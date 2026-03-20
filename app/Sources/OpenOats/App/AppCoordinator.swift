@@ -10,6 +10,9 @@ final class AppCoordinator {
     let sessionStore = SessionStore()
     let templateStore = TemplateStore()
     let notesEngine = NotesEngine()
+    let dictationCoordinator = DictationCoordinator()
+    let hotkeyManager = HotkeyManager()
+    let dictationIndicator = DictationIndicatorManager()
 
     var selectedTemplate: MeetingTemplate?
     var lastEndedSession: SessionIndex?

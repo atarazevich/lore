@@ -140,6 +140,14 @@ final class AppSettings {
         }
     }
 
+    var dictationEnabled: Bool {
+        didSet { UserDefaults.standard.set(dictationEnabled, forKey: "dictationEnabled") }
+    }
+
+    var dictationCleanupPrompt: String {
+        didSet { UserDefaults.standard.set(dictationCleanupPrompt, forKey: "dictationCleanupPrompt") }
+    }
+
     init() {
         let defaults = UserDefaults.standard
 
@@ -176,6 +184,15 @@ final class AppSettings {
         } else {
             self.hideFromScreenShare = defaults.bool(forKey: "hideFromScreenShare")
         }
+
+        if defaults.object(forKey: "dictationEnabled") == nil {
+            self.dictationEnabled = true
+        } else {
+            self.dictationEnabled = defaults.bool(forKey: "dictationEnabled")
+        }
+
+        self.dictationCleanupPrompt = defaults.string(forKey: "dictationCleanupPrompt")
+            ?? "You are a dictation cleanup assistant. Fix grammar, punctuation, and formatting of the transcribed speech. Keep the original meaning and tone. Output only the cleaned text, nothing else."
 
         // Ensure notes folder exists
         try? FileManager.default.createDirectory(

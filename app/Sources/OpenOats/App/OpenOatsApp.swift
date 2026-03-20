@@ -7,6 +7,7 @@ struct OpenOatsApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
     @State private var settings = AppSettings()
     @State private var coordinator = AppCoordinator()
+    @State private var didSetupDictation = false
     private let updaterController = AppUpdaterController()
 
     var body: some Scene {
@@ -15,6 +16,10 @@ struct OpenOatsApp: App {
                 .environment(coordinator)
                 .onAppear {
                     settings.applyScreenShareVisibility()
+                    if !didSetupDictation {
+                        setupDictation()
+                        didSetupDictation = true
+                    }
                 }
         }
         .windowStyle(.hiddenTitleBar)
@@ -36,6 +41,12 @@ struct OpenOatsApp: App {
             SettingsView(settings: settings, updater: updaterController.updater)
                 .environment(coordinator)
         }
+    }
+
+    private func setupDictation() {
+        coordinator.dictationCoordinator.settings = settings
+        coordinator.hotkeyManager.install(coordinator: coordinator.dictationCoordinator, settings: settings)
+        coordinator.dictationIndicator.start(coordinator: coordinator.dictationCoordinator)
     }
 }
 

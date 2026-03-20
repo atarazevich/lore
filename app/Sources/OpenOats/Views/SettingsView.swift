@@ -145,6 +145,54 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
+            Section("Dictation") {
+                Toggle("Enable dictation", isOn: $settings.dictationEnabled)
+                    .font(.system(size: 12))
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Cleanup Prompt")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    ZStack(alignment: .topLeading) {
+                        if settings.dictationCleanupPrompt.isEmpty {
+                            Text("System prompt for GPT-5.3 text cleanup...")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.quaternary)
+                                .padding(.top, 6)
+                                .padding(.leading, 4)
+                                .allowsHitTesting(false)
+                        }
+                        TextEditor(text: $settings.dictationCleanupPrompt)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(height: 80)
+                            .scrollContentBackground(.hidden)
+                    }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(.quaternary)
+                    )
+                }
+
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Hotkeys")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Text("Hold Fn — hold to talk")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                    Text("Fn + Space — toggle recording")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                    Text("Ctrl + Cmd + V — paste last transcript")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.tertiary)
+                }
+
+                Text("Note: Set System Settings → Keyboard → \"Press fn key to\" → \"Do Nothing\" to avoid the Emoji picker conflict.")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.tertiary)
+            }
+
             Section("Updates") {
                 Toggle("Automatically check for updates", isOn: Binding(
                     get: { updater.automaticallyChecksForUpdates },
@@ -268,7 +316,7 @@ struct SettingsView: View {
             }
 }
         .formStyle(.grouped)
-        .frame(width: 450, height: 700)
+        .frame(width: 450, height: 780)
         .onAppear {
             inputDevices = MicCapture.availableInputDevices()
         }

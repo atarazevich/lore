@@ -17,14 +17,7 @@ final class StreamingTranscriber: @unchecked Sendable {
     private let onFinal: @Sendable (String) -> Void
     private let log = Logger(subsystem: "com.openoats", category: "StreamingTranscriber")
 
-    /// Resampler from source format to 16kHz mono Float32.
     private var converter: AVAudioConverter?
-    private let targetFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: 16000,
-        channels: 1,
-        interleaved: false
-    )!
 
     init(
         asrManager: AsrManager,
@@ -78,7 +71,7 @@ final class StreamingTranscriber: @unchecked Sendable {
                 diagLog("[\(speaker.rawValue)] buffer #\(bufferCount): frames=\(buffer.frameLength) sr=\(fmt.sampleRate) ch=\(fmt.channelCount) interleaved=\(fmt.isInterleaved) common=\(fmt.commonFormat.rawValue)")
             }
 
-            guard let samples = extractSamples(buffer) else { continue }
+            guard let samples = AudioUtils.extractSamples(buffer, converter: &converter) else { continue }
 
             if bufferCount <= 3 {
                 let maxVal = samples.max() ?? 0
@@ -181,60 +174,4 @@ final class StreamingTranscriber: @unchecked Sendable {
         }
     }
 
-    /// Extract [Float] samples from an AVAudioPCMBuffer, resampling if needed.
-    private func extractSamples(_ buffer: AVAudioPCMBuffer) -> [Float]? {
-        let sourceFormat = buffer.format
-        let frameLength = Int(buffer.frameLength)
-        guard frameLength > 0 else { return nil }
-
-        // Fast path: already Float32 at 16kHz (common for system audio from ScreenCaptureKit)
-        if sourceFormat.commonFormat == .pcmFormatFloat32 && sourceFormat.sampleRate == 16000 {
-            guard let channelData = buffer.floatChannelData else { return nil }
-            if sourceFormat.channelCount == 1 {
-                // Mono — direct copy
-                return Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
-            } else {
-                // Multi-channel — take first channel only
-                return Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
-            }
-        }
-
-        // Slow path: need to resample via AVAudioConverter
-        if converter == nil || converter?.inputFormat != sourceFormat {
-            converter = AVAudioConverter(from: sourceFormat, to: targetFormat)
-        }
-        guard let converter else { return nil }
-
-        let ratio = targetFormat.sampleRate / sourceFormat.sampleRate
-        let outputFrames = AVAudioFrameCount(Double(buffer.frameLength) * ratio)
-        guard outputFrames > 0 else { return nil }
-
-        guard let outputBuffer = AVAudioPCMBuffer(
-            pcmFormat: targetFormat,
-            frameCapacity: outputFrames
-        ) else { return nil }
-
-        var error: NSError?
-        var consumed = false
-        converter.convert(to: outputBuffer, error: &error) { _, outStatus in
-            if consumed {
-                outStatus.pointee = .noDataNow
-                return nil
-            }
-            consumed = true
-            outStatus.pointee = .haveData
-            return buffer
-        }
-
-        if let error {
-            log.error("Resample error: \(error.localizedDescription)")
-            return nil
-        }
-
-        guard let channelData = outputBuffer.floatChannelData else { return nil }
-        return Array(UnsafeBufferPointer(
-            start: channelData[0],
-            count: Int(outputBuffer.frameLength)
-        ))
-    }
 }
