@@ -140,37 +140,84 @@ struct DictationView: View {
 
     private func historyRow(_ entry: DictationHistoryEntry) -> some View {
         HStack(alignment: .top, spacing: 10) {
-            Text(timeString(entry.timestamp))
-                .font(.system(size: 10, design: .monospaced))
-                .foregroundStyle(.tertiary)
-                .frame(width: 44, alignment: .leading)
+            VStack(spacing: 2) {
+                Text(timeString(entry.timestamp))
+                    .font(.system(size: 10, design: .monospaced))
+                    .foregroundStyle(.tertiary)
+                Text(durationString(entry.durationSeconds))
+                    .font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.quaternary)
+            }
+            .frame(width: 44, alignment: .leading)
 
             VStack(alignment: .leading, spacing: 2) {
-                Text(entry.finalText)
-                    .font(.system(size: 12))
-                    .foregroundStyle(.primary)
-                    .textSelection(.enabled)
-
-                if entry.cleanedText != nil {
-                    Text("cleaned by GPT-5.3")
-                        .font(.system(size: 9))
-                        .foregroundStyle(.quaternary)
+                switch entry.status {
+                case .audioSaved:
+                    HStack(spacing: 4) {
+                        Image(systemName: "waveform")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.orange)
+                        Text("Audio saved — not yet transcribed")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                case .failed:
+                    HStack(spacing: 4) {
+                        Image(systemName: "exclamationmark.triangle")
+                            .font(.system(size: 10))
+                            .foregroundStyle(.red)
+                        Text(entry.errorMessage ?? "Transcription failed")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.red)
+                    }
+                case .transcribed, .cleaned:
+                    if let text = entry.finalText {
+                        Text(text)
+                            .font(.system(size: 12))
+                            .foregroundStyle(.primary)
+                            .textSelection(.enabled)
+                    }
+                    if entry.status == .cleaned {
+                        Text("cleaned by GPT-5.3")
+                            .font(.system(size: 9))
+                            .foregroundStyle(.quaternary)
+                    }
                 }
             }
 
             Spacer()
 
             if hoveredEntryID == entry.id {
-                Button {
-                    NSPasteboard.general.clearContents()
-                    NSPasteboard.general.setString(entry.finalText, forType: .string)
-                } label: {
-                    Image(systemName: "doc.on.doc")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+                HStack(spacing: 6) {
+                    // Retry button for failed or audio-only entries
+                    if entry.status == .failed || entry.status == .audioSaved {
+                        Button {
+                            Task {
+                                await dictation.retryTranscription(entryID: entry.id)
+                            }
+                        } label: {
+                            Image(systemName: "arrow.clockwise")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.orange)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Retry transcription")
+                    }
+
+                    // Copy button for transcribed entries
+                    if let text = entry.finalText {
+                        Button {
+                            NSPasteboard.general.clearContents()
+                            NSPasteboard.general.setString(text, forType: .string)
+                        } label: {
+                            Image(systemName: "doc.on.doc")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Copy to clipboard")
+                    }
                 }
-                .buttonStyle(.plain)
-                .help("Copy to clipboard")
             }
         }
         .padding(.horizontal, 16)
@@ -179,6 +226,11 @@ struct DictationView: View {
         .onHover { isHovered in
             hoveredEntryID = isHovered ? entry.id : nil
         }
+    }
+
+    private func durationString(_ seconds: Double) -> String {
+        if seconds < 60 { return String(format: "%.0fs", seconds) }
+        return String(format: "%.0fm%02.0fs", seconds / 60, seconds.truncatingRemainder(dividingBy: 60))
     }
 
     // MARK: - Prompt Editor

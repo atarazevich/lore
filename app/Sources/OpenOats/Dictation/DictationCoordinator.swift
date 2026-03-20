@@ -27,11 +27,8 @@ final class DictationCoordinator {
     private let cleanupClient = CleanupClient()
 
     private static let minimumSpeechSamples = 8000
-    /// Max samples per transcription chunk (~30s at 16kHz)
     private static let maxChunkSamples = 480_000
 
-    /// Loaded lazily on first dictation use. Separate instance from TranscriptionEngine's —
-    /// sharing would require refactoring TranscriptionEngine's private model lifecycle.
     private var asrManager: AsrManager?
     private var isModelLoaded = false
 
@@ -92,7 +89,8 @@ final class DictationCoordinator {
         let samples = accumulatedSamples
         accumulatedSamples.removeAll()
 
-        diagLog("[DICTATION] recording stopped, samples=\(samples.count)")
+        let durationSeconds = Double(samples.count) / 16000.0
+        diagLog("[DICTATION] recording stopped, samples=\(samples.count), duration=\(String(format: "%.1f", durationSeconds))s")
 
         guard samples.count > Self.minimumSpeechSamples else {
             log.info("Too short, ignoring")
@@ -100,99 +98,36 @@ final class DictationCoordinator {
             return
         }
 
-        // Lazy model loading on first use
-        if !isModelLoaded {
-            do {
-                try await loadModel()
-            } catch {
-                log.error("Failed to load model: \(error.localizedDescription)")
-                lastError = "Model loading failed: \(error.localizedDescription)"
-                state = .idle
-                return
-            }
+        // STEP 1: Save audio to disk FIRST — never lose the recording
+        let audioFilename = DictationHistory.saveAudio(samples)
+        var entry = DictationHistoryEntry(durationSeconds: durationSeconds, audioFilename: audioFilename)
+        history.add(entry)
+        diagLog("[DICTATION] audio saved: \(audioFilename ?? "FAILED")")
+
+        // STEP 2: Transcribe
+        await transcribeEntry(&entry, samples: samples)
+
+        // STEP 3: Cleanup (if enabled)
+        if entry.status == .transcribed, let text = entry.rawText {
+            await cleanupEntry(&entry, rawText: text)
         }
 
-        guard let asrManager else {
-            log.error("AsrManager not available")
-            state = .idle
-            return
-        }
-
-        do {
-            nonisolated(unsafe) let asr = asrManager
-
-            // Chunk long recordings to avoid model truncation
-            var segments: [String] = []
-            let chunks = stride(from: 0, to: samples.count, by: Self.maxChunkSamples).map {
-                Array(samples[$0..<min($0 + Self.maxChunkSamples, samples.count)])
-            }
-            diagLog("[DICTATION] transcribing \(chunks.count) chunk(s), total \(samples.count) samples")
-            for (i, chunk) in chunks.enumerated() {
-                let result = try await asr.transcribe(chunk)
-                let segment = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-                if !segment.isEmpty {
-                    segments.append(segment)
-                    diagLog("[DICTATION] chunk \(i+1)/\(chunks.count): \(segment.prefix(60))")
-                }
-            }
-            let rawTranscription = segments.joined(separator: " ")
-            var text = rawTranscription
-            diagLog("[DICTATION] raw transcription: \(text)")
-
-            guard !text.isEmpty else {
-                state = .idle
-                return
-            }
-
-            if let settings, settings.dictationCleanupEnabled, !settings.openaiApiKey.isEmpty {
-                diagLog("[DICTATION] calling cleanup API (OpenAI direct)...")
-                let rawText = text
-                let prompt = settings.dictationCleanupPrompt
-                let apiKey = settings.openaiApiKey
-                let client = cleanupClient
-                do {
-                    text = try await withThrowingTaskGroup(of: String.self) { group in
-                        group.addTask {
-                            try await client.cleanup(
-                                rawText: rawText,
-                                prompt: prompt,
-                                apiKey: apiKey
-                            )
-                        }
-                        group.addTask {
-                            try await Task.sleep(for: .seconds(10))
-                            throw CancellationError()
-                        }
-                        let result = try await group.next()!
-                        group.cancelAll()
-                        return result
-                    }
-                    diagLog("[DICTATION] cleaned: \(text)")
-                } catch {
-                    diagLog("[DICTATION] cleanup failed: \(error), using raw text")
-                }
-            }
-
-            // Log to history
-            let cleanedText: String? = (text != rawTranscription) ? text : nil
-            history.add(DictationHistoryEntry(rawText: rawTranscription, cleanedText: cleanedText))
-
-            diagLog("[DICTATION] pasting text: \(text.prefix(80))")
+        // STEP 4: Paste result
+        if let text = entry.finalText {
             lastTranscript = text
             TextInserter.paste(text)
+            diagLog("[DICTATION] pasted: \(text.prefix(80))")
+        }
 
-            state = .done
+        // Update history with final state
+        history.update(entry)
 
-            autoHideTask?.cancel()
-            autoHideTask = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(800))
-                guard let self, self.state == .done else { return }
-                self.state = .idle
-            }
-        } catch {
-            log.error("Transcription failed: \(error.localizedDescription)")
-            lastError = error.localizedDescription
-            state = .idle
+        state = .done
+        autoHideTask?.cancel()
+        autoHideTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(800))
+            guard let self, self.state == .done else { return }
+            self.state = .idle
         }
     }
 
@@ -215,10 +150,113 @@ final class DictationCoordinator {
         TextInserter.paste(text)
     }
 
+    /// Retry transcription for a failed or audio-only entry
+    func retryTranscription(entryID: UUID) async {
+        guard var entry = history.entries.first(where: { $0.id == entryID }),
+              let filename = entry.audioFilename,
+              let samples = DictationHistory.loadAudio(filename: filename) else {
+            diagLog("[DICTATION] retry failed: no audio for entry")
+            return
+        }
+
+        entry.status = .audioSaved
+        entry.rawText = nil
+        entry.cleanedText = nil
+        entry.errorMessage = nil
+        history.update(entry)
+
+        await transcribeEntry(&entry, samples: samples)
+
+        if entry.status == .transcribed, let text = entry.rawText {
+            await cleanupEntry(&entry, rawText: text)
+        }
+
+        history.update(entry)
+    }
+
+    // MARK: - Transcription
+
+    private func transcribeEntry(_ entry: inout DictationHistoryEntry, samples: [Float]) async {
+        if !isModelLoaded {
+            do {
+                try await loadModel()
+            } catch {
+                entry.status = .failed
+                entry.errorMessage = "Model loading failed: \(error.localizedDescription)"
+                lastError = entry.errorMessage
+                history.update(entry)
+                return
+            }
+        }
+
+        guard let asrManager else {
+            entry.status = .failed
+            entry.errorMessage = "AsrManager not available"
+            history.update(entry)
+            return
+        }
+
+        nonisolated(unsafe) let asr = asrManager
+
+        // Build chunks, merging short tails into the previous chunk
+        var chunks: [[Float]] = []
+        for start in stride(from: 0, to: samples.count, by: Self.maxChunkSamples) {
+            let end = min(start + Self.maxChunkSamples, samples.count)
+            let chunk = Array(samples[start..<end])
+            if chunk.count < Self.minimumSpeechSamples && !chunks.isEmpty {
+                chunks[chunks.count - 1].append(contentsOf: chunk)
+            } else {
+                chunks.append(chunk)
+            }
+        }
+
+        diagLog("[DICTATION] transcribing \(chunks.count) chunk(s), total \(samples.count) samples")
+        var segments: [String] = []
+
+        for (i, chunk) in chunks.enumerated() {
+            do {
+                let result = try await asr.transcribe(chunk)
+                let segment = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !segment.isEmpty {
+                    segments.append(segment)
+                    diagLog("[DICTATION] chunk \(i+1)/\(chunks.count): \(segment.prefix(60))")
+                }
+            } catch {
+                diagLog("[DICTATION] chunk \(i+1)/\(chunks.count) failed: \(error), skipping")
+            }
+        }
+
+        let text = segments.joined(separator: " ")
+        if text.isEmpty {
+            entry.status = .failed
+            entry.errorMessage = "Transcription produced empty result"
+        } else {
+            entry.status = .transcribed
+            entry.rawText = text
+            diagLog("[DICTATION] raw transcription: \(text)")
+        }
+    }
+
+    private func cleanupEntry(_ entry: inout DictationHistoryEntry, rawText: String) async {
+        guard let settings, settings.dictationCleanupEnabled, !settings.openaiApiKey.isEmpty else { return }
+
+        diagLog("[DICTATION] calling cleanup API...")
+        let prompt = settings.dictationCleanupPrompt
+        let apiKey = settings.openaiApiKey
+
+        do {
+            let cleaned = try await cleanupClient.cleanup(rawText: rawText, prompt: prompt, apiKey: apiKey)
+            entry.cleanedText = cleaned
+            entry.status = .cleaned
+            diagLog("[DICTATION] cleaned: \(cleaned.prefix(80))")
+        } catch {
+            diagLog("[DICTATION] cleanup failed: \(error), using raw text")
+        }
+    }
+
     // MARK: - Model Loading
 
     private func loadModel() async throws {
-        // Dictation always uses Parakeet v3 — fastest and best quality from benchmarks
         diagLog("[DICTATION] loading model parakeetV3...")
         let models = try await AsrModels.downloadAndLoad(version: .v3)
         let asr = AsrManager(config: .default)
