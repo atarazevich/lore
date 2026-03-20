@@ -17,6 +17,8 @@ final class HotkeyManager {
     private var isHoldMode = false
     /// Locked = recording continues after Fn release; stopped by Fn or Esc
     private(set) var isLocked = false
+    /// Set synchronously so the local monitor closure can check it without main actor hop
+    nonisolated(unsafe) private var isRecordingFlag = false
 
     func install(coordinator: DictationCoordinator, settings: AppSettings) {
         self.coordinator = coordinator
@@ -47,8 +49,7 @@ final class HotkeyManager {
 
             // Space while recording → lock (consume the event so it doesn't type into fields)
             if event.keyCode == 49,
-               let coordinator = self.coordinator,
-               coordinator.state == .recording,
+               self.isRecordingFlag,
                !self.isLocked {
                 Task { @MainActor in
                     self.handleKeyDown(event)
@@ -104,6 +105,7 @@ final class HotkeyManager {
 
             if isLocked {
                 isLocked = false
+                isRecordingFlag = false
                 diagLog("[HOTKEY] Fn pressed while locked → stop + paste")
                 Task { [weak self] in
                     await self?.coordinator?.stopRecording()
@@ -116,6 +118,7 @@ final class HotkeyManager {
                 try? await Task.sleep(for: .milliseconds(80))
                 guard !Task.isCancelled, let self else { return }
                 self.isHoldMode = true
+                self.isRecordingFlag = true
                 diagLog("[HOTKEY] hold mode → start recording")
                 self.coordinator?.startRecording()
             }
@@ -131,6 +134,7 @@ final class HotkeyManager {
 
             if isHoldMode {
                 isHoldMode = false
+                isRecordingFlag = false
                 diagLog("[HOTKEY] hold mode release → stop + paste")
                 Task { [weak self] in
                     await self?.coordinator?.stopRecording()
@@ -155,6 +159,7 @@ final class HotkeyManager {
         // Esc while locked → discard
         if event.keyCode == 53 && isLocked {
             isLocked = false
+            isRecordingFlag = false
             diagLog("[HOTKEY] Esc while locked → discard")
             coordinator.discardRecording()
             return

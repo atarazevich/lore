@@ -184,35 +184,47 @@ struct DictationView: View {
     // MARK: - Prompt Editor
 
     private var promptEditor: some View {
-        VStack(alignment: .leading, spacing: 4) {
+        VStack(alignment: .leading, spacing: 6) {
+            // Cleanup toggle + model badge
             HStack {
+                Toggle("GPT-5.3 Cleanup", isOn: $settings.dictationCleanupEnabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .font(.system(size: 11))
+
+                Spacer()
+
+                if settings.dictationCleanupEnabled && settings.openaiApiKey.isEmpty {
+                    Text("API key required")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.red)
+                }
+            }
+
+            // API Key
+            if settings.dictationCleanupEnabled {
+                SecureField("OpenAI API Key", text: $settings.openaiApiKey)
+                    .font(.system(size: 11, design: .monospaced))
+                    .textFieldStyle(.roundedBorder)
+
+                // Prompt
                 Text("CLEANUP PROMPT")
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
                     .foregroundStyle(.tertiary)
                     .tracking(1.5)
 
-                Spacer()
-
-                Text("GPT-5.3")
-                    .font(.system(size: 9, weight: .medium, design: .monospaced))
-                    .foregroundStyle(.quaternary)
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 2)
-                    .background(Color.primary.opacity(0.04))
-                    .clipShape(Capsule())
+                TextEditor(text: $settings.dictationCleanupPrompt)
+                    .font(.system(size: 11, design: .monospaced))
+                    .frame(height: 60)
+                    .scrollContentBackground(.hidden)
+                    .padding(4)
+                    .background(Color.primary.opacity(0.03))
+                    .clipShape(RoundedRectangle(cornerRadius: 6))
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 6)
+                            .stroke(Color.primary.opacity(0.06))
+                    )
             }
-
-            TextEditor(text: $settings.dictationCleanupPrompt)
-                .font(.system(size: 11, design: .monospaced))
-                .frame(height: 60)
-                .scrollContentBackground(.hidden)
-                .padding(4)
-                .background(Color.primary.opacity(0.03))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-                .overlay(
-                    RoundedRectangle(cornerRadius: 6)
-                        .stroke(Color.primary.opacity(0.06))
-                )
 
             HStack(spacing: 12) {
                 Text("Fn = hold to talk")

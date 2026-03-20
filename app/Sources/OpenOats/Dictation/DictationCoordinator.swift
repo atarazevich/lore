@@ -144,11 +144,11 @@ final class DictationCoordinator {
                 return
             }
 
-            if let settings, !settings.openRouterApiKey.isEmpty {
-                diagLog("[DICTATION] calling cleanup API...")
+            if let settings, settings.dictationCleanupEnabled, !settings.openaiApiKey.isEmpty {
+                diagLog("[DICTATION] calling cleanup API (OpenAI direct)...")
                 let rawText = text
                 let prompt = settings.dictationCleanupPrompt
-                let apiKey = settings.openRouterApiKey
+                let apiKey = settings.openaiApiKey
                 let client = cleanupClient
                 do {
                     text = try await withThrowingTaskGroup(of: String.self) { group in

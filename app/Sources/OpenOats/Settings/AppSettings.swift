@@ -148,6 +148,14 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(dictationCleanupPrompt, forKey: "dictationCleanupPrompt") }
     }
 
+    var dictationCleanupEnabled: Bool {
+        didSet { UserDefaults.standard.set(dictationCleanupEnabled, forKey: "dictationCleanupEnabled") }
+    }
+
+    var openaiApiKey: String {
+        didSet { KeychainHelper.save(key: "openaiApiKey", value: openaiApiKey) }
+    }
+
     init() {
         let defaults = UserDefaults.standard
 
@@ -193,6 +201,14 @@ final class AppSettings {
 
         self.dictationCleanupPrompt = defaults.string(forKey: "dictationCleanupPrompt")
             ?? "You are a dictation cleanup assistant. Fix grammar, punctuation, and formatting of the transcribed speech. Keep the original meaning and tone. Output only the cleaned text, nothing else."
+
+        if defaults.object(forKey: "dictationCleanupEnabled") == nil {
+            self.dictationCleanupEnabled = true
+        } else {
+            self.dictationCleanupEnabled = defaults.bool(forKey: "dictationCleanupEnabled")
+        }
+
+        self.openaiApiKey = KeychainHelper.load(key: "openaiApiKey") ?? ""
 
         // Ensure notes folder exists
         try? FileManager.default.createDirectory(
