@@ -27,6 +27,8 @@ final class DictationCoordinator {
     private let cleanupClient = CleanupClient()
 
     private static let minimumSpeechSamples = 8000
+    /// Max samples per transcription chunk (~30s at 16kHz)
+    private static let maxChunkSamples = 480_000
 
     /// Loaded lazily on first dictation use. Separate instance from TranscriptionEngine's —
     /// sharing would require refactoring TranscriptionEngine's private model lifecycle.
@@ -118,9 +120,24 @@ final class DictationCoordinator {
 
         do {
             nonisolated(unsafe) let asr = asrManager
-            let result = try await asr.transcribe(samples)
-            var text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            diagLog("[DICTATION] raw transcription: \(text.prefix(80))")
+
+            // Chunk long recordings to avoid model truncation
+            var segments: [String] = []
+            let chunks = stride(from: 0, to: samples.count, by: Self.maxChunkSamples).map {
+                Array(samples[$0..<min($0 + Self.maxChunkSamples, samples.count)])
+            }
+            diagLog("[DICTATION] transcribing \(chunks.count) chunk(s), total \(samples.count) samples")
+            for (i, chunk) in chunks.enumerated() {
+                let result = try await asr.transcribe(chunk)
+                let segment = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                if !segment.isEmpty {
+                    segments.append(segment)
+                    diagLog("[DICTATION] chunk \(i+1)/\(chunks.count): \(segment.prefix(60))")
+                }
+            }
+            let rawTranscription = segments.joined(separator: " ")
+            var text = rawTranscription
+            diagLog("[DICTATION] raw transcription: \(text)")
 
             guard !text.isEmpty else {
                 state = .idle
@@ -150,16 +167,15 @@ final class DictationCoordinator {
                         group.cancelAll()
                         return result
                     }
-                    diagLog("[DICTATION] cleaned: \(text.prefix(80))")
+                    diagLog("[DICTATION] cleaned: \(text)")
                 } catch {
                     diagLog("[DICTATION] cleanup failed: \(error), using raw text")
                 }
             }
 
             // Log to history
-            let rawText = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            let cleanedText: String? = (text != rawText) ? text : nil
-            history.add(DictationHistoryEntry(rawText: rawText, cleanedText: cleanedText))
+            let cleanedText: String? = (text != rawTranscription) ? text : nil
+            history.add(DictationHistoryEntry(rawText: rawTranscription, cleanedText: cleanedText))
 
             diagLog("[DICTATION] pasting text: \(text.prefix(80))")
             lastTranscript = text
@@ -178,6 +194,20 @@ final class DictationCoordinator {
             lastError = error.localizedDescription
             state = .idle
         }
+    }
+
+    func discardRecording() {
+        guard state == .recording else { return }
+        diagLog("[DICTATION] recording discarded")
+        audioLevelTask?.cancel()
+        audioLevelTask = nil
+        audioLevel = 0
+        mic?.stop()
+        recordingTask?.cancel()
+        recordingTask = nil
+        mic = nil
+        accumulatedSamples.removeAll()
+        state = .idle
     }
 
     func pasteLastTranscript() {

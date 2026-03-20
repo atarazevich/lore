@@ -13,6 +13,8 @@ final class HotkeyManager {
     private var fnDown = false
     private var fnTimer: Task<Void, Never>?
     private var isHoldMode = false
+    /// Locked = recording continues after Fn release; stopped by Fn or Esc
+    private var isLocked = false
 
     func install(coordinator: DictationCoordinator, settings: AppSettings) {
         self.coordinator = coordinator
@@ -53,25 +55,45 @@ final class HotkeyManager {
         let fnPressed = event.modifierFlags.contains(.function)
 
         if fnPressed && !fnDown {
+            // Fn pressed
             fnDown = true
-            isHoldMode = false
 
             guard isEnabled else { return }
 
-            // Start 50ms timer — if Space doesn't arrive, it's hold mode
+            // If locked recording is active, Fn press stops and pastes
+            if isLocked {
+                isLocked = false
+                diagLog("[HOTKEY] Fn pressed while locked → stop + paste")
+                Task { [weak self] in
+                    await self?.coordinator?.stopRecording()
+                }
+                return
+            }
+
+            // Start hold-mode timer
+            isHoldMode = false
             fnTimer = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(50))
+                try? await Task.sleep(for: .milliseconds(80))
                 guard !Task.isCancelled, let self else { return }
                 self.isHoldMode = true
+                diagLog("[HOTKEY] hold mode → start recording")
                 self.coordinator?.startRecording()
             }
         } else if !fnPressed && fnDown {
+            // Fn released
             fnDown = false
             fnTimer?.cancel()
             fnTimer = nil
 
+            // If locked, do nothing — recording continues
+            if isLocked {
+                diagLog("[HOTKEY] Fn released while locked → continues")
+                return
+            }
+
             if isHoldMode {
                 isHoldMode = false
+                diagLog("[HOTKEY] hold mode release → stop + paste")
                 Task { [weak self] in
                     await self?.coordinator?.stopRecording()
                 }
@@ -82,19 +104,21 @@ final class HotkeyManager {
     private func handleKeyDown(_ event: NSEvent) {
         guard isEnabled, let coordinator else { return }
 
-        // Fn+Space toggle mode (keyCode 49 = Space)
-        if fnDown && event.keyCode == 49 {
+        // Space while Fn held and recording → lock
+        if event.keyCode == 49 && fnDown && coordinator.state == .recording {
             fnTimer?.cancel()
             fnTimer = nil
             isHoldMode = false
+            isLocked = true
+            diagLog("[HOTKEY] Space while recording → locked")
+            return
+        }
 
-            if coordinator.state == .recording {
-                Task { [weak self] in
-                    await self?.coordinator?.stopRecording()
-                }
-            } else if coordinator.state == .idle {
-                coordinator.startRecording()
-            }
+        // Esc while locked → discard
+        if event.keyCode == 53 && isLocked {
+            isLocked = false
+            diagLog("[HOTKEY] Esc while locked → discard")
+            coordinator.discardRecording()
             return
         }
 

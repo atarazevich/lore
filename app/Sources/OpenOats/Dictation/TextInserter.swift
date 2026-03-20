@@ -4,50 +4,51 @@ import os
 enum TextInserter {
     private static let log = Logger(subsystem: "com.openoats", category: "TextInserter")
 
-    /// Check if accessibility permission is granted (needed for CGEvent posting).
     static var isAccessibilityGranted: Bool {
         AXIsProcessTrusted()
     }
 
-    /// Prompt the system to show the accessibility permission dialog.
     static func requestAccessibilityIfNeeded() {
         let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
         AXIsProcessTrustedWithOptions(options)
     }
 
-    /// Paste text into the active application by:
-    /// 1. Saving current clipboard
-    /// 2. Setting clipboard to our text
-    /// 3. Simulating Cmd+V
-    /// 4. Restoring clipboard after a delay
     nonisolated(unsafe) private static var didRequestAccessibility = false
 
     static func paste(_ text: String) {
+        diagLog("[PASTE] paste called, accessibility=\(isAccessibilityGranted)")
+
         guard isAccessibilityGranted else {
             if !didRequestAccessibility {
                 log.warning("Accessibility not granted, requesting...")
                 requestAccessibilityIfNeeded()
                 didRequestAccessibility = true
             }
+            diagLog("[PASTE] accessibility not granted, skipping paste")
             return
         }
 
         let pasteboard = NSPasteboard.general
 
-        // Save current clipboard contents
+        // Save current clipboard
         let savedItems = savePasteboard(pasteboard)
 
         // Set our text
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
+        diagLog("[PASTE] clipboard set, posting Cmd+V")
 
-        // Simulate Cmd+V
-        postCmdV()
+        // Small delay to let clipboard settle, then simulate Cmd+V
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
+            postCmdV()
+            diagLog("[PASTE] Cmd+V posted")
 
-        // Restore clipboard after delay
-        Task { @MainActor in
-            try? await Task.sleep(for: .milliseconds(500))
-            restorePasteboard(NSPasteboard.general, items: savedItems)
+            // Restore clipboard after target app processes the paste
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(800))
+                restorePasteboard(NSPasteboard.general, items: savedItems)
+                diagLog("[PASTE] clipboard restored")
+            }
         }
     }
 
@@ -57,15 +58,17 @@ enum TextInserter {
         // keyCode 9 = 'V'
         guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
-            log.error("Failed to create CGEvent for Cmd+V")
+            log.error("Failed to create CGEvent")
+            diagLog("[PASTE] ERROR: failed to create CGEvent")
             return
         }
 
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
 
-        keyDown.post(tap: .cghidEventTap)
-        keyUp.post(tap: .cghidEventTap)
+        // Try cgSessionEventTap (works for more apps than cghidEventTap)
+        keyDown.post(tap: .cgSessionEventTap)
+        keyUp.post(tap: .cgSessionEventTap)
     }
 
     // MARK: - Clipboard save/restore
