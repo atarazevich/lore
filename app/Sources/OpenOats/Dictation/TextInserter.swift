@@ -13,19 +13,15 @@ enum TextInserter {
         AXIsProcessTrustedWithOptions(options)
     }
 
-    nonisolated(unsafe) private static var didRequestAccessibility = false
-
     static func paste(_ text: String) {
-        diagLog("[PASTE] paste called, accessibility=\(isAccessibilityGranted)")
+        let granted = isAccessibilityGranted
+        diagLog("[PASTE] paste called, accessibility=\(granted)")
 
-        guard isAccessibilityGranted else {
-            if !didRequestAccessibility {
-                log.warning("Accessibility not granted, requesting...")
-                requestAccessibilityIfNeeded()
-                didRequestAccessibility = true
-            }
-            diagLog("[PASTE] accessibility not granted, skipping paste")
-            return
+        // Even if AXIsProcessTrusted returns false, try the paste anyway —
+        // macOS sometimes caches the result and requires a restart to update.
+        // The clipboard will still be set, so at worst the user can Cmd+V manually.
+        if !granted {
+            diagLog("[PASTE] accessibility reports false — attempting paste anyway")
         }
 
         let pasteboard = NSPasteboard.general

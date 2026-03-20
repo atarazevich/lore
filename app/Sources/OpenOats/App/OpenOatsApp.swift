@@ -54,7 +54,7 @@ struct OpenOatsApp: App {
     private func setupDictation() {
         coordinator.dictationCoordinator.settings = settings
         coordinator.hotkeyManager.install(coordinator: coordinator.dictationCoordinator, settings: settings)
-        coordinator.dictationIndicator.start(coordinator: coordinator.dictationCoordinator)
+        coordinator.dictationIndicator.start(coordinator: coordinator.dictationCoordinator, hotkeyManager: coordinator.hotkeyManager)
     }
 }
 

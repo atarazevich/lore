@@ -4,6 +4,7 @@ import SwiftUI
 struct DictationIndicatorView: View {
     let state: DictationState
     let audioLevel: Float
+    var isLocked = false
 
     var body: some View {
         HStack(spacing: 8) {
@@ -13,6 +14,11 @@ struct DictationIndicatorView: View {
                     .fill(.red)
                     .frame(width: 10, height: 10)
                 WaveformBars(level: audioLevel)
+                if isLocked {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.red)
+                }
             case .processing:
                 ProgressView()
                     .controlSize(.small)
@@ -66,6 +72,7 @@ private struct WaveformBars: View {
 final class DictationIndicatorModel {
     var state: DictationState = .idle
     var audioLevel: Float = 0
+    var isLocked = false
 }
 
 /// SwiftUI wrapper that reads the observable model.
@@ -73,7 +80,7 @@ private struct DictationIndicatorHost: View {
     @State var model: DictationIndicatorModel
 
     var body: some View {
-        DictationIndicatorView(state: model.state, audioLevel: model.audioLevel)
+        DictationIndicatorView(state: model.state, audioLevel: model.audioLevel, isLocked: model.isLocked)
     }
 }
 
@@ -83,7 +90,7 @@ final class DictationIndicatorManager {
     private var observationTask: Task<Void, Never>?
     private let model = DictationIndicatorModel()
 
-    func start(coordinator: DictationCoordinator) {
+    func start(coordinator: DictationCoordinator, hotkeyManager: HotkeyManager) {
         // Create panel and hosting view once
         let screen = NSScreen.main
         let screenWidth = screen?.frame.width ?? 1440
@@ -105,7 +112,7 @@ final class DictationIndicatorManager {
         self.panel = p
 
         // Poll coordinator state and push into model (which SwiftUI observes reactively)
-        observationTask = Task { [weak self, weak coordinator] in
+        observationTask = Task { [weak self, weak coordinator, weak hotkeyManager] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(50))
                 guard let self, let coordinator else { break }
@@ -115,6 +122,7 @@ final class DictationIndicatorManager {
 
                 self.model.state = newState
                 self.model.audioLevel = newLevel
+                self.model.isLocked = hotkeyManager?.isLocked ?? false
 
                 if newState == .idle {
                     self.panel?.orderOut(nil)

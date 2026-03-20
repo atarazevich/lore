@@ -58,9 +58,18 @@ struct DictationView: View {
                 Circle()
                     .fill(.red)
                     .frame(width: 8, height: 8)
-                Text("Recording...")
-                    .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(.red)
+                if coordinator.hotkeyManager.isLocked {
+                    Image(systemName: "lock.fill")
+                        .font(.system(size: 10))
+                        .foregroundStyle(.red)
+                    Text("Locked — Fn to paste, Esc to discard")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.red)
+                } else {
+                    Text("Recording... Space to lock")
+                        .font(.system(size: 12, weight: .medium))
+                        .foregroundStyle(.red)
+                }
             case .processing:
                 ProgressView()
                     .controlSize(.mini)
