@@ -209,6 +209,19 @@ struct ContentView: View {
                 Text("OpenOats")
                     .font(.system(size: 13, weight: .semibold))
 
+                Button {
+                    openWindow(id: "dictation")
+                } label: {
+                    HStack(spacing: 3) {
+                        Image(systemName: "mic.badge.plus")
+                            .font(.system(size: 10))
+                        Text("Dictation")
+                            .font(.system(size: 11))
+                    }
+                    .foregroundStyle(Color.accentTeal)
+                }
+                .buttonStyle(.plain)
+
                 Spacer()
 
                 // KB status

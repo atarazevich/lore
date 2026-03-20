@@ -20,10 +20,15 @@ enum TextInserter {
     /// 2. Setting clipboard to our text
     /// 3. Simulating Cmd+V
     /// 4. Restoring clipboard after a delay
+    nonisolated(unsafe) private static var didRequestAccessibility = false
+
     static func paste(_ text: String) {
         guard isAccessibilityGranted else {
-            log.warning("Accessibility not granted, requesting...")
-            requestAccessibilityIfNeeded()
+            if !didRequestAccessibility {
+                log.warning("Accessibility not granted, requesting...")
+                requestAccessibilityIfNeeded()
+                didRequestAccessibility = true
+            }
             return
         }
 

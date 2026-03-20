@@ -33,6 +33,7 @@ final class DictationCoordinator {
     private var asrManager: AsrManager?
     private var isModelLoaded = false
 
+    let history = DictationHistory()
     var settings: AppSettings?
 
     func startRecording() {
@@ -127,18 +128,40 @@ final class DictationCoordinator {
             }
 
             if let settings, !settings.openRouterApiKey.isEmpty {
+                diagLog("[DICTATION] calling cleanup API...")
+                let rawText = text
+                let prompt = settings.dictationCleanupPrompt
+                let apiKey = settings.openRouterApiKey
+                let client = cleanupClient
                 do {
-                    text = try await cleanupClient.cleanup(
-                        rawText: text,
-                        prompt: settings.dictationCleanupPrompt,
-                        apiKey: settings.openRouterApiKey
-                    )
+                    text = try await withThrowingTaskGroup(of: String.self) { group in
+                        group.addTask {
+                            try await client.cleanup(
+                                rawText: rawText,
+                                prompt: prompt,
+                                apiKey: apiKey
+                            )
+                        }
+                        group.addTask {
+                            try await Task.sleep(for: .seconds(10))
+                            throw CancellationError()
+                        }
+                        let result = try await group.next()!
+                        group.cancelAll()
+                        return result
+                    }
                     diagLog("[DICTATION] cleaned: \(text.prefix(80))")
                 } catch {
-                    log.error("Cleanup failed, using raw: \(error.localizedDescription)")
+                    diagLog("[DICTATION] cleanup failed: \(error), using raw text")
                 }
             }
 
+            // Log to history
+            let rawText = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+            let cleanedText: String? = (text != rawText) ? text : nil
+            history.add(DictationHistoryEntry(rawText: rawText, cleanedText: cleanedText))
+
+            diagLog("[DICTATION] pasting text: \(text.prefix(80))")
             lastTranscript = text
             TextInserter.paste(text)
 
@@ -165,12 +188,9 @@ final class DictationCoordinator {
     // MARK: - Model Loading
 
     private func loadModel() async throws {
-        let model = settings?.transcriptionModel ?? .parakeetV3
-        diagLog("[DICTATION] loading model \(model.rawValue)...")
-
-        // Dictation uses Parakeet only; fall back to v3 for Qwen
-        let version: AsrModelVersion = (model == .parakeetV2) ? .v2 : .v3
-        let models = try await AsrModels.downloadAndLoad(version: version)
+        // Dictation always uses Parakeet v3 — fastest and best quality from benchmarks
+        diagLog("[DICTATION] loading model parakeetV3...")
+        let models = try await AsrModels.downloadAndLoad(version: .v3)
         let asr = AsrManager(config: .default)
         try await asr.initialize(models: models)
         self.asrManager = asr
