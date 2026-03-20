@@ -62,9 +62,12 @@ enum TextInserter {
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
 
-        // Try cgSessionEventTap (works for more apps than cghidEventTap)
-        keyDown.post(tap: .cgSessionEventTap)
-        keyUp.post(tap: .cgSessionEventTap)
+        // Use cghidEventTap — more reliable for posting synthetic events to other apps.
+        // cgSessionEventTap is better for *reading* events; cghidEventTap injects at the
+        // HID level which the frontmost app reliably receives.
+        keyDown.post(tap: .cghidEventTap)
+        usleep(20_000) // 20ms between key down and up for reliable delivery
+        keyUp.post(tap: .cghidEventTap)
     }
 
     // MARK: - Clipboard save/restore

@@ -19,6 +19,12 @@ final class HotkeyManager {
     private(set) var isLocked = false
     /// Set synchronously so the local monitor closure can check it without main actor hop
     nonisolated(unsafe) private var isRecordingFlag = false
+    /// Synchronous mirror of isLocked for CGEvent tap callback
+    nonisolated(unsafe) private var isLockedFlag = false
+
+    /// CGEvent tap for consuming Space/Esc when external apps are focused
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
 
     func install(coordinator: DictationCoordinator, settings: AppSettings) {
         self.coordinator = coordinator
@@ -72,6 +78,68 @@ final class HotkeyManager {
             return event
         }
 
+        // CGEvent tap — intercepts Space/Esc globally so they don't reach external apps
+        let eventMask = (1 << CGEventType.keyDown.rawValue)
+        let userInfo = Unmanaged.passUnretained(self).toOpaque()
+
+        eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: { _, type, event, refcon -> Unmanaged<CGEvent>? in
+                // If the tap is disabled by the system, re-enable it
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    if let refcon {
+                        let mgr = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
+                        if let tap = mgr.eventTap {
+                            CGEvent.tapEnable(tap: tap, enable: true)
+                        }
+                    }
+                    return Unmanaged.passRetained(event)
+                }
+
+                guard let refcon else { return Unmanaged.passRetained(event) }
+                let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
+
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+
+                // Space while recording and not locked → consume and lock
+                if keyCode == 49 && manager.isRecordingFlag && !manager.isLockedFlag {
+                    manager.isLockedFlag = true
+                    Task { @MainActor in
+                        manager.isLocked = true
+                        manager.fnTimer?.cancel()
+                        manager.fnTimer = nil
+                        manager.isHoldMode = false
+                        diagLog("[HOTKEY] Space (CGEvent tap) → locked")
+                    }
+                    return nil
+                }
+
+                // Esc while locked → consume and discard
+                if keyCode == 53 && manager.isLockedFlag {
+                    manager.isLockedFlag = false
+                    manager.isRecordingFlag = false
+                    Task { @MainActor in
+                        manager.isLocked = false
+                        manager.coordinator?.discardRecording()
+                        diagLog("[HOTKEY] Esc (CGEvent tap) → discard")
+                    }
+                    return nil
+                }
+
+                return Unmanaged.passRetained(event)
+            },
+            userInfo: userInfo
+        )
+
+        if let eventTap {
+            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+        }
+
         log.info("Hotkey manager installed")
     }
 
@@ -84,6 +152,16 @@ final class HotkeyManager {
         globalKeyMonitor = nil
         localFlagsMonitor = nil
         localKeyMonitor = nil
+
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        }
+        eventTap = nil
+        runLoopSource = nil
+
         fnTimer?.cancel()
         fnTimer = nil
         coordinator = nil
@@ -105,6 +183,7 @@ final class HotkeyManager {
 
             if isLocked {
                 isLocked = false
+                isLockedFlag = false
                 isRecordingFlag = false
                 diagLog("[HOTKEY] Fn pressed while locked → stop + paste")
                 Task { [weak self] in
@@ -152,6 +231,7 @@ final class HotkeyManager {
             fnTimer = nil
             isHoldMode = false
             isLocked = true
+            isLockedFlag = true
             diagLog("[HOTKEY] Space while recording → locked")
             return
         }
@@ -159,6 +239,7 @@ final class HotkeyManager {
         // Esc while locked → discard
         if event.keyCode == 53 && isLocked {
             isLocked = false
+            isLockedFlag = false
             isRecordingFlag = false
             diagLog("[HOTKEY] Esc while locked → discard")
             coordinator.discardRecording()

@@ -13,7 +13,7 @@ struct CleanupClient: Sendable {
                 ["role": "system", "content": prompt],
                 ["role": "user", "content": rawText],
             ],
-            "max_tokens": 2048,
+            "max_completion_tokens": 2048,
         ]
 
         var request = URLRequest(url: Self.endpoint)
