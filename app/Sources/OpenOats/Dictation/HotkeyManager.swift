@@ -7,8 +7,12 @@ final class HotkeyManager {
     private weak var coordinator: DictationCoordinator?
     private weak var settings: AppSettings?
 
-    private var flagsMonitor: Any?
-    private var keyMonitor: Any?
+    // Global monitors (events to other apps)
+    private var globalFlagsMonitor: Any?
+    private var globalKeyMonitor: Any?
+    // Local monitors (events to our app)
+    private var localFlagsMonitor: Any?
+    private var localKeyMonitor: Any?
 
     private var fnDown = false
     private var fnTimer: Task<Void, Never>?
@@ -20,26 +24,46 @@ final class HotkeyManager {
         self.coordinator = coordinator
         self.settings = settings
 
-        flagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+        // Global monitors — events going to other apps
+        globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             Task { @MainActor in
                 self?.handleFlagsChanged(event)
             }
         }
 
-        keyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             Task { @MainActor in
                 self?.handleKeyDown(event)
             }
+        }
+
+        // Local monitors — events when our app is focused
+        localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            Task { @MainActor in
+                self?.handleFlagsChanged(event)
+            }
+            return event
+        }
+
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            Task { @MainActor in
+                self?.handleKeyDown(event)
+            }
+            return event
         }
 
         log.info("Hotkey manager installed")
     }
 
     func uninstall() {
-        if let flagsMonitor { NSEvent.removeMonitor(flagsMonitor) }
-        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
-        flagsMonitor = nil
-        keyMonitor = nil
+        if let globalFlagsMonitor { NSEvent.removeMonitor(globalFlagsMonitor) }
+        if let globalKeyMonitor { NSEvent.removeMonitor(globalKeyMonitor) }
+        if let localFlagsMonitor { NSEvent.removeMonitor(localFlagsMonitor) }
+        if let localKeyMonitor { NSEvent.removeMonitor(localKeyMonitor) }
+        globalFlagsMonitor = nil
+        globalKeyMonitor = nil
+        localFlagsMonitor = nil
+        localKeyMonitor = nil
         fnTimer?.cancel()
         fnTimer = nil
         coordinator = nil
@@ -55,7 +79,6 @@ final class HotkeyManager {
         let fnPressed = event.modifierFlags.contains(.function)
 
         if fnPressed && !fnDown {
-            // Fn pressed
             fnDown = true
 
             guard isEnabled else { return }
@@ -70,7 +93,7 @@ final class HotkeyManager {
                 return
             }
 
-            // Start hold-mode timer
+            // Start hold-mode timer (80ms to distinguish from Fn+Space)
             isHoldMode = false
             fnTimer = Task { [weak self] in
                 try? await Task.sleep(for: .milliseconds(80))
@@ -80,7 +103,6 @@ final class HotkeyManager {
                 self.coordinator?.startRecording()
             }
         } else if !fnPressed && fnDown {
-            // Fn released
             fnDown = false
             fnTimer?.cancel()
             fnTimer = nil
@@ -104,8 +126,8 @@ final class HotkeyManager {
     private func handleKeyDown(_ event: NSEvent) {
         guard isEnabled, let coordinator else { return }
 
-        // Space while Fn held and recording → lock
-        if event.keyCode == 49 && fnDown && coordinator.state == .recording {
+        // Space while recording (Fn may or may not be held) → lock
+        if event.keyCode == 49 && coordinator.state == .recording && !isLocked {
             fnTimer?.cancel()
             fnTimer = nil
             isHoldMode = false
