@@ -51,7 +51,7 @@ fi
 install_name_tool -add_rpath @loader_path/../Frameworks "$MACOS/OpenOats" 2>/dev/null || true
 
 # Sign with self-signed dev certificate (stable identity preserves Accessibility permission across rebuilds)
-SIGN_ID="OpenOats Dev"
+SIGN_ID="Apple Development"
 if security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
     # Sign Sparkle framework first if present
     if [ -d "$FRAMEWORKS/Sparkle.framework" ]; then
