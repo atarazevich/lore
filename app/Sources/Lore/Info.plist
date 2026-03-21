@@ -26,5 +26,11 @@
     <string>Lore needs screen capture permission to capture system audio from other participants.</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
+    <key>SUFeedURL</key>
+    <string>https://updates.dev.cognition.design/appcast.xml</string>
+    <key>SUPublicEDKey</key>
+    <string>0Kmn2Nq47DxmOz4XWa53xUJ1mcrheVWKmM+pxNPMF1o=</string>
+    <key>SUEnableAutomaticChecks</key>
+    <true/>
 </dict>
 </plist>
