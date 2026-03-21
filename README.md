@@ -15,9 +15,9 @@ Long-form offline recordings — personal diary, conversations, voice memos. Spe
 
 ## Tech Stack
 
-- **App**: Swift/SwiftUI (forked from [OpenOats](https://github.com/yazinsai/OpenOats))
+- **App**: Lore — Swift/SwiftUI (originally forked from [OpenOats](https://github.com/yazinsai/OpenOats))
 - **Local transcription**: Parakeet TDT v3 via FluidAudio (Apple Neural Engine, ~90x realtime)
-- **Cleanup**: GPT-5.3 post-processing for punctuation and term correction
+- **Cleanup**: GPT-5.4-mini post-processing for punctuation and term correction
 - **Diarization**: FluidAudio (Pyannote-based offline + LS-EEND streaming) — not yet tested
 - **Backend**: Python (planned — API endpoints for OMI, Telegram, batch processing)
 - **API fallback**: OpenAI gpt-4o-transcribe for when local isn't available
@@ -34,7 +34,7 @@ Long-form offline recordings — personal diary, conversations, voice memos. Spe
 
 ```
 voice/
-├── app/                    # Swift app (OpenOats fork)
+├── app/                    # Lore — Swift/SwiftUI app
 ├── backend/                # Python backend (planned)
 ├── scripts/                # Standalone utility scripts
 ├── experiments/

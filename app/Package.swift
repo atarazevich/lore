@@ -3,7 +3,7 @@
 import PackageDescription
 
 let package = Package(
-    name: "OpenOats",
+    name: "Lore",
     platforms: [.macOS(.v15)],
     dependencies: [
         .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.9"),
@@ -11,13 +11,13 @@ let package = Package(
     ],
     targets: [
         .executableTarget(
-            name: "OpenOats",
+            name: "Lore",
             dependencies: [
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "Sparkle", package: "Sparkle"),
             ],
-            path: "Sources/OpenOats",
-            exclude: ["Info.plist", "OpenOats.entitlements", "Assets"]
+            path: "Sources/Lore",
+            exclude: ["Info.plist", "Lore.entitlements", "Assets"]
         ),
     ]
 )

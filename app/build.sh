@@ -1,7 +1,7 @@
 #!/bin/bash
 set -euo pipefail
 
-# Build OpenOats.app bundle from swift build output
+# Build Lore.app bundle from swift build output
 # Usage: ./build.sh [--release]
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -14,12 +14,12 @@ if [[ "${1:-}" == "--release" ]]; then
     SWIFT_FLAGS="-c release"
 fi
 
-echo "Building OpenOats ($CONFIG)..."
+echo "Building Lore ($CONFIG)..."
 swift build $SWIFT_FLAGS
 
 # Paths
 BUILD_DIR=".build/$CONFIG"
-APP_DIR="$BUILD_DIR/OpenOats.app"
+APP_DIR="$BUILD_DIR/Lore.app"
 CONTENTS="$APP_DIR/Contents"
 MACOS="$CONTENTS/MacOS"
 RESOURCES="$CONTENTS/Resources"
@@ -32,14 +32,14 @@ rm -rf "$APP_DIR"
 mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 
 # Copy binary
-cp "$BUILD_DIR/OpenOats" "$MACOS/OpenOats"
+cp "$BUILD_DIR/Lore" "$MACOS/Lore"
 
 # Copy Info.plist
-cp "Sources/OpenOats/Info.plist" "$CONTENTS/Info.plist"
+cp "Sources/Lore/Info.plist" "$CONTENTS/Info.plist"
 
 # Copy app icon
-if [ -f "Sources/OpenOats/Assets/AppIcon.icns" ]; then
-    cp "Sources/OpenOats/Assets/AppIcon.icns" "$RESOURCES/AppIcon.icns"
+if [ -f "Sources/Lore/Assets/AppIcon.icns" ]; then
+    cp "Sources/Lore/Assets/AppIcon.icns" "$RESOURCES/AppIcon.icns"
 fi
 
 # Copy Sparkle framework
@@ -48,9 +48,9 @@ if [ -d "$BUILD_DIR/Sparkle.framework" ]; then
 fi
 
 # Fix rpath so the binary finds Sparkle.framework in Contents/Frameworks/
-install_name_tool -add_rpath @loader_path/../Frameworks "$MACOS/OpenOats" 2>/dev/null || true
+install_name_tool -add_rpath @loader_path/../Frameworks "$MACOS/Lore" 2>/dev/null || true
 
-# Sign with self-signed dev certificate (stable identity preserves Accessibility permission across rebuilds)
+# Sign with Apple Development certificate (stable identity preserves Accessibility permission across rebuilds)
 SIGN_ID="Apple Development"
 if security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
     # Sign Sparkle framework first if present
@@ -58,13 +58,13 @@ if security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
         codesign --force --sign "$SIGN_ID" "$FRAMEWORKS/Sparkle.framework" 2>/dev/null || true
     fi
     codesign --force --sign "$SIGN_ID" \
-        --entitlements "Sources/OpenOats/OpenOats.entitlements" \
+        --entitlements "Sources/Lore/Lore.entitlements" \
         "$APP_DIR" 2>/dev/null || echo "Warning: codesign with '$SIGN_ID' failed"
 else
     echo "Warning: '$SIGN_ID' certificate not found, falling back to ad-hoc signing"
     echo "  Create an 'Apple Development' certificate in Keychain Access to fix this"
     codesign --force --deep --sign - \
-        --entitlements "Sources/OpenOats/OpenOats.entitlements" \
+        --entitlements "Sources/Lore/Lore.entitlements" \
         "$APP_DIR" 2>/dev/null || true
 fi
 
