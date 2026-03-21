@@ -62,7 +62,7 @@ if security find-identity -v -p codesigning | grep -q "$SIGN_ID"; then
         "$APP_DIR" 2>/dev/null || echo "Warning: codesign with '$SIGN_ID' failed"
 else
     echo "Warning: '$SIGN_ID' certificate not found, falling back to ad-hoc signing"
-    echo "  Run the dev setup to create it (see docs/dev-setup.md)"
+    echo "  Create an 'Apple Development' certificate in Keychain Access to fix this"
     codesign --force --deep --sign - \
         --entitlements "Sources/OpenOats/OpenOats.entitlements" \
         "$APP_DIR" 2>/dev/null || true
