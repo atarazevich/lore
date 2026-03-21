@@ -29,6 +29,8 @@ final class OverlayPanel: NSPanel {
         // Remember position
         setFrameAutosaveName("OverlayPanel")
     }
+
+    override var canBecomeKey: Bool { true }
 }
 
 /// Manages the overlay panel lifecycle.

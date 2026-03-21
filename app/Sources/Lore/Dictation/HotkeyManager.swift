@@ -55,6 +55,23 @@ final class HotkeyManager {
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
 
+            // C or T while upgrade panel is showing → apply upgrade
+            // Only match bare keypress (no Cmd/Ctrl/Option modifiers) to avoid eating Cmd+C etc.
+            if self.isUpgradeShowingFlag,
+               event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+               let chars = event.characters?.lowercased() {
+                var action: UpgradeAction?
+                if chars == "c" { action = .cleanup }
+                else if chars == "t" { action = .translate }
+                if let action {
+                    Task { @MainActor in
+                        diagLog("[HOTKEY] \(action) key → apply upgrade")
+                        await self.coordinator?.applyUpgradeByKey(action)
+                    }
+                    return nil
+                }
+            }
+
             // Esc while upgrade panel is showing → dismiss
             if event.keyCode == 53, self.isUpgradeShowingFlag {
                 Task { @MainActor in
@@ -114,6 +131,27 @@ final class HotkeyManager {
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+
+                // C or T while upgrade panel showing → apply upgrade
+                // Check no modifiers (allow Cmd+C etc. through)
+                let flags = event.flags
+                let hasModifiers = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
+                if manager.isUpgradeShowingFlag && !hasModifiers {
+                    // Convert CGEvent to NSEvent to get layout-resolved character
+                    if let nsEvent = NSEvent(cgEvent: event),
+                       let chars = nsEvent.characters?.lowercased() {
+                        var action: UpgradeAction?
+                        if chars == "c" { action = .cleanup }
+                        else if chars == "t" { action = .translate }
+                        if let action {
+                            Task { @MainActor in
+                                diagLog("[HOTKEY] \(action) key (CGEvent tap) → apply upgrade")
+                                await manager.coordinator?.applyUpgradeByKey(action)
+                            }
+                            return nil
+                        }
+                    }
+                }
 
                 // Esc while upgrade panel showing → dismiss
                 if keyCode == 53 && manager.isUpgradeShowingFlag {
@@ -251,7 +289,8 @@ final class HotkeyManager {
         guard isEnabled, let coordinator else { return }
 
         // Esc while upgrade panel showing → dismiss
-        if event.keyCode == 53, !coordinator.upgradeOptions.isEmpty {
+        // (C/T are handled by the local monitor and CGEvent tap, not here)
+        if event.keyCode == 53, coordinator.isUpgradePanelVisible {
             coordinator.dismissUpgrades()
             diagLog("[HOTKEY] Esc → dismiss upgrades")
             return

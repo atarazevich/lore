@@ -9,6 +9,11 @@ enum DictationState: Sendable, Equatable {
     case done
 }
 
+enum UpgradeAction: Sendable {
+    case cleanup
+    case translate
+}
+
 @Observable
 @MainActor
 final class DictationCoordinator {
@@ -16,8 +21,10 @@ final class DictationCoordinator {
     private(set) var audioLevel: Float = 0
     private(set) var lastTranscript: String?
     private(set) var lastError: String?
-    /// Upgrade options available after the initial paste (modes not yet applied).
-    private(set) var upgradeOptions: [CleanupMode] = []
+    /// Whether the upgrade panel (C/T buttons) is visible after initial paste.
+    private(set) var isUpgradePanelVisible = false
+    /// Whether cleanup was already applied (hides [C] button, only shows [T]).
+    private(set) var cleanupAlreadyApplied = false
     /// Countdown remaining for upgrade auto-dismiss (seconds). Nil when not showing.
     private(set) var upgradeCountdown: Double?
 
@@ -53,7 +60,7 @@ final class DictationCoordinator {
         autoHideTask = nil
         upgradeDismissTask?.cancel()
         upgradeDismissTask = nil
-        upgradeOptions = []
+        isUpgradePanelVisible = false
         upgradeCountdown = nil
         currentEntryID = nil
 
@@ -162,30 +169,18 @@ final class DictationCoordinator {
 
     // MARK: - Upgrade Panel
 
-    /// Populate upgrade options based on what was NOT just applied.
+    /// Show upgrade panel if API key is available.
     private func showUpgradeOptions(didCleanup: Bool) {
-        var options: [CleanupMode] = []
-
         let hasApiKey = !(settings?.openaiApiKey.isEmpty ?? true)
 
-        if hasApiKey {
-            if !didCleanup {
-                // Raw was pasted — offer Cleanup and Translate
-                options.append(CleanupMode.defaultCleanup)
-                options.append(CleanupMode.translateEnglish)
-            } else {
-                // Cleanup was applied — offer Translate (additive)
-                options.append(CleanupMode.translateEnglish)
-            }
-        }
-
-        guard !options.isEmpty else {
+        guard hasApiKey else {
             // No upgrades possible — just auto-hide after brief checkmark
             scheduleAutoHide()
             return
         }
 
-        upgradeOptions = options
+        isUpgradePanelVisible = true
+        cleanupAlreadyApplied = didCleanup
         upgradeCountdown = Self.upgradePanelDuration
 
         // Start countdown timer for auto-dismiss
@@ -199,19 +194,37 @@ final class DictationCoordinator {
                 } catch {
                     return // Cancelled
                 }
-                guard let self, !self.upgradeOptions.isEmpty else { return }
+                guard let self, self.isUpgradePanelVisible else { return }
                 self.upgradeCountdown = Self.upgradePanelDuration - (Double(i) * stepDuration)
             }
-            guard let self, !self.upgradeOptions.isEmpty else { return }
+            guard let self, self.isUpgradePanelVisible else { return }
             self.dismissUpgrades()
         }
+    }
+
+    /// Called when user selects an upgrade via hotkey or button.
+    func applyUpgradeByKey(_ action: UpgradeAction) async {
+        guard isUpgradePanelVisible else { return }
+
+        let mode: CleanupMode
+        switch action {
+        case .cleanup:
+            let prompt = settings?.dictationCleanupPrompt ?? CleanupMode.defaultCleanup.prompt
+            mode = CleanupMode(name: "Cleanup", prompt: prompt)
+        case .translate:
+            let basePrompt = settings?.dictationCleanupPrompt ?? CleanupMode.defaultCleanup.prompt
+            let prompt = basePrompt + "\n\nAlso translate the result to English. Output only the final English text."
+            mode = CleanupMode(name: "Translate", prompt: prompt)
+        }
+
+        await applyUpgrade(mode)
     }
 
     /// Called when user clicks an upgrade button.
     func applyUpgrade(_ mode: CleanupMode) async {
         upgradeDismissTask?.cancel()
         upgradeDismissTask = nil
-        upgradeOptions = []
+        isUpgradePanelVisible = false
         upgradeCountdown = nil
 
         guard let entryID = currentEntryID,
@@ -244,7 +257,7 @@ final class DictationCoordinator {
     func dismissUpgrades() {
         upgradeDismissTask?.cancel()
         upgradeDismissTask = nil
-        upgradeOptions = []
+        isUpgradePanelVisible = false
         upgradeCountdown = nil
         scheduleAutoHide()
     }

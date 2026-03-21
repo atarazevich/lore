@@ -5,9 +5,10 @@ struct DictationIndicatorView: View {
     let state: DictationState
     let audioLevel: Float
     var isLocked = false
-    var upgradeOptions: [CleanupMode] = []
+    var showUpgradeButtons = false
+    var hideCleanupButton = false
     var upgradeCountdown: Double?
-    var onUpgrade: ((CleanupMode) -> Void)?
+    var onUpgrade: ((UpgradeAction) -> Void)?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -39,7 +40,7 @@ struct DictationIndicatorView: View {
                 .padding(.vertical, 8)
 
             case .done:
-                if !upgradeOptions.isEmpty {
+                if showUpgradeButtons {
                     upgradeContent
                         .padding(.horizontal, 12)
                         .padding(.vertical, 8)
@@ -68,16 +69,26 @@ struct DictationIndicatorView: View {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
                     .font(.system(size: 12))
-                ForEach(upgradeOptions) { mode in
+                if !hideCleanupButton {
                     Button {
-                        onUpgrade?(mode)
+                        onUpgrade?(.cleanup)
                     } label: {
-                        Text(mode.name)
-                            .font(.system(size: 11, weight: .medium))
+                        Text("[C] Cleanup")
+                            .font(.system(size: 12, weight: .medium))
                     }
                     .buttonStyle(.bordered)
                     .controlSize(.small)
+                    .frame(height: 28)
                 }
+                Button {
+                    onUpgrade?(.translate)
+                } label: {
+                    Text("[T] Translate")
+                        .font(.system(size: 12, weight: .medium))
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+                .frame(height: 28)
             }
 
             if let countdown = upgradeCountdown, countdown > 0 {
@@ -126,9 +137,10 @@ final class DictationIndicatorModel {
     var state: DictationState = .idle
     var audioLevel: Float = 0
     var isLocked = false
-    var upgradeOptions: [CleanupMode] = []
+    var showUpgradeButtons = false
+    var hideCleanupButton = false
     var upgradeCountdown: Double?
-    var onUpgrade: ((CleanupMode) -> Void)?
+    var onUpgrade: ((UpgradeAction) -> Void)?
 }
 
 /// SwiftUI wrapper that reads the observable model.
@@ -140,7 +152,8 @@ private struct DictationIndicatorHost: View {
             state: model.state,
             audioLevel: model.audioLevel,
             isLocked: model.isLocked,
-            upgradeOptions: model.upgradeOptions,
+            showUpgradeButtons: model.showUpgradeButtons,
+            hideCleanupButton: model.hideCleanupButton,
             upgradeCountdown: model.upgradeCountdown,
             onUpgrade: model.onUpgrade
         )
@@ -171,13 +184,14 @@ final class DictationIndicatorManager {
         p.isMovableByWindowBackground = true
         p.backgroundColor = .clear
         p.hasShadow = false
+        p.becomesKeyOnlyIfNeeded = true
         p.contentView = NSHostingView(rootView: DictationIndicatorHost(model: model))
         self.panel = p
 
         // Wire up upgrade callback
-        model.onUpgrade = { [weak coordinator] mode in
+        model.onUpgrade = { [weak coordinator] action in
             Task { @MainActor in
-                await coordinator?.applyUpgrade(mode)
+                await coordinator?.applyUpgradeByKey(action)
             }
         }
 
@@ -193,11 +207,12 @@ final class DictationIndicatorManager {
                 self.model.state = newState
                 self.model.audioLevel = newLevel
                 self.model.isLocked = hotkeyManager?.isLocked ?? false
-                self.model.upgradeOptions = coordinator.upgradeOptions
+                self.model.showUpgradeButtons = coordinator.isUpgradePanelVisible
+                self.model.hideCleanupButton = coordinator.cleanupAlreadyApplied
                 self.model.upgradeCountdown = coordinator.upgradeCountdown
 
                 // Keep CGEvent tap flag in sync for upgrade panel dismissal
-                hotkeyManager?.updateUpgradeShowingFlag(!coordinator.upgradeOptions.isEmpty)
+                hotkeyManager?.updateUpgradeShowingFlag(coordinator.isUpgradePanelVisible)
 
                 if newState == .idle {
                     self.panel?.orderOut(nil)
