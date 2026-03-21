@@ -388,6 +388,13 @@ struct DictationView: View {
                 Divider()
 
                 hotkeyCheatSheet
+
+                Spacer(minLength: 8)
+
+                // Version
+                Text("Lore v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.quaternary)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
