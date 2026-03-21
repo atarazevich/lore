@@ -177,22 +177,17 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(dictationCleanupPrompt, forKey: "dictationCleanupPrompt") }
     }
 
-    /// Legacy: kept for backward compatibility. Prefer cleanupModes.
-    var dictationCleanupEnabled: Bool {
+    /// When true, dictation output is automatically cleaned up via LLM before pasting.
+    var cleanupByDefault: Bool {
         didSet {
-            UserDefaults.standard.set(dictationCleanupEnabled, forKey: "dictationCleanupEnabled")
-            if dictationCleanupEnabled {
-                dictationTranslationEnabled = false
-            }
+            UserDefaults.standard.set(cleanupByDefault, forKey: "dictationCleanupEnabled")
         }
     }
 
-    var dictationTranslationEnabled: Bool {
+    /// When true, dictation output is cleaned up AND translated to English before pasting.
+    var translationByDefault: Bool {
         didSet {
-            UserDefaults.standard.set(dictationTranslationEnabled, forKey: "dictationTranslationEnabled")
-            if dictationTranslationEnabled {
-                dictationCleanupEnabled = false
-            }
+            UserDefaults.standard.set(translationByDefault, forKey: "dictationTranslationEnabled")
         }
     }
 
@@ -279,8 +274,8 @@ final class AppSettings {
         self.dictationCleanupPrompt = defaults.string(forKey: "dictationCleanupPrompt")
             ?? "You are a dictation cleanup assistant. Fix grammar, punctuation, and formatting of the transcribed speech. Keep the original meaning and tone. Output only the cleaned text, nothing else."
 
-        self.dictationCleanupEnabled = defaults.bool(forKey: "dictationCleanupEnabled")
-        self.dictationTranslationEnabled = defaults.bool(forKey: "dictationTranslationEnabled")
+        self.cleanupByDefault = defaults.bool(forKey: "dictationCleanupEnabled")
+        self.translationByDefault = defaults.bool(forKey: "dictationTranslationEnabled")
 
         self.openaiApiKey = KeychainHelper.load(key: "openaiApiKey") ?? ""
 
@@ -305,10 +300,6 @@ final class AppSettings {
             withIntermediateDirectories: true
         )
 
-        // Enforce mutual exclusion (in case both persisted as true)
-        if dictationCleanupEnabled && dictationTranslationEnabled {
-            dictationTranslationEnabled = false
-        }
     }
 
     /// Migrate settings from the old "On The Spot" (com.onthespot.app) bundle.
@@ -543,9 +534,12 @@ final class AppSettings {
     }
 
     /// Apply current screen-share visibility to all app windows.
+    /// Skips windows already set to `.readOnly` (e.g. DictationIndicator panel)
+    /// so we don't override their explicit sharing configuration.
     func applyScreenShareVisibility() {
         let type: NSWindow.SharingType = hideFromScreenShare ? .none : .readOnly
         for window in NSApp.windows {
+            guard window.sharingType != .readOnly else { continue }
             window.sharingType = type
         }
     }

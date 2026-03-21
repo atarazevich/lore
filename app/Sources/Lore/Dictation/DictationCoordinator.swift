@@ -140,8 +140,8 @@ final class DictationCoordinator {
         }
 
         // STEP 3: Determine default action and paste immediately
-        let cleanupEnabled = settings?.dictationCleanupEnabled ?? false
-        let translateEnabled = settings?.dictationTranslationEnabled ?? false
+        let cleanupEnabled = settings?.cleanupByDefault ?? false
+        let translateEnabled = settings?.translationByDefault ?? false
         let hasApiKey = !(settings?.openaiApiKey.isEmpty ?? true)
         let didCleanup: Bool
 
@@ -390,7 +390,7 @@ final class DictationCoordinator {
         let effectivePrompt: String
         if let prompt, !prompt.isEmpty {
             effectivePrompt = prompt
-        } else if settings.dictationCleanupEnabled {
+        } else if settings.cleanupByDefault {
             effectivePrompt = settings.dictationCleanupPrompt
         } else {
             return

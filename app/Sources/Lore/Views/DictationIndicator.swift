@@ -65,30 +65,32 @@ struct DictationIndicatorView: View {
     @ViewBuilder
     private var upgradeContent: some View {
         VStack(spacing: 6) {
-            HStack(spacing: 8) {
+            HStack(spacing: 10) {
                 Image(systemName: "checkmark.circle.fill")
                     .foregroundStyle(.green)
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
                 if !hideCleanupButton {
                     Button {
                         onUpgrade?(.cleanup)
                     } label: {
                         Text("[C] Cleanup")
-                            .font(.system(size: 12, weight: .medium))
+                            .font(.system(size: 13, weight: .medium))
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
                     }
                     .buttonStyle(.bordered)
-                    .controlSize(.small)
-                    .frame(height: 28)
+                    .controlSize(.regular)
                 }
                 Button {
                     onUpgrade?(.translate)
                 } label: {
                     Text("[T] Translate")
-                        .font(.system(size: 12, weight: .medium))
+                        .font(.system(size: 13, weight: .medium))
+                        .padding(.horizontal, 16)
+                        .padding(.vertical, 8)
                 }
                 .buttonStyle(.bordered)
-                .controlSize(.small)
-                .frame(height: 28)
+                .controlSize(.regular)
             }
 
             if let countdown = upgradeCountdown, countdown > 0 {
@@ -170,7 +172,7 @@ final class DictationIndicatorManager {
         // Create panel and hosting view once
         let screen = NSScreen.main
         let screenWidth = screen?.frame.width ?? 1440
-        let panelWidth: CGFloat = 340
+        let panelWidth: CGFloat = 380
         let panelHeight: CGFloat = 120
         let x = (screenWidth - panelWidth) / 2
         // Position below menu bar / notch safe area
@@ -185,6 +187,8 @@ final class DictationIndicatorManager {
         p.backgroundColor = .clear
         p.hasShadow = false
         p.becomesKeyOnlyIfNeeded = true
+        // Always visible in screenshots (override OverlayPanel's screen-share hiding)
+        p.sharingType = .readOnly
         p.contentView = NSHostingView(rootView: DictationIndicatorHost(model: model))
         self.panel = p
 

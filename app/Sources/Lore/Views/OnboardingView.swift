@@ -7,25 +7,26 @@ struct OnboardingView: View {
     @Bindable var settings: AppSettings
     @AppStorage("completedDictationOnboarding") private var completedDictationOnboarding = false
     @State private var currentStep = 0
-    @State private var consentAcknowledged = false
     @State private var micPermission: MicPermissionStatus = .unknown
     @State private var accessibilityGranted = false
 
-    private let totalSteps = 5
+    private let totalSteps = 4
 
     var body: some View {
         VStack(spacing: 0) {
             Spacer()
 
-            Group {
-                switch currentStep {
-                case 0: welcomeStep
-                case 1: permissionsStep
-                case 2: fnKeyStep
-                case 3: consentStep
-                case 4: readyStep
-                default: EmptyView()
+            ScrollView {
+                Group {
+                    switch currentStep {
+                    case 0: welcomeStep
+                    case 1: permissionsStep
+                    case 2: fnKeyStep
+                    case 3: readyStep
+                    default: EmptyView()
+                    }
                 }
+                .frame(maxWidth: .infinity)
             }
 
             Spacer()
@@ -38,7 +39,7 @@ struct OnboardingView: View {
                         .frame(width: 6, height: 6)
                 }
             }
-            .padding(.bottom, 20)
+            .padding(.bottom, 16)
 
             // Navigation buttons
             HStack {
@@ -70,27 +71,20 @@ struct OnboardingView: View {
                         .padding(.horizontal, 20)
                         .padding(.vertical, 8)
                         .background(
-                            nextButtonEnabled ? Color.accentTeal : Color.gray,
+                            Color.accentTeal,
                             in: RoundedRectangle(cornerRadius: 8)
                         )
                 }
                 .buttonStyle(.plain)
-                .disabled(!nextButtonEnabled)
             }
         }
-        .padding(28)
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .padding(.horizontal, 28)
+        .padding(.vertical, 20)
+        .frame(maxWidth: .infinity, maxHeight: 480)
         .background(.ultraThinMaterial)
         .onAppear {
             refreshPermissions()
         }
-    }
-
-    private var nextButtonEnabled: Bool {
-        if currentStep == 3 {
-            return consentAcknowledged
-        }
-        return true
     }
 
     // MARK: - Step 1: Welcome
@@ -98,17 +92,17 @@ struct OnboardingView: View {
     private var welcomeStep: some View {
         VStack(spacing: 0) {
             Image(systemName: "waveform")
-                .font(.system(size: 40, weight: .light))
+                .font(.system(size: 36, weight: .light))
                 .foregroundStyle(Color.accentTeal)
-                .frame(height: 52)
+                .frame(height: 44)
 
-            Spacer().frame(height: 20)
+            Spacer().frame(height: 14)
 
             Text("Welcome to Lore")
                 .font(.system(size: 16, weight: .semibold))
                 .multilineTextAlignment(.center)
 
-            Spacer().frame(height: 10)
+            Spacer().frame(height: 8)
 
             Text("Hold Fn, speak, release \u{2014} your words appear instantly.")
                 .font(.system(size: 13))
@@ -127,9 +121,9 @@ struct OnboardingView: View {
                 .font(.system(size: 16, weight: .semibold))
                 .multilineTextAlignment(.center)
 
-            Spacer().frame(height: 20)
+            Spacer().frame(height: 14)
 
-            VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 12) {
                 // Microphone
                 HStack(spacing: 12) {
                     permissionIcon(granted: micPermission == .granted)
@@ -182,7 +176,7 @@ struct OnboardingView: View {
             }
             .padding(.horizontal, 8)
 
-            Spacer().frame(height: 16)
+            Spacer().frame(height: 12)
 
             Text("You can grant these later in System Settings if you prefer.")
                 .font(.system(size: 11))
@@ -200,7 +194,7 @@ struct OnboardingView: View {
                 .font(.system(size: 16, weight: .semibold))
                 .multilineTextAlignment(.center)
 
-            Spacer().frame(height: 16)
+            Spacer().frame(height: 12)
 
             Text("To use Fn as your dictation key, set it to \u{201C}Do Nothing\u{201D} in System Settings.")
                 .font(.system(size: 13))
@@ -209,17 +203,17 @@ struct OnboardingView: View {
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
 
-            Spacer().frame(height: 16)
+            Spacer().frame(height: 12)
 
             VStack(alignment: .leading, spacing: 4) {
                 instructionRow("System Settings")
                 instructionRow("Keyboard")
                 instructionRow("\u{201C}Press \u{1F310} fn key to\u{201D} \u{2192} \u{201C}Do Nothing\u{201D}")
             }
-            .padding(12)
+            .padding(10)
             .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
 
-            Spacer().frame(height: 16)
+            Spacer().frame(height: 12)
 
             Button("Open Keyboard Settings") {
                 if let url = URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension") {
@@ -230,7 +224,7 @@ struct OnboardingView: View {
             .buttonStyle(.bordered)
             .controlSize(.small)
 
-            Spacer().frame(height: 12)
+            Spacer().frame(height: 10)
 
             Text("You can also use Right Option as an alternative hotkey (configurable in Settings).")
                 .font(.system(size: 11))
@@ -240,72 +234,29 @@ struct OnboardingView: View {
         }
     }
 
-    // MARK: - Step 4: Recording Consent
-
-    private var consentStep: some View {
-        VStack(spacing: 0) {
-            Image(systemName: "exclamationmark.shield")
-                .font(.system(size: 40, weight: .light))
-                .foregroundStyle(.orange)
-                .frame(height: 52)
-
-            Spacer().frame(height: 20)
-
-            Text("Recording Consent Notice")
-                .font(.system(size: 16, weight: .semibold))
-                .multilineTextAlignment(.center)
-
-            Spacer().frame(height: 10)
-
-            Text("Lore records and transcribes audio from your microphone. Many jurisdictions require consent before recording a conversation.")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-                .multilineTextAlignment(.center)
-                .lineSpacing(3)
-                .fixedSize(horizontal: false, vertical: true)
-
-            Spacer().frame(height: 12)
-
-            VStack(alignment: .leading, spacing: 8) {
-                consentBullet("You are solely responsible for obtaining any required consent from all participants before recording.")
-                consentBullet("You will comply with all applicable local, state, and federal laws governing recording.")
-                consentBullet("The developers of Lore accept no liability for unauthorized or unlawful recording.")
-            }
-            .padding(.horizontal, 8)
-
-            Spacer().frame(height: 16)
-
-            Toggle(isOn: $consentAcknowledged) {
-                Text("I understand and accept these obligations")
-                    .font(.system(size: 12, weight: .medium))
-            }
-            .toggleStyle(.checkbox)
-        }
-    }
-
-    // MARK: - Step 5: Ready
+    // MARK: - Step 4: Ready
 
     private var readyStep: some View {
         VStack(spacing: 0) {
             Image(systemName: "checkmark.circle")
-                .font(.system(size: 40, weight: .light))
+                .font(.system(size: 36, weight: .light))
                 .foregroundStyle(Color.accentTeal)
-                .frame(height: 52)
+                .frame(height: 44)
 
-            Spacer().frame(height: 20)
+            Spacer().frame(height: 14)
 
             Text("You\u{2019}re all set!")
                 .font(.system(size: 16, weight: .semibold))
                 .multilineTextAlignment(.center)
 
-            Spacer().frame(height: 10)
+            Spacer().frame(height: 8)
 
             Text("Hold \(settings.hotkeyKey.displayName) and start speaking.")
                 .font(.system(size: 13))
                 .foregroundStyle(.secondary)
                 .multilineTextAlignment(.center)
 
-            Spacer().frame(height: 20)
+            Spacer().frame(height: 14)
 
             VStack(alignment: .leading, spacing: 6) {
                 cheatSheetRow("Fn", "talk")
@@ -313,7 +264,7 @@ struct OnboardingView: View {
                 cheatSheetRow("C", "cleanup")
                 cheatSheetRow("T", "translate")
             }
-            .padding(12)
+            .padding(10)
             .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
         }
     }
@@ -334,19 +285,6 @@ struct OnboardingView: View {
             Text(text)
                 .font(.system(size: 12))
                 .foregroundStyle(.secondary)
-        }
-    }
-
-    private func consentBullet(_ text: String) -> some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text("\u{2022}")
-                .font(.system(size: 13))
-                .foregroundStyle(.secondary)
-            Text(text)
-                .font(.system(size: 12))
-                .foregroundStyle(.secondary)
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 

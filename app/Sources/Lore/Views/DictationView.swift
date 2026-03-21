@@ -128,6 +128,7 @@ struct DictationView: View {
                         .background(selectedTab == tab ? Color.primary.opacity(0.05) : Color.clear)
                 }
                 .buttonStyle(.plain)
+                .contentShape(Rectangle())
             }
         }
     }
@@ -223,64 +224,66 @@ struct DictationView: View {
 
             Spacer()
 
-            if hoveredEntryID == entry.id {
-                HStack(spacing: 6) {
-                    // Retry button for failed or audio-only entries
-                    if entry.status == .failed || entry.status == .audioSaved {
-                        Button {
-                            Task {
-                                await dictation.retryTranscription(entryID: entry.id)
-                            }
-                        } label: {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.orange)
+            HStack(spacing: 6) {
+                // Retry button for failed or audio-only entries
+                if entry.status == .failed || entry.status == .audioSaved {
+                    Button {
+                        Task {
+                            await dictation.retryTranscription(entryID: entry.id)
                         }
-                        .buttonStyle(.plain)
-                        .help("Retry transcription")
+                    } label: {
+                        Image(systemName: "arrow.clockwise")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.orange)
                     }
+                    .buttonStyle(.plain)
+                    .help("Retry transcription")
+                }
 
-                    // Copy button for transcribed entries
-                    if let text = entry.finalText {
-                        Button {
-                            NSPasteboard.general.clearContents()
-                            NSPasteboard.general.setString(text, forType: .string)
-                        } label: {
-                            Image(systemName: "doc.on.doc")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Copy to clipboard")
+                // Copy button for transcribed entries
+                if let text = entry.finalText {
+                    Button {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(text, forType: .string)
+                    } label: {
+                        Image(systemName: "doc.on.doc")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
                     }
+                    .buttonStyle(.plain)
+                    .help("Copy to clipboard")
+                }
 
-                    // Retroactive cleanup button for transcribed entries
-                    if entry.rawText != nil {
-                        Menu {
-                            ForEach(settings.cleanupModes.filter { !$0.isRawPaste }) { mode in
-                                Button(mode.name) {
-                                    Task {
-                                        await dictation.cleanupHistoryEntry(entryID: entry.id, mode: mode)
-                                    }
+                // Retroactive cleanup button for transcribed entries
+                if entry.rawText != nil {
+                    Menu {
+                        ForEach(settings.cleanupModes.filter { !$0.isRawPaste }) { mode in
+                            Button(mode.name) {
+                                Task {
+                                    await dictation.cleanupHistoryEntry(entryID: entry.id, mode: mode)
                                 }
                             }
-                        } label: {
-                            Image(systemName: "wand.and.stars")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.secondary)
                         }
-                        .menuStyle(.borderlessButton)
-                        .frame(width: 20)
-                        .help("Clean up with...")
+                    } label: {
+                        Image(systemName: "wand.and.stars")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
                     }
+                    .menuStyle(.borderlessButton)
+                    .frame(width: 20)
+                    .help("Clean up with...")
                 }
             }
+            .opacity(hoveredEntryID == entry.id ? 1.0 : 0.4)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
         .background(hoveredEntryID == entry.id ? Color.primary.opacity(0.03) : Color.clear)
+        .contentShape(Rectangle())
         .onHover { isHovered in
-            hoveredEntryID = isHovered ? entry.id : nil
+            withAnimation(.easeInOut(duration: 0.15)) {
+                hoveredEntryID = isHovered ? entry.id : nil
+            }
         }
     }
 
@@ -295,19 +298,41 @@ struct DictationView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 // Cleanup toggle
-                Toggle("Cleanup", isOn: $settings.dictationCleanupEnabled)
+                Toggle("Cleanup by default", isOn: Binding(
+                    get: { settings.cleanupByDefault },
+                    set: { newValue in
+                        settings.cleanupByDefault = newValue
+                        if !newValue {
+                            settings.translationByDefault = false
+                        }
+                    }
+                ))
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .font(.system(size: 12))
 
                 // Translation toggle
-                Toggle("Translation", isOn: $settings.dictationTranslationEnabled)
+                Toggle("Translation by default", isOn: Binding(
+                    get: { settings.translationByDefault },
+                    set: { newValue in
+                        settings.translationByDefault = newValue
+                        if newValue {
+                            settings.cleanupByDefault = true
+                        }
+                    }
+                ))
                     .toggleStyle(.switch)
                     .controlSize(.mini)
                     .font(.system(size: 12))
 
+                if settings.translationByDefault {
+                    Text("Translation includes cleanup automatically")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+
                 // API key warning
-                if (settings.dictationCleanupEnabled || settings.dictationTranslationEnabled)
+                if (settings.cleanupByDefault || settings.translationByDefault)
                     && settings.openaiApiKey.isEmpty {
                     Text("OpenAI API key required")
                         .font(.system(size: 11))
@@ -325,7 +350,7 @@ struct DictationView: View {
                 }
 
                 // Cleanup Prompt (shown when cleanup or translation is enabled)
-                if settings.dictationCleanupEnabled || settings.dictationTranslationEnabled {
+                if settings.cleanupByDefault || settings.translationByDefault {
                     VStack(alignment: .leading, spacing: 4) {
                         Text("CLEANUP PROMPT")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
