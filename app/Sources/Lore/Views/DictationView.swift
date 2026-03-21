@@ -1,10 +1,16 @@
 import SwiftUI
 
+enum DictationTab: String, CaseIterable {
+    case history = "History"
+    case settings = "Settings"
+}
+
 struct DictationView: View {
     @Bindable var settings: AppSettings
     @Environment(AppCoordinator.self) private var coordinator
 
     @State private var hoveredEntryID: UUID?
+    @State private var selectedTab: DictationTab = .history
 
     private var dictation: DictationCoordinator {
         coordinator.dictationCoordinator
@@ -16,9 +22,15 @@ struct DictationView: View {
             Divider()
             statusBar
             Divider()
-            historyList
+            tabBar
             Divider()
-            promptEditor
+
+            switch selectedTab {
+            case .history:
+                historyTab
+            case .settings:
+                settingsTab
+            }
         }
         .frame(minWidth: 380, maxWidth: 600, minHeight: 500)
         .background(.ultraThinMaterial)
@@ -28,15 +40,9 @@ struct DictationView: View {
 
     private var header: some View {
         HStack {
-            Text("Dictation")
+            Text("Lore")
                 .font(.system(size: 13, weight: .semibold))
-
             Spacer()
-
-            Toggle("Enabled", isOn: $settings.dictationEnabled)
-                .toggleStyle(.switch)
-                .controlSize(.mini)
-                .font(.system(size: 11))
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 10)
@@ -51,7 +57,7 @@ struct DictationView: View {
                 Image(systemName: "mic")
                     .font(.system(size: 11))
                     .foregroundStyle(.tertiary)
-                Text("Hold Fn to talk")
+                Text("Hold \(settings.hotkeyKey.displayName) to talk")
                     .font(.system(size: 12))
                     .foregroundStyle(.secondary)
             case .recording:
@@ -62,7 +68,7 @@ struct DictationView: View {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 10))
                         .foregroundStyle(.red)
-                    Text("Locked — Fn to paste, Esc to discard")
+                    Text("Locked \u{2014} \(settings.hotkeyKey.displayName) to paste, Esc to discard")
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.red)
                 } else {
@@ -106,7 +112,37 @@ struct DictationView: View {
         .animation(.easeInOut(duration: 0.2), value: dictation.state)
     }
 
-    // MARK: - History
+    // MARK: - Tab Bar
+
+    private var tabBar: some View {
+        HStack(spacing: 0) {
+            ForEach(DictationTab.allCases, id: \.self) { tab in
+                Button {
+                    selectedTab = tab
+                } label: {
+                    Text(tab.rawValue)
+                        .font(.system(size: 12, weight: selectedTab == tab ? .semibold : .regular))
+                        .foregroundStyle(selectedTab == tab ? .primary : .secondary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 8)
+                        .background(selectedTab == tab ? Color.primary.opacity(0.05) : Color.clear)
+                }
+                .buttonStyle(.plain)
+            }
+        }
+    }
+
+    // MARK: - History Tab
+
+    private var historyTab: some View {
+        VStack(spacing: 0) {
+            historyList
+            Divider()
+            hotkeyCheatSheet
+        }
+    }
+
+    // MARK: - History List
 
     private var historyList: some View {
         Group {
@@ -119,7 +155,7 @@ struct DictationView: View {
                     Text("No dictation history yet")
                         .font(.system(size: 12))
                         .foregroundStyle(.tertiary)
-                    Text("Hold Fn and speak to get started")
+                    Text("Hold \(settings.hotkeyKey.displayName) and speak to get started")
                         .font(.system(size: 11))
                         .foregroundStyle(.quaternary)
                     Spacer()
@@ -157,7 +193,7 @@ struct DictationView: View {
                         Image(systemName: "waveform")
                             .font(.system(size: 10))
                             .foregroundStyle(.orange)
-                        Text("Audio saved — not yet transcribed")
+                        Text("Audio saved \u{2014} not yet transcribed")
                             .font(.system(size: 11))
                             .foregroundStyle(.secondary)
                     }
@@ -178,7 +214,7 @@ struct DictationView: View {
                             .textSelection(.enabled)
                     }
                     if entry.status == .cleaned {
-                        Text("cleaned by GPT-5.3")
+                        Text("cleaned")
                             .font(.system(size: 9))
                             .foregroundStyle(.quaternary)
                     }
@@ -253,68 +289,107 @@ struct DictationView: View {
         return String(format: "%.0fm%02.0fs", seconds / 60, seconds.truncatingRemainder(dividingBy: 60))
     }
 
-    // MARK: - Prompt Editor
+    // MARK: - Settings Tab
 
-    private var promptEditor: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            // Cleanup toggle + model badge
-            HStack {
-                Toggle("GPT-5.3 Cleanup", isOn: $settings.dictationCleanupEnabled)
+    private var settingsTab: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                // Cleanup toggle
+                Toggle("Cleanup", isOn: $settings.dictationCleanupEnabled)
                     .toggleStyle(.switch)
                     .controlSize(.mini)
-                    .font(.system(size: 11))
+                    .font(.system(size: 12))
 
-                Spacer()
+                // Translation toggle
+                Toggle("Translation", isOn: $settings.dictationTranslationEnabled)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .font(.system(size: 12))
 
-                if settings.dictationCleanupEnabled && settings.openaiApiKey.isEmpty {
-                    Text("API key required")
-                        .font(.system(size: 10))
+                // API key warning
+                if (settings.dictationCleanupEnabled || settings.dictationTranslationEnabled)
+                    && settings.openaiApiKey.isEmpty {
+                    Text("OpenAI API key required")
+                        .font(.system(size: 11))
                         .foregroundStyle(.red)
                 }
+
+                // API Key
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("OpenAI API Key")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    SecureField("sk-...", text: $settings.openaiApiKey)
+                        .font(.system(size: 11, design: .monospaced))
+                        .textFieldStyle(.roundedBorder)
+                }
+
+                // Cleanup Prompt (shown when cleanup or translation is enabled)
+                if settings.dictationCleanupEnabled || settings.dictationTranslationEnabled {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("CLEANUP PROMPT")
+                            .font(.system(size: 10, weight: .bold, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                            .tracking(1.5)
+
+                        TextEditor(text: $settings.dictationCleanupPrompt)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(height: 60)
+                            .scrollContentBackground(.hidden)
+                            .padding(4)
+                            .background(Color.primary.opacity(0.03))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.primary.opacity(0.06))
+                            )
+                    }
+                }
+
+                // Hotkey picker
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Hotkey")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+                    Picker("Hotkey", selection: $settings.hotkeyKey) {
+                        ForEach(HotkeyKey.allCases) { key in
+                            Text(key.displayName).tag(key)
+                        }
+                    }
+                    .labelsHidden()
+                    .font(.system(size: 12))
+                }
+
+                Divider()
+
+                hotkeyCheatSheet
             }
-
-            // API Key
-            if settings.dictationCleanupEnabled {
-                SecureField("OpenAI API Key", text: $settings.openaiApiKey)
-                    .font(.system(size: 11, design: .monospaced))
-                    .textFieldStyle(.roundedBorder)
-
-                // Prompt
-                Text("CLEANUP PROMPT")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .tracking(1.5)
-
-                TextEditor(text: $settings.dictationCleanupPrompt)
-                    .font(.system(size: 11, design: .monospaced))
-                    .frame(height: 60)
-                    .scrollContentBackground(.hidden)
-                    .padding(4)
-                    .background(Color.primary.opacity(0.03))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 6)
-                            .stroke(Color.primary.opacity(0.06))
-                    )
-            }
-
-            HStack(spacing: 12) {
-                Text("Fn = hold to talk")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.quaternary)
-                Text("Space = lock")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.quaternary)
-                Text("Esc = discard")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.quaternary)
-                Text("⌃⌘V = re-paste")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.quaternary)
-            }
+            .padding(.horizontal, 16)
+            .padding(.vertical, 12)
         }
+    }
+
+    // MARK: - Hotkey Cheat Sheet
+
+    private var hotkeyLabel: String {
+        switch settings.hotkeyKey {
+        case .fn: "Fn"
+        case .rightOption: "R⌥"
+        }
+    }
+
+    private var hotkeyCheatSheet: some View {
+        HStack(spacing: 12) {
+            Text("\(hotkeyLabel) = hold to talk")
+            Text("Space = lock")
+            Text("C = cleanup")
+            Text("T = translate")
+            Text("Esc = discard")
+        }
+        .font(.system(size: 10))
+        .foregroundStyle(.quaternary)
         .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.vertical, 8)
     }
 
     // MARK: - Helpers

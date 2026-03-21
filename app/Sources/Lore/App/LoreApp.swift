@@ -8,42 +8,48 @@ struct LoreApp: App {
     @State private var settings = AppSettings()
     @State private var coordinator = AppCoordinator()
     @State private var didSetupDictation = false
+    @AppStorage("completedDictationOnboarding") private var completedDictationOnboarding = false
     private let updaterController = AppUpdaterController()
 
     var body: some Scene {
         WindowGroup {
-            ContentView(settings: settings)
-                .environment(coordinator)
-                .onAppear {
-                    settings.applyScreenShareVisibility()
-                    if !didSetupDictation {
-                        setupDictation()
-                        didSetupDictation = true
-                    }
+            Group {
+                if completedDictationOnboarding {
+                    DictationView(settings: settings)
+                        .environment(coordinator)
+                } else {
+                    OnboardingView(settings: settings)
                 }
+            }
+            .onAppear {
+                settings.applyScreenShareVisibility()
+                if !didSetupDictation {
+                    setupDictation()
+                    didSetupDictation = true
+                }
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
-        .defaultSize(width: 320, height: 560)
+        .defaultSize(width: 400, height: 560)
         .commands {
             CommandGroup(after: .appInfo) {
                 CheckForUpdatesView(updater: updaterController.updater)
             }
         }
 
-        Window("Notes", id: "notes") {
-            NotesView(settings: settings)
-                .environment(coordinator)
-        }
-        .defaultSize(width: 700, height: 550)
+        // v2: Notes window (hidden for dictation-only release)
+        // Window("Notes", id: "notes") {
+        //     NotesView(settings: settings)
+        //         .environment(coordinator)
+        // }
+        // .defaultSize(width: 700, height: 550)
 
-        Window("Dictation", id: "dictation") {
-            DictationView(settings: settings)
-                .environment(coordinator)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultSize(width: 400, height: 560)
+        // v2: Separate dictation window (main window already shows DictationView)
+        // Window("Dictation", id: "dictation") {
+        //     DictationView(settings: settings)
+        //         .environment(coordinator)
+        // }
 
         Settings {
             SettingsView(settings: settings, updater: updaterController.updater)

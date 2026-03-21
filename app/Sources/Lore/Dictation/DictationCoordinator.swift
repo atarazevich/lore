@@ -141,11 +141,18 @@ final class DictationCoordinator {
 
         // STEP 3: Determine default action and paste immediately
         let cleanupEnabled = settings?.dictationCleanupEnabled ?? false
+        let translateEnabled = settings?.dictationTranslationEnabled ?? false
         let hasApiKey = !(settings?.openaiApiKey.isEmpty ?? true)
         let didCleanup: Bool
 
-        if cleanupEnabled && hasApiKey {
-            // Run default cleanup
+        if translateEnabled && hasApiKey {
+            // Run cleanup + translate
+            let basePrompt = settings?.dictationCleanupPrompt ?? CleanupMode.defaultCleanup.prompt
+            let prompt = basePrompt + "\n\nAlso translate the result to English. Output only the final English text."
+            await cleanupEntry(&entry, rawText: rawText, prompt: prompt)
+            didCleanup = (entry.status == .cleaned)
+        } else if cleanupEnabled && hasApiKey {
+            // Run default cleanup only
             let prompt = settings?.dictationCleanupPrompt ?? CleanupMode.defaultCleanup.prompt
             await cleanupEntry(&entry, rawText: rawText, prompt: prompt)
             didCleanup = (entry.status == .cleaned)

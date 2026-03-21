@@ -110,21 +110,14 @@ struct ContentView: View {
         .frame(minWidth: 360, maxWidth: 600, minHeight: 400)
         .background(.ultraThinMaterial)
         .overlay {
-            if showOnboarding {
-                OnboardingView(isPresented: $showOnboarding)
-                    .transition(.opacity)
-            }
+            // Legacy meeting-mode onboarding removed — dictation onboarding
+            // is now handled at the LoreApp level via OnboardingView.
             if showConsentSheet {
                 RecordingConsentView(
                     isPresented: $showConsentSheet,
                     settings: settings
                 )
                 .transition(.opacity)
-            }
-        }
-        .onChange(of: showOnboarding) {
-            if !showOnboarding {
-                hasCompletedOnboarding = true
             }
         }
         .onChange(of: showConsentSheet) {

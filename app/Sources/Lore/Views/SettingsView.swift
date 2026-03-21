@@ -14,6 +14,8 @@ struct SettingsView: View {
 
     var body: some View {
         Form {
+            // v2: Meeting Notes section (hidden for dictation-only release)
+            if false {
             Section("Meeting Notes") {
                 Text("Where meeting transcripts are saved as plain text files.")
                     .font(.system(size: 11))
@@ -32,7 +34,10 @@ struct SettingsView: View {
                     }
                 }
             }
+            } // end v2: Meeting Notes
 
+            // v2: Knowledge Base section (hidden for dictation-only release)
+            if false {
             Section("Knowledge Base") {
                 Text("Optional. Point this to a folder of notes, docs, or reference material (.md, .txt). During meetings, Lore searches this folder to surface relevant context and talking points.")
                     .font(.system(size: 11))
@@ -59,7 +64,10 @@ struct SettingsView: View {
                     }
                 }
             }
+            } // end v2: Knowledge Base
 
+            // v2: LLM Provider section (hidden for dictation-only release)
+            if false {
             Section("LLM Provider") {
                 Picker("Provider", selection: $settings.llmProvider) {
                     ForEach(LLMProvider.allCases) { provider in
@@ -82,7 +90,10 @@ struct SettingsView: View {
                         .font(.system(size: 12, design: .monospaced))
                 }
             }
+            } // end v2: LLM Provider
 
+            // v2: Embedding Provider section (hidden for dictation-only release)
+            if false {
             Section("Embedding Provider") {
                 Picker("Provider", selection: $settings.embeddingProvider) {
                     ForEach(EmbeddingProvider.allCases) { provider in
@@ -114,6 +125,7 @@ struct SettingsView: View {
                         .font(.system(size: 12, design: .monospaced))
                 }
             }
+            } // end v2: Embedding Provider
 
             Section("Audio Input") {
                 Picker("Microphone", selection: $settings.inputDeviceID) {
@@ -145,59 +157,8 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            Section("Dictation") {
-                Toggle("Enable dictation", isOn: $settings.dictationEnabled)
-                    .font(.system(size: 12))
-
-                VStack(alignment: .leading, spacing: 3) {
-                    Text("Cleanup Prompt")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    ZStack(alignment: .topLeading) {
-                        if settings.dictationCleanupPrompt.isEmpty {
-                            Text("System prompt for GPT-5.3 text cleanup...")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.quaternary)
-                                .padding(.top, 6)
-                                .padding(.leading, 4)
-                                .allowsHitTesting(false)
-                        }
-                        TextEditor(text: $settings.dictationCleanupPrompt)
-                            .font(.system(size: 11, design: .monospaced))
-                            .frame(height: 80)
-                            .scrollContentBackground(.hidden)
-                    }
-                    .overlay(
-                        RoundedRectangle(cornerRadius: 4)
-                            .stroke(.quaternary)
-                    )
-                }
-
-                VStack(alignment: .leading, spacing: 2) {
-                    Text("Hotkeys")
-                        .font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary)
-                    Text("Hold Fn — hold to talk (release to paste)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                    Text("Space while recording — lock (Fn can be released)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                    Text("Fn while locked — stop and paste")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                    Text("Esc while locked — discard recording")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                    Text("Ctrl + Cmd + V — paste last transcript")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
-                }
-
-                Text("Note: Set System Settings → Keyboard → \"Press fn key to\" → \"Do Nothing\" to avoid the Emoji picker conflict.")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.tertiary)
-            }
+            // v2: Dictation section moved to DictationView Settings tab
+            // Section("Dictation") { ... }
 
             Section("Updates") {
                 Toggle("Automatically check for updates", isOn: Binding(
@@ -207,6 +168,8 @@ struct SettingsView: View {
                 .font(.system(size: 12))
             }
 
+            // v2: Meeting Templates section (hidden for dictation-only release)
+            if false {
             Section("Meeting Templates") {
                 ForEach(coordinator.templateStore.templates) { template in
                     HStack {
@@ -320,9 +283,10 @@ struct SettingsView: View {
                     .font(.system(size: 12))
                 }
             }
-}
+            } // end v2: Meeting Templates
+        }
         .formStyle(.grouped)
-        .frame(width: 450, height: 780)
+        .frame(width: 450, height: 580)
         .onAppear {
             inputDevices = MicCapture.availableInputDevices()
         }

@@ -170,7 +170,7 @@ final class DictationIndicatorManager {
         // Create panel and hosting view once
         let screen = NSScreen.main
         let screenWidth = screen?.frame.width ?? 1440
-        let panelWidth: CGFloat = 260
+        let panelWidth: CGFloat = 340
         let panelHeight: CGFloat = 120
         let x = (screenWidth - panelWidth) / 2
         // Position below menu bar / notch safe area

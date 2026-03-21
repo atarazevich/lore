@@ -43,6 +43,30 @@ enum TranscriptionModel: String, CaseIterable, Identifiable {
     }
 }
 
+enum HotkeyKey: String, CaseIterable, Identifiable, Codable {
+    case fn
+    case rightOption
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .fn: "Fn (Globe)"
+        case .rightOption: "Right Option (⌥)"
+        }
+    }
+
+    /// Check if this key matches the given flags-changed event.
+    func matchesPress(_ event: NSEvent) -> Bool {
+        switch self {
+        case .fn:
+            return event.modifierFlags.contains(.function)
+        case .rightOption:
+            return event.modifierFlags.contains(.option) && event.keyCode == 61
+        }
+    }
+}
+
 enum EmbeddingProvider: String, CaseIterable, Identifiable {
     case voyageAI
     case ollama
@@ -144,6 +168,10 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(dictationEnabled, forKey: "dictationEnabled") }
     }
 
+    var hotkeyKey: HotkeyKey {
+        didSet { UserDefaults.standard.set(hotkeyKey.rawValue, forKey: "hotkeyKey") }
+    }
+
     /// Legacy: kept for backward compatibility. Prefer cleanupModes.
     var dictationCleanupPrompt: String {
         didSet { UserDefaults.standard.set(dictationCleanupPrompt, forKey: "dictationCleanupPrompt") }
@@ -151,7 +179,21 @@ final class AppSettings {
 
     /// Legacy: kept for backward compatibility. Prefer cleanupModes.
     var dictationCleanupEnabled: Bool {
-        didSet { UserDefaults.standard.set(dictationCleanupEnabled, forKey: "dictationCleanupEnabled") }
+        didSet {
+            UserDefaults.standard.set(dictationCleanupEnabled, forKey: "dictationCleanupEnabled")
+            if dictationCleanupEnabled {
+                dictationTranslationEnabled = false
+            }
+        }
+    }
+
+    var dictationTranslationEnabled: Bool {
+        didSet {
+            UserDefaults.standard.set(dictationTranslationEnabled, forKey: "dictationTranslationEnabled")
+            if dictationTranslationEnabled {
+                dictationCleanupEnabled = false
+            }
+        }
     }
 
     var openaiApiKey: String {
@@ -230,14 +272,15 @@ final class AppSettings {
             self.dictationEnabled = defaults.bool(forKey: "dictationEnabled")
         }
 
+        self.hotkeyKey = HotkeyKey(
+            rawValue: defaults.string(forKey: "hotkeyKey") ?? ""
+        ) ?? .fn
+
         self.dictationCleanupPrompt = defaults.string(forKey: "dictationCleanupPrompt")
             ?? "You are a dictation cleanup assistant. Fix grammar, punctuation, and formatting of the transcribed speech. Keep the original meaning and tone. Output only the cleaned text, nothing else."
 
-        if defaults.object(forKey: "dictationCleanupEnabled") == nil {
-            self.dictationCleanupEnabled = true
-        } else {
-            self.dictationCleanupEnabled = defaults.bool(forKey: "dictationCleanupEnabled")
-        }
+        self.dictationCleanupEnabled = defaults.bool(forKey: "dictationCleanupEnabled")
+        self.dictationTranslationEnabled = defaults.bool(forKey: "dictationTranslationEnabled")
 
         self.openaiApiKey = KeychainHelper.load(key: "openaiApiKey") ?? ""
 
@@ -261,6 +304,11 @@ final class AppSettings {
             atPath: notesFolderPath,
             withIntermediateDirectories: true
         )
+
+        // Enforce mutual exclusion (in case both persisted as true)
+        if dictationCleanupEnabled && dictationTranslationEnabled {
+            dictationTranslationEnabled = false
+        }
     }
 
     /// Migrate settings from the old "On The Spot" (com.onthespot.app) bundle.

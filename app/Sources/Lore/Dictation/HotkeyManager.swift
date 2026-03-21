@@ -237,9 +237,10 @@ final class HotkeyManager {
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
-        let fnPressed = event.modifierFlags.contains(.function)
+        let hotkeyKey = settings?.hotkeyKey ?? .fn
+        let hotkeyPressed = hotkeyKey.matchesPress(event)
 
-        if fnPressed && !fnDown {
+        if hotkeyPressed && !fnDown {
             fnDown = true
 
             guard isEnabled else { return }
@@ -248,7 +249,7 @@ final class HotkeyManager {
                 isLocked = false
                 isLockedFlag = false
                 isRecordingFlag = false
-                diagLog("[HOTKEY] Fn pressed while locked → stop + paste")
+                diagLog("[HOTKEY] hotkey pressed while locked → stop + paste")
                 Task { [weak self] in
                     await self?.coordinator?.stopRecording()
                 }
@@ -264,13 +265,13 @@ final class HotkeyManager {
                 diagLog("[HOTKEY] hold mode → start recording")
                 self.coordinator?.startRecording()
             }
-        } else if !fnPressed && fnDown {
+        } else if !hotkeyPressed && fnDown {
             fnDown = false
             fnTimer?.cancel()
             fnTimer = nil
 
             if isLocked {
-                diagLog("[HOTKEY] Fn released while locked → continues")
+                diagLog("[HOTKEY] hotkey released while locked → continues")
                 return
             }
 
