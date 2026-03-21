@@ -75,22 +75,26 @@ struct DictationIndicatorView: View {
                     } label: {
                         Text("[C] Cleanup")
                             .font(.system(size: 13, weight: .medium))
+                            .foregroundColor(.white)
                             .padding(.horizontal, 16)
                             .padding(.vertical, 8)
+                            .background(Color.white.opacity(0.15))
+                            .cornerRadius(8)
                     }
-                    .buttonStyle(.bordered)
-                    .controlSize(.regular)
+                    .buttonStyle(.plain)
                 }
                 Button {
                     onUpgrade?(.translate)
                 } label: {
                     Text("[T] Translate")
                         .font(.system(size: 13, weight: .medium))
+                        .foregroundColor(.white)
                         .padding(.horizontal, 16)
                         .padding(.vertical, 8)
+                        .background(Color.white.opacity(0.15))
+                        .cornerRadius(8)
                 }
-                .buttonStyle(.bordered)
-                .controlSize(.regular)
+                .buttonStyle(.plain)
             }
 
             if let countdown = upgradeCountdown, countdown > 0 {

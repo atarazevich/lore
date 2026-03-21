@@ -126,9 +126,9 @@ struct DictationView: View {
                         .frame(maxWidth: .infinity)
                         .padding(.vertical, 8)
                         .background(selectedTab == tab ? Color.primary.opacity(0.05) : Color.clear)
+                        .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .contentShape(Rectangle())
             }
         }
     }
