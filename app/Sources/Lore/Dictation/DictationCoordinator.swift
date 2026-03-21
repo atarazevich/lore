@@ -5,6 +5,7 @@ import os
 enum DictationState: Sendable, Equatable {
     case idle
     case recording
+    case loadingModel
     case processing
     case done
 }
@@ -327,6 +328,7 @@ final class DictationCoordinator {
         if !isModelLoaded {
             do {
                 try await loadModel()
+                state = .processing
             } catch {
                 entry.status = .failed
                 entry.errorMessage = "Model loading failed: \(error.localizedDescription)"
@@ -425,7 +427,16 @@ final class DictationCoordinator {
     // MARK: - Model Loading
 
     private func loadModel() async throws {
-        diagLog("[DICTATION] loading model parakeetV3...")
+        let needsDownload = !AsrModels.modelsExist(
+            at: AsrModels.defaultCacheDirectory(for: .v3),
+            version: .v3
+        )
+        if needsDownload {
+            diagLog("[DICTATION] model not cached, downloading parakeetV3...")
+            state = .loadingModel
+        } else {
+            diagLog("[DICTATION] loading cached model parakeetV3...")
+        }
         let models = try await AsrModels.downloadAndLoad(version: .v3)
         let asr = AsrManager(config: .default)
         try await asr.initialize(models: models)

@@ -28,6 +28,17 @@ struct DictationIndicatorView: View {
                 .padding(.horizontal, 16)
                 .padding(.vertical, 8)
 
+            case .loadingModel:
+                HStack(spacing: 8) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Downloading model...")
+                        .font(.system(size: 12))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.horizontal, 16)
+                .padding(.vertical, 8)
+
             case .processing:
                 HStack(spacing: 8) {
                     ProgressView()

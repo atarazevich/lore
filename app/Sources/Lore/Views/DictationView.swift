@@ -76,6 +76,12 @@ struct DictationView: View {
                         .font(.system(size: 12, weight: .medium))
                         .foregroundStyle(.red)
                 }
+            case .loadingModel:
+                ProgressView()
+                    .controlSize(.mini)
+                Text("Downloading model...")
+                    .font(.system(size: 12))
+                    .foregroundStyle(.secondary)
             case .processing:
                 ProgressView()
                     .controlSize(.mini)

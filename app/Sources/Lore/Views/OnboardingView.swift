@@ -266,6 +266,14 @@ struct OnboardingView: View {
             }
             .padding(10)
             .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 8))
+
+            Spacer().frame(height: 14)
+
+            Text("Please quit (\u{2318}Q) and reopen Lore for permissions to take full effect.")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundColor(.orange)
+                .multilineTextAlignment(.center)
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
