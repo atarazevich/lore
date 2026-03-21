@@ -67,45 +67,45 @@ struct DictationIndicatorView: View {
         VStack(spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
+                    .foregroundColor(Color.green)
                     .font(.system(size: 14))
                 if !hideCleanupButton {
-                    Button {
-                        onUpgrade?(.cleanup)
-                    } label: {
-                        Text("[C] Cleanup")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundColor(.white)
-                            .padding(.horizontal, 16)
-                            .padding(.vertical, 8)
-                            .background(Color.white.opacity(0.15))
-                            .cornerRadius(8)
-                    }
-                    .buttonStyle(.plain)
+                    upgradeButton(label: "[C] Cleanup", action: .cleanup)
                 }
-                Button {
-                    onUpgrade?(.translate)
-                } label: {
-                    Text("[T] Translate")
-                        .font(.system(size: 13, weight: .medium))
-                        .foregroundColor(.white)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(Color.white.opacity(0.15))
-                        .cornerRadius(8)
-                }
-                .buttonStyle(.plain)
+                upgradeButton(label: "[T] Translate", action: .translate)
             }
 
             if let countdown = upgradeCountdown, countdown > 0 {
                 GeometryReader { geo in
                     RoundedRectangle(cornerRadius: 1)
-                        .fill(Color.accentColor.opacity(0.4))
+                        .fill(Color(red: 0.4, green: 0.6, blue: 1.0).opacity(0.6))
                         .frame(width: geo.size.width * (countdown / DictationCoordinator.upgradePanelDuration))
                 }
                 .frame(height: 2)
             }
         }
+        .environment(\.colorScheme, .dark)
+    }
+
+    @ViewBuilder
+    private func upgradeButton(label: String, action: UpgradeAction) -> some View {
+        Text(label)
+            .font(.system(size: 13, weight: .medium, design: .rounded))
+            .foregroundColor(Color.white.opacity(0.9))
+            .frame(minWidth: 110, minHeight: 32)
+            .padding(.horizontal, 12)
+            .background(
+                RoundedRectangle(cornerRadius: 8)
+                    .fill(Color.white.opacity(0.12))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 8)
+                    .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+            )
+            .contentShape(Rectangle())
+            .onTapGesture {
+                onUpgrade?(action)
+            }
     }
 }
 
@@ -193,7 +193,11 @@ final class DictationIndicatorManager {
         p.becomesKeyOnlyIfNeeded = true
         // Always visible in screenshots (override OverlayPanel's screen-share hiding)
         p.sharingType = .readOnly
-        p.contentView = NSHostingView(rootView: DictationIndicatorHost(model: model))
+        let hostingView = NSHostingView(rootView: DictationIndicatorHost(model: model))
+        // Force dark appearance at AppKit level so vibrancy doesn't wash out text/colors
+        hostingView.appearance = NSAppearance(named: .darkAqua)
+        p.appearance = NSAppearance(named: .darkAqua)
+        p.contentView = hostingView
         self.panel = p
 
         // Wire up upgrade callback
