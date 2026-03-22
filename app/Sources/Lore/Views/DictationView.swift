@@ -358,23 +358,22 @@ struct DictationView: View {
 
                 // Cleanup Prompt (always visible — used by C/T hotkeys even when not default)
                 VStack(alignment: .leading, spacing: 4) {
-                        Text("CLEANUP PROMPT")
-                            .font(.system(size: 10, weight: .bold, design: .monospaced))
-                            .foregroundStyle(.tertiary)
-                            .tracking(1.5)
+                    Text("Cleanup Prompt")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
 
-                        TextEditor(text: $settings.dictationCleanupPrompt)
-                            .font(.system(size: 11, design: .monospaced))
-                            .frame(height: 60)
-                            .scrollContentBackground(.hidden)
-                            .padding(4)
-                            .background(Color.primary.opacity(0.03))
-                            .clipShape(RoundedRectangle(cornerRadius: 6))
-                            .overlay(
-                                RoundedRectangle(cornerRadius: 6)
-                                    .stroke(Color.primary.opacity(0.06))
-                            )
-                    }
+                    TextEditor(text: $settings.dictationCleanupPrompt)
+                        .font(.system(size: 11, design: .monospaced))
+                        .frame(height: 60)
+                        .scrollContentBackground(.hidden)
+                        .padding(6)
+                        .background(Color.primary.opacity(0.06))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 6)
+                                .stroke(Color.primary.opacity(0.1))
+                        )
+                }
 
                 // Hotkey picker
                 VStack(alignment: .leading, spacing: 4) {

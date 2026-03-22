@@ -34,8 +34,15 @@ mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 # Copy binary
 cp "$BUILD_DIR/Lore" "$MACOS/Lore"
 
-# Copy Info.plist
+# Copy Info.plist and inject build version from git commit count
 cp "Sources/Lore/Info.plist" "$CONTENTS/Info.plist"
+COMMIT_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo "0")
+BASE_VERSION=$(defaults read "$PWD/$CONTENTS/Info.plist" CFBundleShortVersionString 2>/dev/null | sed 's/\.[0-9]*$//')
+DEV_VERSION="${BASE_VERSION}.${COMMIT_COUNT}"
+defaults write "$PWD/$CONTENTS/Info.plist" CFBundleShortVersionString "$DEV_VERSION"
+defaults write "$PWD/$CONTENTS/Info.plist" CFBundleVersion "$DEV_VERSION"
+plutil -convert xml1 "$CONTENTS/Info.plist"
+echo "Version: $DEV_VERSION (commit #$COMMIT_COUNT)"
 
 # Copy app icon
 if [ -f "Sources/Lore/Assets/AppIcon.icns" ]; then
