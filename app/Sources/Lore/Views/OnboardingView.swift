@@ -269,7 +269,7 @@ struct OnboardingView: View {
 
             Spacer().frame(height: 14)
 
-            Text("Please quit (\u{2318}Q) and reopen Lore for permissions to take full effect.")
+            Text("If you just granted permissions, please quit (\u{2318}Q) and reopen Lore for them to take full effect.")
                 .font(.system(size: 12, weight: .medium))
                 .foregroundColor(.orange)
                 .multilineTextAlignment(.center)

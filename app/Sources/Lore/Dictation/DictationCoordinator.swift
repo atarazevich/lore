@@ -120,8 +120,6 @@ final class DictationCoordinator {
             return
         }
 
-        state = .processing
-
         // STEP 1: Save audio to disk FIRST — never lose the recording
         let audioFilename = DictationHistory.saveAudio(samples)
         var entry = DictationHistoryEntry(durationSeconds: durationSeconds, audioFilename: audioFilename)
@@ -280,8 +278,8 @@ final class DictationCoordinator {
     }
 
     func discardRecording() {
-        guard state == .recording else { return }
-        diagLog("[DICTATION] recording discarded")
+        guard state == .recording || state == .loadingModel || state == .processing else { return }
+        diagLog("[DICTATION] discarded from state: \(state)")
         audioLevelTask?.cancel()
         audioLevelTask = nil
         audioLevel = 0
@@ -320,6 +318,13 @@ final class DictationCoordinator {
         }
 
         history.update(entry)
+
+        if entry.status == .transcribed || entry.status == .cleaned {
+            state = .done
+            scheduleAutoHide()
+        } else {
+            state = .idle
+        }
     }
 
     // MARK: - Transcription
@@ -328,7 +333,6 @@ final class DictationCoordinator {
         if !isModelLoaded {
             do {
                 try await loadModel()
-                state = .processing
             } catch {
                 entry.status = .failed
                 entry.errorMessage = "Model loading failed: \(error.localizedDescription)"
@@ -337,6 +341,7 @@ final class DictationCoordinator {
                 return
             }
         }
+        state = .processing
 
         guard let asrManager else {
             entry.status = .failed
