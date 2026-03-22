@@ -356,9 +356,8 @@ struct DictationView: View {
                         .textFieldStyle(.roundedBorder)
                 }
 
-                // Cleanup Prompt (shown when cleanup or translation is enabled)
-                if settings.cleanupByDefault || settings.translationByDefault {
-                    VStack(alignment: .leading, spacing: 4) {
+                // Cleanup Prompt (always visible — used by C/T hotkeys even when not default)
+                VStack(alignment: .leading, spacing: 4) {
                         Text("CLEANUP PROMPT")
                             .font(.system(size: 10, weight: .bold, design: .monospaced))
                             .foregroundStyle(.tertiary)
@@ -376,7 +375,6 @@ struct DictationView: View {
                                     .stroke(Color.primary.opacity(0.06))
                             )
                     }
-                }
 
                 // Hotkey picker
                 VStack(alignment: .leading, spacing: 4) {
