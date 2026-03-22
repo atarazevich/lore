@@ -301,6 +301,7 @@ struct DictationView: View {
     // MARK: - Settings Tab
 
     private var settingsTab: some View {
+        VStack(spacing: 0) {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 // Cleanup toggle
@@ -391,20 +392,13 @@ struct DictationView: View {
                     .font(.system(size: 12))
                 }
 
-                Divider()
-
-                hotkeyCheatSheet
-
-                Spacer(minLength: 8)
-
-                // Version
-                Text("Lore v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")")
-                    .font(.system(size: 10))
-                    .foregroundStyle(.quaternary)
             }
             .padding(.horizontal, 16)
             .padding(.vertical, 12)
         }
+        Divider()
+        hotkeyCheatSheet
+        } // VStack
     }
 
     // MARK: - Hotkey Cheat Sheet
@@ -423,6 +417,8 @@ struct DictationView: View {
             Text("C = cleanup")
             Text("T = translate")
             Text("Esc = discard")
+            Spacer()
+            Text("v\(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "?")")
         }
         .font(.system(size: 10))
         .foregroundStyle(.quaternary)
