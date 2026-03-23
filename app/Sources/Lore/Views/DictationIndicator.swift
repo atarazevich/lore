@@ -274,10 +274,11 @@ final class DictationIndicatorManager {
 
                 let newState = coordinator.state
 
-                // Track recording duration (update only when seconds change)
-                if newState == .recording && self.recordingStartDate == nil {
+                // Track recording duration from pre-buffer start (when audio actually begins)
+                let isCapturing = newState == .recording || coordinator.isPreBuffering
+                if isCapturing && self.recordingStartDate == nil {
                     self.recordingStartDate = Date()
-                } else if newState != .recording {
+                } else if !isCapturing {
                     self.recordingStartDate = nil
                 }
                 let newSeconds: Int
