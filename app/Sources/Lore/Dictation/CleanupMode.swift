@@ -1,5 +1,25 @@
 import Foundation
 
+// MARK: - Cleanup Preset
+
+enum CleanupPreset: String, CaseIterable, Identifiable, Codable {
+    case clean
+    case concise
+    case custom
+
+    var id: String { rawValue }
+
+    var displayName: String {
+        switch self {
+        case .clean: "Clean (default)"
+        case .concise: "Concise"
+        case .custom: "Custom"
+        }
+    }
+}
+
+// MARK: - Cleanup Mode
+
 struct CleanupMode: Codable, Identifiable, Equatable {
     let id: UUID
     var name: String
@@ -16,33 +36,22 @@ struct CleanupMode: Codable, Identifiable, Equatable {
         self.hotkey = hotkey
     }
 
-    // MARK: - Static Defaults
+    // MARK: - Preset Prompts
 
-    static let pasteRawID = UUID(uuidString: "00000000-0000-0000-0000-000000000001")!
-    static let defaultCleanupID = UUID(uuidString: "00000000-0000-0000-0000-000000000002")!
-    static let translateEnglishID = UUID(uuidString: "00000000-0000-0000-0000-000000000003")!
+    static let cleanPrompt = "You are processing a voice dictation into clean text. Rules:\n1. Remove all fillers (um, uh, like, you know, right, basically, I mean, so)\n2. Remove all repetitions and false starts\n3. Remove verbal thinking (\"let me think\", \"hold on\", \"what was I saying\")\n4. Fix grammar and punctuation\n5. Break into logical paragraphs\n6. Preserve technical terms exactly\n7. Keep the speaker's voice \u{2014} don't make it overly formal\nOutput only the cleaned text."
 
-    static let pasteRaw = CleanupMode(
-        id: pasteRawID,
-        name: "Paste raw",
-        prompt: "",
-        hotkey: "1"
-    )
+    static let concisePrompt = "Clean up this dictation transcript. Remove ALL filler words, false starts, repetitions, and self-corrections. Restructure run-on sentences into clear, concise ones. Preserve the speaker's intent and key points but make the text read as polished written prose. Output only the cleaned text."
 
-    static let defaultCleanup = CleanupMode(
-        id: defaultCleanupID,
-        name: "Cleanup",
-        prompt: "You are a dictation cleanup assistant. Fix grammar, punctuation, and formatting of the transcribed speech. Keep the original meaning and tone. Output only the cleaned text, nothing else.",
-        hotkey: "2"
-    )
+    static let translateSuffix = "\n\nAlso translate the result into English. Output only the translated text."
 
-    static let translateEnglish = CleanupMode(
-        id: translateEnglishID,
-        name: "Translate to English",
-        prompt: "Translate the following transcribed speech into English. Keep the original meaning and tone. Output only the translated text, nothing else.",
-        hotkey: "3"
-    )
+    /// Resolve the prompt for a given preset, with optional custom text.
+    static func prompt(for preset: CleanupPreset, customPrompt: String = "") -> String {
+        switch preset {
+        case .clean: cleanPrompt
+        case .concise: concisePrompt
+        case .custom: customPrompt
+        }
+    }
 
-    static let defaultModes: [CleanupMode] = [pasteRaw, defaultCleanup, translateEnglish]
 }
 

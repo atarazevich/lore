@@ -172,9 +172,19 @@ final class AppSettings {
         didSet { UserDefaults.standard.set(hotkeyKey.rawValue, forKey: "hotkeyKey") }
     }
 
-    /// Legacy: kept for backward compatibility. Prefer cleanupModes.
-    var dictationCleanupPrompt: String {
-        didSet { UserDefaults.standard.set(dictationCleanupPrompt, forKey: "dictationCleanupPrompt") }
+    /// Which cleanup preset is active: clean, concise, or custom.
+    var cleanupPreset: CleanupPreset {
+        didSet { UserDefaults.standard.set(cleanupPreset.rawValue, forKey: "cleanupPreset") }
+    }
+
+    /// User's custom cleanup prompt (used when cleanupPreset == .custom).
+    var customCleanupPrompt: String {
+        didSet { UserDefaults.standard.set(customCleanupPrompt, forKey: "customCleanupPrompt") }
+    }
+
+    /// The resolved cleanup prompt based on the active preset.
+    var activeCleanupPrompt: String {
+        CleanupMode.prompt(for: cleanupPreset, customPrompt: customCleanupPrompt)
     }
 
     /// When true, dictation output is automatically cleaned up via LLM before pasting.
@@ -195,33 +205,6 @@ final class AppSettings {
         didSet { KeychainHelper.save(key: "openaiApiKey", value: openaiApiKey) }
     }
 
-    /// Ordered list of available cleanup modes shown in the post-dictation selector.
-    var cleanupModes: [CleanupMode] {
-        didSet {
-            if let data = try? JSONEncoder().encode(cleanupModes) {
-                UserDefaults.standard.set(data, forKey: "cleanupModes")
-            }
-        }
-    }
-
-    /// Which mode auto-selects when the user doesn't press a number key. Nil = first mode.
-    var defaultCleanupModeId: UUID? {
-        didSet {
-            if let id = defaultCleanupModeId {
-                UserDefaults.standard.set(id.uuidString, forKey: "defaultCleanupModeId")
-            } else {
-                UserDefaults.standard.removeObject(forKey: "defaultCleanupModeId")
-            }
-        }
-    }
-
-    /// Resolved default mode — falls back to first in list.
-    var defaultCleanupMode: CleanupMode? {
-        if let id = defaultCleanupModeId {
-            return cleanupModes.first { $0.id == id } ?? cleanupModes.first
-        }
-        return cleanupModes.first
-    }
 
     init() {
         let defaults = UserDefaults.standard
@@ -271,28 +254,27 @@ final class AppSettings {
             rawValue: defaults.string(forKey: "hotkeyKey") ?? ""
         ) ?? .fn
 
-        self.dictationCleanupPrompt = defaults.string(forKey: "dictationCleanupPrompt")
-            ?? "You are a dictation cleanup assistant. Fix grammar, punctuation, and formatting of the transcribed speech. Keep the original meaning and tone. Output only the cleaned text, nothing else."
+        // Cleanup preset — migrate from legacy dictationCleanupPrompt if needed
+        let oldLegacyPrompt = "You are a dictation cleanup assistant. Fix grammar, punctuation, and formatting of the transcribed speech. Keep the original meaning and tone. Output only the cleaned text, nothing else."
+        if let savedPreset = defaults.string(forKey: "cleanupPreset"),
+           let preset = CleanupPreset(rawValue: savedPreset) {
+            self.cleanupPreset = preset
+        } else if let legacyPrompt = defaults.string(forKey: "dictationCleanupPrompt"),
+                  legacyPrompt != oldLegacyPrompt {
+            // User had a custom prompt — preserve it
+            self.cleanupPreset = .custom
+            defaults.set(CleanupPreset.custom.rawValue, forKey: "cleanupPreset")
+        } else {
+            self.cleanupPreset = .clean
+        }
+        self.customCleanupPrompt = defaults.string(forKey: "customCleanupPrompt")
+            ?? defaults.string(forKey: "dictationCleanupPrompt")
+            ?? CleanupMode.cleanPrompt
 
         self.cleanupByDefault = defaults.bool(forKey: "dictationCleanupEnabled")
         self.translationByDefault = defaults.bool(forKey: "dictationTranslationEnabled")
 
         self.openaiApiKey = KeychainHelper.load(key: "openaiApiKey") ?? ""
-
-        // Cleanup modes
-        if let modesData = defaults.data(forKey: "cleanupModes"),
-           let decoded = try? JSONDecoder().decode([CleanupMode].self, from: modesData),
-           !decoded.isEmpty {
-            self.cleanupModes = decoded
-        } else {
-            self.cleanupModes = CleanupMode.defaultModes
-        }
-
-        if let idString = defaults.string(forKey: "defaultCleanupModeId") {
-            self.defaultCleanupModeId = UUID(uuidString: idString)
-        } else {
-            self.defaultCleanupModeId = nil
-        }
 
         // Ensure notes folder exists
         try? FileManager.default.createDirectory(

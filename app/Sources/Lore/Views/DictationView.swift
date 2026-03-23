@@ -9,7 +9,6 @@ struct DictationView: View {
     @Bindable var settings: AppSettings
     @Environment(AppCoordinator.self) private var coordinator
 
-    @State private var hoveredEntryID: UUID?
     @State private var selectedTab: DictationTab = .history
 
     private var dictation: DictationCoordinator {
@@ -214,14 +213,14 @@ struct DictationView: View {
                             .foregroundStyle(.red)
                     }
                 case .transcribed, .cleaned:
-                    if let text = entry.finalText {
+                    if let text = entry.displayText {
                         Text(text)
                             .font(.system(size: 12))
                             .foregroundStyle(.primary)
                             .textSelection(.enabled)
                     }
-                    if entry.status == .cleaned {
-                        Text("cleaned")
+                    if entry.hasBothVersions {
+                        Text(entry.activeVersion == .cleaned ? "Cleaned" : "Original")
                             .font(.system(size: 9))
                             .foregroundStyle(.quaternary)
                     }
@@ -247,7 +246,7 @@ struct DictationView: View {
                 }
 
                 // Copy button for transcribed entries
-                if let text = entry.finalText {
+                if let text = entry.displayText {
                     Button {
                         NSPasteboard.general.clearContents()
                         NSPasteboard.general.setString(text, forType: .string)
@@ -260,14 +259,35 @@ struct DictationView: View {
                     .help("Copy to clipboard")
                 }
 
+                // Toggle between raw and cleaned versions
+                if entry.hasBothVersions {
+                    Button {
+                        var updated = entry
+                        updated.activeVersion = entry.activeVersion == .cleaned ? .raw : .cleaned
+                        dictation.history.update(updated)
+                    } label: {
+                        Image(systemName: entry.activeVersion == .cleaned ? "arrow.uturn.backward" : "sparkles")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help(entry.activeVersion == .cleaned ? "Show original" : "Show cleaned")
+                }
+
                 // Retroactive cleanup button for transcribed entries
                 if entry.rawText != nil {
                     Menu {
-                        ForEach(settings.cleanupModes.filter { !$0.isRawPaste }) { mode in
-                            Button(mode.name) {
-                                Task {
-                                    await dictation.cleanupHistoryEntry(entryID: entry.id, mode: mode)
-                                }
+                        Button("Clean up") {
+                            Task {
+                                let mode = CleanupMode(name: "Cleanup", prompt: settings.activeCleanupPrompt)
+                                await dictation.cleanupHistoryEntry(entryID: entry.id, mode: mode)
+                            }
+                        }
+                        Button("Translate") {
+                            Task {
+                                let prompt = settings.activeCleanupPrompt + CleanupMode.translateSuffix
+                                let mode = CleanupMode(name: "Translate", prompt: prompt)
+                                await dictation.cleanupHistoryEntry(entryID: entry.id, mode: mode)
                             }
                         }
                     } label: {
@@ -280,17 +300,9 @@ struct DictationView: View {
                     .help("Clean up with...")
                 }
             }
-            .opacity(hoveredEntryID == entry.id ? 1.0 : 0.4)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 8)
-        .background(hoveredEntryID == entry.id ? Color.primary.opacity(0.03) : Color.clear)
-        .contentShape(Rectangle())
-        .onHover { isHovered in
-            withAnimation(.easeInOut(duration: 0.15)) {
-                hoveredEntryID = isHovered ? entry.id : nil
-            }
-        }
     }
 
     private func durationString(_ seconds: Double) -> String {
@@ -362,17 +374,40 @@ struct DictationView: View {
                         .font(.system(size: 11, weight: .medium))
                         .foregroundStyle(.secondary)
 
-                    TextEditor(text: $settings.dictationCleanupPrompt)
-                        .font(.system(size: 11, design: .monospaced))
-                        .frame(height: 60)
-                        .scrollContentBackground(.hidden)
-                        .padding(6)
-                        .background(Color.primary.opacity(0.06))
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
-                        .overlay(
-                            RoundedRectangle(cornerRadius: 6)
-                                .stroke(Color.primary.opacity(0.1))
-                        )
+                    Picker("Preset", selection: $settings.cleanupPreset) {
+                        ForEach(CleanupPreset.allCases) { preset in
+                            Text(preset.displayName).tag(preset)
+                        }
+                    }
+                    .labelsHidden()
+                    .font(.system(size: 12))
+
+                    if settings.cleanupPreset == .custom {
+                        TextEditor(text: $settings.customCleanupPrompt)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(height: 80)
+                            .scrollContentBackground(.hidden)
+                            .padding(6)
+                            .background(Color.primary.opacity(0.06))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.primary.opacity(0.1))
+                            )
+                    } else {
+                        Text(settings.activeCleanupPrompt)
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.secondary)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .frame(height: 80)
+                            .padding(6)
+                            .background(Color.primary.opacity(0.04))
+                            .clipShape(RoundedRectangle(cornerRadius: 6))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 6)
+                                    .stroke(Color.primary.opacity(0.1))
+                            )
+                    }
                 }
 
                 // Hotkey picker

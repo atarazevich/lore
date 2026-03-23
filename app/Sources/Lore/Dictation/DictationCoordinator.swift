@@ -146,21 +146,23 @@ final class DictationCoordinator {
 
         if translateEnabled && hasApiKey {
             // Run cleanup + translate
-            let basePrompt = settings?.dictationCleanupPrompt ?? CleanupMode.defaultCleanup.prompt
-            let prompt = basePrompt + "\n\nAlso translate the result to English. Output only the final English text."
+            let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
+            let prompt = basePrompt + CleanupMode.translateSuffix
             await cleanupEntry(&entry, rawText: rawText, prompt: prompt)
+            entry.cleanupModeName = "Translate"
             didCleanup = (entry.status == .cleaned)
         } else if cleanupEnabled && hasApiKey {
             // Run default cleanup only
-            let prompt = settings?.dictationCleanupPrompt ?? CleanupMode.defaultCleanup.prompt
+            let prompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
             await cleanupEntry(&entry, rawText: rawText, prompt: prompt)
+            entry.cleanupModeName = "Cleanup"
             didCleanup = (entry.status == .cleaned)
         } else {
             didCleanup = false
         }
 
-        // Paste immediately
-        if let text = entry.finalText {
+        // Paste immediately (always paste the best version)
+        if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
             TextInserter.paste(text)
             diagLog("[DICTATION] pasted: \(text.prefix(80))")
@@ -215,11 +217,11 @@ final class DictationCoordinator {
         let mode: CleanupMode
         switch action {
         case .cleanup:
-            let prompt = settings?.dictationCleanupPrompt ?? CleanupMode.defaultCleanup.prompt
+            let prompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
             mode = CleanupMode(name: "Cleanup", prompt: prompt)
         case .translate:
-            let basePrompt = settings?.dictationCleanupPrompt ?? CleanupMode.defaultCleanup.prompt
-            let prompt = basePrompt + "\n\nAlso translate the result to English. Output only the final English text."
+            let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
+            let prompt = basePrompt + CleanupMode.translateSuffix
             mode = CleanupMode(name: "Translate", prompt: prompt)
         }
 
@@ -248,7 +250,7 @@ final class DictationCoordinator {
         await cleanupEntry(&entry, rawText: rawText, prompt: mode.prompt)
 
         // Undo previous paste, then paste upgraded text
-        if let text = entry.finalText {
+        if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
             TextInserter.undoAndPaste(text)
             diagLog("[DICTATION] upgrade pasted (undo+paste): \(text.prefix(80))")
@@ -292,8 +294,12 @@ final class DictationCoordinator {
     }
 
     func pasteLastTranscript() {
-        guard let text = lastTranscript else { return }
-        TextInserter.paste(text)
+        // Respect activeVersion of the most recent entry
+        if let entry = history.entries.first, let text = entry.displayText {
+            TextInserter.paste(text)
+        } else if let text = lastTranscript {
+            TextInserter.paste(text)
+        }
     }
 
     /// Retry transcription for a failed or audio-only entry
@@ -398,7 +404,7 @@ final class DictationCoordinator {
         if let prompt, !prompt.isEmpty {
             effectivePrompt = prompt
         } else if settings.cleanupByDefault {
-            effectivePrompt = settings.dictationCleanupPrompt
+            effectivePrompt = settings.activeCleanupPrompt
         } else {
             return
         }
@@ -410,6 +416,7 @@ final class DictationCoordinator {
             let cleaned = try await cleanupClient.cleanup(rawText: rawText, prompt: effectivePrompt, apiKey: apiKey)
             entry.cleanedText = cleaned
             entry.status = .cleaned
+            entry.activeVersion = .cleaned
             diagLog("[DICTATION] cleaned: \(cleaned.prefix(80))")
         } catch {
             diagLog("[DICTATION] cleanup failed: \(error), using raw text")
@@ -417,15 +424,17 @@ final class DictationCoordinator {
     }
 
     /// Run cleanup on an existing history entry with a specific mode (retroactive cleanup).
+    /// Always cleans from the raw transcription to preserve the original.
     func cleanupHistoryEntry(entryID: UUID, mode: CleanupMode) async {
         guard var entry = history.entries.first(where: { $0.id == entryID }),
-              let text = entry.rawText ?? entry.cleanedText else {
-            diagLog("[DICTATION] retroactive cleanup: no text for entry")
+              let text = entry.rawText else {
+            diagLog("[DICTATION] retroactive cleanup: no raw text for entry")
             return
         }
         guard !mode.isRawPaste else { return }
 
         await cleanupEntry(&entry, rawText: text, prompt: mode.prompt)
+        entry.cleanupModeName = mode.name
         history.update(entry)
     }
 

@@ -8,6 +8,11 @@ enum DictationEntryStatus: String, Codable {
     case failed
 }
 
+enum DictationVersion: String, Codable {
+    case raw
+    case cleaned
+}
+
 struct DictationHistoryEntry: Identifiable, Codable {
     let id: UUID
     let timestamp: Date
@@ -18,8 +23,21 @@ struct DictationHistoryEntry: Identifiable, Codable {
     /// Filename of saved audio (16kHz mono Float32, raw bytes)
     var audioFilename: String?
     var durationSeconds: Double
+    /// Which version is displayed in the UI.
+    var activeVersion: DictationVersion
+    /// Name of the cleanup mode that was applied (for display)
+    var cleanupModeName: String?
 
-    var finalText: String? { cleanedText ?? rawText }
+    /// The text for the currently active version.
+    var displayText: String? {
+        switch activeVersion {
+        case .cleaned: cleanedText ?? rawText
+        case .raw: rawText ?? cleanedText
+        }
+    }
+
+    /// Whether both raw and cleaned versions are available.
+    var hasBothVersions: Bool { rawText != nil && cleanedText != nil }
 
     var hasAudio: Bool { audioFilename != nil }
 
@@ -29,6 +47,23 @@ struct DictationHistoryEntry: Identifiable, Codable {
         self.status = .audioSaved
         self.durationSeconds = durationSeconds
         self.audioFilename = audioFilename
+        self.activeVersion = .raw
+    }
+
+    // Custom decoder for backward compatibility (existing entries lack activeVersion/cleanupModeName)
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        id = try c.decode(UUID.self, forKey: .id)
+        timestamp = try c.decode(Date.self, forKey: .timestamp)
+        status = try c.decode(DictationEntryStatus.self, forKey: .status)
+        rawText = try c.decodeIfPresent(String.self, forKey: .rawText)
+        cleanedText = try c.decodeIfPresent(String.self, forKey: .cleanedText)
+        errorMessage = try c.decodeIfPresent(String.self, forKey: .errorMessage)
+        audioFilename = try c.decodeIfPresent(String.self, forKey: .audioFilename)
+        durationSeconds = try c.decode(Double.self, forKey: .durationSeconds)
+        activeVersion = try c.decodeIfPresent(DictationVersion.self, forKey: .activeVersion)
+            ?? (cleanedText != nil ? .cleaned : .raw)
+        cleanupModeName = try c.decodeIfPresent(String.self, forKey: .cleanupModeName)
     }
 }
 
