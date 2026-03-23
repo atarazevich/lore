@@ -5,11 +5,19 @@ enum DictationTab: String, CaseIterable {
     case settings = "Settings"
 }
 
+private struct HistoryDayGroup: Identifiable {
+    let day: Date
+    let label: String
+    let entries: [DictationHistoryEntry]
+    var id: Date { day }
+}
+
 struct DictationView: View {
     @Bindable var settings: AppSettings
     @Environment(AppCoordinator.self) private var coordinator
 
     @State private var selectedTab: DictationTab = .history
+    @State private var searchText: String = ""
 
     private var dictation: DictationCoordinator {
         coordinator.dictationCoordinator
@@ -150,6 +158,61 @@ struct DictationView: View {
 
     // MARK: - History List
 
+    private var filteredEntries: [DictationHistoryEntry] {
+        let entries = dictation.history.entries
+        guard !searchText.isEmpty else { return entries }
+        return entries.filter { entry in
+            let raw = entry.rawText ?? ""
+            let cleaned = entry.cleanedText ?? ""
+            return raw.localizedCaseInsensitiveContains(searchText)
+                || cleaned.localizedCaseInsensitiveContains(searchText)
+        }
+    }
+
+    private static let dayLabelFormatter: DateFormatter = {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "MMM d"
+        return fmt
+    }()
+
+    private var groupedEntries: [HistoryDayGroup] {
+        let calendar = Calendar.current
+        let today = calendar.startOfDay(for: Date())
+        let yesterday = calendar.date(byAdding: .day, value: -1, to: today)!
+
+        var groups: [(day: Date, entries: [DictationHistoryEntry])] = []
+        var currentDay: Date?
+        var currentEntries: [DictationHistoryEntry] = []
+
+        for entry in filteredEntries {
+            let day = calendar.startOfDay(for: entry.timestamp)
+            if day != currentDay {
+                if let d = currentDay {
+                    groups.append((d, currentEntries))
+                }
+                currentDay = day
+                currentEntries = [entry]
+            } else {
+                currentEntries.append(entry)
+            }
+        }
+        if let d = currentDay {
+            groups.append((d, currentEntries))
+        }
+
+        return groups.map { (day, entries) in
+            let label: String
+            if day == today {
+                label = "Today"
+            } else if day == yesterday {
+                label = "Yesterday"
+            } else {
+                label = Self.dayLabelFormatter.string(from: day)
+            }
+            return HistoryDayGroup(day: day, label: label, entries: entries)
+        }
+    }
+
     private var historyList: some View {
         Group {
             if dictation.history.entries.isEmpty {
@@ -168,11 +231,64 @@ struct DictationView: View {
                 }
                 .frame(maxWidth: .infinity)
             } else {
-                ScrollView {
-                    LazyVStack(spacing: 0) {
-                        ForEach(dictation.history.entries) { entry in
-                            historyRow(entry)
-                            Divider().padding(.leading, 16)
+                VStack(spacing: 0) {
+                    // Search field
+                    HStack(spacing: 6) {
+                        Image(systemName: "magnifyingglass")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.tertiary)
+                        TextField("Search history...", text: $searchText)
+                            .font(.system(size: 12))
+                            .textFieldStyle(.plain)
+                        if !searchText.isEmpty {
+                            Button {
+                                searchText = ""
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .font(.system(size: 11))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            .buttonStyle(.plain)
+                        }
+                    }
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 8)
+                    .background(Color.primary.opacity(0.03))
+
+                    Divider()
+
+                    if filteredEntries.isEmpty && !searchText.isEmpty {
+                        VStack(spacing: 8) {
+                            Spacer()
+                            Text("No results for \u{201C}\(searchText)\u{201D}")
+                                .font(.system(size: 12))
+                                .foregroundStyle(.tertiary)
+                            Spacer()
+                        }
+                        .frame(maxWidth: .infinity)
+                    } else {
+                        ScrollView {
+                            LazyVStack(spacing: 0, pinnedViews: .sectionHeaders) {
+                                ForEach(groupedEntries) { group in
+                                    Section {
+                                        ForEach(group.entries) { entry in
+                                            historyRow(entry)
+                                            Divider().padding(.leading, 16)
+                                        }
+                                    } header: {
+                                        HStack {
+                                            Text(group.label)
+                                                .font(.system(size: 10, weight: .semibold))
+                                                .foregroundStyle(.tertiary)
+                                                .textCase(.uppercase)
+                                            Spacer()
+                                        }
+                                        .padding(.horizontal, 16)
+                                        .padding(.vertical, 4)
+                                        .background(.ultraThinMaterial)
+                                    }
+                                }
+                            }
                         }
                     }
                 }
