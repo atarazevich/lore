@@ -17,6 +17,8 @@ final class HotkeyManager {
     /// Debounce timer for Fn release — Fn modifier flag flickers when other keys pressed
     private var fnReleaseDebounce: Task<Void, Never>?
     private var isHoldMode = false
+    /// True when Fn was held at the moment Space locked. First Fn release after this should be ignored.
+    private var fnHeldAtLock = false
     /// Locked = recording continues after Fn release; stopped by Fn or Esc
     private(set) var isLocked = false
     /// Set synchronously so the local monitor closure can check it without main actor hop
@@ -203,6 +205,7 @@ final class HotkeyManager {
                         if manager.coordinator?.isPreBuffering == true {
                             manager.coordinator?.confirmRecording()
                         }
+                        manager.fnHeldAtLock = manager.fnDown
                         manager.isLocked = true
                         manager.fnTimer?.cancel()
                         manager.fnTimer = nil
@@ -311,8 +314,13 @@ final class HotkeyManager {
             fnTimer = nil
 
             if isLocked {
-                // Debounce: Fn modifier flag flickers when pressing other keys with Fn held.
-                // Wait 30ms — if Fn comes back, it was a bounce, not a real release.
+                if fnHeldAtLock {
+                    // First release after lock-while-holding — just continue recording
+                    fnHeldAtLock = false
+                    diagLog("[HOTKEY] hotkey released after lock → continues (initial release)")
+                    return
+                }
+                // Subsequent release — stop recording (with debounce for Fn flag flicker)
                 fnReleaseDebounce?.cancel()
                 fnReleaseDebounce = Task { [weak self] in
                     try? await Task.sleep(for: .milliseconds(30))
@@ -376,6 +384,7 @@ final class HotkeyManager {
             fnTimer = nil
             isHoldMode = false
             isPreBufferingFlag = false
+            fnHeldAtLock = fnDown  // Track: if Fn held at lock, first release should continue
             if coordinator.isPreBuffering {
                 coordinator.confirmRecording()
             }
