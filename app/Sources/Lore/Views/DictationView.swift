@@ -18,6 +18,7 @@ struct DictationView: View {
 
     @State private var selectedTab: DictationTab = .history
     @State private var searchText: String = ""
+    @FocusState private var isSearchFocused: Bool
 
     private var dictation: DictationCoordinator {
         coordinator.dictationCoordinator
@@ -41,6 +42,23 @@ struct DictationView: View {
         }
         .frame(minWidth: 380, maxWidth: 600, minHeight: 500)
         .background(.ultraThinMaterial)
+        .focusable()
+        .onKeyPress(characters: .alphanumerics.union(.punctuationCharacters).union(.whitespaces)) { press in
+            if selectedTab == .history && !isSearchFocused {
+                searchText += press.characters
+                isSearchFocused = true
+                return .handled
+            }
+            return .ignored
+        }
+        .onKeyPress(.escape) {
+            if selectedTab == .history && !searchText.isEmpty {
+                searchText = ""
+                isSearchFocused = false
+                return .handled
+            }
+            return .ignored
+        }
     }
 
     // MARK: - Header
@@ -240,6 +258,7 @@ struct DictationView: View {
                         TextField("Search history...", text: $searchText)
                             .font(.system(size: 12))
                             .textFieldStyle(.plain)
+                            .focused($isSearchFocused)
                         if !searchText.isEmpty {
                             Button {
                                 searchText = ""
@@ -330,7 +349,7 @@ struct DictationView: View {
                     }
                 case .transcribed, .cleaned:
                     if let text = entry.displayText {
-                        Text(text)
+                        highlightedText(text)
                             .font(.system(size: 12))
                             .foregroundStyle(.primary)
                             .textSelection(.enabled)
@@ -575,6 +594,29 @@ struct DictationView: View {
     }
 
     // MARK: - Helpers
+
+    private func highlightedText(_ text: String) -> Text {
+        guard !searchText.isEmpty else { return Text(text) }
+
+        var result = Text("")
+        var currentIndex = text.startIndex
+        var searchStart = text.startIndex
+
+        while let range = text.range(of: searchText, options: .caseInsensitive, range: searchStart..<text.endIndex) {
+            if currentIndex < range.lowerBound {
+                result = result + Text(text[currentIndex..<range.lowerBound])
+            }
+            result = result + Text(text[range])
+                .foregroundColor(.yellow)
+                .bold()
+            currentIndex = range.upperBound
+            searchStart = range.upperBound
+        }
+        if currentIndex < text.endIndex {
+            result = result + Text(text[currentIndex...])
+        }
+        return result
+    }
 
     private static let timeFormatter: DateFormatter = {
         let fmt = DateFormatter()
