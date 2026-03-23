@@ -19,6 +19,7 @@ struct DictationView: View {
     @State private var selectedTab: DictationTab = .history
     @State private var searchText: String = ""
     @FocusState private var isSearchFocused: Bool
+    @State private var searchKeyMonitor: Any?
 
     private var dictation: DictationCoordinator {
         coordinator.dictationCoordinator
@@ -42,23 +43,8 @@ struct DictationView: View {
         }
         .frame(minWidth: 380, maxWidth: 600, minHeight: 500)
         .background(.ultraThinMaterial)
-        .focusable()
-        .onKeyPress(characters: .alphanumerics.union(.punctuationCharacters).union(.whitespaces)) { press in
-            if selectedTab == .history && !isSearchFocused {
-                searchText += press.characters
-                isSearchFocused = true
-                return .handled
-            }
-            return .ignored
-        }
-        .onKeyPress(.escape) {
-            if selectedTab == .history && !searchText.isEmpty {
-                searchText = ""
-                isSearchFocused = false
-                return .handled
-            }
-            return .ignored
-        }
+        .onAppear { installSearchKeyMonitor() }
+        .onDisappear { removeSearchKeyMonitor() }
     }
 
     // MARK: - Header
@@ -594,6 +580,59 @@ struct DictationView: View {
     }
 
     // MARK: - Helpers
+
+    // MARK: - Search Key Monitor
+
+    private func installSearchKeyMonitor() {
+        searchKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
+            guard selectedTab == .history else { return event }
+
+            // Escape → clear search
+            if event.keyCode == 53 && !searchText.isEmpty {
+                searchText = ""
+                isSearchFocused = true  // Keep focus so next typing works
+                return nil
+            }
+
+            // Typing while search is NOT focused → redirect to search field
+            if !isSearchFocused,
+               event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+               let chars = event.characters, !chars.isEmpty,
+               chars.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) {
+                isSearchFocused = true
+                // Let the event through — TextField will receive it once focused
+                // Use async to ensure focus takes effect before the event arrives
+                DispatchQueue.main.async {
+                    // Re-post the character so the now-focused TextField receives it
+                    let charEvent = NSEvent.keyEvent(
+                        with: .keyDown,
+                        location: event.locationInWindow,
+                        modifierFlags: event.modifierFlags,
+                        timestamp: event.timestamp,
+                        windowNumber: event.windowNumber,
+                        context: nil,
+                        characters: chars,
+                        charactersIgnoringModifiers: event.charactersIgnoringModifiers ?? chars,
+                        isARepeat: event.isARepeat,
+                        keyCode: event.keyCode
+                    )
+                    if let charEvent {
+                        NSApp.sendEvent(charEvent)
+                    }
+                }
+                return nil  // Consume the original event (we'll re-post it)
+            }
+
+            return event
+        }
+    }
+
+    private func removeSearchKeyMonitor() {
+        if let monitor = searchKeyMonitor {
+            NSEvent.removeMonitor(monitor)
+            searchKeyMonitor = nil
+        }
+    }
 
     private func highlightedText(_ text: String) -> Text {
         guard !searchText.isEmpty else { return Text(text) }
