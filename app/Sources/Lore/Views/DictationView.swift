@@ -576,9 +576,13 @@ struct DictationView: View {
 
     // MARK: - Helpers
 
-    private func timeString(_ date: Date) -> String {
+    private static let timeFormatter: DateFormatter = {
         let fmt = DateFormatter()
         fmt.dateFormat = "HH:mm"
-        return fmt.string(from: date)
+        return fmt
+    }()
+
+    private func timeString(_ date: Date) -> String {
+        Self.timeFormatter.string(from: date)
     }
 }

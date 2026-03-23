@@ -268,6 +268,7 @@ final class DictationCoordinator {
 
         // Run cleanup on the raw text with the upgrade mode's prompt
         await cleanupEntry(&entry, rawText: rawText, prompt: mode.prompt)
+        entry.cleanupModeName = mode.name
 
         // Undo previous paste, then paste upgraded text
         if let text = entry.cleanedText ?? entry.rawText {

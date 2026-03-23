@@ -92,9 +92,8 @@ struct DictationIndicatorView: View {
 
     private var downloadingContent: some View {
         HStack(spacing: 8) {
-            Image(systemName: "arrow.down.circle")
-                .font(.system(size: 14))
-                .foregroundStyle(.white.opacity(0.7))
+            ProgressView()
+                .controlSize(.small)
             Text("Downloading model...")
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.8))
@@ -148,7 +147,7 @@ struct DictationIndicatorView: View {
                     .foregroundStyle(.white.opacity(0.7))
                 Spacer().frame(width: 4)
                 if !hideCleanupButton {
-                    upgradeButton(label: "[V] Cleanup", action: .cleanup)
+                    upgradeButton(label: "[C] Cleanup", action: .cleanup)
                 }
                 upgradeButton(label: "[T] Translate", action: .translate)
             }
