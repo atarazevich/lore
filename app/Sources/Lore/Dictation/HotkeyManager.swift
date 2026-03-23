@@ -14,6 +14,8 @@ final class HotkeyManager {
 
     private var fnDown = false
     private var fnTimer: Task<Void, Never>?
+    /// Debounce timer for Fn release — Fn modifier flag flickers when other keys pressed
+    private var fnReleaseDebounce: Task<Void, Never>?
     private var isHoldMode = false
     /// Locked = recording continues after Fn release; stopped by Fn or Esc
     private(set) var isLocked = false
@@ -23,8 +25,6 @@ final class HotkeyManager {
     nonisolated(unsafe) private var isLockedFlag = false
     /// Synchronous mirror: true when upgrade panel is showing
     nonisolated(unsafe) private var isUpgradeShowingFlag = false
-    /// Synchronous mirror of fnDown for CGEvent tap
-    nonisolated(unsafe) private var fnDownFlag = false
     /// Synchronous mirror: true during pre-buffer phase (before hold confirmed)
     nonisolated(unsafe) private var isPreBufferingFlag = false
 
@@ -55,14 +55,13 @@ final class HotkeyManager {
             return event
         }
 
-        // Local key monitor — return nil to consume events we handle (Space lock, Esc discard, Esc upgrade dismiss)
+        // Local key monitor — return nil to consume events we handle
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
 
-            // V/T while Fn held and recording → set pre-paste mode, consume event
-            if self.fnDownFlag && self.isRecordingFlag,
-               let chars = event.characters?.lowercased() {
-                if chars == "v" || chars == "t" {
+            // Fn+V/T while recording → consume (use event's own Fn flag, not tracked flag)
+            if event.modifierFlags.contains(.function) && self.isRecordingFlag {
+                if event.keyCode == 9 || event.keyCode == 17 { // V or T
                     Task { @MainActor in
                         self.handleKeyDown(event)
                     }
@@ -146,33 +145,31 @@ final class HotkeyManager {
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                let flags = event.flags
 
-                // V/T while Fn held and recording → set pre-paste mode, consume event
-                if manager.fnDownFlag && manager.isRecordingFlag {
-                    if let nsEvent = NSEvent(cgEvent: event),
-                       let chars = nsEvent.characters?.lowercased() {
-                        if chars == "v" {
-                            Task { @MainActor in
-                                manager.coordinator?.setPendingMode(.cleanup)
-                                diagLog("[HOTKEY] Fn+V (CGEvent tap) → pending cleanup")
-                            }
-                            return nil
-                        } else if chars == "t" {
-                            Task { @MainActor in
-                                manager.coordinator?.setPendingMode(.translate)
-                                diagLog("[HOTKEY] Fn+T (CGEvent tap) → pending translate")
-                            }
-                            return nil
+                // Fn+V/T while recording → set pre-paste mode
+                // Use the EVENT's own Fn flag (reliable) instead of tracked fnDown (flickers)
+                let fnHeld = flags.contains(.maskSecondaryFn)
+                if fnHeld && manager.isRecordingFlag {
+                    if keyCode == 9 { // V
+                        Task { @MainActor in
+                            manager.coordinator?.setPendingMode(.cleanup)
+                            diagLog("[HOTKEY] Fn+V (CGEvent) → pending cleanup")
                         }
+                        return nil
+                    } else if keyCode == 17 { // T
+                        Task { @MainActor in
+                            manager.coordinator?.setPendingMode(.translate)
+                            diagLog("[HOTKEY] Fn+T (CGEvent) → pending translate")
+                        }
+                        return nil
                     }
                 }
 
                 // C or T while upgrade panel showing → apply upgrade
                 // Check no modifiers (allow Cmd+C etc. through)
-                let flags = event.flags
                 let hasModifiers = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
                 if manager.isUpgradeShowingFlag && !hasModifiers {
-                    // Convert CGEvent to NSEvent to get layout-resolved character
                     if let nsEvent = NSEvent(cgEvent: event),
                        let chars = nsEvent.characters?.lowercased() {
                         var action: UpgradeAction?
@@ -262,6 +259,8 @@ final class HotkeyManager {
 
         fnTimer?.cancel()
         fnTimer = nil
+        fnReleaseDebounce?.cancel()
+        fnReleaseDebounce = nil
         coordinator = nil
         settings = nil
         log.info("Hotkey manager uninstalled")
@@ -282,7 +281,7 @@ final class HotkeyManager {
 
         if hotkeyPressed && !fnDown {
             fnDown = true
-            fnDownFlag = true
+            fnReleaseDebounce?.cancel() // Cancel any pending debounced release
 
             guard isEnabled else { return }
 
@@ -308,57 +307,63 @@ final class HotkeyManager {
             }
         } else if !hotkeyPressed && fnDown {
             fnDown = false
-            fnDownFlag = false
             fnTimer?.cancel()
             fnTimer = nil
 
             if isLocked {
-                // Fn released while locked → stop recording (with any pending mode)
-                isLocked = false
-                isLockedFlag = false
-                isRecordingFlag = false
-                diagLog("[HOTKEY] hotkey released while locked → stop + paste")
-                Task { [weak self] in
-                    await self?.coordinator?.stopRecording()
+                // Debounce: Fn modifier flag flickers when pressing other keys with Fn held.
+                // Wait 30ms — if Fn comes back, it was a bounce, not a real release.
+                fnReleaseDebounce?.cancel()
+                fnReleaseDebounce = Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(30))
+                    guard !Task.isCancelled, let self, !self.fnDown else { return }
+                    self.isLocked = false
+                    self.isLockedFlag = false
+                    self.isRecordingFlag = false
+                    diagLog("[HOTKEY] hotkey released while locked → stop + paste")
+                    await self.coordinator?.stopRecording()
                 }
                 return
             }
 
             if isHoldMode {
-                isHoldMode = false
-                isRecordingFlag = false
-                diagLog("[HOTKEY] hold mode release → stop + paste")
-                Task { [weak self] in
-                    await self?.coordinator?.stopRecording()
+                // Debounce hold-to-talk release too (same Fn flag flickering issue)
+                fnReleaseDebounce?.cancel()
+                fnReleaseDebounce = Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(30))
+                    guard !Task.isCancelled, let self, !self.fnDown else { return }
+                    self.isHoldMode = false
+                    self.isRecordingFlag = false
+                    diagLog("[HOTKEY] hold mode release → stop + paste")
+                    await self.coordinator?.stopRecording()
                 }
-            } else {
-                // Tap within 150ms — cancel pre-buffer
-                isPreBufferingFlag = false
-                coordinator?.cancelPreBuffer()
+                return
             }
+
+            // Tap within 150ms — cancel pre-buffer (no debounce needed for taps)
+            isPreBufferingFlag = false
+            coordinator?.cancelPreBuffer()
         }
     }
 
     private func handleKeyDown(_ event: NSEvent) {
         guard isEnabled, let coordinator else { return }
 
-        // V/T while Fn held and recording/pre-buffering → set pre-paste cleanup mode
-        if fnDown && (coordinator.state == .recording || coordinator.isPreBuffering) {
-            if let chars = event.characters?.lowercased() {
-                if chars == "v" {
-                    coordinator.setPendingMode(.cleanup)
-                    diagLog("[HOTKEY] Fn+V → pending cleanup")
-                    return
-                } else if chars == "t" {
-                    coordinator.setPendingMode(.translate)
-                    diagLog("[HOTKEY] Fn+T → pending translate")
-                    return
-                }
+        // Fn+V/T while recording → set pre-paste cleanup mode
+        // Use event's own .function flag (reliable even when Fn modifier flickers)
+        if event.modifierFlags.contains(.function) && (coordinator.state == .recording || coordinator.isPreBuffering) {
+            if event.keyCode == 9 { // V
+                coordinator.setPendingMode(.cleanup)
+                diagLog("[HOTKEY] Fn+V → pending cleanup")
+                return
+            } else if event.keyCode == 17 { // T
+                coordinator.setPendingMode(.translate)
+                diagLog("[HOTKEY] Fn+T → pending translate")
+                return
             }
         }
 
         // Esc while upgrade panel showing → dismiss
-        // (C/T are handled by the local monitor and CGEvent tap, not here)
         if event.keyCode == 53, coordinator.isUpgradePanelVisible {
             coordinator.dismissUpgrades()
             diagLog("[HOTKEY] Esc → dismiss upgrades")

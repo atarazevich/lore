@@ -137,48 +137,54 @@ struct DictationIndicatorView: View {
 
     @ViewBuilder
     private var upgradeContent: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 10) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.system(size: 14))
-                Text("Pasted")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.7))
-                Spacer().frame(width: 4)
-                if !hideCleanupButton {
-                    upgradeButton(label: "[C] Cleanup", action: .cleanup)
+        VStack(spacing: 4) {
+            HStack(spacing: 16) {
+                HStack(spacing: 6) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 13))
+                    Text("Pasted")
+                        .font(.system(size: 13))
+                        .foregroundStyle(.white.opacity(0.6))
                 }
-                upgradeButton(label: "[T] Translate", action: .translate)
+
+                Spacer()
+
+                HStack(spacing: 8) {
+                    if !hideCleanupButton {
+                        upgradeButton(label: "[C] Cleanup", action: .cleanup)
+                    }
+                    upgradeButton(label: "[T] Translate", action: .translate)
+                }
             }
 
             if let countdown = upgradeCountdown, countdown > 0 {
                 GeometryReader { geo in
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(Color(red: 0.4, green: 0.6, blue: 1.0).opacity(0.6))
+                    RoundedRectangle(cornerRadius: 1.5)
+                        .fill(Color.white.opacity(0.25))
                         .frame(width: geo.size.width * (countdown / DictationCoordinator.upgradePanelDuration))
                 }
-                .frame(height: 2)
+                .frame(height: 3)
             }
         }
-        .padding(.horizontal, 12)
-        .padding(.vertical, 8)
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
     }
 
     @ViewBuilder
     private func upgradeButton(label: String, action: UpgradeAction) -> some View {
         Text(label)
-            .font(.system(size: 13, weight: .medium, design: .rounded))
-            .foregroundStyle(.white.opacity(0.9))
-            .frame(minWidth: 110, minHeight: 32)
-            .padding(.horizontal, 12)
+            .font(.system(size: 12, weight: .medium, design: .monospaced))
+            .foregroundStyle(.white.opacity(0.85))
+            .padding(.horizontal, 14)
+            .padding(.vertical, 6)
             .background(
-                RoundedRectangle(cornerRadius: 8)
-                    .fill(Color.white.opacity(0.12))
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.white.opacity(0.1))
             )
             .overlay(
-                RoundedRectangle(cornerRadius: 8)
-                    .stroke(Color.white.opacity(0.2), lineWidth: 0.5)
+                RoundedRectangle(cornerRadius: 6)
+                    .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
             )
             .contentShape(Rectangle())
             .onTapGesture {
@@ -265,8 +271,8 @@ final class DictationIndicatorManager {
         // Create panel and hosting view once
         let screen = NSScreen.main
         let screenWidth = screen?.frame.width ?? 1440
-        let panelWidth: CGFloat = 380
-        let panelHeight: CGFloat = 120
+        let panelWidth: CGFloat = 480
+        let panelHeight: CGFloat = 80
         let x = (screenWidth - panelWidth) / 2
         let visibleTop = screen?.visibleFrame.maxY ?? ((screen?.frame.height ?? 900) - 25)
         let y = visibleTop - panelHeight - 8
