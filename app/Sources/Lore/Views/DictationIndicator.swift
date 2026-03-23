@@ -1,6 +1,8 @@
 import AppKit
 import SwiftUI
 
+// MARK: - View
+
 struct DictationIndicatorView: View {
     let state: DictationState
     let audioLevel: Float
@@ -19,38 +21,38 @@ struct DictationIndicatorView: View {
             case .recording:
                 recordingContent
             case .loadingModel:
-                downloadingContent
+                statusRow(icon: "arrow.down.circle", text: "Downloading model...")
             case .processing:
                 processingContent
             case .done:
                 if showUpgradeButtons {
                     upgradeContent
                 } else if let error = lastError {
-                    errorContent(error)
+                    statusRow(icon: "xmark.circle.fill", iconColor: .red, text: error)
                 } else {
-                    doneContent
+                    statusRow(icon: "checkmark.circle.fill", iconColor: .green, text: "Done")
                 }
             case .idle:
                 EmptyView()
             }
         }
+        .padding(.horizontal, 20)
+        .padding(.vertical, 12)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .fixedSize()
         .environment(\.colorScheme, .dark)
-        .animation(.spring(duration: 0.2), value: state)
-        .animation(.spring(duration: 0.2), value: isLocked)
-        .animation(.spring(duration: 0.2), value: pendingMode)
     }
 
     // MARK: - Recording
 
     private var recordingContent: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             Circle()
                 .fill(.red)
                 .frame(width: 8, height: 8)
             if isLocked {
                 Image(systemName: "lock.fill")
-                    .font(.system(size: 10))
+                    .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.7))
             }
             WaveformBars(level: audioLevel)
@@ -64,8 +66,6 @@ struct DictationIndicatorView: View {
                     .foregroundStyle(.white.opacity(0.9))
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
     }
 
     private var timerString: String {
@@ -74,70 +74,35 @@ struct DictationIndicatorView: View {
         return String(format: "%d:%02d", m, s)
     }
 
-    // MARK: - Processing
+    // MARK: - Status rows (processing, downloading, done, error)
 
     private var processingContent: some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 10) {
             ProgressView()
                 .controlSize(.small)
             Text("Processing...")
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.8))
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
     }
 
-    // MARK: - Downloading
-
-    private var downloadingContent: some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("Downloading model...")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.8))
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
-
-    // MARK: - Done
-
-    private var doneContent: some View {
-        HStack(spacing: 8) {
-            Image(systemName: "checkmark.circle.fill")
-                .foregroundStyle(.green)
+    private func statusRow(icon: String, iconColor: Color = .white.opacity(0.7), text: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: icon)
+                .foregroundStyle(iconColor)
                 .font(.system(size: 14))
-            Text("Done")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.8))
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
-    }
-
-    // MARK: - Error
-
-    private func errorContent(_ message: String) -> some View {
-        HStack(spacing: 8) {
-            Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(.red)
-                .font(.system(size: 14))
-            Text(message)
+            Text(text)
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.8))
                 .lineLimit(1)
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
     }
 
     // MARK: - Upgrade
 
     @ViewBuilder
     private var upgradeContent: some View {
-        VStack(spacing: 4) {
+        VStack(spacing: 6) {
             HStack(spacing: 16) {
                 HStack(spacing: 6) {
                     Image(systemName: "checkmark.circle.fill")
@@ -147,8 +112,6 @@ struct DictationIndicatorView: View {
                         .font(.system(size: 13))
                         .foregroundStyle(.white.opacity(0.6))
                 }
-
-                Spacer()
 
                 HStack(spacing: 8) {
                     if !hideCleanupButton {
@@ -161,14 +124,12 @@ struct DictationIndicatorView: View {
             if let countdown = upgradeCountdown, countdown > 0 {
                 GeometryReader { geo in
                     RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Color.white.opacity(0.25))
+                        .fill(Color.white.opacity(0.2))
                         .frame(width: geo.size.width * (countdown / DictationCoordinator.upgradePanelDuration))
                 }
                 .frame(height: 3)
             }
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
     }
 
     @ViewBuilder
@@ -258,25 +219,26 @@ private struct DictationIndicatorHost: View {
     }
 }
 
-// MARK: - Manager
+// MARK: - Manager (dynamic sizing)
 
 @MainActor
 final class DictationIndicatorManager {
     private var panel: OverlayPanel?
+    private var hostingView: NSHostingView<DictationIndicatorHost>?
     private var observationTask: Task<Void, Never>?
     private let model = DictationIndicatorModel()
     private var recordingStartDate: Date?
+    private var lastPanelSize: NSSize = .zero
+    private var screenWidth: CGFloat = 1440
+    private var visibleTop: CGFloat = 900
 
     func start(coordinator: DictationCoordinator, hotkeyManager: HotkeyManager) {
-        // Create panel and hosting view once
         let screen = NSScreen.main
-        let screenWidth = screen?.frame.width ?? 1440
-        let panelWidth: CGFloat = 480
-        let panelHeight: CGFloat = 120
-        let x = (screenWidth - panelWidth) / 2
-        let visibleTop = screen?.visibleFrame.maxY ?? ((screen?.frame.height ?? 900) - 25)
-        let y = visibleTop - panelHeight - 8
-        let rect = NSRect(x: x, y: y, width: panelWidth, height: panelHeight)
+        screenWidth = screen?.frame.width ?? 1440
+        visibleTop = screen?.visibleFrame.maxY ?? ((screen?.frame.height ?? 900) - 25)
+
+        // Initial off-screen rect — panel resizes to content dynamically
+        let rect = NSRect(x: screenWidth / 2, y: visibleTop - 50, width: 1, height: 1)
         let p = OverlayPanel(contentRect: rect)
         p.styleMask = [.nonactivatingPanel, .fullSizeContentView]
         p.titlebarAppearsTransparent = true
@@ -285,17 +247,17 @@ final class DictationIndicatorManager {
         p.backgroundColor = .clear
         p.hasShadow = false
         p.becomesKeyOnlyIfNeeded = true
-        // Always visible in screenshots (override OverlayPanel's screen-share hiding)
         p.sharingType = .readOnly
-        let hostingView = NSHostingView(rootView: DictationIndicatorHost(model: model))
-        // Prevent SwiftUI from trying to resize the window (causes crashes with floating panels)
+
+        let hv = NSHostingView(rootView: DictationIndicatorHost(model: model))
         if #available(macOS 13.0, *) {
-            hostingView.sizingOptions = []
+            hv.sizingOptions = .intrinsicContentSize
         }
-        hostingView.appearance = NSAppearance(named: .darkAqua)
+        hv.appearance = NSAppearance(named: .darkAqua)
         p.appearance = NSAppearance(named: .darkAqua)
-        p.contentView = hostingView
+        p.contentView = hv
         self.panel = p
+        self.hostingView = hv
 
         // Wire up upgrade callback
         model.onUpgrade = { [weak coordinator] action in
@@ -312,39 +274,69 @@ final class DictationIndicatorManager {
 
                 let newState = coordinator.state
 
-                // Track recording duration
+                // Track recording duration (update only when seconds change)
                 if newState == .recording && self.recordingStartDate == nil {
                     self.recordingStartDate = Date()
                 } else if newState != .recording {
                     self.recordingStartDate = nil
                 }
+                let newSeconds: Int
+                if let start = self.recordingStartDate {
+                    newSeconds = Int(Date().timeIntervalSince(start))
+                } else {
+                    newSeconds = 0
+                }
 
+                // Push to model
                 self.model.state = newState
                 self.model.audioLevel = coordinator.audioLevel
                 self.model.isLocked = hotkeyManager?.isLocked ?? false
                 self.model.pendingMode = coordinator.pendingCleanupMode
+                if newSeconds != self.model.recordingSeconds {
+                    self.model.recordingSeconds = newSeconds
+                }
                 self.model.showUpgradeButtons = coordinator.isUpgradePanelVisible
                 self.model.hideCleanupButton = coordinator.cleanupAlreadyApplied
                 self.model.upgradeCountdown = coordinator.upgradeCountdown
                 self.model.lastError = coordinator.lastError
 
-                if let start = self.recordingStartDate {
-                    self.model.recordingSeconds = Int(Date().timeIntervalSince(start))
-                } else {
-                    self.model.recordingSeconds = 0
-                }
-
                 // Keep CGEvent tap flag in sync
                 hotkeyManager?.updateUpgradeShowingFlag(coordinator.isUpgradePanelVisible)
 
+                // Show/hide and resize
                 if newState == .idle {
                     self.panel?.orderOut(nil)
+                    self.lastPanelSize = .zero
                 } else {
                     if self.panel?.isVisible != true {
                         self.panel?.orderFront(nil)
                     }
+                    self.resizePanelToContent()
                 }
             }
+        }
+    }
+
+    private func resizePanelToContent() {
+        guard let panel, let hostingView else { return }
+        hostingView.layoutSubtreeIfNeeded()
+        let size = hostingView.fittingSize
+        guard size.width > 10 && size.height > 5 else { return }
+
+        // Only resize when dimensions actually change (avoid 20x/sec animation calls)
+        let widthChanged = abs(size.width - lastPanelSize.width) > 1
+        let heightChanged = abs(size.height - lastPanelSize.height) > 1
+        guard widthChanged || heightChanged else { return }
+        lastPanelSize = size
+
+        let x = (screenWidth - size.width) / 2
+        let y = visibleTop - size.height - 8
+        let newFrame = NSRect(x: x, y: y, width: size.width, height: size.height)
+
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+            panel.animator().setFrame(newFrame, display: true)
         }
     }
 
