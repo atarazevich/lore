@@ -5,83 +5,150 @@ struct DictationIndicatorView: View {
     let state: DictationState
     let audioLevel: Float
     var isLocked = false
+    var pendingMode: UpgradeAction?
+    var recordingSeconds: Int = 0
     var showUpgradeButtons = false
     var hideCleanupButton = false
     var upgradeCountdown: Double?
+    var lastError: String?
     var onUpgrade: ((UpgradeAction) -> Void)?
 
     var body: some View {
-        VStack(spacing: 0) {
+        Group {
             switch state {
             case .recording:
-                HStack(spacing: 8) {
-                    Circle()
-                        .fill(.red)
-                        .frame(width: 10, height: 10)
-                    WaveformBars(level: audioLevel)
-                    if isLocked {
-                        Image(systemName: "lock.fill")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.red)
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-
+                recordingContent
             case .loadingModel:
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Downloading model...")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-
+                downloadingContent
             case .processing:
-                HStack(spacing: 8) {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Processing...")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-
+                processingContent
             case .done:
                 if showUpgradeButtons {
                     upgradeContent
-                        .padding(.horizontal, 12)
-                        .padding(.vertical, 8)
+                } else if let error = lastError {
+                    errorContent(error)
                 } else {
-                    HStack(spacing: 8) {
-                        Image(systemName: "checkmark.circle.fill")
-                            .foregroundStyle(.green)
-                            .font(.system(size: 14))
-                    }
-                    .padding(.horizontal, 16)
-                    .padding(.vertical, 8)
+                    doneContent
                 }
-
             case .idle:
                 EmptyView()
             }
         }
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 18))
-        .animation(.easeInOut(duration: 0.15), value: state)
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .environment(\.colorScheme, .dark)
+        .animation(.spring(duration: 0.2), value: state)
+        .animation(.spring(duration: 0.2), value: isLocked)
+        .animation(.spring(duration: 0.2), value: pendingMode)
     }
+
+    // MARK: - Recording
+
+    private var recordingContent: some View {
+        HStack(spacing: 8) {
+            Circle()
+                .fill(.red)
+                .frame(width: 8, height: 8)
+            if isLocked {
+                Image(systemName: "lock.fill")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.white.opacity(0.7))
+            }
+            WaveformBars(level: audioLevel)
+            Text(timerString)
+                .font(.system(size: 13, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.6))
+                .monospacedDigit()
+            if let mode = pendingMode {
+                Text("+ \(mode == .cleanup ? "Cleanup" : "Translate")")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.9))
+            }
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    private var timerString: String {
+        let m = recordingSeconds / 60
+        let s = recordingSeconds % 60
+        return String(format: "%d:%02d", m, s)
+    }
+
+    // MARK: - Processing
+
+    private var processingContent: some View {
+        HStack(spacing: 8) {
+            ProgressView()
+                .controlSize(.small)
+            Text("Processing...")
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.8))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    // MARK: - Downloading
+
+    private var downloadingContent: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "arrow.down.circle")
+                .font(.system(size: 14))
+                .foregroundStyle(.white.opacity(0.7))
+            Text("Downloading model...")
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.8))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    // MARK: - Done
+
+    private var doneContent: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "checkmark.circle.fill")
+                .foregroundStyle(.green)
+                .font(.system(size: 14))
+            Text("Done")
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.8))
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    // MARK: - Error
+
+    private func errorContent(_ message: String) -> some View {
+        HStack(spacing: 8) {
+            Image(systemName: "xmark.circle.fill")
+                .foregroundStyle(.red)
+                .font(.system(size: 14))
+            Text(message)
+                .font(.system(size: 13))
+                .foregroundStyle(.white.opacity(0.8))
+                .lineLimit(1)
+        }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 10)
+    }
+
+    // MARK: - Upgrade
 
     @ViewBuilder
     private var upgradeContent: some View {
         VStack(spacing: 6) {
             HStack(spacing: 10) {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundColor(Color.green)
+                    .foregroundStyle(.green)
                     .font(.system(size: 14))
+                Text("Pasted")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.7))
+                Spacer().frame(width: 4)
                 if !hideCleanupButton {
-                    upgradeButton(label: "[C] Cleanup", action: .cleanup)
+                    upgradeButton(label: "[V] Cleanup", action: .cleanup)
                 }
                 upgradeButton(label: "[T] Translate", action: .translate)
             }
@@ -95,14 +162,15 @@ struct DictationIndicatorView: View {
                 .frame(height: 2)
             }
         }
-        .environment(\.colorScheme, .dark)
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
     }
 
     @ViewBuilder
     private func upgradeButton(label: String, action: UpgradeAction) -> some View {
         Text(label)
             .font(.system(size: 13, weight: .medium, design: .rounded))
-            .foregroundColor(Color.white.opacity(0.9))
+            .foregroundStyle(.white.opacity(0.9))
             .frame(minWidth: 110, minHeight: 32)
             .padding(.horizontal, 12)
             .background(
@@ -120,9 +188,11 @@ struct DictationIndicatorView: View {
     }
 }
 
+// MARK: - Waveform
+
 private struct WaveformBars: View {
     let level: Float
-    private let barCount = 5
+    private let barCount = 7
 
     var body: some View {
         HStack(spacing: 2) {
@@ -146,17 +216,20 @@ private struct WaveformBars: View {
     }
 }
 
-/// Bridges DictationCoordinator's @Observable state to a SwiftUI-friendly model
-/// that a single NSHostingView can observe without recreation.
+// MARK: - Model
+
 @Observable
 @MainActor
 final class DictationIndicatorModel {
     var state: DictationState = .idle
     var audioLevel: Float = 0
     var isLocked = false
+    var pendingMode: UpgradeAction?
+    var recordingSeconds: Int = 0
     var showUpgradeButtons = false
     var hideCleanupButton = false
     var upgradeCountdown: Double?
+    var lastError: String?
     var onUpgrade: ((UpgradeAction) -> Void)?
 }
 
@@ -169,19 +242,25 @@ private struct DictationIndicatorHost: View {
             state: model.state,
             audioLevel: model.audioLevel,
             isLocked: model.isLocked,
+            pendingMode: model.pendingMode,
+            recordingSeconds: model.recordingSeconds,
             showUpgradeButtons: model.showUpgradeButtons,
             hideCleanupButton: model.hideCleanupButton,
             upgradeCountdown: model.upgradeCountdown,
+            lastError: model.lastError,
             onUpgrade: model.onUpgrade
         )
     }
 }
+
+// MARK: - Manager
 
 @MainActor
 final class DictationIndicatorManager {
     private var panel: OverlayPanel?
     private var observationTask: Task<Void, Never>?
     private let model = DictationIndicatorModel()
+    private var recordingStartDate: Date?
 
     func start(coordinator: DictationCoordinator, hotkeyManager: HotkeyManager) {
         // Create panel and hosting view once
@@ -190,7 +269,6 @@ final class DictationIndicatorManager {
         let panelWidth: CGFloat = 380
         let panelHeight: CGFloat = 120
         let x = (screenWidth - panelWidth) / 2
-        // Position below menu bar / notch safe area
         let visibleTop = screen?.visibleFrame.maxY ?? ((screen?.frame.height ?? 900) - 25)
         let y = visibleTop - panelHeight - 8
         let rect = NSRect(x: x, y: y, width: panelWidth, height: panelHeight)
@@ -205,7 +283,6 @@ final class DictationIndicatorManager {
         // Always visible in screenshots (override OverlayPanel's screen-share hiding)
         p.sharingType = .readOnly
         let hostingView = NSHostingView(rootView: DictationIndicatorHost(model: model))
-        // Force dark appearance at AppKit level so vibrancy doesn't wash out text/colors
         hostingView.appearance = NSAppearance(named: .darkAqua)
         p.appearance = NSAppearance(named: .darkAqua)
         p.contentView = hostingView
@@ -218,23 +295,37 @@ final class DictationIndicatorManager {
             }
         }
 
-        // Poll coordinator state and push into model (which SwiftUI observes reactively)
+        // Poll coordinator state and push into model
         observationTask = Task { [weak self, weak coordinator, weak hotkeyManager] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(50))
                 guard let self, let coordinator else { break }
 
                 let newState = coordinator.state
-                let newLevel = coordinator.audioLevel
+
+                // Track recording duration
+                if newState == .recording && self.recordingStartDate == nil {
+                    self.recordingStartDate = Date()
+                } else if newState != .recording {
+                    self.recordingStartDate = nil
+                }
 
                 self.model.state = newState
-                self.model.audioLevel = newLevel
+                self.model.audioLevel = coordinator.audioLevel
                 self.model.isLocked = hotkeyManager?.isLocked ?? false
+                self.model.pendingMode = coordinator.pendingCleanupMode
                 self.model.showUpgradeButtons = coordinator.isUpgradePanelVisible
                 self.model.hideCleanupButton = coordinator.cleanupAlreadyApplied
                 self.model.upgradeCountdown = coordinator.upgradeCountdown
+                self.model.lastError = coordinator.lastError
 
-                // Keep CGEvent tap flag in sync for upgrade panel dismissal
+                if let start = self.recordingStartDate {
+                    self.model.recordingSeconds = Int(Date().timeIntervalSince(start))
+                } else {
+                    self.model.recordingSeconds = 0
+                }
+
+                // Keep CGEvent tap flag in sync
                 hotkeyManager?.updateUpgradeShowingFlag(coordinator.isUpgradePanelVisible)
 
                 if newState == .idle {
