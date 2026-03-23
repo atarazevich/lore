@@ -272,7 +272,7 @@ final class DictationIndicatorManager {
         let screen = NSScreen.main
         let screenWidth = screen?.frame.width ?? 1440
         let panelWidth: CGFloat = 480
-        let panelHeight: CGFloat = 80
+        let panelHeight: CGFloat = 120
         let x = (screenWidth - panelWidth) / 2
         let visibleTop = screen?.visibleFrame.maxY ?? ((screen?.frame.height ?? 900) - 25)
         let y = visibleTop - panelHeight - 8
@@ -288,6 +288,10 @@ final class DictationIndicatorManager {
         // Always visible in screenshots (override OverlayPanel's screen-share hiding)
         p.sharingType = .readOnly
         let hostingView = NSHostingView(rootView: DictationIndicatorHost(model: model))
+        // Prevent SwiftUI from trying to resize the window (causes crashes with floating panels)
+        if #available(macOS 13.0, *) {
+            hostingView.sizingOptions = []
+        }
         hostingView.appearance = NSAppearance(named: .darkAqua)
         p.appearance = NSAppearance(named: .darkAqua)
         p.contentView = hostingView
