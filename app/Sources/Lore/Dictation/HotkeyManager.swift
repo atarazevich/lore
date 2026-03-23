@@ -25,6 +25,8 @@ final class HotkeyManager {
     nonisolated(unsafe) private var isUpgradeShowingFlag = false
     /// Synchronous mirror of fnDown for CGEvent tap
     nonisolated(unsafe) private var fnDownFlag = false
+    /// Synchronous mirror: true during pre-buffer phase (before hold confirmed)
+    nonisolated(unsafe) private var isPreBufferingFlag = false
 
     /// CGEvent tap for consuming Space/Esc when external apps are focused
     private var eventTap: CFMachPort?
@@ -94,9 +96,9 @@ final class HotkeyManager {
                 return nil
             }
 
-            // Space while recording → lock (consume the event so it doesn't type into fields)
+            // Space while recording or pre-buffering → lock (consume the event)
             if event.keyCode == 49,
-               self.isRecordingFlag,
+               (self.isRecordingFlag || self.isPreBufferingFlag),
                !self.isLocked {
                 Task { @MainActor in
                     self.handleKeyDown(event)
@@ -195,15 +197,20 @@ final class HotkeyManager {
                     return nil
                 }
 
-                // Space while recording and not locked → consume and lock
-                if keyCode == 49 && manager.isRecordingFlag && !manager.isLockedFlag {
+                // Space while recording/pre-buffering and not locked → consume and lock
+                if keyCode == 49 && (manager.isRecordingFlag || manager.isPreBufferingFlag) && !manager.isLockedFlag {
                     manager.isLockedFlag = true
+                    manager.isPreBufferingFlag = false
+                    manager.isRecordingFlag = true
                     Task { @MainActor in
+                        if manager.coordinator?.isPreBuffering == true {
+                            manager.coordinator?.confirmRecording()
+                        }
                         manager.isLocked = true
                         manager.fnTimer?.cancel()
                         manager.fnTimer = nil
                         manager.isHoldMode = false
-                        diagLog("[HOTKEY] Space (CGEvent tap) → locked")
+                        diagLog("[HOTKEY] Space (CGEvent tap) → confirm + locked")
                     }
                     return nil
                 }
@@ -285,14 +292,19 @@ final class HotkeyManager {
                 return
             }
 
+            // Start pre-buffering immediately (audio capture before hold confirmed)
+            isPreBufferingFlag = true
+            coordinator?.startPreBuffer()
+
             isHoldMode = false
             fnTimer = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(80))
+                try? await Task.sleep(for: .milliseconds(150))
                 guard !Task.isCancelled, let self else { return }
                 self.isHoldMode = true
                 self.isRecordingFlag = true
-                diagLog("[HOTKEY] hold mode → start recording")
-                self.coordinator?.startRecording()
+                self.isPreBufferingFlag = false
+                diagLog("[HOTKEY] hold confirmed (150ms) → recording")
+                self.coordinator?.confirmRecording()
             }
         } else if !hotkeyPressed && fnDown {
             fnDown = false
@@ -319,6 +331,10 @@ final class HotkeyManager {
                 Task { [weak self] in
                     await self?.coordinator?.stopRecording()
                 }
+            } else {
+                // Tap within 150ms — cancel pre-buffer
+                isPreBufferingFlag = false
+                coordinator?.cancelPreBuffer()
             }
         }
     }
@@ -326,8 +342,8 @@ final class HotkeyManager {
     private func handleKeyDown(_ event: NSEvent) {
         guard isEnabled, let coordinator else { return }
 
-        // V/T while Fn held and recording → set pre-paste cleanup mode
-        if fnDown && coordinator.state == .recording {
+        // V/T while Fn held and recording/pre-buffering → set pre-paste cleanup mode
+        if fnDown && (coordinator.state == .recording || coordinator.isPreBuffering) {
             if let chars = event.characters?.lowercased() {
                 if chars == "v" {
                     coordinator.setPendingMode(.cleanup)
@@ -349,14 +365,19 @@ final class HotkeyManager {
             return
         }
 
-        // Space while recording → lock
-        if event.keyCode == 49 && coordinator.state == .recording && !isLocked {
+        // Space while recording or pre-buffering → confirm + lock
+        if event.keyCode == 49 && (coordinator.state == .recording || coordinator.isPreBuffering) && !isLocked {
             fnTimer?.cancel()
             fnTimer = nil
             isHoldMode = false
+            isPreBufferingFlag = false
+            if coordinator.isPreBuffering {
+                coordinator.confirmRecording()
+            }
             isLocked = true
             isLockedFlag = true
-            diagLog("[HOTKEY] Space while recording → locked")
+            isRecordingFlag = true
+            diagLog("[HOTKEY] Space → confirm + locked")
             return
         }
 

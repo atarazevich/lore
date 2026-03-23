@@ -30,6 +30,8 @@ final class DictationCoordinator {
     private(set) var upgradeCountdown: Double?
     /// Pre-paste cleanup mode set during recording via Fn+V/Fn+T.
     private(set) var pendingCleanupMode: UpgradeAction?
+    /// True while audio is being buffered before hold is confirmed (pre-buffer phase).
+    private(set) var isPreBuffering = false
 
     private let log = Logger(subsystem: "com.lore.app", category: "DictationCoordinator")
     private var mic: MicCapture?
@@ -54,8 +56,10 @@ final class DictationCoordinator {
     let history = DictationHistory()
     var settings: AppSettings?
 
-    func startRecording() {
-        // Allow starting a new recording from .done state (cancels any upgrade panel)
+    /// Start capturing audio silently before hold is confirmed (pre-buffer phase).
+    /// State stays .idle — indicator does not show yet.
+    func startPreBuffer() {
+        guard !isPreBuffering else { return }
         guard state == .idle || state == .done else { return }
         guard let settings, settings.dictationEnabled else { return }
 
@@ -68,48 +72,42 @@ final class DictationCoordinator {
         currentEntryID = nil
         pendingCleanupMode = nil
 
-        state = .recording
         lastError = nil
         accumulatedSamples.removeAll()
         converter = nil
+        isPreBuffering = true
 
-        let capture = MicCapture()
-        self.mic = capture
+        startMicCapture()
+        diagLog("[DICTATION] pre-buffering started")
+    }
 
-        let deviceID = settings.inputDeviceID
-        let stream = capture.bufferStream(deviceID: deviceID > 0 ? deviceID : nil)
+    /// Confirm that the hold gesture was detected — transition to visible recording.
+    func confirmRecording() {
+        guard isPreBuffering else { return }
+        isPreBuffering = false
+        state = .recording
+        diagLog("[DICTATION] recording confirmed (pre-buffer kept)")
+    }
 
-        audioLevelTask = Task { [weak self, weak capture] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(50))
-                guard let self, let capture else { break }
-                self.audioLevel = capture.audioLevel
-            }
-        }
-
-        recordingTask = Task { [weak self] in
-            for await buffer in stream {
-                guard let self, !Task.isCancelled else { break }
-                if let samples = AudioUtils.extractSamples(buffer, converter: &self.converter) {
-                    self.accumulatedSamples.append(contentsOf: samples)
-                }
-            }
-        }
-
-        diagLog("[DICTATION] recording started")
+    /// Cancel pre-buffer (user tapped instead of holding).
+    func cancelPreBuffer() {
+        guard isPreBuffering else { return }
+        isPreBuffering = false
+        stopMicCapture()
+        accumulatedSamples.removeAll()
+        diagLog("[DICTATION] pre-buffer discarded (tap)")
     }
 
     func stopRecording() async {
         guard state == .recording else { return }
 
-        audioLevelTask?.cancel()
-        audioLevelTask = nil
-        audioLevel = 0
+        // Audio tail: keep recording 300ms to capture trailing speech
+        try? await Task.sleep(for: .milliseconds(300))
 
-        mic?.stop()
-        await recordingTask?.value
-        recordingTask = nil
-        mic = nil
+        // Re-check state — may have been discarded during the tail
+        guard state == .recording else { return }
+
+        stopMicCapture()
 
         let samples = accumulatedSamples
         accumulatedSamples.removeAll()
@@ -302,8 +300,46 @@ final class DictationCoordinator {
     }
 
     func discardRecording() {
+        if isPreBuffering {
+            cancelPreBuffer()
+            return
+        }
         guard state == .recording || state == .loadingModel || state == .processing else { return }
         diagLog("[DICTATION] discarded from state: \(state)")
+        stopMicCapture()
+        accumulatedSamples.removeAll()
+        pendingCleanupMode = nil
+        state = .idle
+    }
+
+    // MARK: - Mic Helpers
+
+    private func startMicCapture() {
+        let capture = MicCapture()
+        self.mic = capture
+
+        let deviceID = settings?.inputDeviceID ?? 0
+        let stream = capture.bufferStream(deviceID: deviceID > 0 ? deviceID : nil)
+
+        audioLevelTask = Task { [weak self, weak capture] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(50))
+                guard let self, let capture else { break }
+                self.audioLevel = capture.audioLevel
+            }
+        }
+
+        recordingTask = Task { [weak self] in
+            for await buffer in stream {
+                guard let self, !Task.isCancelled else { break }
+                if let samples = AudioUtils.extractSamples(buffer, converter: &self.converter) {
+                    self.accumulatedSamples.append(contentsOf: samples)
+                }
+            }
+        }
+    }
+
+    private func stopMicCapture() {
         audioLevelTask?.cancel()
         audioLevelTask = nil
         audioLevel = 0
@@ -311,9 +347,6 @@ final class DictationCoordinator {
         recordingTask?.cancel()
         recordingTask = nil
         mic = nil
-        accumulatedSamples.removeAll()
-        pendingCleanupMode = nil
-        state = .idle
     }
 
     /// Toggle pre-paste cleanup mode during recording.
