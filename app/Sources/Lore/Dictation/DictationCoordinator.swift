@@ -28,6 +28,8 @@ final class DictationCoordinator {
     private(set) var cleanupAlreadyApplied = false
     /// Countdown remaining for upgrade auto-dismiss (seconds). Nil when not showing.
     private(set) var upgradeCountdown: Double?
+    /// Pre-paste cleanup mode set during recording via Fn+V/Fn+T.
+    private(set) var pendingCleanupMode: UpgradeAction?
 
     private let log = Logger(subsystem: "com.lore.app", category: "DictationCoordinator")
     private var mic: MicCapture?
@@ -64,6 +66,7 @@ final class DictationCoordinator {
         isUpgradePanelVisible = false
         upgradeCountdown = nil
         currentEntryID = nil
+        pendingCleanupMode = nil
 
         state = .recording
         lastError = nil
@@ -138,21 +141,36 @@ final class DictationCoordinator {
             return
         }
 
-        // STEP 3: Determine default action and paste immediately
+        // STEP 3: Determine cleanup action (pre-paste mode > defaults) and run
+        let pending = pendingCleanupMode
+        pendingCleanupMode = nil
         let cleanupEnabled = settings?.cleanupByDefault ?? false
         let translateEnabled = settings?.translationByDefault ?? false
         let hasApiKey = !(settings?.openaiApiKey.isEmpty ?? true)
         let didCleanup: Bool
 
-        if translateEnabled && hasApiKey {
-            // Run cleanup + translate
+        if let pending, hasApiKey {
+            // Pre-paste mode set via Fn+V/Fn+T during recording — overrides defaults
+            let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
+            switch pending {
+            case .cleanup:
+                await cleanupEntry(&entry, rawText: rawText, prompt: basePrompt)
+                entry.cleanupModeName = "Cleanup"
+            case .translate:
+                let prompt = basePrompt + CleanupMode.translateSuffix
+                await cleanupEntry(&entry, rawText: rawText, prompt: prompt)
+                entry.cleanupModeName = "Translate"
+            }
+            didCleanup = (entry.status == .cleaned)
+        } else if translateEnabled && hasApiKey {
+            // Default: cleanup + translate
             let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
             let prompt = basePrompt + CleanupMode.translateSuffix
             await cleanupEntry(&entry, rawText: rawText, prompt: prompt)
             entry.cleanupModeName = "Translate"
             didCleanup = (entry.status == .cleaned)
         } else if cleanupEnabled && hasApiKey {
-            // Run default cleanup only
+            // Default: cleanup only
             let prompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
             await cleanupEntry(&entry, rawText: rawText, prompt: prompt)
             entry.cleanupModeName = "Cleanup"
@@ -171,8 +189,12 @@ final class DictationCoordinator {
         history.update(entry)
         state = .done
 
-        // STEP 4: Show upgrade options (modes that differ from what was just applied)
-        showUpgradeOptions(didCleanup: didCleanup)
+        // STEP 4: Show upgrade options — skip if user explicitly chose a pre-paste mode
+        if pending != nil {
+            scheduleAutoHide()
+        } else {
+            showUpgradeOptions(didCleanup: didCleanup)
+        }
     }
 
     // MARK: - Upgrade Panel
@@ -290,7 +312,20 @@ final class DictationCoordinator {
         recordingTask = nil
         mic = nil
         accumulatedSamples.removeAll()
+        pendingCleanupMode = nil
         state = .idle
+    }
+
+    /// Toggle pre-paste cleanup mode during recording.
+    /// Same action twice → off. Different action → replaces.
+    func setPendingMode(_ action: UpgradeAction) {
+        guard state == .recording else { return }
+        if pendingCleanupMode == action {
+            pendingCleanupMode = nil
+        } else {
+            pendingCleanupMode = action
+        }
+        diagLog("[DICTATION] pending mode: \(pendingCleanupMode.map { "\($0)" } ?? "none")")
     }
 
     func pasteLastTranscript() {

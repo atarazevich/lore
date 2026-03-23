@@ -23,6 +23,8 @@ final class HotkeyManager {
     nonisolated(unsafe) private var isLockedFlag = false
     /// Synchronous mirror: true when upgrade panel is showing
     nonisolated(unsafe) private var isUpgradeShowingFlag = false
+    /// Synchronous mirror of fnDown for CGEvent tap
+    nonisolated(unsafe) private var fnDownFlag = false
 
     /// CGEvent tap for consuming Space/Esc when external apps are focused
     private var eventTap: CFMachPort?
@@ -54,6 +56,17 @@ final class HotkeyManager {
         // Local key monitor — return nil to consume events we handle (Space lock, Esc discard, Esc upgrade dismiss)
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+
+            // V/T while Fn held and recording → set pre-paste mode, consume event
+            if self.fnDownFlag && self.isRecordingFlag,
+               let chars = event.characters?.lowercased() {
+                if chars == "v" || chars == "t" {
+                    Task { @MainActor in
+                        self.handleKeyDown(event)
+                    }
+                    return nil
+                }
+            }
 
             // C or T while upgrade panel is showing → apply upgrade
             // Only match bare keypress (no Cmd/Ctrl/Option modifiers) to avoid eating Cmd+C etc.
@@ -131,6 +144,26 @@ final class HotkeyManager {
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+
+                // V/T while Fn held and recording → set pre-paste mode, consume event
+                if manager.fnDownFlag && manager.isRecordingFlag {
+                    if let nsEvent = NSEvent(cgEvent: event),
+                       let chars = nsEvent.characters?.lowercased() {
+                        if chars == "v" {
+                            Task { @MainActor in
+                                manager.coordinator?.setPendingMode(.cleanup)
+                                diagLog("[HOTKEY] Fn+V (CGEvent tap) → pending cleanup")
+                            }
+                            return nil
+                        } else if chars == "t" {
+                            Task { @MainActor in
+                                manager.coordinator?.setPendingMode(.translate)
+                                diagLog("[HOTKEY] Fn+T (CGEvent tap) → pending translate")
+                            }
+                            return nil
+                        }
+                    }
+                }
 
                 // C or T while upgrade panel showing → apply upgrade
                 // Check no modifiers (allow Cmd+C etc. through)
@@ -242,17 +275,13 @@ final class HotkeyManager {
 
         if hotkeyPressed && !fnDown {
             fnDown = true
+            fnDownFlag = true
 
             guard isEnabled else { return }
 
             if isLocked {
-                isLocked = false
-                isLockedFlag = false
-                isRecordingFlag = false
-                diagLog("[HOTKEY] hotkey pressed while locked → stop + paste")
-                Task { [weak self] in
-                    await self?.coordinator?.stopRecording()
-                }
+                // Don't stop yet — V/T chord may follow. Stop happens on Fn release.
+                diagLog("[HOTKEY] hotkey pressed while locked → waiting for chord or release")
                 return
             }
 
@@ -267,11 +296,19 @@ final class HotkeyManager {
             }
         } else if !hotkeyPressed && fnDown {
             fnDown = false
+            fnDownFlag = false
             fnTimer?.cancel()
             fnTimer = nil
 
             if isLocked {
-                diagLog("[HOTKEY] hotkey released while locked → continues")
+                // Fn released while locked → stop recording (with any pending mode)
+                isLocked = false
+                isLockedFlag = false
+                isRecordingFlag = false
+                diagLog("[HOTKEY] hotkey released while locked → stop + paste")
+                Task { [weak self] in
+                    await self?.coordinator?.stopRecording()
+                }
                 return
             }
 
@@ -288,6 +325,21 @@ final class HotkeyManager {
 
     private func handleKeyDown(_ event: NSEvent) {
         guard isEnabled, let coordinator else { return }
+
+        // V/T while Fn held and recording → set pre-paste cleanup mode
+        if fnDown && coordinator.state == .recording {
+            if let chars = event.characters?.lowercased() {
+                if chars == "v" {
+                    coordinator.setPendingMode(.cleanup)
+                    diagLog("[HOTKEY] Fn+V → pending cleanup")
+                    return
+                } else if chars == "t" {
+                    coordinator.setPendingMode(.translate)
+                    diagLog("[HOTKEY] Fn+T → pending translate")
+                    return
+                }
+            }
+        }
 
         // Esc while upgrade panel showing → dismiss
         // (C/T are handled by the local monitor and CGEvent tap, not here)
