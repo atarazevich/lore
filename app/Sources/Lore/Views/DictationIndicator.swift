@@ -102,55 +102,56 @@ struct DictationIndicatorView: View {
 
     @ViewBuilder
     private var upgradeContent: some View {
-        VStack(spacing: 6) {
-            HStack(spacing: 16) {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.system(size: 13))
-                    Text("Pasted")
-                        .font(.system(size: 13))
-                        .foregroundStyle(.white.opacity(0.6))
-                }
+        VStack(spacing: 4) {
+            HStack(spacing: 10) {
+                Image(systemName: "checkmark.circle.fill")
+                    .foregroundStyle(.green)
+                    .font(.system(size: 12))
+                Text("Pasted")
+                    .font(.system(size: 13))
+                    .foregroundStyle(.white.opacity(0.5))
 
-                HStack(spacing: 8) {
-                    if !hideCleanupButton {
-                        upgradeButton(label: "[C] Cleanup", action: .cleanup)
-                    }
-                    upgradeButton(label: "[T] Translate", action: .translate)
+                Rectangle()
+                    .fill(Color.white.opacity(0.12))
+                    .frame(width: 1, height: 14)
+
+                if !hideCleanupButton {
+                    upgradeButton(label: "C", subtitle: "Cleanup", action: .cleanup)
                 }
+                upgradeButton(label: "T", subtitle: "Translate", action: .translate)
             }
 
             if let countdown = upgradeCountdown, countdown > 0 {
                 GeometryReader { geo in
-                    RoundedRectangle(cornerRadius: 1.5)
-                        .fill(Color.white.opacity(0.2))
+                    RoundedRectangle(cornerRadius: 1)
+                        .fill(Color.white.opacity(0.12))
                         .frame(width: geo.size.width * (countdown / DictationCoordinator.upgradePanelDuration))
                 }
-                .frame(height: 3)
+                .frame(height: 2)
             }
         }
     }
 
     @ViewBuilder
-    private func upgradeButton(label: String, action: UpgradeAction) -> some View {
-        Text(label)
-            .font(.system(size: 12, weight: .medium, design: .monospaced))
-            .foregroundStyle(.white.opacity(0.85))
-            .padding(.horizontal, 14)
-            .padding(.vertical, 6)
-            .background(
-                RoundedRectangle(cornerRadius: 6)
-                    .fill(Color.white.opacity(0.1))
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: 6)
-                    .stroke(Color.white.opacity(0.15), lineWidth: 0.5)
-            )
-            .contentShape(Rectangle())
-            .onTapGesture {
-                onUpgrade?(action)
-            }
+    private func upgradeButton(label: String, subtitle: String, action: UpgradeAction) -> some View {
+        HStack(spacing: 4) {
+            Text(label)
+                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .foregroundStyle(.white.opacity(0.5))
+            Text(subtitle)
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(.white.opacity(0.8))
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(Color.white.opacity(0.07))
+        )
+        .contentShape(Rectangle())
+        .onTapGesture {
+            onUpgrade?(action)
+        }
     }
 }
 
