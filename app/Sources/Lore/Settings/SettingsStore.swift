@@ -428,6 +428,89 @@ final class SettingsStore {
         }
     }
 
+    // MARK: - Dictation Settings
+
+    @ObservationIgnored nonisolated(unsafe) private var _dictationEnabled: Bool
+    var dictationEnabled: Bool {
+        get { access(keyPath: \.dictationEnabled); return _dictationEnabled }
+        set {
+            withMutation(keyPath: \.dictationEnabled) {
+                _dictationEnabled = newValue
+                defaults.set(newValue, forKey: "dictationEnabled")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _hotkeyKey: HotkeyKey
+    var hotkeyKey: HotkeyKey {
+        get { access(keyPath: \.hotkeyKey); return _hotkeyKey }
+        set {
+            withMutation(keyPath: \.hotkeyKey) {
+                _hotkeyKey = newValue
+                defaults.set(newValue.rawValue, forKey: "hotkeyKey")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _cleanupPreset: CleanupPreset
+    var cleanupPreset: CleanupPreset {
+        get { access(keyPath: \.cleanupPreset); return _cleanupPreset }
+        set {
+            withMutation(keyPath: \.cleanupPreset) {
+                _cleanupPreset = newValue
+                defaults.set(newValue.rawValue, forKey: "cleanupPreset")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _customCleanupPrompt: String
+    var customCleanupPrompt: String {
+        get { access(keyPath: \.customCleanupPrompt); return _customCleanupPrompt }
+        set {
+            withMutation(keyPath: \.customCleanupPrompt) {
+                _customCleanupPrompt = newValue
+                defaults.set(newValue, forKey: "customCleanupPrompt")
+            }
+        }
+    }
+
+    var activeCleanupPrompt: String {
+        CleanupMode.prompt(for: cleanupPreset, customPrompt: customCleanupPrompt)
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _cleanupByDefault: Bool
+    var cleanupByDefault: Bool {
+        get { access(keyPath: \.cleanupByDefault); return _cleanupByDefault }
+        set {
+            withMutation(keyPath: \.cleanupByDefault) {
+                _cleanupByDefault = newValue
+                defaults.set(newValue, forKey: "dictationCleanupEnabled")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _translationByDefault: Bool
+    var translationByDefault: Bool {
+        get { access(keyPath: \.translationByDefault); return _translationByDefault }
+        set {
+            withMutation(keyPath: \.translationByDefault) {
+                _translationByDefault = newValue
+                defaults.set(newValue, forKey: "dictationTranslationEnabled")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _openaiApiKey: String
+    var openaiApiKey: String {
+        get { access(keyPath: \.openaiApiKey); return _openaiApiKey }
+        set {
+            withMutation(keyPath: \.openaiApiKey) {
+                _openaiApiKey = newValue
+                secretStore.save(key: "openaiApiKey", value: newValue)
+            }
+        }
+    }
+
     // MARK: - UI Settings
 
     @ObservationIgnored nonisolated(unsafe) private var _showLiveTranscript: Bool
@@ -560,6 +643,26 @@ final class SettingsStore {
 
         // Import Settings
         self._granolaApiKey = storage.secretStore.load(key: "granolaApiKey") ?? ""
+
+        // Dictation Settings
+        if defaults.object(forKey: "dictationEnabled") == nil {
+            self._dictationEnabled = true
+        } else {
+            self._dictationEnabled = defaults.bool(forKey: "dictationEnabled")
+        }
+        self._hotkeyKey = HotkeyKey(
+            rawValue: defaults.string(forKey: "hotkeyKey") ?? ""
+        ) ?? .fn
+        if let savedPreset = defaults.string(forKey: "cleanupPreset"),
+           let preset = CleanupPreset(rawValue: savedPreset) {
+            self._cleanupPreset = preset
+        } else {
+            self._cleanupPreset = .clean
+        }
+        self._customCleanupPrompt = defaults.string(forKey: "customCleanupPrompt") ?? ""
+        self._cleanupByDefault = defaults.bool(forKey: "dictationCleanupEnabled")
+        self._translationByDefault = defaults.bool(forKey: "dictationTranslationEnabled")
+        self._openaiApiKey = storage.secretStore.load(key: "openaiApiKey") ?? ""
 
         // UI Settings
         if defaults.object(forKey: "showLiveTranscript") == nil {

@@ -41,6 +41,10 @@ public struct LoreRootApp: App {
                             showMainWindow: { [self] in showMainWindow() },
                             checkForUpdates: { updaterController.checkForUpdatesFromMenuBar() }
                         )
+                        appDelegate.setupDictationIfNeeded(
+                            coordinator: coordinator,
+                            settings: settings
+                        )
                     }
                     settings.applyScreenShareVisibility()
                 }
@@ -87,6 +91,11 @@ public struct LoreRootApp: App {
                 .keyboardShortcut("i", modifiers: [.command, .shift])
                 .disabled(coordinator.isRecording || isBatchEngineBusy)
 
+                Button("Dictation") {
+                    openWindow(id: "dictation")
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+
                 Button("GitHub Repository...") {
                     if let url = URL(string: "https://github.com/atarazevich/lore") {
                         NSWorkspace.shared.open(url)
@@ -112,11 +121,35 @@ public struct LoreRootApp: App {
         }
         .defaultSize(width: 600, height: 700)
 
+        Window("Dictation", id: "dictation") {
+            DictationWindowContent(settings: settings)
+                .environment(container)
+                .environment(coordinator)
+                .defaultAppStorage(defaults)
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultSize(width: 400, height: 560)
+
         Settings {
             SettingsView(settings: settings, updater: updaterController.updater)
                 .environment(container)
                 .environment(coordinator)
                 .defaultAppStorage(defaults)
+        }
+    }
+}
+
+/// Wraps DictationView with the onboarding gate.
+private struct DictationWindowContent: View {
+    @Bindable var settings: AppSettings
+    @AppStorage("completedDictationOnboarding") private var completedDictationOnboarding = false
+
+    var body: some View {
+        if completedDictationOnboarding {
+            DictationView(settings: settings)
+        } else {
+            DictationOnboardingView(settings: settings)
         }
     }
 }
@@ -260,6 +293,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     private var globalHotkeyMonitor: Any?
     private var localHotkeyMonitor: Any?
+    private var didSetupDictation = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         if !isUITest {
@@ -382,6 +416,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             )
             try? await center.add(request)
         }
+    }
+
+    // MARK: - Dictation Setup
+
+    func setupDictationIfNeeded(coordinator: AppCoordinator, settings: AppSettings) {
+        guard !didSetupDictation else { return }
+        didSetupDictation = true
+
+        coordinator.dictationCoordinator.settings = settings
+        coordinator.hotkeyManager.install(
+            coordinator: coordinator.dictationCoordinator,
+            settings: settings
+        )
+        coordinator.dictationIndicator.start(
+            coordinator: coordinator.dictationCoordinator,
+            hotkeyManager: coordinator.hotkeyManager
+        )
     }
 
     // MARK: - Global Hotkey (Cmd+Shift+L)

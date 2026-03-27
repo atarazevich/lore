@@ -1,0 +1,415 @@
+import AppKit
+import os
+
+@MainActor
+final class HotkeyManager {
+    private let log = Logger(subsystem: "com.lore.app", category: "HotkeyManager")
+    private weak var coordinator: DictationCoordinator?
+    private weak var settings: AppSettings?
+
+    private var globalFlagsMonitor: Any?
+    private var globalKeyMonitor: Any?
+    private var localFlagsMonitor: Any?
+    private var localKeyMonitor: Any?
+
+    private var fnDown = false
+    private var fnTimer: Task<Void, Never>?
+    /// Debounce timer for Fn release — Fn modifier flag flickers when other keys pressed
+    private var fnReleaseDebounce: Task<Void, Never>?
+    private var isHoldMode = false
+    /// True when Fn was held at the moment Space locked. First Fn release after this should be ignored.
+    private var fnHeldAtLock = false
+    /// Locked = recording continues after Fn release; stopped by Fn or Esc
+    private(set) var isLocked = false
+    /// Set synchronously so the local monitor closure can check it without main actor hop
+    nonisolated(unsafe) private var isRecordingFlag = false
+    /// Synchronous mirror of isLocked for CGEvent tap callback
+    nonisolated(unsafe) private var isLockedFlag = false
+    /// Synchronous mirror: true when upgrade panel is showing
+    nonisolated(unsafe) private var isUpgradeShowingFlag = false
+    /// Synchronous mirror: true during pre-buffer phase (before hold confirmed)
+    nonisolated(unsafe) private var isPreBufferingFlag = false
+
+    /// CGEvent tap for consuming Space/Esc when external apps are focused
+    private var eventTap: CFMachPort?
+    private var runLoopSource: CFRunLoopSource?
+
+    func install(coordinator: DictationCoordinator, settings: AppSettings) {
+        self.coordinator = coordinator
+        self.settings = settings
+
+        globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            Task { @MainActor in
+                self?.handleFlagsChanged(event)
+            }
+        }
+
+        globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            Task { @MainActor in
+                self?.handleKeyDown(event)
+            }
+        }
+
+        localFlagsMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+            Task { @MainActor in
+                self?.handleFlagsChanged(event)
+            }
+            return event
+        }
+
+        // Local key monitor — return nil to consume events we handle
+        localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self else { return event }
+
+            // Fn+V/T while recording → consume (use event's own Fn flag, not tracked flag)
+            if event.modifierFlags.contains(.function) && self.isRecordingFlag {
+                if event.keyCode == 9 || event.keyCode == 17 { // V or T
+                    Task { @MainActor in
+                        self.handleKeyDown(event)
+                    }
+                    return nil
+                }
+            }
+
+            // C or T while upgrade panel is showing → apply upgrade
+            // Only match bare keypress (no Cmd/Ctrl/Option modifiers) to avoid eating Cmd+C etc.
+            if self.isUpgradeShowingFlag,
+               event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
+               let chars = event.characters?.lowercased() {
+                var action: UpgradeAction?
+                if chars == "c" { action = .cleanup }
+                else if chars == "t" { action = .translate }
+                if let action {
+                    Task { @MainActor in
+                        diagLog("[HOTKEY] \(action) key → apply upgrade")
+                        await self.coordinator?.applyUpgradeByKey(action)
+                    }
+                    return nil
+                }
+            }
+
+            // Esc while upgrade panel is showing → dismiss
+            if event.keyCode == 53, self.isUpgradeShowingFlag {
+                Task { @MainActor in
+                    self.coordinator?.dismissUpgrades()
+                    diagLog("[HOTKEY] Esc → dismiss upgrades")
+                }
+                return nil
+            }
+
+            // Space while recording or pre-buffering → lock (consume the event)
+            if event.keyCode == 49,
+               (self.isRecordingFlag || self.isPreBufferingFlag),
+               !self.isLocked {
+                Task { @MainActor in
+                    self.handleKeyDown(event)
+                }
+                return nil // swallow the Space
+            }
+
+            // Esc while locked → discard (consume)
+            if event.keyCode == 53, self.isLocked {
+                Task { @MainActor in
+                    self.handleKeyDown(event)
+                }
+                return nil // swallow the Esc
+            }
+
+            // All other keys pass through normally
+            Task { @MainActor in
+                self.handleKeyDown(event)
+            }
+            return event
+        }
+
+        // CGEvent tap — intercepts Space/Esc globally so they don't reach external apps
+        let eventMask = (1 << CGEventType.keyDown.rawValue)
+        let userInfo = Unmanaged.passUnretained(self).toOpaque()
+
+        eventTap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap,
+            place: .headInsertEventTap,
+            options: .defaultTap,
+            eventsOfInterest: CGEventMask(eventMask),
+            callback: { _, type, event, refcon -> Unmanaged<CGEvent>? in
+                // If the tap is disabled by the system, re-enable it
+                if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    if let refcon {
+                        let mgr = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
+                        if let tap = mgr.eventTap {
+                            CGEvent.tapEnable(tap: tap, enable: true)
+                        }
+                    }
+                    return Unmanaged.passRetained(event)
+                }
+
+                guard let refcon else { return Unmanaged.passRetained(event) }
+                let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
+
+                let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+                let flags = event.flags
+
+                // Fn+V/T while recording → set pre-paste mode
+                // Use the EVENT's own Fn flag (reliable) instead of tracked fnDown (flickers)
+                let fnHeld = flags.contains(.maskSecondaryFn)
+                if fnHeld && manager.isRecordingFlag {
+                    if keyCode == 9 { // V
+                        Task { @MainActor in
+                            manager.coordinator?.setPendingMode(.cleanup)
+                            diagLog("[HOTKEY] Fn+V (CGEvent) → pending cleanup")
+                        }
+                        return nil
+                    } else if keyCode == 17 { // T
+                        Task { @MainActor in
+                            manager.coordinator?.setPendingMode(.translate)
+                            diagLog("[HOTKEY] Fn+T (CGEvent) → pending translate")
+                        }
+                        return nil
+                    }
+                }
+
+                // C or T while upgrade panel showing → apply upgrade
+                // Check no modifiers (allow Cmd+C etc. through)
+                let hasModifiers = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
+                if manager.isUpgradeShowingFlag && !hasModifiers {
+                    if let nsEvent = NSEvent(cgEvent: event),
+                       let chars = nsEvent.characters?.lowercased() {
+                        var action: UpgradeAction?
+                        if chars == "c" { action = .cleanup }
+                        else if chars == "t" { action = .translate }
+                        if let action {
+                            Task { @MainActor in
+                                diagLog("[HOTKEY] \(action) key (CGEvent tap) → apply upgrade")
+                                await manager.coordinator?.applyUpgradeByKey(action)
+                            }
+                            return nil
+                        }
+                    }
+                }
+
+                // Esc while upgrade panel showing → dismiss
+                if keyCode == 53 && manager.isUpgradeShowingFlag {
+                    Task { @MainActor in
+                        manager.coordinator?.dismissUpgrades()
+                        diagLog("[HOTKEY] Esc (CGEvent tap) → dismiss upgrades")
+                    }
+                    return nil
+                }
+
+                // Space while recording/pre-buffering and not locked → consume and lock
+                if keyCode == 49 && (manager.isRecordingFlag || manager.isPreBufferingFlag) && !manager.isLockedFlag {
+                    manager.isLockedFlag = true
+                    manager.isPreBufferingFlag = false
+                    manager.isRecordingFlag = true
+                    Task { @MainActor in
+                        if manager.coordinator?.isPreBuffering == true {
+                            manager.coordinator?.confirmRecording()
+                        }
+                        manager.fnHeldAtLock = manager.fnDown
+                        manager.isLocked = true
+                        manager.fnTimer?.cancel()
+                        manager.fnTimer = nil
+                        manager.isHoldMode = false
+                        diagLog("[HOTKEY] Space (CGEvent tap) → confirm + locked")
+                    }
+                    return nil
+                }
+
+                // Esc while locked → consume and discard
+                if keyCode == 53 && manager.isLockedFlag {
+                    manager.isLockedFlag = false
+                    manager.isRecordingFlag = false
+                    Task { @MainActor in
+                        manager.isLocked = false
+                        manager.coordinator?.discardRecording()
+                        diagLog("[HOTKEY] Esc (CGEvent tap) → discard")
+                    }
+                    return nil
+                }
+
+                return Unmanaged.passRetained(event)
+            },
+            userInfo: userInfo
+        )
+
+        if let eventTap {
+            runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
+            CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+            CGEvent.tapEnable(tap: eventTap, enable: true)
+        }
+
+        log.info("Hotkey manager installed")
+    }
+
+    func uninstall() {
+        if let globalFlagsMonitor { NSEvent.removeMonitor(globalFlagsMonitor) }
+        if let globalKeyMonitor { NSEvent.removeMonitor(globalKeyMonitor) }
+        if let localFlagsMonitor { NSEvent.removeMonitor(localFlagsMonitor) }
+        if let localKeyMonitor { NSEvent.removeMonitor(localKeyMonitor) }
+        globalFlagsMonitor = nil
+        globalKeyMonitor = nil
+        localFlagsMonitor = nil
+        localKeyMonitor = nil
+
+        if let eventTap {
+            CGEvent.tapEnable(tap: eventTap, enable: false)
+        }
+        if let runLoopSource {
+            CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
+        }
+        eventTap = nil
+        runLoopSource = nil
+
+        fnTimer?.cancel()
+        fnTimer = nil
+        fnReleaseDebounce?.cancel()
+        fnReleaseDebounce = nil
+        coordinator = nil
+        settings = nil
+        log.info("Hotkey manager uninstalled")
+    }
+
+    /// Update the upgrade-showing flag for the CGEvent tap (called from polling loop).
+    func updateUpgradeShowingFlag(_ showing: Bool) {
+        isUpgradeShowingFlag = showing
+    }
+
+    private var isEnabled: Bool {
+        settings?.dictationEnabled ?? false
+    }
+
+    private func handleFlagsChanged(_ event: NSEvent) {
+        let hotkeyKey = settings?.hotkeyKey ?? .fn
+        let hotkeyPressed = hotkeyKey.matchesPress(event)
+
+        if hotkeyPressed && !fnDown {
+            fnDown = true
+            fnReleaseDebounce?.cancel() // Cancel any pending debounced release
+
+            guard isEnabled else { return }
+
+            if isLocked {
+                // Don't stop yet — V/T chord may follow. Stop happens on Fn release.
+                diagLog("[HOTKEY] hotkey pressed while locked → waiting for chord or release")
+                return
+            }
+
+            // Start pre-buffering immediately (audio capture before hold confirmed)
+            isPreBufferingFlag = true
+            coordinator?.startPreBuffer()
+
+            isHoldMode = false
+            fnTimer = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled, let self else { return }
+                self.isHoldMode = true
+                self.isRecordingFlag = true
+                self.isPreBufferingFlag = false
+                diagLog("[HOTKEY] hold confirmed (150ms) → recording")
+                self.coordinator?.confirmRecording()
+            }
+        } else if !hotkeyPressed && fnDown {
+            fnDown = false
+            fnTimer?.cancel()
+            fnTimer = nil
+
+            if isLocked {
+                if fnHeldAtLock {
+                    // First release after lock-while-holding — just continue recording
+                    fnHeldAtLock = false
+                    diagLog("[HOTKEY] hotkey released after lock → continues (initial release)")
+                    return
+                }
+                // Subsequent release — stop recording (with debounce for Fn flag flicker)
+                fnReleaseDebounce?.cancel()
+                fnReleaseDebounce = Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(30))
+                    guard !Task.isCancelled, let self, !self.fnDown else { return }
+                    self.isLocked = false
+                    self.isLockedFlag = false
+                    self.isRecordingFlag = false
+                    diagLog("[HOTKEY] hotkey released while locked → stop + paste")
+                    await self.coordinator?.stopRecording()
+                }
+                return
+            }
+
+            if isHoldMode {
+                // Debounce hold-to-talk release too (same Fn flag flickering issue)
+                fnReleaseDebounce?.cancel()
+                fnReleaseDebounce = Task { [weak self] in
+                    try? await Task.sleep(for: .milliseconds(30))
+                    guard !Task.isCancelled, let self, !self.fnDown else { return }
+                    self.isHoldMode = false
+                    self.isRecordingFlag = false
+                    diagLog("[HOTKEY] hold mode release → stop + paste")
+                    await self.coordinator?.stopRecording()
+                }
+                return
+            }
+
+            // Tap within 150ms — cancel pre-buffer (no debounce needed for taps)
+            isPreBufferingFlag = false
+            coordinator?.cancelPreBuffer()
+        }
+    }
+
+    private func handleKeyDown(_ event: NSEvent) {
+        guard isEnabled, let coordinator else { return }
+
+        // Fn+V/T while recording → set pre-paste cleanup mode
+        // Use event's own .function flag (reliable even when Fn modifier flickers)
+        if event.modifierFlags.contains(.function) && (coordinator.state == .recording || coordinator.isPreBuffering) {
+            if event.keyCode == 9 { // V
+                coordinator.setPendingMode(.cleanup)
+                diagLog("[HOTKEY] Fn+V → pending cleanup")
+                return
+            } else if event.keyCode == 17 { // T
+                coordinator.setPendingMode(.translate)
+                diagLog("[HOTKEY] Fn+T → pending translate")
+                return
+            }
+        }
+
+        // Esc while upgrade panel showing → dismiss
+        if event.keyCode == 53, coordinator.isUpgradePanelVisible {
+            coordinator.dismissUpgrades()
+            diagLog("[HOTKEY] Esc → dismiss upgrades")
+            return
+        }
+
+        // Space while recording or pre-buffering → confirm + lock
+        if event.keyCode == 49 && (coordinator.state == .recording || coordinator.isPreBuffering) && !isLocked {
+            fnTimer?.cancel()
+            fnTimer = nil
+            isHoldMode = false
+            isPreBufferingFlag = false
+            fnHeldAtLock = fnDown  // Track: if Fn held at lock, first release should continue
+            if coordinator.isPreBuffering {
+                coordinator.confirmRecording()
+            }
+            isLocked = true
+            isLockedFlag = true
+            isRecordingFlag = true
+            diagLog("[HOTKEY] Space → confirm + locked")
+            return
+        }
+
+        // Esc while locked → discard
+        if event.keyCode == 53 && isLocked {
+            isLocked = false
+            isLockedFlag = false
+            isRecordingFlag = false
+            diagLog("[HOTKEY] Esc while locked → discard")
+            coordinator.discardRecording()
+            return
+        }
+
+        // Ctrl+Cmd+V to re-paste last transcript
+        if event.keyCode == 9
+            && event.modifierFlags.contains(.control)
+            && event.modifierFlags.contains(.command) {
+            coordinator.pasteLastTranscript()
+        }
+    }
+}

@@ -95,6 +95,12 @@ final class AppCoordinator {
     var audioRecorder: AudioRecorder?
     var batchEngine: BatchTranscriptionEngine?
 
+    // MARK: - Dictation
+
+    let dictationCoordinator = DictationCoordinator()
+    let hotkeyManager = HotkeyManager()
+    let dictationIndicator = DictationIndicatorManager()
+
     @ObservationIgnored nonisolated(unsafe) private var _knowledgeBase: KnowledgeBase?
     nonisolated var knowledgeBase: KnowledgeBase? {
         get { _knowledgeBase }
