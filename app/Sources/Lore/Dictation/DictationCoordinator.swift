@@ -61,6 +61,9 @@ final class DictationCoordinator {
     func startPreBuffer() {
         guard !isPreBuffering else { return }
         guard state == .idle || state == .done else { return }
+        if settings == nil {
+            diagLog("[DICTATION] WARNING: settings not wired — dictation disabled")
+        }
         guard let settings, settings.dictationEnabled else { return }
 
         autoHideTask?.cancel()

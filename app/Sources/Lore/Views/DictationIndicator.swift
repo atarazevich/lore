@@ -248,7 +248,7 @@ final class DictationIndicatorManager {
         p.backgroundColor = .clear
         p.hasShadow = false
         p.becomesKeyOnlyIfNeeded = true
-        p.sharingType = .readOnly
+        p.setFrameAutosaveName("")
 
         let hv = NSHostingView(rootView: DictationIndicatorHost(model: model))
         if #available(macOS 13.0, *) {
