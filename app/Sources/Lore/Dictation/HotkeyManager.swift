@@ -156,12 +156,14 @@ final class HotkeyManager {
                     if keyCode == 9 { // V
                         Task { @MainActor in
                             manager.coordinator?.setPendingMode(.cleanup)
+                            if manager.isLocked { manager.fnHeldAtLock = true }
                             diagLog("[HOTKEY] Fn+V (CGEvent) → pending cleanup")
                         }
                         return nil
                     } else if keyCode == 17 { // T
                         Task { @MainActor in
                             manager.coordinator?.setPendingMode(.translate)
+                            if manager.isLocked { manager.fnHeldAtLock = true }
                             diagLog("[HOTKEY] Fn+T (CGEvent) → pending translate")
                         }
                         return nil
@@ -362,10 +364,12 @@ final class HotkeyManager {
         if event.modifierFlags.contains(.function) && (coordinator.state == .recording || coordinator.isPreBuffering) {
             if event.keyCode == 9 { // V
                 coordinator.setPendingMode(.cleanup)
+                if isLocked { fnHeldAtLock = true }
                 diagLog("[HOTKEY] Fn+V → pending cleanup")
                 return
             } else if event.keyCode == 17 { // T
                 coordinator.setPendingMode(.translate)
+                if isLocked { fnHeldAtLock = true }
                 diagLog("[HOTKEY] Fn+T → pending translate")
                 return
             }
