@@ -230,16 +230,15 @@ final class DictationIndicatorManager {
     private let model = DictationIndicatorModel()
     private var recordingStartDate: Date?
     private var lastPanelSize: NSSize = .zero
-    private var screenWidth: CGFloat = 1440
-    private var visibleTop: CGFloat = 900
+    private var currentScreen: NSScreen?
 
     func start(coordinator: DictationCoordinator, hotkeyManager: HotkeyManager) {
-        let screen = NSScreen.main
-        screenWidth = screen?.frame.width ?? 1440
-        visibleTop = screen?.visibleFrame.maxY ?? ((screen?.frame.height ?? 900) - 25)
+        guard let screen = screenForMouse() else { return }
+        currentScreen = screen
 
         // Initial off-screen rect — panel resizes to content dynamically
-        let rect = NSRect(x: screenWidth / 2, y: visibleTop - 50, width: 1, height: 1)
+        let screenOrigin = screen.frame.origin
+        let rect = NSRect(x: screenOrigin.x + screen.frame.width / 2, y: screen.visibleFrame.maxY - 50, width: 1, height: 1)
         let p = OverlayPanel(contentRect: rect)
         p.styleMask = [.nonactivatingPanel, .fullSizeContentView]
         p.titlebarAppearsTransparent = true
@@ -321,25 +320,45 @@ final class DictationIndicatorManager {
 
     private func resizePanelToContent() {
         guard let panel, let hostingView else { return }
+        guard let screen = screenForMouse() else { return }
         hostingView.layoutSubtreeIfNeeded()
         let size = hostingView.fittingSize
         guard size.width > 10 && size.height > 5 else { return }
 
+        // Detect cross-screen move by identity, not dimensions
+        let screenChanged = screen !== currentScreen
+        if screenChanged {
+            currentScreen = screen
+        }
+
         // Only resize when dimensions actually change (avoid 20x/sec animation calls)
         let widthChanged = abs(size.width - lastPanelSize.width) > 1
         let heightChanged = abs(size.height - lastPanelSize.height) > 1
-        guard widthChanged || heightChanged else { return }
+        guard widthChanged || heightChanged || screenChanged else { return }
         lastPanelSize = size
 
-        let x = (screenWidth - size.width) / 2
-        let y = visibleTop - size.height - 8
+        let screenOrigin = screen.frame.origin
+        let x = screenOrigin.x + (screen.frame.width - size.width) / 2
+        let y = screen.visibleFrame.maxY - size.height - 8
         let newFrame = NSRect(x: x, y: y, width: size.width, height: size.height)
 
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.15
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            panel.animator().setFrame(newFrame, display: true)
+        if screenChanged {
+            // Snap instantly across screens — no sliding through the gap
+            panel.setFrame(newFrame, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.15
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(newFrame, display: true)
+            }
         }
+    }
+
+    private func screenForMouse() -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouseLocation) }
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
     }
 
     func stop() {
