@@ -7,11 +7,24 @@ import Observation
 @Observable
 @MainActor
 final class SuggestionEngine {
-    private(set) var suggestions: [Suggestion] = []
-    private(set) var isGenerating = false
+    @ObservationIgnored nonisolated(unsafe) private var _suggestions: [Suggestion] = []
+    private(set) var suggestions: [Suggestion] {
+        get { access(keyPath: \.suggestions); return _suggestions }
+        set { withMutation(keyPath: \.suggestions) { _suggestions = newValue } }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _isGenerating = false
+    private(set) var isGenerating: Bool {
+        get { access(keyPath: \.isGenerating); return _isGenerating }
+        set { withMutation(keyPath: \.isGenerating) { _isGenerating = newValue } }
+    }
 
     /// The latest suggestion decision, even if it didn't surface (for logging).
-    private(set) var lastDecision: SuggestionDecision?
+    @ObservationIgnored nonisolated(unsafe) private var _lastDecision: SuggestionDecision?
+    private(set) var lastDecision: SuggestionDecision? {
+        get { access(keyPath: \.lastDecision); return _lastDecision }
+        set { withMutation(keyPath: \.lastDecision) { _lastDecision = newValue } }
+    }
 
     private let client = OpenRouterClient()
     private var currentTask: Task<Void, Never>?
@@ -20,17 +33,23 @@ final class SuggestionEngine {
 
     // MARK: - Thresholds
 
-    private let cooldownSeconds: TimeInterval = 90
+    private var cooldownSeconds: TimeInterval { settings.suggestionVerbosity.cooldownSeconds }
     private let minUtteranceWordCount = 8
     private let minUtteranceCharCount = 30
     private let minKBRelevanceScore: Double = 0.35
 
-    // Gate thresholds
-    private let minRelevanceScore: Double = 0.72
-    private let minHelpfulnessScore: Double = 0.75
-    private let minTimingScore: Double = 0.70
-    private let minNoveltyScore: Double = 0.65
-    private let minConfidenceScore: Double = 0.75
+    // Base gate thresholds, scaled by verbosity
+    private static let baseRelevanceScore: Double = 0.72
+    private static let baseHelpfulnessScore: Double = 0.75
+    private static let baseTimingScore: Double = 0.70
+    private static let baseNoveltyScore: Double = 0.65
+    private static let baseConfidenceScore: Double = 0.75
+
+    private var minRelevanceScore: Double { Self.baseRelevanceScore * settings.suggestionVerbosity.thresholdMultiplier }
+    private var minHelpfulnessScore: Double { Self.baseHelpfulnessScore * settings.suggestionVerbosity.thresholdMultiplier }
+    private var minTimingScore: Double { Self.baseTimingScore * settings.suggestionVerbosity.thresholdMultiplier }
+    private var minNoveltyScore: Double { Self.baseNoveltyScore * settings.suggestionVerbosity.thresholdMultiplier }
+    private var minConfidenceScore: Double { Self.baseConfidenceScore * settings.suggestionVerbosity.thresholdMultiplier }
 
     private let transcriptStore: TranscriptStore
     private let knowledgeBase: KnowledgeBase
@@ -47,16 +66,34 @@ final class SuggestionEngine {
         switch settings.llmProvider {
         case .openRouter: settings.openRouterApiKey
         case .ollama: nil
+        case .mlx: nil
+        case .openAICompatible: settings.openAILLMApiKey.isEmpty ? nil : settings.openAILLMApiKey
         }
     }
 
     /// Returns the base URL for the current LLM provider (nil uses the default OpenRouter URL).
+    /// Throws a fatal error for Ollama if the URL is invalid, preventing silent fallback to OpenRouter.
     private var llmBaseURL: URL? {
         switch settings.llmProvider {
         case .openRouter: return nil
         case .ollama:
-            let base = settings.ollamaBaseURL.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-            return URL(string: base + "/v1/chat/completions")
+            guard let url = OpenRouterClient.chatCompletionsURL(from: settings.ollamaBaseURL) else {
+                print("[SuggestionEngine] Invalid Ollama URL: \(settings.ollamaBaseURL)")
+                return nil
+            }
+            return url
+        case .mlx:
+            guard let url = OpenRouterClient.chatCompletionsURL(from: settings.mlxBaseURL) else {
+                print("[SuggestionEngine] Invalid MLX URL: \(settings.mlxBaseURL)")
+                return nil
+            }
+            return url
+        case .openAICompatible:
+            guard let url = OpenRouterClient.chatCompletionsURL(from: settings.openAILLMBaseURL) else {
+                print("[SuggestionEngine] Invalid OpenAI Compatible URL: \(settings.openAILLMBaseURL)")
+                return nil
+            }
+            return url
         }
     }
 
@@ -65,6 +102,8 @@ final class SuggestionEngine {
         switch settings.llmProvider {
         case .openRouter: settings.selectedModel
         case .ollama: settings.ollamaLLMModel
+        case .mlx: settings.mlxModel
+        case .openAICompatible: settings.openAILLMModel
         }
     }
 
@@ -81,7 +120,11 @@ final class SuggestionEngine {
         case .openRouter:
             guard !settings.openRouterApiKey.isEmpty else { return }
         case .ollama:
-            break // No API key needed
+            guard llmBaseURL != nil else { return }
+        case .mlx:
+            guard llmBaseURL != nil else { return }
+        case .openAICompatible:
+            guard llmBaseURL != nil else { return }
         }
 
         currentTask = Task {
@@ -182,10 +225,10 @@ final class SuggestionEngine {
         if fillerRatio > 0.6 { return false }
 
         // Near-duplicate check against recent them utterances
-        let recentThem = transcriptStore.recentThemUtterances.suffix(3)
+        let recentThem = transcriptStore.recentRemoteUtterances.suffix(3)
         for recent in recentThem {
             if recent.id == utterance.id { continue }
-            if textSimilarity(text, recent.text) > 0.8 { return false }
+            if TextSimilarity.jaccard(text, recent.text) > 0.8 { return false }
         }
 
         return true
@@ -465,7 +508,7 @@ final class SuggestionEngine {
 
         var conversationText = ""
         for u in recentUtterances {
-            let label = u.speaker == .you ? "You" : "Them"
+            let label = u.speaker.displayLabel
             conversationText += "\(label): \(u.text)\n"
         }
 
@@ -509,7 +552,7 @@ final class SuggestionEngine {
 
         var conversationText = ""
         for u in recentExchange {
-            let label = u.speaker == .you ? "You" : "Them"
+            let label = u.speaker.displayLabel
             conversationText += "\(label): \(u.text)\n"
         }
 
@@ -632,15 +675,5 @@ final class SuggestionEngine {
             s = String(s.dropLast(3))
         }
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    /// Simple word-overlap similarity (Jaccard) for near-duplicate detection.
-    private func textSimilarity(_ a: String, _ b: String) -> Double {
-        let setA = Set(a.lowercased().split(separator: " "))
-        let setB = Set(b.lowercased().split(separator: " "))
-        guard !setA.isEmpty || !setB.isEmpty else { return 1.0 }
-        let intersection = setA.intersection(setB).count
-        let union = setA.union(setB).count
-        return Double(intersection) / Double(union)
     }
 }

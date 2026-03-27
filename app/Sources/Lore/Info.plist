@@ -9,28 +9,46 @@
     <key>CFBundleIdentifier</key>
     <string>com.lore.app</string>
     <key>CFBundleVersion</key>
-    <string>1.13.0</string>
+    <string>1.22.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.13.0</string>
+    <string>1.22.0</string>
     <key>CFBundleExecutable</key>
     <string>Lore</string>
     <key>CFBundleIconFile</key>
     <string>AppIcon</string>
+    <key>CFBundleURLTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleURLName</key>
+            <string>com.lore.app</string>
+            <key>CFBundleURLSchemes</key>
+            <array>
+                <string>lore</string>
+            </array>
+        </dict>
+    </array>
     <key>CFBundlePackageType</key>
     <string>APPL</string>
     <key>LSMinimumSystemVersion</key>
     <string>15.0</string>
     <key>NSMicrophoneUsageDescription</key>
     <string>Lore needs microphone access to transcribe your voice in real-time during conversations.</string>
-    <key>NSScreenCaptureUsageDescription</key>
-    <string>Lore needs screen capture permission to capture system audio from other participants.</string>
+    <key>NSAudioCaptureUsageDescription</key>
+    <string>Lore needs system audio recording access to transcribe other participants in real time.</string>
     <key>LSApplicationCategoryType</key>
     <string>public.app-category.productivity</string>
     <key>SUFeedURL</key>
     <string>https://updates.dev.cognition.design/appcast.xml</string>
-    <key>SUPublicEDKey</key>
-    <string>0Kmn2Nq47DxmOz4XWa53xUJ1mcrheVWKmM+pxNPMF1o=</string>
     <key>SUEnableAutomaticChecks</key>
     <true/>
+    <key>SUPublicEDKey</key>
+    <string>RMSxoyjk8gEBvqmECGMvBLYQ7Kl7ptbacDBWSbsdgeI=</string>
+    <key>LSUIElement</key>
+    <true/>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
 </dict>
 </plist>

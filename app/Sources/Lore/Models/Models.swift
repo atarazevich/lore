@@ -1,48 +1,5 @@
 import Foundation
 
-enum Speaker: String, Codable, Sendable {
-    case you
-    case them
-}
-
-struct Utterance: Identifiable, Codable, Sendable {
-    let id: UUID
-    let text: String
-    let speaker: Speaker
-    let timestamp: Date
-
-    init(text: String, speaker: Speaker, timestamp: Date = .now) {
-        self.id = UUID()
-        self.text = text
-        self.speaker = speaker
-        self.timestamp = timestamp
-    }
-}
-
-// MARK: - Conversation State
-
-struct ConversationState: Sendable, Codable {
-    var currentTopic: String
-    var shortSummary: String
-    var openQuestions: [String]
-    var activeTensions: [String]
-    var recentDecisions: [String]
-    var themGoals: [String]
-    var suggestedAnglesRecentlyShown: [String]
-    var lastUpdatedAt: Date
-
-    static let empty = ConversationState(
-        currentTopic: "",
-        shortSummary: "",
-        openQuestions: [],
-        activeTensions: [],
-        recentDecisions: [],
-        themGoals: [],
-        suggestedAnglesRecentlyShown: [],
-        lastUpdatedAt: .distantPast
-    )
-}
-
 // MARK: - Suggestion Trigger
 
 enum SuggestionTriggerKind: String, Codable, Sendable {
@@ -156,6 +113,7 @@ struct SessionRecord: Codable {
     let suggestionDecision: SuggestionDecision?
     let surfacedSuggestionText: String?
     let conversationStateSummary: String?
+    let refinedText: String?
 
     init(
         speaker: Speaker,
@@ -165,7 +123,8 @@ struct SessionRecord: Codable {
         kbHits: [String]? = nil,
         suggestionDecision: SuggestionDecision? = nil,
         surfacedSuggestionText: String? = nil,
-        conversationStateSummary: String? = nil
+        conversationStateSummary: String? = nil,
+        refinedText: String? = nil
     ) {
         self.speaker = speaker
         self.text = text
@@ -175,6 +134,18 @@ struct SessionRecord: Codable {
         self.suggestionDecision = suggestionDecision
         self.surfacedSuggestionText = surfacedSuggestionText
         self.conversationStateSummary = conversationStateSummary
+        self.refinedText = refinedText
+    }
+
+    func withRefinedText(_ text: String?) -> SessionRecord {
+        SessionRecord(
+            speaker: speaker, text: self.text, timestamp: timestamp,
+            suggestions: suggestions, kbHits: kbHits,
+            suggestionDecision: suggestionDecision,
+            surfacedSuggestionText: surfacedSuggestionText,
+            conversationStateSummary: conversationStateSummary,
+            refinedText: text
+        )
     }
 }
 
@@ -209,6 +180,16 @@ struct SessionIndex: Identifiable, Codable, Sendable {
     var title: String?
     var utteranceCount: Int
     var hasNotes: Bool
+    /// BCP 47 language/locale used for transcription (e.g. "en-US", "fr-FR").
+    var language: String?
+    /// The detected meeting application name (e.g. "Zoom", "Microsoft Teams").
+    var meetingApp: String?
+    /// The ASR engine used for transcription (e.g. "parakeetV2").
+    var engine: String?
+    /// User-assigned tags for session organization.
+    var tags: [String]?
+    /// How the session was created (nil for live sessions, "imported" for imported audio).
+    var source: String?
 }
 
 struct SessionSidecar: Codable, Sendable {

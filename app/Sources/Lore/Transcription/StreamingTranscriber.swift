@@ -3,63 +3,61 @@ import FluidAudio
 import os
 
 /// Consumes an audio buffer stream, detects speech via Silero VAD,
-/// and transcribes completed speech segments via Parakeet-TDT.
+/// and transcribes completed speech segments via the TranscriptionBackend protocol.
 final class StreamingTranscriber: @unchecked Sendable {
-    private enum Backend: @unchecked Sendable {
-        case parakeet(AsrManager)
-        case qwen3(Qwen3AsrManager, Qwen3AsrConfig.Language?)
-    }
-
-    private let backend: Backend
+    private let backend: any TranscriptionBackend
+    private let locale: Locale
     private let vadManager: VadManager
     private let speaker: Speaker
     private let onPartial: @Sendable (String) -> Void
     private let onFinal: @Sendable (String) -> Void
-    private let log = Logger(subsystem: "com.lore.app", category: "StreamingTranscriber")
+    private let log = Logger(subsystem: "com.lore", category: "StreamingTranscriber")
 
+    /// Resampler from source format to 16kHz mono Float32.
     private var converter: AVAudioConverter?
+    private let targetFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: 16000,
+        channels: 1,
+        interleaved: false
+    )!
+
+    /// Flush interval in 16kHz samples. Determined by the transcription model.
+    private let flushInterval: Int
 
     init(
-        asrManager: AsrManager,
+        backend: any TranscriptionBackend,
+        locale: Locale,
         vadManager: VadManager,
         speaker: Speaker,
+        flushInterval: Int,
         onPartial: @escaping @Sendable (String) -> Void,
         onFinal: @escaping @Sendable (String) -> Void
     ) {
-        self.backend = .parakeet(asrManager)
+        self.backend = backend
+        self.locale = locale
         self.vadManager = vadManager
         self.speaker = speaker
-        self.onPartial = onPartial
-        self.onFinal = onFinal
-    }
-
-    init(
-        qwen3Manager: Qwen3AsrManager,
-        qwenLanguage: Qwen3AsrConfig.Language?,
-        vadManager: VadManager,
-        speaker: Speaker,
-        onPartial: @escaping @Sendable (String) -> Void,
-        onFinal: @escaping @Sendable (String) -> Void
-    ) {
-        self.backend = .qwen3(qwen3Manager, qwenLanguage)
-        self.vadManager = vadManager
-        self.speaker = speaker
+        self.flushInterval = flushInterval
         self.onPartial = onPartial
         self.onFinal = onFinal
     }
 
     /// Silero VAD expects chunks of 4096 samples (256ms at 16kHz).
     private static let vadChunkSize = 4096
-    private static let minimumSpeechSamples = 8000
+    /// Parakeet TDT requires >= 1s of audio; shorter segments produce unreliable output.
+    private static let minimumSpeechSamples = 16_000
     private static let prerollChunkCount = 2
-    /// Flush speech for transcription every ~3 seconds (48,000 samples at 16kHz).
-    private static let flushInterval = 48_000
+    // flushInterval is now an instance property, set per-model via TranscriptionModel.flushIntervalSamples
+    /// Number of trailing words to carry across segment boundaries for decoder priming.
+    private static let contextWordCount = 5
 
     /// Main loop: reads audio buffers, runs VAD, transcribes speech segments.
     func run(stream: AsyncStream<AVAudioPCMBuffer>) async {
         var vadState = await vadManager.makeStreamState()
         var speechSamples: [Float] = []
         var vadBuffer: [Float] = []
+        var vadReadIndex = 0
         var recentChunks: [[Float]] = []
         var isSpeaking = false
         var bufferCount = 0
@@ -68,21 +66,27 @@ final class StreamingTranscriber: @unchecked Sendable {
             bufferCount += 1
             if bufferCount <= 3 {
                 let fmt = buffer.format
-                diagLog("[\(speaker.rawValue)] buffer #\(bufferCount): frames=\(buffer.frameLength) sr=\(fmt.sampleRate) ch=\(fmt.channelCount) interleaved=\(fmt.isInterleaved) common=\(fmt.commonFormat.rawValue)")
+                diagLog("[\(speaker.storageKey)] buffer #\(bufferCount): frames=\(buffer.frameLength) sr=\(fmt.sampleRate) ch=\(fmt.channelCount) interleaved=\(fmt.isInterleaved) common=\(fmt.commonFormat.rawValue)")
             }
 
-            guard let samples = AudioUtils.extractSamples(buffer, converter: &converter) else { continue }
+            guard let samples = extractSamples(buffer) else { continue }
 
             if bufferCount <= 3 {
                 let maxVal = samples.max() ?? 0
-                diagLog("[\(speaker.rawValue)] samples: count=\(samples.count) max=\(maxVal)")
+                diagLog("[\(speaker.storageKey)] samples: count=\(samples.count) max=\(maxVal)")
             }
 
             vadBuffer.append(contentsOf: samples)
 
-            while vadBuffer.count >= Self.vadChunkSize {
-                let chunk = Array(vadBuffer.prefix(Self.vadChunkSize))
-                vadBuffer.removeFirst(Self.vadChunkSize)
+            while vadBuffer.count - vadReadIndex >= Self.vadChunkSize {
+                let chunk = Array(vadBuffer[vadReadIndex..<(vadReadIndex + Self.vadChunkSize)])
+                vadReadIndex += Self.vadChunkSize
+
+                // Compact when we've consumed more than half to bound memory growth
+                if vadReadIndex > vadBuffer.count / 2 {
+                    vadBuffer.removeFirst(vadReadIndex)
+                    vadReadIndex = 0
+                }
                 let wasSpeaking = isSpeaking
 
                 var startedSpeech = false
@@ -104,7 +108,7 @@ final class StreamingTranscriber: @unchecked Sendable {
                                 isSpeaking = true
                                 startedSpeech = true
                                 speechSamples = recentChunks.suffix(Self.prerollChunkCount).flatMap { $0 }
-                                diagLog("[\(self.speaker.rawValue)] speech start")
+                                diagLog("[\(self.speaker.storageKey)] speech start")
                             }
 
                         case .speechEnd:
@@ -124,7 +128,7 @@ final class StreamingTranscriber: @unchecked Sendable {
 
                     if endedSpeech {
                         isSpeaking = false
-                        diagLog("[\(self.speaker.rawValue)] speech end, samples=\(speechSamples.count)")
+                        diagLog("[\(self.speaker.storageKey)] speech end, samples=\(speechSamples.count)")
                         if speechSamples.count > Self.minimumSpeechSamples {
                             let segment = speechSamples
                             speechSamples.removeAll(keepingCapacity: true)
@@ -134,8 +138,8 @@ final class StreamingTranscriber: @unchecked Sendable {
                         }
                     } else if isSpeaking {
 
-                        // Flush every ~3s for near-real-time output during continuous speech
-                        if speechSamples.count >= Self.flushInterval {
+                        // Flush on long continuous speech (see flushInterval)
+                        if speechSamples.count >= flushInterval {
                             let segment = speechSamples
                             speechSamples.removeAll(keepingCapacity: true)
                             await transcribeSegment(segment)
@@ -152,26 +156,102 @@ final class StreamingTranscriber: @unchecked Sendable {
         }
     }
 
+    /// Trailing words from the last transcribed segment, used to prime the next segment's decoder.
+    private var previousContext: String?
+
     private func transcribeSegment(_ samples: [Float]) async {
         do {
-            let text: String
-            switch backend {
-            case .parakeet(let asrManager):
-                let result = try await asrManager.transcribe(samples)
-                text = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
-            case .qwen3(let qwen3Manager, let qwenLanguage):
-                text = try await qwen3Manager.transcribe(
-                    audioSamples: samples,
-                    language: qwenLanguage,
-                    maxNewTokens: 512
-                ).trimmingCharacters(in: .whitespacesAndNewlines)
-            }
+            let text = try await backend.transcribe(samples, locale: locale, previousContext: previousContext)
             guard !text.isEmpty else { return }
-            log.info("[\(self.speaker.rawValue)] transcribed: \(text.prefix(80))")
+            log.info("[\(self.speaker.storageKey)] transcribed: \(text.prefix(80))")
+            // Store trailing words for cross-segment context
+            let words = text.split(separator: " ")
+            previousContext = words.suffix(Self.contextWordCount).joined(separator: " ")
             onFinal(text)
         } catch {
             log.error("ASR error: \(error.localizedDescription)")
         }
     }
 
+    /// Extract [Float] samples from an AVAudioPCMBuffer, resampling if needed.
+    private func extractSamples(_ buffer: AVAudioPCMBuffer) -> [Float]? {
+        let sourceFormat = buffer.format
+        let frameLength = Int(buffer.frameLength)
+        guard frameLength > 0 else { return nil }
+
+        // Fast path: already Float32 at 16kHz (common for system audio capture)
+        if sourceFormat.commonFormat == .pcmFormatFloat32 && sourceFormat.sampleRate == 16000 {
+            guard let channelData = buffer.floatChannelData else { return nil }
+            if sourceFormat.channelCount == 1 {
+                // Mono — direct copy
+                return Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
+            } else {
+                // Multi-channel — take first channel only
+                return Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
+            }
+        }
+
+        // Downmix multi-channel to mono before resampling
+        // (AVAudioConverter mishandles deinterleaved multi-channel input)
+        var inputBuffer = buffer
+        if sourceFormat.channelCount > 1, let src = buffer.floatChannelData {
+            let monoFormat = AVAudioFormat(
+                commonFormat: .pcmFormatFloat32,
+                sampleRate: sourceFormat.sampleRate,
+                channels: 1,
+                interleaved: false
+            )!
+            if let monoBuf = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: buffer.frameCapacity),
+               let dst = monoBuf.floatChannelData?[0] {
+                monoBuf.frameLength = buffer.frameLength
+                let channels = Int(sourceFormat.channelCount)
+                let scale = 1.0 / Float(channels)
+                for i in 0..<frameLength {
+                    var sum: Float = 0
+                    for ch in 0..<channels { sum += src[ch][i] }
+                    dst[i] = sum * scale
+                }
+                inputBuffer = monoBuf
+            }
+        }
+
+        // Slow path: need to resample via AVAudioConverter
+        let inputFormat = inputBuffer.format
+        if converter == nil || converter?.inputFormat != inputFormat {
+            converter = AVAudioConverter(from: inputFormat, to: targetFormat)
+        }
+        guard let converter else { return nil }
+
+        let ratio = targetFormat.sampleRate / inputFormat.sampleRate
+        let outputFrames = AVAudioFrameCount(Double(inputBuffer.frameLength) * ratio)
+        guard outputFrames > 0 else { return nil }
+
+        guard let outputBuffer = AVAudioPCMBuffer(
+            pcmFormat: targetFormat,
+            frameCapacity: outputFrames
+        ) else { return nil }
+
+        var error: NSError?
+        nonisolated(unsafe) var consumed = false
+        converter.convert(to: outputBuffer, error: &error) { _, outStatus in
+            if consumed {
+                outStatus.pointee = .noDataNow
+                return nil
+            }
+            consumed = true
+            outStatus.pointee = .haveData
+            return inputBuffer
+        }
+
+        if let error {
+            log.error("Resample error: \(error.localizedDescription)")
+            return nil
+        }
+
+        guard let channelData = outputBuffer.floatChannelData else { return nil }
+        return Array(UnsafeBufferPointer(
+            start: channelData[0],
+            count: Int(outputBuffer.frameLength)
+        ))
+    }
 }
