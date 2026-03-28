@@ -9,9 +9,9 @@
     <key>CFBundleIdentifier</key>
     <string>com.lore.app</string>
     <key>CFBundleVersion</key>
-    <string>1.14.0</string>
+    <string>1.15.0</string>
     <key>CFBundleShortVersionString</key>
-    <string>1.14.0</string>
+    <string>1.15.0</string>
     <key>CFBundleExecutable</key>
     <string>Lore</string>
     <key>CFBundleIconFile</key>
