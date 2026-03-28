@@ -4,6 +4,9 @@ import os
 @MainActor
 final class HotkeyManager {
     private let log = Logger(subsystem: "com.lore.app", category: "HotkeyManager")
+    private let hkLog = Logger(subsystem: "com.lore.app", category: "hotkey")
+    /// Static logger for use inside the CGEvent tap C callback where instance properties are inaccessible.
+    private static let hkLogStatic = Logger(subsystem: "com.lore.app", category: "hotkey")
     private weak var coordinator: DictationCoordinator?
     private weak var settings: AppSettings?
 
@@ -134,6 +137,8 @@ final class HotkeyManager {
             callback: { _, type, event, refcon -> Unmanaged<CGEvent>? in
                 // If the tap is disabled by the system, re-enable it
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+                    HotkeyManager.hkLogStatic.error("[HK] CGEvent tap was disabled, re-enabling")
+                    diagLog("[HK] CGEvent tap was disabled, re-enabling")
                     if let refcon {
                         let mgr = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
                         if let tap = mgr.eventTap {
@@ -283,6 +288,10 @@ final class HotkeyManager {
     private func handleFlagsChanged(_ event: NSEvent) {
         let hotkeyKey = settings?.hotkeyKey ?? .fn
         let hotkeyPressed = hotkeyKey.matchesPress(event)
+
+        let flags = event.modifierFlags.rawValue
+        hkLog.info("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(self.fnDown) locked=\(self.isLocked) enabled=\(self.isEnabled) hold=\(self.isHoldMode)")
+        diagLog("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(fnDown) locked=\(isLocked) enabled=\(isEnabled) hold=\(isHoldMode)")
 
         if hotkeyPressed && !fnDown {
             fnDown = true
