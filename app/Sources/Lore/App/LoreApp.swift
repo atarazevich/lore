@@ -291,6 +291,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         ProcessInfo.processInfo.environment["LORE_UI_TEST"] != nil
     }
 
+    private var appNapActivity: NSObjectProtocol?
     private var globalHotkeyMonitor: Any?
     private var localHotkeyMonitor: Any?
     private var didSetupDictation = false
@@ -298,6 +299,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         if !isUITest {
             NSApp.setActivationPolicy(.regular)
+            appNapActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Background hotkey monitoring and audio processing"
+            )
         }
 
         let hidden = defaults.object(forKey: "hideFromScreenShare") == nil
