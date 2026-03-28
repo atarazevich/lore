@@ -24,8 +24,17 @@ public struct LoreRootApp: App {
     }
 
     public var body: some Scene {
-        Window("Lore", id: "main") {
-            ContentView(settings: settings)
+        // Meeting mode windows — hidden until meeting mode is ready
+        // Window("Lore", id: "main") {
+        //     ContentView(settings: settings)
+        //         .environment(container)
+        //         .environment(coordinator)
+        //         .defaultAppStorage(defaults)
+        //         ...
+        // }
+
+        Window("Dictation", id: "dictation") {
+            DictationWindowContent(settings: settings)
                 .environment(container)
                 .environment(coordinator)
                 .defaultAppStorage(defaults)
@@ -38,7 +47,7 @@ public struct LoreRootApp: App {
                         appDelegate.setupMenuBarIfNeeded(
                             coordinator: coordinator,
                             settings: settings,
-                            showMainWindow: { [self] in showMainWindow() },
+                            showMainWindow: { [self] in showDictationWindow() },
                             checkForUpdates: { updaterController.checkForUpdatesFromMenuBar() }
                         )
                         appDelegate.setupDictationIfNeeded(
@@ -58,7 +67,8 @@ public struct LoreRootApp: App {
                     switch command {
                     case .openNotes(let sessionID):
                         coordinator.queueSessionSelection(sessionID)
-                        openNotesWindow()
+                        // Meeting notes window hidden — queue for when meeting mode returns
+                        break
                     default:
                         coordinator.queueExternalCommand(command)
                     }
@@ -66,7 +76,7 @@ public struct LoreRootApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
-        .defaultSize(width: 320, height: 560)
+        .defaultSize(width: 400, height: 560)
         .commands {
             CommandGroup(after: .appInfo) {
                 if case .live = container.mode {
@@ -75,21 +85,22 @@ public struct LoreRootApp: App {
                     Divider()
                 }
 
-                Button("Toggle Meeting") {
-                    appDelegate.toggleMeeting()
-                }
-                .keyboardShortcut("l", modifiers: [.command, .shift])
-
-                Button("Past Meetings") {
-                    openNotesWindow()
-                }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
-
-                Button("Import Meeting Recording...") {
-                    importMeetingRecording()
-                }
-                .keyboardShortcut("i", modifiers: [.command, .shift])
-                .disabled(coordinator.isRecording || isBatchEngineBusy)
+                // Meeting mode menu items — hidden until meeting mode is ready
+                // Button("Toggle Meeting") {
+                //     appDelegate.toggleMeeting()
+                // }
+                // .keyboardShortcut("l", modifiers: [.command, .shift])
+                //
+                // Button("Past Meetings") {
+                //     openNotesWindow()
+                // }
+                // .keyboardShortcut("m", modifiers: [.command, .shift])
+                //
+                // Button("Import Meeting Recording...") {
+                //     importMeetingRecording()
+                // }
+                // .keyboardShortcut("i", modifiers: [.command, .shift])
+                // .disabled(coordinator.isRecording || isBatchEngineBusy)
 
                 Button("Dictation") {
                     openWindow(id: "dictation")
@@ -104,32 +115,23 @@ public struct LoreRootApp: App {
             }
         }
 
-        Window("Notes", id: "notes") {
-            NotesView(settings: settings)
-                .environment(container)
-                .environment(coordinator)
-                .defaultAppStorage(defaults)
-        }
-        .defaultSize(width: 700, height: 550)
-
-        Window("Transcript", id: "transcript") {
-            TranscriptWindowView()
-                .environment(container)
-                .environment(coordinator)
-                .environment(coordinator.transcriptStore)
-                .defaultAppStorage(defaults)
-        }
-        .defaultSize(width: 600, height: 700)
-
-        Window("Dictation", id: "dictation") {
-            DictationWindowContent(settings: settings)
-                .environment(container)
-                .environment(coordinator)
-                .defaultAppStorage(defaults)
-        }
-        .windowStyle(.hiddenTitleBar)
-        .windowResizability(.contentSize)
-        .defaultSize(width: 400, height: 560)
+        // Meeting mode windows — hidden until meeting mode is ready
+        // Window("Notes", id: "notes") {
+        //     NotesView(settings: settings)
+        //         .environment(container)
+        //         .environment(coordinator)
+        //         .defaultAppStorage(defaults)
+        // }
+        // .defaultSize(width: 700, height: 550)
+        //
+        // Window("Transcript", id: "transcript") {
+        //     TranscriptWindowView()
+        //         .environment(container)
+        //         .environment(coordinator)
+        //         .environment(coordinator.transcriptStore)
+        //         .defaultAppStorage(defaults)
+        // }
+        // .defaultSize(width: 600, height: 700)
 
         Settings {
             SettingsView(settings: settings, updater: updaterController.updater)
@@ -155,96 +157,71 @@ private struct DictationWindowContent: View {
 }
 
 extension LoreRootApp {
-    static let mainWindowID = "main"
+    static let mainWindowID = "dictation"
 
-    private func openNotesWindow() {
-        openWindow(id: "notes")
-    }
+    // Meeting mode helpers — kept for when meeting mode returns
+    // private func openNotesWindow() {
+    //     openWindow(id: "notes")
+    // }
+    //
+    // private var isBatchEngineBusy: Bool {
+    //     switch coordinator.batchStatus {
+    //     case .idle, .completed, .failed, .cancelled: return false
+    //     default: return true
+    //     }
+    // }
+    //
+    // private func importMeetingRecording() {
+    //     let panel = NSOpenPanel()
+    //     panel.title = "Import Meeting Recording"
+    //     panel.allowedContentTypes = [
+    //         .audio,
+    //         .init(filenameExtension: "m4a")!,
+    //         .init(filenameExtension: "mp3")!,
+    //         .init(filenameExtension: "wav")!,
+    //         .init(filenameExtension: "caf")!,
+    //     ]
+    //     panel.allowsMultipleSelection = false
+    //     panel.canChooseDirectories = false
+    //     guard panel.runModal() == .OK, let fileURL = panel.url else { return }
+    //     guard let batchEngine = coordinator.batchEngine else { return }
+    //     let model = settings.transcriptionModel
+    //     let locale = settings.locale
+    //     let repo = coordinator.sessionRepository
+    //     let fm = FileManager.default
+    //     let startDate: Date
+    //     if let attrs = try? fm.attributesOfItem(atPath: fileURL.path),
+    //        let creation = attrs[.creationDate] as? Date {
+    //         startDate = creation
+    //     } else {
+    //         startDate = Date()
+    //     }
+    //     var estimatedEnd = startDate
+    //     if let audioFile = try? AVAudioFile(forReading: fileURL) {
+    //         let duration = Double(audioFile.length) / audioFile.processingFormat.sampleRate
+    //         estimatedEnd = startDate.addingTimeInterval(duration)
+    //     }
+    //     let title = fileURL.deletingPathExtension().lastPathComponent
+    //     let sessionID = UUID().uuidString
+    //     let session = MeetingSession(...)  // see git history for full constructor
+    //     Task {
+    //         await batchEngine.processFile(fileURL, sessionID: sessionID, model: model, locale: locale, sessionRepository: repo)
+    //         let status = await batchEngine.status
+    //         if case .completed = status {
+    //             coordinator.queueSessionSelection(sessionID)
+    //             openNotesWindow()
+    //             await coordinator.loadHistory()
+    //         } else if case .failed = status {
+    //             await repo.deleteSession(sessionID: sessionID)
+    //             await coordinator.loadHistory()
+    //         } else if case .cancelled = status {
+    //             await repo.deleteSession(sessionID: sessionID)
+    //             await coordinator.loadHistory()
+    //         }
+    //     }
+    // }
 
-    private var isBatchEngineBusy: Bool {
-        switch coordinator.batchStatus {
-        case .idle, .completed, .failed, .cancelled: return false
-        default: return true
-        }
-    }
-
-    private func importMeetingRecording() {
-        let panel = NSOpenPanel()
-        panel.title = "Import Meeting Recording"
-        panel.allowedContentTypes = [
-            .audio,
-            .init(filenameExtension: "m4a")!,
-            .init(filenameExtension: "mp3")!,
-            .init(filenameExtension: "wav")!,
-            .init(filenameExtension: "caf")!,
-        ]
-        panel.allowsMultipleSelection = false
-        panel.canChooseDirectories = false
-
-        guard panel.runModal() == .OK, let fileURL = panel.url else { return }
-
-        guard let batchEngine = coordinator.batchEngine else { return }
-
-        let model = settings.transcriptionModel
-        let locale = settings.locale
-        let repo = coordinator.sessionRepository
-
-        // Derive start date and duration from file
-        let fm = FileManager.default
-        let startDate: Date
-        if let attrs = try? fm.attributesOfItem(atPath: fileURL.path),
-           let creation = attrs[.creationDate] as? Date {
-            startDate = creation
-        } else {
-            startDate = Date()
-        }
-
-        // Estimate duration from audio file for endedAt
-        var estimatedEnd = startDate
-        if let audioFile = try? AVAudioFile(forReading: fileURL) {
-            let duration = Double(audioFile.length) / audioFile.processingFormat.sampleRate
-            estimatedEnd = startDate.addingTimeInterval(duration)
-        }
-
-        let title = fileURL.deletingPathExtension().lastPathComponent
-
-        Task {
-            let sessionID = await repo.createImportedSession(
-                config: .init(
-                    title: title,
-                    startedAt: startDate,
-                    endedAt: estimatedEnd,
-                    language: settings.transcriptionLocale,
-                    engine: model.rawValue
-                )
-            )
-
-            await batchEngine.importFile(
-                url: fileURL,
-                sessionID: sessionID,
-                model: model,
-                locale: locale,
-                sessionRepository: repo
-            )
-
-            // Check result
-            let status = await batchEngine.status
-            if case .completed = status {
-                coordinator.queueSessionSelection(sessionID)
-                openNotesWindow()
-                await coordinator.loadHistory()
-            } else if case .failed = status {
-                // Clean up the orphaned session
-                await repo.deleteSession(sessionID: sessionID)
-                await coordinator.loadHistory()
-            } else if case .cancelled = status {
-                await repo.deleteSession(sessionID: sessionID)
-                await coordinator.loadHistory()
-            }
-        }
-    }
-
-    private func showMainWindow() {
+    private func showDictationWindow() {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == Self.mainWindowID }) {
@@ -315,6 +292,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         if !isUITest {
+            // Set delegate on dictation window (primary window) for close-to-background behavior
             for window in NSApp.windows where window.identifier?.rawValue == LoreRootApp.mainWindowID {
                 window.delegate = self
             }
@@ -386,12 +364,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         guard !isUITest else { return true }
 
-        let isMainWindow = sender.identifier?.rawValue == LoreRootApp.mainWindowID
+        let isDictationWindow = sender.identifier?.rawValue == LoreRootApp.mainWindowID
 
-        if isMainWindow {
+        if isDictationWindow {
             sender.orderOut(nil)
             NSApp.setActivationPolicy(.accessory)
-            showBackgroundModeHintIfNeeded()
             return false
         }
         return true
@@ -440,24 +417,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
     }
 
-    // MARK: - Global Hotkey (Cmd+Shift+L)
+    // MARK: - Global Hotkey (Cmd+Shift+L) — disabled while meeting mode is hidden
 
     private func registerGlobalHotkey() {
-        let matchesHotkey: (NSEvent) -> Bool = { event in
-            event.modifierFlags.contains([.command, .shift])
-                && event.charactersIgnoringModifiers?.lowercased() == "l"
-        }
-
-        globalHotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard matchesHotkey(event) else { return }
-            Task { @MainActor in self?.toggleMeeting() }
-        }
-
-        localHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard matchesHotkey(event) else { return event }
-            Task { @MainActor in self?.toggleMeeting() }
-            return nil
-        }
+        // Meeting toggle hotkey disabled until meeting mode is ready
+        // let matchesHotkey: (NSEvent) -> Bool = { event in
+        //     event.modifierFlags.contains([.command, .shift])
+        //         && event.charactersIgnoringModifiers?.lowercased() == "l"
+        // }
+        //
+        // globalHotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        //     guard matchesHotkey(event) else { return }
+        //     Task { @MainActor in self?.toggleMeeting() }
+        // }
+        //
+        // localHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+        //     guard matchesHotkey(event) else { return event }
+        //     Task { @MainActor in self?.toggleMeeting() }
+        //     return nil
+        // }
     }
 
     func toggleMeeting() {

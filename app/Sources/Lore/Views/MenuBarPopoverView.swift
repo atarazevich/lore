@@ -26,12 +26,6 @@ struct MenuBarPopoverView: View {
 
             Divider()
 
-            primaryAction
-                .padding(.horizontal, 16)
-                .padding(.vertical, 10)
-
-            Divider()
-
             Button(action: onShowMainWindow) {
                 HStack {
                     Text("Show Lore")
@@ -86,59 +80,35 @@ struct MenuBarPopoverView: View {
 
     private var statusLine: some View {
         HStack(spacing: 6) {
-            if coordinator.isRecording {
-                Circle()
-                    .fill(.red)
-                    .frame(width: 8, height: 8)
-                Text("Recording - \(formattedTime)")
-                    .font(.system(size: 13, weight: .medium))
-            } else if settings.meetingAutoDetectEnabled {
-                Circle()
-                    .fill(.secondary)
-                    .frame(width: 8, height: 8)
-                Text("Listening for meetings...")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            } else {
-                Circle()
-                    .fill(.secondary.opacity(0.5))
-                    .frame(width: 8, height: 8)
-                Text("Idle")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-            }
+            Circle()
+                .fill(.green.opacity(0.7))
+                .frame(width: 8, height: 8)
+            Text("Dictation ready")
+                .font(.system(size: 13))
+                .foregroundStyle(.secondary)
             Spacer()
         }
     }
 
+    // Meeting mode primary action — hidden until meeting mode is ready
+    // @ViewBuilder
+    // private var primaryAction: some View {
+    //     if coordinator.isRecording {
+    //         Button(action: { coordinator.handle(.userStopped, settings: settings) }) {
+    //             Text("Stop Recording").font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity)
+    //         }.buttonStyle(.borderedProminent).tint(.red).controlSize(.regular)
+    //     } else {
+    //         Button(action: {
+    //             guard settings.hasAcknowledgedRecordingConsent else { onShowMainWindow(); return }
+    //             coordinator.handle(.userStarted(.manual()), settings: settings)
+    //         }) {
+    //             Text("Start Recording").font(.system(size: 13, weight: .medium)).frame(maxWidth: .infinity)
+    //         }.buttonStyle(.borderedProminent).controlSize(.regular)
+    //     }
+    // }
     @ViewBuilder
     private var primaryAction: some View {
-        if coordinator.isRecording {
-            Button(action: {
-                coordinator.handle(.userStopped, settings: settings)
-            }) {
-                Text("Stop Recording")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(.red)
-            .controlSize(.regular)
-        } else {
-            Button(action: {
-                guard settings.hasAcknowledgedRecordingConsent else {
-                    onShowMainWindow()
-                    return
-                }
-                coordinator.handle(.userStarted(.manual()), settings: settings)
-            }) {
-                Text("Start Recording")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
-        }
+        EmptyView()
     }
 
     private var formattedTime: String {
