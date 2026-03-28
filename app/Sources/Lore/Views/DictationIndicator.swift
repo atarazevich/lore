@@ -14,6 +14,7 @@ struct DictationIndicatorView: View {
     var upgradeCountdown: Double?
     var lastError: String?
     var bluetoothRedirected = false
+    @State private var showBluetoothInfo = false
     var onUpgrade: ((UpgradeAction) -> Void)?
 
     var body: some View {
@@ -62,10 +63,21 @@ struct DictationIndicatorView: View {
                 .foregroundStyle(.white.opacity(0.6))
                 .monospacedDigit()
             if bluetoothRedirected {
-                Image(systemName: "laptopcomputer.and.arrow.down")
-                    .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.5))
-                    .help("Using laptop mic — Bluetooth bypassed")
+                Group {
+                    if showBluetoothInfo {
+                        Text("Using laptop mic — AirPods mic compresses audio below what speech recognition needs")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.7))
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Image(systemName: "laptopcomputer.and.arrow.down")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                }
+                .onTapGesture { showBluetoothInfo.toggle() }
+                .onHover { hovering in showBluetoothInfo = hovering }
             }
             if let mode = pendingMode {
                 Text("+ \(mode == .cleanup ? "Cleanup" : "Translate")")
