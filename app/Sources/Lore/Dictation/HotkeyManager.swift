@@ -17,6 +17,8 @@ final class HotkeyManager {
 
     private var fnDown = false
     private var fnTimer: Task<Void, Never>?
+    /// Watchdog: if fnDown stays true for 15s without lock, something went wrong
+    private var fnStaleTimer: Task<Void, Never>?
     /// Debounce timer for Fn release — Fn modifier flag flickers when other keys pressed
     private var fnReleaseDebounce: Task<Void, Never>?
     private var isHoldMode = false
@@ -271,6 +273,8 @@ final class HotkeyManager {
         fnTimer = nil
         fnReleaseDebounce?.cancel()
         fnReleaseDebounce = nil
+        fnStaleTimer?.cancel()
+        fnStaleTimer = nil
         coordinator = nil
         settings = nil
         log.info("Hotkey manager uninstalled")
@@ -297,7 +301,27 @@ final class HotkeyManager {
             fnDown = true
             fnReleaseDebounce?.cancel() // Cancel any pending debounced release
 
+            // Watchdog: reset fnDown if it stays stuck for 15s (missed release event)
+            fnStaleTimer?.cancel()
+            fnStaleTimer = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(15))
+                guard !Task.isCancelled, let self, self.fnDown else { return }
+                self.hkLog.warning("[HK] fnDown stuck for 15s, resetting")
+                diagLog("[HK] fnDown stuck for 15s, resetting")
+                self.fnDown = false
+                self.isHoldMode = false
+                self.fnTimer?.cancel()
+                self.fnTimer = nil
+                self.isRecordingFlag = false
+                self.isPreBufferingFlag = false
+            }
+
             guard isEnabled else { return }
+
+            if coordinator == nil {
+                hkLog.error("[HK] coordinator is nil in handleFlagsChanged — events being dropped")
+                diagLog("[HK] coordinator is nil in handleFlagsChanged")
+            }
 
             if isLocked {
                 // Don't stop yet — V/T chord may follow. Stop happens on Fn release.
@@ -321,6 +345,8 @@ final class HotkeyManager {
             }
         } else if !hotkeyPressed && fnDown {
             fnDown = false
+            fnStaleTimer?.cancel()
+            fnStaleTimer = nil
             fnTimer?.cancel()
             fnTimer = nil
 
@@ -366,7 +392,13 @@ final class HotkeyManager {
     }
 
     private func handleKeyDown(_ event: NSEvent) {
-        guard isEnabled, let coordinator else { return }
+        guard isEnabled, let coordinator else {
+            if coordinator == nil {
+                hkLog.error("[HK] coordinator is nil in handleKeyDown — events being dropped")
+                diagLog("[HK] coordinator is nil in handleKeyDown")
+            }
+            return
+        }
 
         // Fn+V/T while recording → set pre-paste cleanup mode
         // Use event's own .function flag (reliable even when Fn modifier flickers)
