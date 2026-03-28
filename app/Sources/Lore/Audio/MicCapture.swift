@@ -44,7 +44,10 @@ final class MicCapture: @unchecked Sendable {
     func bufferStream(deviceID: AudioDeviceID? = nil, echoCancellation: Bool = false) -> AsyncStream<AVAudioPCMBuffer> {
         // Defensive cleanup of any prior state
         _streamContinuation.withLock { $0?.finish(); $0 = nil }
-        engine.inputNode.removeTap(onBus: 0)
+        if hasTapInstalled {
+            engine.inputNode.removeTap(onBus: 0)
+            hasTapInstalled = false
+        }
         engine.stop()
 
         let level = _audioLevel
