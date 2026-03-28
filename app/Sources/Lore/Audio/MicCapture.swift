@@ -353,6 +353,46 @@ final class MicCapture: @unchecked Sendable {
         return status == noErr ? sampleRate : nil
     }
 
+    /// Get the transport type of an audio device (built-in, Bluetooth, USB, etc.)
+    static func transportType(for deviceID: AudioDeviceID) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var transportType: UInt32 = 0
+        var size = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &transportType)
+        return status == noErr ? transportType : nil
+    }
+
+    /// Check if a device uses any Bluetooth transport.
+    static func isBluetoothDevice(_ deviceID: AudioDeviceID) -> Bool {
+        guard let transport = transportType(for: deviceID) else { return false }
+        return transport == kAudioDeviceTransportTypeBluetooth ||
+               transport == kAudioDeviceTransportTypeBluetoothLE
+    }
+
+    /// Find the first built-in input device.
+    static func builtInInputDevice() -> AudioDeviceID? {
+        let devices = availableInputDevices()
+        return devices.first { transportType(for: $0.id) == kAudioDeviceTransportTypeBuiltIn }?.id
+    }
+
+    /// Resolve the best input device — redirects Bluetooth to built-in if available.
+    /// Returns the device ID to use and whether a redirect occurred.
+    static func resolveBestInputDevice(requested: AudioDeviceID) -> (deviceID: AudioDeviceID, redirectedFromBluetooth: Bool) {
+        let resolved = requested > 0 ? requested : (defaultInputDeviceID() ?? requested)
+        guard resolved > 0, isBluetoothDevice(resolved) else {
+            return (resolved, false)
+        }
+        if let builtIn = builtInInputDevice() {
+            return (builtIn, true)
+        }
+        // No built-in mic (Mac Mini/Studio) — use Bluetooth anyway
+        return (resolved, false)
+    }
+
     static func defaultInputDeviceID() -> AudioDeviceID? {
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,

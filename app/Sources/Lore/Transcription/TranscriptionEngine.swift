@@ -784,10 +784,21 @@ final class TranscriptionEngine {
     private func resolvedMicDeviceID(for inputDeviceID: AudioDeviceID) -> AudioDeviceID? {
         if inputDeviceID > 0 {
             let availableDeviceIDs = Set(MicCapture.availableInputDevices().map(\.id))
-            return availableDeviceIDs.contains(inputDeviceID) ? inputDeviceID : nil
+            guard availableDeviceIDs.contains(inputDeviceID) else { return nil }
+            // Redirect Bluetooth to built-in mic
+            let (resolved, redirected) = MicCapture.resolveBestInputDevice(requested: inputDeviceID)
+            if redirected {
+                diagLog("[ENGINE] Bluetooth mic detected, redirecting to built-in mic (device \(resolved))")
+            }
+            return resolved
         }
 
-        return MicCapture.defaultInputDeviceID()
+        // System default — check if it resolves to Bluetooth
+        let (resolved, redirected) = MicCapture.resolveBestInputDevice(requested: 0)
+        if redirected {
+            diagLog("[ENGINE] Default input is Bluetooth, redirecting to built-in mic (device \(resolved))")
+        }
+        return resolved > 0 ? resolved : nil
     }
 
     private func unavailableMicMessage(for inputDeviceID: AudioDeviceID) -> String {

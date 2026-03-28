@@ -32,6 +32,8 @@ final class DictationCoordinator {
     private(set) var pendingCleanupMode: UpgradeAction?
     /// True while audio is being buffered before hold is confirmed (pre-buffer phase).
     private(set) var isPreBuffering = false
+    /// True when Bluetooth mic was detected and capture redirected to built-in mic.
+    private(set) var bluetoothMicRedirected = false
 
     private let log = Logger(subsystem: "com.lore.app", category: "DictationCoordinator")
     private var mic: MicCapture?
@@ -322,8 +324,13 @@ final class DictationCoordinator {
         let capture = MicCapture()
         self.mic = capture
 
-        let deviceID = settings?.inputDeviceID ?? 0
-        let stream = capture.bufferStream(deviceID: deviceID > 0 ? deviceID : nil)
+        let requestedDevice = settings?.inputDeviceID ?? 0
+        let (resolvedDevice, redirected) = MicCapture.resolveBestInputDevice(requested: requestedDevice)
+        bluetoothMicRedirected = redirected
+        if redirected {
+            diagLog("[DICTATION] Bluetooth mic detected, redirecting to built-in mic (device \(resolvedDevice))")
+        }
+        let stream = capture.bufferStream(deviceID: resolvedDevice > 0 ? resolvedDevice : nil)
 
         audioLevelTask = Task { [weak self, weak capture] in
             while !Task.isCancelled {
@@ -351,6 +358,7 @@ final class DictationCoordinator {
         recordingTask?.cancel()
         recordingTask = nil
         mic = nil
+        bluetoothMicRedirected = false
     }
 
     /// Toggle pre-paste cleanup mode during recording.

@@ -13,6 +13,7 @@ struct DictationIndicatorView: View {
     var hideCleanupButton = false
     var upgradeCountdown: Double?
     var lastError: String?
+    var bluetoothRedirected = false
     var onUpgrade: ((UpgradeAction) -> Void)?
 
     var body: some View {
@@ -60,6 +61,12 @@ struct DictationIndicatorView: View {
                 .font(.system(size: 13, design: .monospaced))
                 .foregroundStyle(.white.opacity(0.6))
                 .monospacedDigit()
+            if bluetoothRedirected {
+                Image(systemName: "laptopcomputer.and.arrow.down")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.white.opacity(0.5))
+                    .help("Using laptop mic — Bluetooth bypassed")
+            }
             if let mode = pendingMode {
                 Text("+ \(mode == .cleanup ? "Cleanup" : "Translate")")
                     .font(.system(size: 13, weight: .medium))
@@ -197,6 +204,7 @@ final class DictationIndicatorModel {
     var hideCleanupButton = false
     var upgradeCountdown: Double?
     var lastError: String?
+    var bluetoothRedirected = false
     var onUpgrade: ((UpgradeAction) -> Void)?
 }
 
@@ -215,6 +223,7 @@ private struct DictationIndicatorHost: View {
             hideCleanupButton: model.hideCleanupButton,
             upgradeCountdown: model.upgradeCountdown,
             lastError: model.lastError,
+            bluetoothRedirected: model.bluetoothRedirected,
             onUpgrade: model.onUpgrade
         )
     }
@@ -300,6 +309,7 @@ final class DictationIndicatorManager {
                 self.model.hideCleanupButton = coordinator.cleanupAlreadyApplied
                 self.model.upgradeCountdown = coordinator.upgradeCountdown
                 self.model.lastError = coordinator.lastError
+                self.model.bluetoothRedirected = coordinator.bluetoothMicRedirected
 
                 // Keep CGEvent tap flag in sync
                 hotkeyManager?.updateUpgradeShowingFlag(coordinator.isUpgradePanelVisible)
