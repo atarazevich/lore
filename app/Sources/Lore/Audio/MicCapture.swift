@@ -58,6 +58,10 @@ final class MicCapture: @unchecked Sendable {
             errorHolder.value = nil
             self._hasCapturedFrames.value = false
 
+            // Run audio setup on a background thread — accessing inputNode and
+            // starting the engine can block when Bluetooth is the system default
+            // (HFP profile negotiation). Must not block the main thread.
+            DispatchQueue.global(qos: .userInitiated).async {
             diagLog("[MIC-1] bufferStream called, deviceID=\(String(describing: deviceID))")
 
             let engine = self.makeFreshEngine()
@@ -178,6 +182,7 @@ final class MicCapture: @unchecked Sendable {
                 self.hasTapInstalled = false
                 continuation.finish()
             }
+            } // end DispatchQueue.global
         }
     }
 
