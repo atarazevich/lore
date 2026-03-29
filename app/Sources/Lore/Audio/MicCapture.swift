@@ -58,11 +58,26 @@ final class MicCapture: @unchecked Sendable {
             errorHolder.value = nil
             self._hasCapturedFrames.value = false
 
-            // Run audio setup on a background thread — accessing inputNode and
-            // starting the engine can block when Bluetooth is the system default
-            // (HFP profile negotiation). Must not block the main thread.
-            DispatchQueue.global(qos: .userInitiated).async {
             diagLog("[MIC-1] bufferStream called, deviceID=\(String(describing: deviceID))")
+
+            // When the system default input is Bluetooth, temporarily swap it to the
+            // target device BEFORE creating the engine. AVAudioEngine configures its
+            // inputNode based on the system default at init; Bluetooth triggers HFP
+            // negotiation which blocks for seconds.
+            var restoredDefaultDevice: AudioDeviceID?
+            let currentDefault = Self.defaultInputDeviceID() ?? 0
+            if let id = deviceID, currentDefault > 0, Self.isBluetoothDevice(currentDefault) {
+                if Self.setDefaultInputDevice(id) {
+                    restoredDefaultDevice = currentDefault
+                    diagLog("[MIC-1a] swapped system default from Bluetooth (\(currentDefault)) to device \(id)")
+                }
+            }
+            defer {
+                if let restore = restoredDefaultDevice {
+                    _ = Self.setDefaultInputDevice(restore)
+                    diagLog("[MIC-1a] restored system default to \(restore)")
+                }
+            }
 
             let engine = self.makeFreshEngine()
             diagLog("[MIC-1a] fresh engine created")
@@ -182,7 +197,6 @@ final class MicCapture: @unchecked Sendable {
                 self.hasTapInstalled = false
                 continuation.finish()
             }
-            } // end DispatchQueue.global
         }
     }
 
@@ -417,6 +431,25 @@ final class MicCapture: @unchecked Sendable {
             &deviceID
         )
         return status == noErr ? deviceID : nil
+    }
+
+    /// Temporarily set the system default input device. Returns true on success.
+    @discardableResult
+    static func setDefaultInputDevice(_ deviceID: AudioDeviceID) -> Bool {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var devID = deviceID
+        let status = AudioObjectSetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            0, nil,
+            UInt32(MemoryLayout<AudioDeviceID>.size),
+            &devID
+        )
+        return status == noErr
     }
 
 }
