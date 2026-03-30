@@ -120,6 +120,13 @@ final class TranscriptionEngine {
     private var systemBackend: (any TranscriptionBackend)?
     private var vadManager: VadManager?
 
+    /// Cached backends survive across start/stop cycles to avoid reloading models from disk.
+    /// Invalidated when the transcription model or custom vocabulary changes.
+    private var cachedMicBackend: (any TranscriptionBackend)?
+    private var cachedSystemBackend: (any TranscriptionBackend)?
+    private var cachedModel: TranscriptionModel?
+    private var cachedVocabulary: String?
+
     /// Audio recorder for tapping streams (set by ContentView when recording is enabled).
     var audioRecorder: AudioRecorder?
 
@@ -202,43 +209,68 @@ final class TranscriptionEngine {
         isRunning = true
 
         // 1. Load transcription models via backend protocol
-        let isDownloading = needsModelDownload
-        assetStatus = isDownloading
-            ? "Downloading \(transcriptionModel.displayName)..."
-            : "Loading \(transcriptionModel.displayName)..."
-        if isDownloading { downloadProgress = 0 }
-        diagLog("[ENGINE-1] loading transcription model \(transcriptionModel.rawValue)...")
-        do {
-            let vocab = settings.transcriptionCustomVocabulary
-            let mic = transcriptionModel.makeBackend(customVocabulary: vocab)
-            try await mic.prepare(
-                onStatus: { [weak self] status in
-                    Task { @MainActor in
-                        self?.assetStatus = status
-                    }
-                },
-                onProgress: { [weak self] fraction in
-                    Task { @MainActor in
-                        self?.downloadProgress = fraction
-                    }
-                }
-            )
-            self.micBackend = mic
+        let vocab = settings.transcriptionCustomVocabulary
+        let canReuseCache = cachedModel == transcriptionModel
+            && cachedVocabulary == vocab
+            && cachedMicBackend != nil
+            && cachedSystemBackend != nil
 
-            // Parakeet needs a separate backend for system audio (mutable decoder state).
-            // Qwen3 is actor-based and thread-safe, so reuse the same instance.
-            if transcriptionModel == .qwen3ASR06B {
-                self.systemBackend = mic
-            } else {
-                let sys = transcriptionModel.makeBackend(customVocabulary: vocab)
-                try await sys.prepare { _ in }
-                self.systemBackend = sys
+        if canReuseCache {
+            diagLog("[ENGINE-1] reusing cached backends for \(transcriptionModel.rawValue)")
+            self.micBackend = cachedMicBackend
+            self.systemBackend = cachedSystemBackend
+            assetStatus = "Models ready"
+        }
+
+        if !canReuseCache {
+            let isDownloading = needsModelDownload
+            assetStatus = isDownloading
+                ? "Downloading \(transcriptionModel.displayName)..."
+                : "Loading \(transcriptionModel.displayName)..."
+            if isDownloading { downloadProgress = 0 }
+            diagLog("[ENGINE-1] loading transcription model \(transcriptionModel.rawValue)...")
+        }
+
+        do {
+            if !canReuseCache {
+                let mic = transcriptionModel.makeBackend(customVocabulary: vocab)
+                try await mic.prepare(
+                    onStatus: { [weak self] status in
+                        Task { @MainActor in
+                            self?.assetStatus = status
+                        }
+                    },
+                    onProgress: { [weak self] fraction in
+                        Task { @MainActor in
+                            self?.downloadProgress = fraction
+                        }
+                    }
+                )
+                self.micBackend = mic
+
+                // Parakeet needs a separate backend for system audio (mutable decoder state).
+                // Qwen3 is actor-based and thread-safe, so reuse the same instance.
+                if transcriptionModel == .qwen3ASR06B {
+                    self.systemBackend = mic
+                } else {
+                    let sys = transcriptionModel.makeBackend(customVocabulary: vocab)
+                    try await sys.prepare { _ in }
+                    self.systemBackend = sys
+                }
+
+                // Store in cache for next session
+                cachedMicBackend = self.micBackend
+                cachedSystemBackend = self.systemBackend
+                cachedModel = transcriptionModel
+                cachedVocabulary = vocab
             }
 
-            assetStatus = "Loading VAD model..."
-            diagLog("[ENGINE-1b] loading VAD model...")
-            let vad = try await VadManager()
-            self.vadManager = vad
+            if self.vadManager == nil {
+                assetStatus = "Loading VAD model..."
+                diagLog("[ENGINE-1b] loading VAD model...")
+                let vad = try await VadManager()
+                self.vadManager = vad
+            }
 
             // Optionally load speaker diarization model
             if settings.enableDiarization {
@@ -266,6 +298,7 @@ final class TranscriptionEngine {
             isRunning = false
             downloadProgress = nil
             // Clear corrupt cache so the next attempt triggers a fresh download
+            invalidateBackendCache()
             settings.transcriptionModel.makeBackend().clearModelCache()
             diagLog("[ENGINE-2-FAIL] cleared model cache for \(settings.transcriptionModel.rawValue)")
             needsModelDownload = true
@@ -880,5 +913,14 @@ final class TranscriptionEngine {
             lastError.localizedCaseInsensitiveContains("audio output device") {
             self.lastError = nil
         }
+    }
+
+    /// Discard cached backends so the next start() creates fresh ones.
+    private func invalidateBackendCache() {
+        cachedMicBackend = nil
+        cachedSystemBackend = nil
+        cachedModel = nil
+        cachedVocabulary = nil
+        diagLog("[ENGINE-CACHE] backend cache invalidated")
     }
 }
