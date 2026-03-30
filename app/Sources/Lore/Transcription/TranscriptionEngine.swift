@@ -147,6 +147,7 @@ final class TranscriptionEngine {
     private var sysRestartTask: Task<Void, Never>?
     private var micHealthTask: Task<Void, Never>?
     private var pendingMicDeviceID: AudioDeviceID?
+    private var pendingMicForceRestart = false
     private var pendingSystemAudioRestart = false
 
     init(transcriptStore: TranscriptStore, settings: AppSettings, mode: Mode = .live) {
@@ -249,7 +250,7 @@ final class TranscriptionEngine {
                 self.micBackend = mic
 
                 // Parakeet needs a separate backend for system audio (mutable decoder state).
-                // Qwen3 is actor-based and thread-safe, so reuse the same instance.
+                // Qwen3 shares one backend instance for both mic and system audio (thread-safe actor).
                 if transcriptionModel == .qwen3ASR06B {
                     self.systemBackend = mic
                 } else {
@@ -370,16 +371,18 @@ final class TranscriptionEngine {
         // 3. Start system audio capture
         await startSystemAudioStream(locale: locale, vadManager: vadManager)
 
-        // 4. Start repeating mic health monitor — detects silent capture death
+        // 4. Start repeating mic health monitor — detects silent capture death.
+        // Starts at 10s to let the one-time health check (AEC fallback) run first at 5s.
         micHealthTask?.cancel()
-        micHealthTask = Task { [weak self] in
+        micHealthTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(10))
             while !Task.isCancelled {
-                try? await Task.sleep(for: .seconds(5))
-                guard !Task.isCancelled, let self, self.isRunning else { break }
+                guard let self, self.isRunning else { break }
                 if !self.micCapture.isEngineAlive {
                     diagLog("[ENGINE-MIC-HEALTH] mic capture dead, forcing restart")
-                    await self.performMicRestart(inputDeviceID: self.userSelectedDeviceID, force: true)
+                    self.forceRestartMic()
                 }
+                try? await Task.sleep(for: .seconds(5))
             }
         }
 
@@ -410,6 +413,31 @@ final class TranscriptionEngine {
             while self.isRunning, let requestedDeviceID = self.pendingMicDeviceID {
                 self.pendingMicDeviceID = nil
                 await self.performMicRestart(inputDeviceID: requestedDeviceID)
+            }
+        }
+    }
+
+    /// Force-restart the mic through the same serialization as restartMic() to prevent
+    /// concurrent restarts when the health monitor and a device-change restart overlap.
+    private func forceRestartMic() {
+        let deviceID = userSelectedDeviceID
+        pendingMicDeviceID = deviceID
+        pendingMicForceRestart = true
+
+        if micRestartTask != nil {
+            diagLog("[ENGINE-MIC-HEALTH] queued forced restart")
+            return
+        }
+
+        micRestartTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.micRestartTask = nil }
+
+            while self.isRunning, let requestedDeviceID = self.pendingMicDeviceID {
+                let force = self.pendingMicForceRestart
+                self.pendingMicDeviceID = nil
+                self.pendingMicForceRestart = false
+                await self.performMicRestart(inputDeviceID: requestedDeviceID, force: force)
             }
         }
     }
@@ -563,6 +591,8 @@ final class TranscriptionEngine {
         }
         diarizationManager = nil
 
+        // NOTE: cachedMicBackend/cachedSystemBackend are intentionally preserved
+        // across sessions to avoid model reload. Call invalidateBackendCache() to release.
         micBackend = nil
         systemBackend = nil
         isRunning = false

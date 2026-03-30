@@ -22,6 +22,8 @@ final class MicCapture: @unchecked Sendable {
     var captureError: String? { _error.value }
 
     /// Returns true if the engine is running AND a frame was received within the last 5 seconds.
+    /// Threading: `engine.isRunning` is not synchronized. Call from the same context that
+    /// manages the engine lifecycle (currently @MainActor via the health monitor).
     var isEngineAlive: Bool {
         guard engine.isRunning else { return false }
         guard let lastFrame = _lastFrameTime.value else { return false }
