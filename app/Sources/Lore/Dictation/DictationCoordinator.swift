@@ -520,6 +520,13 @@ final class DictationCoordinator {
 
     // MARK: - Model Loading
 
+    /// Preload the ASR model in background at app launch.
+    /// Safe to call multiple times — no-op if already loaded.
+    func preloadModel() async throws {
+        guard !isModelLoaded else { return }
+        try await loadModel()
+    }
+
     private func loadModel() async throws {
         let needsDownload = !AsrModels.modelsExist(
             at: AsrModels.defaultCacheDirectory(for: .v3),

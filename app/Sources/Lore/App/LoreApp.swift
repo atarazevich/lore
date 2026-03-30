@@ -434,6 +434,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             coordinator: coordinator.dictationCoordinator,
             hotkeyManager: coordinator.hotkeyManager
         )
+
+        // Preload Parakeet model in background so first dictation is instant
+        Task {
+            try? await coordinator.dictationCoordinator.preloadModel()
+        }
     }
 
     // MARK: - Global Hotkey (Cmd+Shift+L)
