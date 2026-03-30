@@ -138,6 +138,7 @@ final class TranscriptionEngine {
     private var defaultOutputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var micRestartTask: Task<Void, Never>?
     private var sysRestartTask: Task<Void, Never>?
+    private var micHealthTask: Task<Void, Never>?
     private var pendingMicDeviceID: AudioDeviceID?
     private var pendingSystemAudioRestart = false
 
@@ -336,6 +337,19 @@ final class TranscriptionEngine {
         // 3. Start system audio capture
         await startSystemAudioStream(locale: locale, vadManager: vadManager)
 
+        // 4. Start repeating mic health monitor — detects silent capture death
+        micHealthTask?.cancel()
+        micHealthTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .seconds(5))
+                guard !Task.isCancelled, let self, self.isRunning else { break }
+                if !self.micCapture.isEngineAlive {
+                    diagLog("[ENGINE-MIC-HEALTH] mic capture dead, forcing restart")
+                    await self.performMicRestart(inputDeviceID: self.userSelectedDeviceID, force: true)
+                }
+            }
+        }
+
         assetStatus = "Transcribing (\(micBackend?.displayName ?? transcriptionModel.displayName))"
         diagLog("[ENGINE-6] all transcription tasks started")
 
@@ -488,8 +502,10 @@ final class TranscriptionEngine {
         removeDefaultOutputDeviceListener()
         micRestartTask?.cancel()
         sysRestartTask?.cancel()
+        micHealthTask?.cancel()
         micRestartTask = nil
         sysRestartTask = nil
+        micHealthTask = nil
         pendingMicDeviceID = nil
         pendingSystemAudioRestart = false
         micKeepAliveTask?.cancel()
@@ -533,8 +549,10 @@ final class TranscriptionEngine {
         removeDefaultOutputDeviceListener()
         micRestartTask?.cancel()
         sysRestartTask?.cancel()
+        micHealthTask?.cancel()
         micRestartTask = nil
         sysRestartTask = nil
+        micHealthTask = nil
         pendingMicDeviceID = nil
         pendingSystemAudioRestart = false
         micTask?.cancel()
@@ -552,7 +570,7 @@ final class TranscriptionEngine {
         assetStatus = "Ready"
     }
 
-    private func performMicRestart(inputDeviceID: AudioDeviceID) async {
+    private func performMicRestart(inputDeviceID: AudioDeviceID, force: Bool = false) async {
         guard isRunning, let vadManager else { return }
 
         userSelectedDeviceID = inputDeviceID
@@ -564,7 +582,7 @@ final class TranscriptionEngine {
             return
         }
 
-        guard targetMicID != currentMicDeviceID else {
+        if !force, targetMicID == currentMicDeviceID {
             diagLog("[ENGINE-MIC-SWAP] same device \(targetMicID), skipping")
             return
         }

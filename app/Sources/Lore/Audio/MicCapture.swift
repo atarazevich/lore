@@ -15,10 +15,18 @@ final class MicCapture: @unchecked Sendable {
     private let _error = SyncString()
     private let _streamContinuation = OSAllocatedUnfairLock<AsyncStream<AVAudioPCMBuffer>.Continuation?>(uncheckedState: nil)
     private let _muted = SyncBool()
+    private let _lastFrameTime = SyncOptionalDate()
 
     var audioLevel: Float { _muted.value ? 0 : _audioLevel.value }
     var hasCapturedFrames: Bool { _hasCapturedFrames.value }
     var captureError: String? { _error.value }
+
+    /// Returns true if the engine is running AND a frame was received within the last 5 seconds.
+    var isEngineAlive: Bool {
+        guard engine.isRunning else { return false }
+        guard let lastFrame = _lastFrameTime.value else { return false }
+        return Date().timeIntervalSince(lastFrame) < 5.0
+    }
 
     /// When muted, buffers are not forwarded to the stream and audio level reads as 0.
     var isMuted: Bool {
@@ -166,6 +174,7 @@ final class MicCapture: @unchecked Sendable {
             inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, _ in
                 tapCallCount += 1
                 self._hasCapturedFrames.value = true
+                self._lastFrameTime.value = Date()
                 let rms = Self.normalizedRMS(from: buffer)
                 level.value = min(rms * 25, 1.0)
 
@@ -216,6 +225,7 @@ final class MicCapture: @unchecked Sendable {
         engine.reset()
         _audioLevel.value = 0
         _hasCapturedFrames.value = false
+        _lastFrameTime.value = nil
     }
 
     private func makeFreshEngine() -> AVAudioEngine {
@@ -497,6 +507,17 @@ final class SyncBool: @unchecked Sendable {
     private let lock = NSLock()
 
     var value: Bool {
+        get { lock.withLock { _value } }
+        set { lock.withLock { _value = newValue } }
+    }
+}
+
+/// Simple thread-safe optional Date holder.
+final class SyncOptionalDate: @unchecked Sendable {
+    private var _value: Date?
+    private let lock = NSLock()
+
+    var value: Date? {
         get { lock.withLock { _value } }
         set { lock.withLock { _value = newValue } }
     }
