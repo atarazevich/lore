@@ -427,6 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         didSetupDictation = true
 
         coordinator.dictationCoordinator.settings = settings
+        coordinator.dictationCoordinator.audioBus = container?.audioBus
         coordinator.dictationCoordinator.backendCache = coordinator.sharedBackendCache
         coordinator.hotkeyManager.install(
             coordinator: coordinator.dictationCoordinator,

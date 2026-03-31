@@ -535,7 +535,7 @@ struct SettingsView: View {
     }
 
     private func refreshViewState() {
-        inputDevices = MicCapture.availableInputDevices()
+        inputDevices = AudioBus.availableInputDevices()
         Task { @MainActor in
             automaticallyChecksForUpdates = updater.automaticallyChecksForUpdates
             templates = coordinator.templateStore.templates

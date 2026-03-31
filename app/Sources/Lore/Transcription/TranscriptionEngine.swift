@@ -84,17 +84,17 @@ final class TranscriptionEngine {
     }
 
     private let systemCapture = SystemAudioCapture()
-    private let micCapture = MicCapture()
+    private let audioBus: AudioBus
     private let transcriptStore: TranscriptStore
     private let settings: AppSettings
     private let mode: Mode
 
     /// Audio level from mic for the UI meter.
-    /// nonisolated is safe here — micCapture.audioLevel is thread-safe (NSLock).
+    /// nonisolated is safe here — audioBus.audioLevel is thread-safe (NSLock).
     nonisolated var audioLevel: Float {
         switch mode {
         case .live:
-            micCapture.audioLevel
+            audioBus.audioLevel
         case .scripted:
             _isRunning ? 0.35 : 0
         }
@@ -103,14 +103,15 @@ final class TranscriptionEngine {
     /// Mute/unmute the microphone. When muted, mic audio is not transcribed
     /// and the audio level reads as 0. System audio continues normally.
     nonisolated var isMicMuted: Bool {
-        get { micCapture.isMuted }
-        set { micCapture.isMuted = newValue }
+        get { audioBus.isMuted }
+        set { audioBus.isMuted = newValue }
     }
 
     private var micTask: Task<Void, Never>?
     private var sysTask: Task<Void, Never>?
     /// Keeps the mic stream alive for the audio level meter when transcription isn't running.
-    private var micKeepAliveTask: Task<Void, Never>?
+    /// Tracks the AudioBus subscription for mic capture.
+    private var micConsumerID: UUID?
 
     /// Separate backend instances for mic and system audio.
     /// Parakeet keeps mutable decoder state per manager, so mic and system audio
@@ -143,20 +144,17 @@ final class TranscriptionEngine {
     /// Tracks whether user selected "System Default" (0) or a specific device.
     private var userSelectedDeviceID: AudioDeviceID = 0
 
-    /// Listens for default input device changes at the OS level.
-    private var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     /// Listens for default output device changes at the OS level.
     private var defaultOutputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var micRestartTask: Task<Void, Never>?
     private var sysRestartTask: Task<Void, Never>?
-    private var micHealthTask: Task<Void, Never>?
     private var pendingMicDeviceID: AudioDeviceID?
-    private var pendingMicForceRestart = false
     private var pendingSystemAudioRestart = false
 
-    init(transcriptStore: TranscriptStore, settings: AppSettings, mode: Mode = .live) {
+    init(transcriptStore: TranscriptStore, settings: AppSettings, audioBus: AudioBus = AudioBus(), mode: Mode = .live) {
         self.transcriptStore = transcriptStore
         self.settings = settings
+        self.audioBus = audioBus
         self.mode = mode
         switch mode {
         case .live:
@@ -342,74 +340,41 @@ final class TranscriptionEngine {
         // AEC (voice processing) conflicts with system audio capture on macOS —
         // both cause CoreAudio aggregate-device reconfiguration that can stall the
         // mic stream. Since system audio capture is always active during recording,
-        // AEC must be disabled to prevent capture failures.
-        let useAEC = false
         if settings.enableEchoCancellation {
             diagLog("[ENGINE-3] AEC disabled — conflicts with system audio capture")
         }
 
-        diagLog("[ENGINE-3] starting mic capture, targetMicID=\(String(describing: targetMicID)), aec=\(useAEC)")
+        diagLog("[ENGINE-3] starting mic capture, targetMicID=\(String(describing: targetMicID))")
         startMicStream(
             locale: locale,
             vadManager: vadManager,
-            deviceID: targetMicID,
-            echoCancellation: useAEC
+            deviceID: targetMicID
         )
 
         // Check for immediate mic capture failure
-        if let micError = micCapture.captureError {
+        if let micError = audioBus.captureError {
             diagLog("[ENGINE-3-FAIL] mic capture error: \(micError)")
             lastError = micError
         }
 
-        // Health check: if mic produces no audio within 5 seconds, retry once
-        // without AEC before surfacing the error.
+        // Health check: if mic produces no audio within 5 seconds, surface error.
+        // AudioBus handles engine-level health monitoring and auto-restart internally.
         Task { @MainActor [weak self] in
             try? await Task.sleep(for: .seconds(5))
             guard let self, self.isRunning else { return }
-            if !self.micCapture.hasCapturedFrames && self.micCapture.captureError == nil {
-                if useAEC {
-                    diagLog("[ENGINE-HEALTH] no mic audio after 5s with AEC, retrying without")
-                    self.micCapture.finishStream()
-                    await self.micTask?.value
-                    self.micTask = nil
-                    self.micCapture.stop()
-                    self.startMicStream(
-                        locale: locale,
-                        vadManager: vadManager,
-                        deviceID: targetMicID,
-                        echoCancellation: false
-                    )
-                } else {
-                    diagLog("[ENGINE-HEALTH] no mic audio after 5s")
-                    self.lastError = "Microphone is not producing audio. Check your input device in System Settings."
-                }
+            if !self.audioBus.hasCapturedFrames && self.audioBus.captureError == nil {
+                diagLog("[ENGINE-HEALTH] no mic audio after 5s")
+                self.lastError = "Microphone is not producing audio. Check your input device in System Settings."
             }
         }
 
         // 3. Start system audio capture
         await startSystemAudioStream(locale: locale, vadManager: vadManager)
 
-        // 4. Start repeating mic health monitor — detects silent capture death.
-        // Starts at 10s to let the one-time health check (AEC fallback) run first at 5s.
-        micHealthTask?.cancel()
-        micHealthTask = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: .seconds(10))
-            while !Task.isCancelled {
-                guard let self, self.isRunning else { break }
-                if !self.micCapture.isEngineAlive {
-                    diagLog("[ENGINE-MIC-HEALTH] mic capture dead, forcing restart")
-                    self.forceRestartMic()
-                }
-                try? await Task.sleep(for: .seconds(5))
-            }
-        }
-
         assetStatus = "Transcribing (\(micBackend?.displayName ?? transcriptionModel.displayName))"
         diagLog("[ENGINE-6] all transcription tasks started")
 
-        // Install CoreAudio listeners for live device routing changes
-        installDefaultDeviceListener()
+        // Install CoreAudio listener for output device changes (system audio restart)
         installDefaultOutputDeviceListener()
     }
 
@@ -436,74 +401,7 @@ final class TranscriptionEngine {
         }
     }
 
-    /// Force-restart the mic through the same serialization as restartMic() to prevent
-    /// concurrent restarts when the health monitor and a device-change restart overlap.
-    private func forceRestartMic() {
-        let deviceID = userSelectedDeviceID
-        pendingMicDeviceID = deviceID
-        pendingMicForceRestart = true
-
-        if micRestartTask != nil {
-            diagLog("[ENGINE-MIC-HEALTH] queued forced restart")
-            return
-        }
-
-        micRestartTask = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer { self.micRestartTask = nil }
-
-            while self.isRunning, let requestedDeviceID = self.pendingMicDeviceID {
-                let force = self.pendingMicForceRestart
-                self.pendingMicDeviceID = nil
-                self.pendingMicForceRestart = false
-                await self.performMicRestart(inputDeviceID: requestedDeviceID, force: force)
-            }
-        }
-    }
-
-    // MARK: - Default Device Listener
-
-    private func installDefaultDeviceListener() {
-        guard defaultDeviceListenerBlock == nil else { return }
-
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            Task { @MainActor in
-                guard self.isRunning, self.userSelectedDeviceID == 0 else { return }
-                self.restartMic(inputDeviceID: 0)
-            }
-        }
-        defaultDeviceListenerBlock = block
-
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            DispatchQueue.main,
-            block
-        )
-    }
-
-    private func removeDefaultDeviceListener() {
-        guard let block = defaultDeviceListenerBlock else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            DispatchQueue.main,
-            block
-        )
-        defaultDeviceListenerBlock = nil
-    }
+    // MARK: - Default Device Listener (AudioBus handles input device changes)
 
     private func installDefaultOutputDeviceListener() {
         guard defaultOutputDeviceListenerBlock == nil else { return }
@@ -578,31 +476,29 @@ final class TranscriptionEngine {
             return
         }
 
-        removeDefaultDeviceListener()
         removeDefaultOutputDeviceListener()
         micRestartTask?.cancel()
         sysRestartTask?.cancel()
-        micHealthTask?.cancel()
         micRestartTask = nil
         sysRestartTask = nil
-        micHealthTask = nil
         pendingMicDeviceID = nil
         pendingSystemAudioRestart = false
-        micKeepAliveTask?.cancel()
 
-        micCapture.finishStream()
+        // Unsubscribe from audio bus (engine stays running for other consumers)
+        if let id = micConsumerID {
+            audioBus.unsubscribe(id)
+            micConsumerID = nil
+        }
         systemCapture.finishStream()
 
         await micTask?.value
         await sysTask?.value
 
-        micCapture.stop()
         await systemCapture.stop()
 
         micTask = nil
         sysTask = nil
         pendingMicDeviceID = nil
-        micKeepAliveTask = nil
         currentMicDeviceID = 0
         // Finalize and release diarization manager
         if let dm = diarizationManager {
@@ -627,24 +523,22 @@ final class TranscriptionEngine {
             return
         }
 
-        removeDefaultDeviceListener()
         removeDefaultOutputDeviceListener()
         micRestartTask?.cancel()
         sysRestartTask?.cancel()
-        micHealthTask?.cancel()
         micRestartTask = nil
         sysRestartTask = nil
-        micHealthTask = nil
         pendingMicDeviceID = nil
         pendingSystemAudioRestart = false
         micTask?.cancel()
         sysTask?.cancel()
-        micKeepAliveTask?.cancel()
         micTask = nil
         sysTask = nil
-        micKeepAliveTask = nil
+        if let id = micConsumerID {
+            audioBus.unsubscribe(id)
+            micConsumerID = nil
+        }
         Task { await systemCapture.stop() }
-        micCapture.stop()
         currentMicDeviceID = 0
         micBackend = nil
         systemBackend = nil
@@ -671,7 +565,11 @@ final class TranscriptionEngine {
 
         diagLog("[ENGINE-MIC-SWAP] switching mic from \(currentMicDeviceID) to \(targetMicID)")
 
-        micCapture.finishStream()
+        // Unsubscribe old stream, switch device on AudioBus, re-subscribe
+        if let id = micConsumerID {
+            audioBus.unsubscribe(id)
+            micConsumerID = nil
+        }
         await micTask?.value
 
         if Task.isCancelled || !isRunning {
@@ -679,7 +577,7 @@ final class TranscriptionEngine {
         }
 
         micTask = nil
-        micCapture.stop()
+        audioBus.switchDevice(targetMicID)
         startMicStream(
             locale: settings.locale,
             vadManager: vadManager,
@@ -733,10 +631,11 @@ final class TranscriptionEngine {
     private func startMicStream(
         locale: Locale,
         vadManager: VadManager,
-        deviceID: AudioDeviceID,
-        echoCancellation: Bool = false
+        deviceID: AudioDeviceID
     ) {
-        var micStream = micCapture.bufferStream(deviceID: deviceID, echoCancellation: echoCancellation)
+        let (id, rawStream) = audioBus.subscribe(deviceID: deviceID)
+        micConsumerID = id
+        var micStream = rawStream
         if let recorder = audioRecorder {
             micStream = Self.tappedStream(micStream) { buffer in
                 recorder.writeMicBuffer(buffer)
@@ -883,10 +782,10 @@ final class TranscriptionEngine {
 
     private func resolvedMicDeviceID(for inputDeviceID: AudioDeviceID) -> AudioDeviceID? {
         if inputDeviceID > 0 {
-            let availableDeviceIDs = Set(MicCapture.availableInputDevices().map(\.id))
+            let availableDeviceIDs = Set(AudioBus.availableInputDevices().map(\.id))
             guard availableDeviceIDs.contains(inputDeviceID) else { return nil }
             // Redirect Bluetooth to built-in mic
-            let (resolved, redirected) = MicCapture.resolveBestInputDevice(requested: inputDeviceID)
+            let (resolved, redirected) = AudioBus.resolveBestInputDevice(requested: inputDeviceID)
             if redirected {
                 diagLog("[ENGINE] Bluetooth mic detected, redirecting to built-in mic (device \(resolved))")
             }
@@ -894,7 +793,7 @@ final class TranscriptionEngine {
         }
 
         // System default — check if it resolves to Bluetooth
-        let (resolved, redirected) = MicCapture.resolveBestInputDevice(requested: 0)
+        let (resolved, redirected) = AudioBus.resolveBestInputDevice(requested: 0)
         if redirected {
             diagLog("[ENGINE] Default input is Bluetooth, redirecting to built-in mic (device \(resolved))")
         }

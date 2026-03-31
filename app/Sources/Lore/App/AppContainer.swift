@@ -11,6 +11,9 @@ final class AppContainer {
     let appSupportDirectory: URL
     let notesDirectory: URL
 
+    /// Persistent shared audio bus — one AVAudioEngine for all consumers.
+    let audioBus = AudioBus()
+
     /// Detection controller for the meeting auto-detect lifecycle.
     /// Created when detection is enabled; nil otherwise.
     private(set) var detectionController: MeetingDetectionController?
@@ -133,7 +136,8 @@ final class AppContainer {
         case .live:
             transcriptionEngine = TranscriptionEngine(
                 transcriptStore: coordinator.transcriptStore,
-                settings: settings
+                settings: settings,
+                audioBus: audioBus
             )
         case .uiTest:
             transcriptionEngine = TranscriptionEngine(
