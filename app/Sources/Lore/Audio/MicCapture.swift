@@ -70,130 +70,124 @@ final class MicCapture: @unchecked Sendable {
 
             diagLog("[MIC-1] bufferStream called, deviceID=\(String(describing: deviceID))")
 
-            // NOTE: We no longer swap the system default input device here.
-            // The per-engine AudioUnit device assignment (lines below) is sufficient —
-            // we override the inputNode's device BEFORE calling engine.start().
-            // The old swap fired device-change listeners on other components (e.g.
-            // TranscriptionEngine), causing spurious mic restarts in concurrent modes.
-
-            let engine = self.makeFreshEngine()
-            diagLog("[MIC-1a] fresh engine created")
-
-            let inputNode = engine.inputNode
-            diagLog("[MIC-1b] input node ready")
-
-            // Enable voice processing (AEC + noise suppression) if requested
-            if echoCancellation {
-                do {
-                    try inputNode.setVoiceProcessingEnabled(true)
-                    diagLog("[MIC-1c] voice processing (AEC) enabled")
-                } catch {
-                    diagLog("[MIC-1c] failed to enable voice processing: \(error.localizedDescription)")
-                }
+            continuation.onTermination = { _ in
+                diagLog("[MIC-TERM] stream terminated")
             }
 
-            // Set input device before accessing inputNode format
-            var resolvedDeviceID: AudioDeviceID?
-            if let id = deviceID {
-                guard let inAU = inputNode.audioUnit else {
-                    let msg = "inputNode has no audio unit after prepare"
-                    diagLog("[MIC-2-FAIL] \(msg)")
+            // Engine setup runs on a background queue to avoid blocking the main thread.
+            // AVAudioEngine.inputNode can block indefinitely when CoreAudio is in a bad
+            // state (Bluetooth negotiation, audio daemon stall). Running off-main means
+            // the UI stays responsive — the stream simply produces no buffers until setup
+            // completes, or finishes with an error if it times out.
+            let setupQueue = DispatchQueue(label: "com.lore.mic-setup", qos: .userInitiated)
+            setupQueue.async {
+                let engine = self.makeFreshEngine()
+                diagLog("[MIC-1a] fresh engine created")
+
+                let inputNode = engine.inputNode
+                diagLog("[MIC-1b] input node ready")
+
+                // Enable voice processing (AEC + noise suppression) if requested
+                if echoCancellation {
+                    do {
+                        try inputNode.setVoiceProcessingEnabled(true)
+                        diagLog("[MIC-1c] voice processing (AEC) enabled")
+                    } catch {
+                        diagLog("[MIC-1c] failed to enable voice processing: \(error.localizedDescription)")
+                    }
+                }
+
+                // Set input device before accessing inputNode format
+                var resolvedDeviceID: AudioDeviceID?
+                if let id = deviceID {
+                    guard let inAU = inputNode.audioUnit else {
+                        let msg = "inputNode has no audio unit after prepare"
+                        diagLog("[MIC-2-FAIL] \(msg)")
+                        errorHolder.value = msg
+                        continuation.finish()
+                        return
+                    }
+                    var devID = id
+                    let inStatus = AudioUnitSetProperty(
+                        inAU,
+                        kAudioOutputUnitProperty_CurrentDevice,
+                        kAudioUnitScope_Global,
+                        0,
+                        &devID,
+                        UInt32(MemoryLayout<AudioDeviceID>.size)
+                    )
+                    diagLog("[MIC-2] setInputDevice status=\(inStatus) (0=ok)")
+                    resolvedDeviceID = id
+                } else {
+                    diagLog("[MIC-2] no deviceID, using system default")
+                    resolvedDeviceID = Self.defaultInputDeviceID()
+                }
+
+                let format = inputNode.outputFormat(forBus: 0)
+
+                var sampleRate = format.sampleRate
+                if let devID = resolvedDeviceID,
+                   let hwRate = Self.deviceNominalSampleRate(for: devID),
+                   hwRate > 0, hwRate != sampleRate {
+                    diagLog("[MIC-3] hardware sr=\(hwRate) differs from inputNode sr=\(sampleRate), using hardware rate")
+                    sampleRate = hwRate
+                }
+
+                diagLog("[MIC-3] inputNode format: sr=\(format.sampleRate) ch=\(format.channelCount) interleaved=\(format.isInterleaved) commonFormat=\(format.commonFormat.rawValue), effective sr=\(sampleRate)")
+
+                guard sampleRate > 0 && format.channelCount > 0 else {
+                    let msg = "Invalid audio format: sr=\(sampleRate) ch=\(format.channelCount)"
+                    diagLog("[MIC-3-FAIL] \(msg)")
                     errorHolder.value = msg
                     continuation.finish()
                     return
                 }
-                var devID = id
-                let inStatus = AudioUnitSetProperty(
-                    inAU,
-                    kAudioOutputUnitProperty_CurrentDevice,
-                    kAudioUnitScope_Global,
-                    0,
-                    &devID,
-                    UInt32(MemoryLayout<AudioDeviceID>.size)
-                )
-                diagLog("[MIC-2] setInputDevice status=\(inStatus) (0=ok)")
-                resolvedDeviceID = id
-            } else {
-                diagLog("[MIC-2] no deviceID, using system default")
-                resolvedDeviceID = Self.defaultInputDeviceID()
-            }
 
-            let format = inputNode.outputFormat(forBus: 0)
-
-            // The inputNode format may lag behind a device switch (e.g. USB mic at 48 kHz
-            // while the engine still reports 44.1 kHz). Query the hardware sample rate
-            // directly and prefer it when it differs from the inputNode format.
-            var sampleRate = format.sampleRate
-            if let devID = resolvedDeviceID,
-               let hwRate = Self.deviceNominalSampleRate(for: devID),
-               hwRate > 0, hwRate != sampleRate {
-                diagLog("[MIC-3] hardware sr=\(hwRate) differs from inputNode sr=\(sampleRate), using hardware rate")
-                sampleRate = hwRate
-            }
-
-            diagLog("[MIC-3] inputNode format: sr=\(format.sampleRate) ch=\(format.channelCount) interleaved=\(format.isInterleaved) commonFormat=\(format.commonFormat.rawValue), effective sr=\(sampleRate)")
-
-            guard sampleRate > 0 && format.channelCount > 0 else {
-                let msg = "Invalid audio format: sr=\(sampleRate) ch=\(format.channelCount)"
-                diagLog("[MIC-3-FAIL] \(msg)")
-                errorHolder.value = msg
-                continuation.finish()
-                return
-            }
-
-            // Try multiple tap formats — some devices report formats that don't
-            // round-trip through AVAudioFormat(standardFormat:). Fall back to the
-            // native input format as a last resort.
-            let tapFormat: AVAudioFormat
-            if let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: format.channelCount) {
-                tapFormat = f
-            } else if sampleRate != format.sampleRate,
-                      let f = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: format.channelCount) {
-                diagLog("[MIC-4] hardware-rate format failed, using node rate \(format.sampleRate)")
-                tapFormat = f
-            } else {
-                diagLog("[MIC-4] standard formats failed, using native input format")
-                tapFormat = format
-            }
-
-            diagLog("[MIC-4] tapFormat: sr=\(tapFormat.sampleRate) ch=\(tapFormat.channelCount)")
-
-            let muted = self._muted
-            var tapCallCount = 0
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, _ in
-                tapCallCount += 1
-                self._hasCapturedFrames.value = true
-                self._lastFrameTime.value = Date()
-                let rms = Self.normalizedRMS(from: buffer)
-                level.value = min(rms * 25, 1.0)
-
-                if tapCallCount <= 5 || tapCallCount % 100 == 0 {
-                    diagLog("[MIC-6] tap #\(tapCallCount): frames=\(buffer.frameLength) rms=\(rms) level=\(level.value)")
+                let tapFormat: AVAudioFormat
+                if let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: format.channelCount) {
+                    tapFormat = f
+                } else if sampleRate != format.sampleRate,
+                          let f = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: format.channelCount) {
+                    diagLog("[MIC-4] hardware-rate format failed, using node rate \(format.sampleRate)")
+                    tapFormat = f
+                } else {
+                    diagLog("[MIC-4] standard formats failed, using native input format")
+                    tapFormat = format
                 }
 
-                guard !muted.value else { return }
-                continuation.yield(buffer)
-            }
-            self.hasTapInstalled = true
+                diagLog("[MIC-4] tapFormat: sr=\(tapFormat.sampleRate) ch=\(tapFormat.channelCount)")
 
-            diagLog("[MIC-5] tap installed, preparing engine...")
+                let muted = self._muted
+                var tapCallCount = 0
+                inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, _ in
+                    tapCallCount += 1
+                    self._hasCapturedFrames.value = true
+                    self._lastFrameTime.value = Date()
+                    let rms = Self.normalizedRMS(from: buffer)
+                    level.value = min(rms * 25, 1.0)
 
-            continuation.onTermination = { _ in
-                diagLog("[MIC-TERM] stream terminated")
-                // Audio hardware teardown handled by stop() — not here,
-                // so finishStream() can drain without premature engine shutdown.
-            }
+                    if tapCallCount <= 5 || tapCallCount % 100 == 0 {
+                        diagLog("[MIC-6] tap #\(tapCallCount): frames=\(buffer.frameLength) rms=\(rms) level=\(level.value)")
+                    }
 
-            do {
-                diagLog("[MIC-7] engine prepared, starting...")
-                try engine.start()
-                diagLog("[MIC-8] engine started successfully, isRunning=\(engine.isRunning)")
-            } catch {
-                let msg = "Mic failed: \(error.localizedDescription)"
-                print("[MIC-8-FAIL] \(msg)")
-                errorHolder.value = msg
-                self.hasTapInstalled = false
-                continuation.finish()
+                    guard !muted.value else { return }
+                    continuation.yield(buffer)
+                }
+                self.hasTapInstalled = true
+
+                diagLog("[MIC-5] tap installed, preparing engine...")
+
+                do {
+                    diagLog("[MIC-7] engine prepared, starting...")
+                    try engine.start()
+                    diagLog("[MIC-8] engine started successfully, isRunning=\(engine.isRunning)")
+                } catch {
+                    let msg = "Mic failed: \(error.localizedDescription)"
+                    diagLog("[MIC-8-FAIL] \(msg)")
+                    errorHolder.value = msg
+                    self.hasTapInstalled = false
+                    continuation.finish()
+                }
             }
         }
     }
