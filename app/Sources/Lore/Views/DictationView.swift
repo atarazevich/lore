@@ -15,15 +15,12 @@ private struct HistoryDayGroup: Identifiable {
 struct DictationView: View {
     @Bindable var settings: AppSettings
     @Environment(AppCoordinator.self) private var coordinator
+    @Environment(DictationCoordinator.self) private var dictation
 
     @State private var selectedTab: DictationTab = .history
     @State private var searchText: String = ""
     @FocusState private var isSearchFocused: Bool
     @State private var searchKeyMonitor: Any?
-
-    private var dictation: DictationCoordinator {
-        coordinator.dictationCoordinator
-    }
 
     var body: some View {
         VStack(spacing: 0) {

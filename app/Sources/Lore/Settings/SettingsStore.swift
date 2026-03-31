@@ -620,9 +620,9 @@ final class SettingsStore {
         self._enableDiarization = defaults.bool(forKey: "enableDiarization")
         self._diarizationVariant = defaults.string(forKey: "diarizationVariant") ?? DiarizationVariant.dihard3.rawValue
 
-        // Detection Settings
+        // Detection Settings — default to false until meeting mode is stable
         if defaults.object(forKey: "meetingAutoDetectEnabled") == nil {
-            self._meetingAutoDetectEnabled = true
+            self._meetingAutoDetectEnabled = false
         } else {
             self._meetingAutoDetectEnabled = defaults.bool(forKey: "meetingAutoDetectEnabled")
         }
