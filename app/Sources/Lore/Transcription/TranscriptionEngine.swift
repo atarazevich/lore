@@ -239,9 +239,10 @@ final class TranscriptionEngine {
         do {
             if !canReuseCache {
                 // Try shared cache first — reuse the preloaded dictation backend as mic backend
+                let trimmedVocab = vocab.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let shared = sharedBackendCache,
                    shared.model == transcriptionModel,
-                   shared.vocabulary == vocab,
+                   shared.vocabulary == trimmedVocab,
                    let sharedBackend = shared.backend {
                     self.micBackend = sharedBackend
                     diagLog("[ENGINE-1] reusing shared cache backend for mic")
@@ -272,8 +273,13 @@ final class TranscriptionEngine {
                     self.systemBackend = sys
                 }
 
-                // Store in cache for next session
-                cachedMicBackend = self.micBackend
+                // Store in cache for next session.
+                // Only cache engine-created backends — the shared cache backend is
+                // managed by SharedBackendCache and may be invalidated independently.
+                let usedSharedBackend = (self.micBackend as AnyObject) === (sharedBackendCache?.backend as AnyObject)
+                if !usedSharedBackend {
+                    cachedMicBackend = self.micBackend
+                }
                 cachedSystemBackend = self.systemBackend
                 cachedModel = transcriptionModel
                 cachedVocabulary = vocab

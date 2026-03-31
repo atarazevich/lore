@@ -51,6 +51,13 @@ final class DictationCoordinator {
     /// Shared backend cache — set by AppDelegate during dictation setup.
     var backendCache: SharedBackendCache?
 
+    /// Private backend instance for dictation transcription.
+    /// Separate from the shared cache to avoid concurrent decoder state mutation
+    /// when TranscriptionEngine also transcribes via the shared backend.
+    private var ownBackend: (any TranscriptionBackend)?
+    private var ownBackendModel: TranscriptionModel?
+    private var ownBackendVocabulary: String?
+
     /// The current history entry being processed (needed for upgrades).
     private var currentEntryID: UUID?
 
@@ -415,30 +422,49 @@ final class DictationCoordinator {
     // MARK: - Transcription
 
     private func transcribeEntry(_ entry: inout DictationHistoryEntry, samples: [Float]) async {
-        guard let cache = backendCache else {
-            entry.status = .failed
-            entry.errorMessage = "Backend cache not available"
-            history.update(entry)
-            return
-        }
-
         let model = settings?.transcriptionModel ?? .parakeetV3
         let vocab = settings?.transcriptionCustomVocabulary ?? ""
         let locale = settings?.locale ?? .current
 
-        do {
-            try await cache.prepare(model: model, vocabulary: vocab) { [weak self] status in
-                Task { @MainActor in self?.state = .loadingModel }
+        // Ensure the shared cache has downloaded model files (fast no-op if already cached)
+        if let cache = backendCache {
+            do {
+                try await cache.prepare(model: model, vocabulary: vocab) { [weak self] status in
+                    Task { @MainActor in self?.state = .loadingModel }
+                }
+            } catch {
+                entry.status = .failed
+                entry.errorMessage = "Model loading failed: \(error.localizedDescription)"
+                lastError = entry.errorMessage
+                history.update(entry)
+                return
             }
-        } catch {
-            entry.status = .failed
-            entry.errorMessage = "Model loading failed: \(error.localizedDescription)"
-            lastError = entry.errorMessage
-            history.update(entry)
-            return
+        } else {
+            diagLog("[DICTATION] backendCache nil — dictation setup may not have run")
         }
 
-        guard let backend = cache.backend else {
+        // Use a private backend instance to avoid sharing mutable decoder state
+        // with TranscriptionEngine's backend from the shared cache.
+        // Creating a fresh backend when model files are already on disk is fast (~1s).
+        let trimmedVocab = vocab.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ownBackend == nil || ownBackendModel != model || ownBackendVocabulary != trimmedVocab {
+            diagLog("[DICTATION] creating private backend for \(model.rawValue)")
+            let fresh = model.makeBackend(customVocabulary: trimmedVocab)
+            do {
+                try await fresh.prepare(onStatus: { _ in }, onProgress: { _ in })
+            } catch {
+                entry.status = .failed
+                entry.errorMessage = "Backend prepare failed: \(error.localizedDescription)"
+                lastError = entry.errorMessage
+                history.update(entry)
+                return
+            }
+            ownBackend = fresh
+            ownBackendModel = model
+            ownBackendVocabulary = trimmedVocab
+        }
+
+        guard let backend = ownBackend else {
             entry.status = .failed
             entry.errorMessage = "Backend not available after prepare"
             history.update(entry)

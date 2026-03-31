@@ -432,25 +432,6 @@ final class MicCapture: @unchecked Sendable {
         return status == noErr ? deviceID : nil
     }
 
-    /// Temporarily set the system default input device. Returns true on success.
-    @discardableResult
-    static func setDefaultInputDevice(_ deviceID: AudioDeviceID) -> Bool {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        var devID = deviceID
-        let status = AudioObjectSetPropertyData(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            0, nil,
-            UInt32(MemoryLayout<AudioDeviceID>.size),
-            &devID
-        )
-        return status == noErr
-    }
-
 }
 
 /// Simple thread-safe float holder for audio level.
