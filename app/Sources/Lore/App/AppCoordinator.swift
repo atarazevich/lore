@@ -95,6 +95,10 @@ final class AppCoordinator {
     var audioRecorder: AudioRecorder?
     var batchEngine: BatchTranscriptionEngine?
 
+    // MARK: - Shared Backend Cache
+
+    let sharedBackendCache = SharedBackendCache()
+
     // MARK: - Dictation
 
     let dictationCoordinator = DictationCoordinator()

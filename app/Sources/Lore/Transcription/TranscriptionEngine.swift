@@ -130,6 +130,10 @@ final class TranscriptionEngine {
     /// Audio recorder for tapping streams (set by ContentView when recording is enabled).
     var audioRecorder: AudioRecorder?
 
+    /// Shared backend cache — if set, the engine reuses the cached backend for mic
+    /// transcription instead of loading a duplicate model.
+    var sharedBackendCache: SharedBackendCache?
+
     /// Speaker diarization manager for system audio (nil when diarization is disabled).
     private var diarizationManager: DiarizationManager?
 
@@ -234,25 +238,34 @@ final class TranscriptionEngine {
 
         do {
             if !canReuseCache {
-                let mic = transcriptionModel.makeBackend(customVocabulary: vocab)
-                try await mic.prepare(
-                    onStatus: { [weak self] status in
-                        Task { @MainActor in
-                            self?.assetStatus = status
+                // Try shared cache first — reuse the preloaded dictation backend as mic backend
+                if let shared = sharedBackendCache,
+                   shared.model == transcriptionModel,
+                   shared.vocabulary == vocab,
+                   let sharedBackend = shared.backend {
+                    self.micBackend = sharedBackend
+                    diagLog("[ENGINE-1] reusing shared cache backend for mic")
+                } else {
+                    let mic = transcriptionModel.makeBackend(customVocabulary: vocab)
+                    try await mic.prepare(
+                        onStatus: { [weak self] status in
+                            Task { @MainActor in
+                                self?.assetStatus = status
+                            }
+                        },
+                        onProgress: { [weak self] fraction in
+                            Task { @MainActor in
+                                self?.downloadProgress = fraction
+                            }
                         }
-                    },
-                    onProgress: { [weak self] fraction in
-                        Task { @MainActor in
-                            self?.downloadProgress = fraction
-                        }
-                    }
-                )
-                self.micBackend = mic
+                    )
+                    self.micBackend = mic
+                }
 
                 // Parakeet needs a separate backend for system audio (mutable decoder state).
                 // Qwen3 shares one backend instance for both mic and system audio (thread-safe actor).
                 if transcriptionModel == .qwen3ASR06B {
-                    self.systemBackend = mic
+                    self.systemBackend = self.micBackend
                 } else {
                     let sys = transcriptionModel.makeBackend(customVocabulary: vocab)
                     try await sys.prepare { _ in }

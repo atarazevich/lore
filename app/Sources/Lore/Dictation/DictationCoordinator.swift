@@ -1,5 +1,4 @@
 @preconcurrency import AVFoundation
-import FluidAudio
 import os
 
 enum DictationState: Sendable, Equatable {
@@ -49,8 +48,8 @@ final class DictationCoordinator {
     private static let maxChunkSamples = 480_000
     static let upgradePanelDuration: Double = 3.0
 
-    private var asrManager: AsrManager?
-    private var isModelLoaded = false
+    /// Shared backend cache — set by AppDelegate during dictation setup.
+    var backendCache: SharedBackendCache?
 
     /// The current history entry being processed (needed for upgrades).
     private var currentEntryID: UUID?
@@ -416,27 +415,37 @@ final class DictationCoordinator {
     // MARK: - Transcription
 
     private func transcribeEntry(_ entry: inout DictationHistoryEntry, samples: [Float]) async {
-        if !isModelLoaded {
-            do {
-                try await loadModel()
-            } catch {
-                entry.status = .failed
-                entry.errorMessage = "Model loading failed: \(error.localizedDescription)"
-                lastError = entry.errorMessage
-                history.update(entry)
-                return
-            }
-        }
-        state = .processing
-
-        guard let asrManager else {
+        guard let cache = backendCache else {
             entry.status = .failed
-            entry.errorMessage = "AsrManager not available"
+            entry.errorMessage = "Backend cache not available"
             history.update(entry)
             return
         }
 
-        nonisolated(unsafe) let asr = asrManager
+        let model = settings?.transcriptionModel ?? .parakeetV3
+        let vocab = settings?.transcriptionCustomVocabulary ?? ""
+        let locale = settings?.locale ?? .current
+
+        do {
+            try await cache.prepare(model: model, vocabulary: vocab) { [weak self] status in
+                Task { @MainActor in self?.state = .loadingModel }
+            }
+        } catch {
+            entry.status = .failed
+            entry.errorMessage = "Model loading failed: \(error.localizedDescription)"
+            lastError = entry.errorMessage
+            history.update(entry)
+            return
+        }
+
+        guard let backend = cache.backend else {
+            entry.status = .failed
+            entry.errorMessage = "Backend not available after prepare"
+            history.update(entry)
+            return
+        }
+
+        state = .processing
 
         // Build chunks, merging short tails into the previous chunk
         var chunks: [[Float]] = []
@@ -455,8 +464,7 @@ final class DictationCoordinator {
 
         for (i, chunk) in chunks.enumerated() {
             do {
-                let result = try await asr.transcribe(chunk)
-                let segment = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let segment = try await backend.transcribe(chunk, locale: locale, previousContext: nil)
                 if !segment.isEmpty {
                     segments.append(segment)
                     diagLog("[DICTATION] chunk \(i+1)/\(chunks.count): \(segment.prefix(60))")
@@ -518,31 +526,4 @@ final class DictationCoordinator {
         history.update(entry)
     }
 
-    // MARK: - Model Loading
-
-    /// Preload the ASR model in background at app launch.
-    /// Safe to call multiple times — no-op if already loaded.
-    func preloadModel() async throws {
-        guard !isModelLoaded else { return }
-        try await loadModel()
-    }
-
-    private func loadModel() async throws {
-        let needsDownload = !AsrModels.modelsExist(
-            at: AsrModels.defaultCacheDirectory(for: .v3),
-            version: .v3
-        )
-        if needsDownload {
-            diagLog("[DICTATION] model not cached, downloading parakeetV3...")
-            state = .loadingModel
-        } else {
-            diagLog("[DICTATION] loading cached model parakeetV3...")
-        }
-        let models = try await AsrModels.downloadAndLoad(version: .v3)
-        let asr = AsrManager(config: .default)
-        try await asr.initialize(models: models)
-        self.asrManager = asr
-        isModelLoaded = true
-        diagLog("[DICTATION] model loaded")
-    }
 }

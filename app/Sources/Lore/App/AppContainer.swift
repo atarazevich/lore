@@ -162,6 +162,7 @@ final class AppContainer {
 
         let services = makeServices(settings: settings, coordinator: coordinator)
         coordinator.transcriptionEngine = services.transcriptionEngine
+        coordinator.transcriptionEngine?.sharedBackendCache = coordinator.sharedBackendCache
         coordinator.refinementEngine = services.refinementEngine
         coordinator.audioRecorder = services.audioRecorder
         coordinator.batchEngine = services.batchEngine

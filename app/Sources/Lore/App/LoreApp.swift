@@ -107,6 +107,7 @@ public struct LoreRootApp: App {
             DictationWindowContent(settings: settings)
                 .environment(container)
                 .environment(coordinator)
+                .environment(coordinator.dictationCoordinator)
                 .defaultAppStorage(defaults)
         }
         .windowStyle(.hiddenTitleBar)
@@ -426,6 +427,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         didSetupDictation = true
 
         coordinator.dictationCoordinator.settings = settings
+        coordinator.dictationCoordinator.backendCache = coordinator.sharedBackendCache
         coordinator.hotkeyManager.install(
             coordinator: coordinator.dictationCoordinator,
             settings: settings
@@ -435,9 +437,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hotkeyManager: coordinator.hotkeyManager
         )
 
-        // Preload Parakeet model in background so first dictation is instant
+        // Preload model via shared cache so first dictation is instant
         Task {
-            try? await coordinator.dictationCoordinator.preloadModel()
+            let model = settings.transcriptionModel
+            let vocab = settings.transcriptionCustomVocabulary
+            try? await coordinator.sharedBackendCache.prepare(model: model, vocabulary: vocab)
         }
     }
 
