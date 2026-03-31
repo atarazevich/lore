@@ -70,24 +70,11 @@ final class MicCapture: @unchecked Sendable {
 
             diagLog("[MIC-1] bufferStream called, deviceID=\(String(describing: deviceID))")
 
-            // When the system default input is Bluetooth, temporarily swap it to the
-            // target device BEFORE creating the engine. AVAudioEngine configures its
-            // inputNode based on the system default at init; Bluetooth triggers HFP
-            // negotiation which blocks for seconds.
-            var restoredDefaultDevice: AudioDeviceID?
-            let currentDefault = Self.defaultInputDeviceID() ?? 0
-            if let id = deviceID, currentDefault > 0, Self.isBluetoothDevice(currentDefault) {
-                if Self.setDefaultInputDevice(id) {
-                    restoredDefaultDevice = currentDefault
-                    diagLog("[MIC-1a] swapped system default from Bluetooth (\(currentDefault)) to device \(id)")
-                }
-            }
-            defer {
-                if let restore = restoredDefaultDevice {
-                    _ = Self.setDefaultInputDevice(restore)
-                    diagLog("[MIC-1a] restored system default to \(restore)")
-                }
-            }
+            // NOTE: We no longer swap the system default input device here.
+            // The per-engine AudioUnit device assignment (lines below) is sufficient —
+            // we override the inputNode's device BEFORE calling engine.start().
+            // The old swap fired device-change listeners on other components (e.g.
+            // TranscriptionEngine), causing spurious mic restarts in concurrent modes.
 
             let engine = self.makeFreshEngine()
             diagLog("[MIC-1a] fresh engine created")
