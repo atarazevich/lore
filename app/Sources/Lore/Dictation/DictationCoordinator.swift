@@ -357,24 +357,31 @@ final class DictationCoordinator {
 
         audioLevelTask = Task { [weak self, weak bus] in
             var zeroSignalStart: Date?
+            var everHadSignal = false
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(50))
                 guard let self, let bus else { break }
                 self.audioLevel = bus.audioLevel
 
-                // Zero-signal detection (only after first buffer to avoid startup flash)
                 let signal = bus.hasSignal
                 let captured = bus.hasCapturedFrames
-                let shouldShowNoSignal = captured && !signal
+                if signal { everHadSignal = true }
+
+                // Show "no audio" indicator only if we've captured frames but never had signal
+                // (truly dead mic). Don't show it for normal silence gaps — voice isolation
+                // produces digital silence between speech, which is not a mic problem.
+                let shouldShowNoSignal = captured && !signal && !everHadSignal
                 if self.noSignal != shouldShowNoSignal {
                     self.noSignal = shouldShowNoSignal
                 }
 
-                if captured && !signal && !fallbackExhausted {
+                // Only attempt fallback if the mic has NEVER produced signal.
+                // If it had signal before, it's a normal speech gap, not a dead mic.
+                if captured && !signal && !everHadSignal && !fallbackExhausted {
                     if zeroSignalStart == nil {
                         zeroSignalStart = Date()
                     }
-                    if let start = zeroSignalStart, Date().timeIntervalSince(start) >= 1.0 {
+                    if let start = zeroSignalStart, Date().timeIntervalSince(start) >= 3.0 {
                         zeroSignalStart = nil
                         await self.attemptMicFallback()
                     }
@@ -403,19 +410,25 @@ final class DictationCoordinator {
         noSignal = false
         diagLog("[DICTATION] zero-signal detected, attempting mic fallback (dead device: \(String(describing: deadDeviceID)))")
 
-        // Get candidates, excluding the dead device
+        // Only fall back to built-in or wired devices.
+        // Never try Bluetooth (unreliable) or Continuity devices (triggers iPhone permission prompts).
         let allDevices = AudioBus.availableInputDevices()
-        let candidates = allDevices.filter { deadDeviceID == nil || $0.id != deadDeviceID }
+        let candidates = allDevices.filter { device in
+            if deadDeviceID != nil && device.id == deadDeviceID { return false }
+            guard let transport = AudioBus.transportType(for: device.id) else { return false }
+            let safe: Set<UInt32> = [
+                kAudioDeviceTransportTypeBuiltIn,
+                kAudioDeviceTransportTypeUSB,
+                kAudioDeviceTransportTypeFireWire,
+                kAudioDeviceTransportTypeThunderbolt,
+                kAudioDeviceTransportTypePCI,
+            ]
+            return safe.contains(transport)
+        }
 
-        // Priority: built-in first, then non-Bluetooth, then anything
-        let sorted = candidates.sorted { a, b in
-            let aBuiltIn = AudioBus.transportType(for: a.id) == kAudioDeviceTransportTypeBuiltIn
-            let bBuiltIn = AudioBus.transportType(for: b.id) == kAudioDeviceTransportTypeBuiltIn
-            if aBuiltIn != bBuiltIn { return aBuiltIn }
-            let aBT = AudioBus.isBluetoothDevice(a.id)
-            let bBT = AudioBus.isBluetoothDevice(b.id)
-            if aBT != bBT { return !aBT }
-            return false
+        // Built-in first, then wired
+        let sorted = candidates.sorted { a, _ in
+            AudioBus.transportType(for: a.id) == kAudioDeviceTransportTypeBuiltIn
         }
 
         for candidate in sorted {
