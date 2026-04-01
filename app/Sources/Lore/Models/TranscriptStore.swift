@@ -4,10 +4,10 @@ import Observation
 @Observable
 @MainActor
 final class TranscriptStore {
-    private let acousticEchoWindow: TimeInterval = 1.75
-    private let acousticEchoSimilarityThreshold = 0.78
-    private let acousticEchoMinimumWordCount = 4
-    private let acousticEchoMinimumCharacterCount = 20
+    private let acousticEchoWindow = AcousticEchoFilter.defaultWindow
+    private let acousticEchoSimilarityThreshold = AcousticEchoFilter.defaultSimilarityThreshold
+    private let acousticEchoMinimumWordCount = AcousticEchoFilter.defaultMinimumWordCount
+    private let acousticEchoMinimumCharacterCount = AcousticEchoFilter.defaultMinimumCharacterCount
 
     @ObservationIgnored nonisolated(unsafe) private var _utterances: [Utterance] = []
     private(set) var utterances: [Utterance] {
@@ -39,6 +39,7 @@ final class TranscriptStore {
     @discardableResult
     func append(_ utterance: Utterance) -> Bool {
         guard !shouldSuppressAcousticEcho(utterance) else { return false }
+        removeEchoedByIncoming(utterance)
         utterances.append(utterance)
         if utterance.speaker.isRemote {
             remoteUtterancesSinceStateUpdate += 1
@@ -87,6 +88,51 @@ final class TranscriptStore {
     /// Recent remote-only utterances for trigger analysis
     var recentRemoteUtterances: [Utterance] {
         utterances.suffix(10).filter { $0.speaker.isRemote }
+    }
+
+    /// Reverse echo check: when a remote utterance arrives and matches a recent
+    /// mic utterance, the mic version is the echo (speaker bleed) — remove it.
+    /// This handles the common case where the mic transcriber processes faster
+    /// than the system audio transcriber.
+    private func removeEchoedByIncoming(_ utterance: Utterance) {
+        guard utterance.speaker.isRemote else { return }
+
+        let normalizedIncoming = TextSimilarity.normalizedText(utterance.text)
+        guard isEligibleForEchoCheck(normalizedIncoming) else { return }
+
+        // Walk backwards through recent utterances looking for mic echoes.
+        // Cap at 20 entries for performance; the time window will exit earlier in practice.
+        var indicesToRemove: [Int] = []
+        for i in stride(from: utterances.count - 1, through: max(0, utterances.count - 20), by: -1) {
+            let existing = utterances[i]
+            guard existing.speaker == .you else { continue }
+            let timeDelta = utterance.timestamp.timeIntervalSince(existing.timestamp)
+            guard timeDelta >= 0 else { continue }
+            guard timeDelta <= acousticEchoWindow else { continue }
+
+            let normalizedExisting = TextSimilarity.normalizedText(existing.text)
+            guard isEligibleForEchoCheck(normalizedExisting) else { continue }
+
+            let similarity = TextSimilarity.jaccard(normalizedIncoming, normalizedExisting)
+            let containsOther =
+                normalizedIncoming.contains(normalizedExisting) ||
+                normalizedExisting.contains(normalizedIncoming)
+
+            guard similarity >= acousticEchoSimilarityThreshold || containsOther else { continue }
+
+            diagLog(
+                "[TRANSCRIPT-ECHO] removing mic echo retroactively " +
+                "dt=\(String(format: "%.2f", timeDelta)) " +
+                "similarity=\(String(format: "%.2f", similarity)) " +
+                "you='\(existing.text.prefix(80))' them='\(utterance.text.prefix(80))'"
+            )
+            indicesToRemove.append(i)
+        }
+
+        // Remove in reverse order to preserve indices
+        for i in indicesToRemove.sorted().reversed() {
+            utterances.remove(at: i)
+        }
     }
 
     private func shouldSuppressAcousticEcho(_ utterance: Utterance) -> Bool {

@@ -5,15 +5,20 @@ import Foundation
 /// Jaccard word-set similarity and substring containment.
 enum AcousticEchoFilter {
 
+    static let defaultWindow: TimeInterval = 4.0
+    static let defaultSimilarityThreshold: Double = 0.35
+    static let defaultMinimumWordCount: Int = 4
+    static let defaultMinimumCharacterCount: Int = 20
+
     /// Suppress mic records that are acoustic echoes of system records.
     /// Modifies `micRecords` in place, removing entries that match.
     static func suppress(
         micRecords: inout [SessionRecord],
         against sysRecords: [SessionRecord],
-        window: TimeInterval = 1.75,
-        similarityThreshold: Double = 0.78,
-        minimumWordCount: Int = 4,
-        minimumCharacterCount: Int = 20
+        window: TimeInterval = defaultWindow,
+        similarityThreshold: Double = defaultSimilarityThreshold,
+        minimumWordCount: Int = defaultMinimumWordCount,
+        minimumCharacterCount: Int = defaultMinimumCharacterCount
     ) {
         micRecords.removeAll { micRecord in
             let normalizedYou = TextSimilarity.normalizedText(micRecord.text)
