@@ -65,7 +65,6 @@ final class AudioBus: @unchecked Sendable {
 
     init() {
         installDeviceChangeListener()
-        installConfigChangeObserver()
     }
 
     deinit {
@@ -170,68 +169,16 @@ final class AudioBus: @unchecked Sendable {
             diagLog("[AUDIO-BUS] using system default device")
         }
 
-        let format = inputNode.outputFormat(forBus: 0)
-
-        var sampleRate = format.sampleRate
-        if let devID = currentDeviceID,
-           let hwRate = Self.deviceNominalSampleRate(for: devID),
-           hwRate > 0, hwRate != sampleRate {
-            diagLog("[AUDIO-BUS] hardware sr=\(hwRate) differs from inputNode sr=\(sampleRate), using hardware rate")
-            sampleRate = hwRate
-        }
-
-        diagLog("[AUDIO-BUS] format: sr=\(format.sampleRate) ch=\(format.channelCount), effective sr=\(sampleRate)")
-
-        guard sampleRate > 0 && format.channelCount > 0 else {
-            let msg = "Invalid audio format: sr=\(sampleRate) ch=\(format.channelCount)"
+        guard let tapFormat = resolveFormat(for: inputNode) else {
+            let msg = "Invalid audio format"
             diagLog("[AUDIO-BUS] FAIL: \(msg)")
             _error.value = msg
             return
         }
 
-        let tapFormat: AVAudioFormat
-        if let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: format.channelCount) {
-            tapFormat = f
-        } else if sampleRate != format.sampleRate,
-                  let f = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: format.channelCount) {
-            diagLog("[AUDIO-BUS] hardware-rate format failed, using node rate \(format.sampleRate)")
-            tapFormat = f
-        } else {
-            diagLog("[AUDIO-BUS] standard formats failed, using native input format")
-            tapFormat = format
-        }
-
-        // Install tap
-        let level = _audioLevel
-        let muted = _muted
-        let hasCaptured = _hasCapturedFrames
-        let hasSignal = _hasSignal
-        let lastFrame = _lastFrameTime
-        let consumersRef = consumers
-        var tapCallCount = 0
-
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: tapFormat) { buffer, _ in
-            tapCallCount += 1
-            hasCaptured.value = true
-            lastFrame.value = Date()
-
-            let rms = Self.normalizedRMS(from: buffer)
-            level.value = min(rms * 25, 1.0)
-            hasSignal.value = rms > 1e-6
-
-            if tapCallCount <= 5 || tapCallCount % 100 == 0 {
-                diagLog("[AUDIO-BUS] tap #\(tapCallCount): frames=\(buffer.frameLength) rms=\(rms)")
-            }
-
-            guard !muted.value else { return }
-
-            // Fan out to all consumers — snapshot read under unfair lock
-            let snapshot = consumersRef.withLock { Array($0.values) }
-            for continuation in snapshot {
-                continuation.yield(buffer)
-            }
-        }
-        hasTapInstalled = true
+        installTap(on: inputNode, format: tapFormat)
+        // Register observer before start() so no config change can be lost during startup.
+        installConfigChangeObserver(for: newEngine)
 
         diagLog("[AUDIO-BUS] tap installed, starting engine...")
 
@@ -239,6 +186,7 @@ final class AudioBus: @unchecked Sendable {
             try newEngine.start()
             _running.value = true
             _error.value = nil
+            configChangeRestartFailures = 0
             diagLog("[AUDIO-BUS] engine started, isRunning=\(newEngine.isRunning)")
         } catch {
             let msg = "Audio engine failed: \(error.localizedDescription)"
@@ -255,15 +203,78 @@ final class AudioBus: @unchecked Sendable {
         diagLog("[AUDIO-BUS] switching device to \(String(describing: deviceID))")
 
         // Tear down old engine, start new one. Consumer continuations stay alive.
+        // Reset failure counter — device switch is intentional, not a config-change cascade.
+        configChangeRestartFailures = 0
+        configChangeScheduled = false
         teardownEngine()
         startEngine(deviceID: deviceID)
 
         diagLog("[AUDIO-BUS] device switch complete")
     }
 
+    private func resolveFormat(for inputNode: AVAudioInputNode) -> AVAudioFormat? {
+        let format = inputNode.outputFormat(forBus: 0)
+
+        var sampleRate = format.sampleRate
+        if let devID = currentDeviceID,
+           let hwRate = Self.deviceNominalSampleRate(for: devID),
+           hwRate > 0, hwRate != sampleRate {
+            diagLog("[AUDIO-BUS] hardware sr=\(hwRate) differs from inputNode sr=\(sampleRate), using hardware rate")
+            sampleRate = hwRate
+        }
+
+        diagLog("[AUDIO-BUS] format: sr=\(format.sampleRate) ch=\(format.channelCount), effective sr=\(sampleRate)")
+
+        guard sampleRate > 0 && format.channelCount > 0 else { return nil }
+
+        if let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: format.channelCount) {
+            return f
+        } else if sampleRate != format.sampleRate,
+                  let f = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: format.channelCount) {
+            diagLog("[AUDIO-BUS] hardware-rate format failed, using node rate \(format.sampleRate)")
+            return f
+        } else {
+            diagLog("[AUDIO-BUS] standard formats failed, using native input format")
+            return format
+        }
+    }
+
+    private func installTap(on inputNode: AVAudioInputNode, format: AVAudioFormat) {
+        let level = _audioLevel
+        let muted = _muted
+        let hasCaptured = _hasCapturedFrames
+        let hasSignal = _hasSignal
+        let lastFrame = _lastFrameTime
+        let consumersRef = consumers
+        var tapCallCount = 0
+
+        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
+            tapCallCount += 1
+            hasCaptured.value = true
+            lastFrame.value = Date()
+
+            let rms = Self.normalizedRMS(from: buffer)
+            level.value = min(rms * 25, 1.0)
+            hasSignal.value = rms > 1e-6
+
+            if tapCallCount <= 5 || tapCallCount % 100 == 0 {
+                diagLog("[AUDIO-BUS] tap #\(tapCallCount): frames=\(buffer.frameLength) rms=\(rms)")
+            }
+
+            guard !muted.value else { return }
+
+            let snapshot = consumersRef.withLock { Array($0.values) }
+            for continuation in snapshot {
+                continuation.yield(buffer)
+            }
+        }
+        hasTapInstalled = true
+    }
+
     private func teardownEngine() {
         dispatchPrecondition(condition: .onQueue(engineQueue))
 
+        removeConfigChangeObserver()
         if hasTapInstalled, let engine {
             engine.inputNode.removeTap(onBus: 0)
             hasTapInstalled = false
@@ -299,14 +310,18 @@ final class AudioBus: @unchecked Sendable {
         // If engine reports running but no frames in 5 seconds, restart
         guard let engine, engine.isRunning else {
             diagLog("[AUDIO-BUS-HEALTH] engine not running, restarting")
+            configChangeRestartFailures = 0
             let device = currentDeviceID
+            teardownEngine()
             startEngine(deviceID: device)
             return
         }
 
         if let lastFrame = _lastFrameTime.value, Date().timeIntervalSince(lastFrame) > 5.0 {
             diagLog("[AUDIO-BUS-HEALTH] silent for >5s, restarting engine")
+            configChangeRestartFailures = 0
             let device = currentDeviceID
+            teardownEngine()
             startEngine(deviceID: device)
         } else if _lastFrameTime.value == nil && _hasCapturedFrames.value == false {
             // Engine started but never produced frames — give it time on first check
@@ -329,6 +344,9 @@ final class AudioBus: @unchecked Sendable {
             guard self.currentDeviceID == nil || self.currentDeviceID == Self.defaultInputDeviceID() else { return }
             guard self._running.value else { return }
             diagLog("[AUDIO-BUS] default input device changed, restarting engine")
+            self.configChangeRestartFailures = 0
+            self.configChangeScheduled = false
+            self.teardownEngine()
             self.startEngine(deviceID: nil)
         }
         defaultDeviceListenerBlock = block
@@ -359,18 +377,85 @@ final class AudioBus: @unchecked Sendable {
 
     // MARK: - Config Change Observer
 
-    private func installConfigChangeObserver() {
+    /// Consecutive restart failures since last successful engine start.
+    private var configChangeRestartFailures = 0
+    private static let maxConfigChangeRestarts = 3
+    /// Debounce: when set, a restart is already scheduled on engineQueue.
+    private var configChangeScheduled = false
+
+    private func installConfigChangeObserver(for engine: AVAudioEngine) {
+        removeConfigChangeObserver()
         configChangeObserver = NotificationCenter.default.addObserver(
             forName: .AVAudioEngineConfigurationChange,
-            object: nil,
+            object: engine,
             queue: nil
         ) { [weak self] _ in
             guard let self else { return }
             self.engineQueue.async {
-                guard self._running.value else { return }
-                diagLog("[AUDIO-BUS] AVAudioEngineConfigurationChange, restarting engine")
-                let device = self.currentDeviceID
-                self.startEngine(deviceID: device)
+                guard self.engine != nil else { return }
+                guard !self.configChangeScheduled else {
+                    diagLog("[AUDIO-BUS] config change coalesced (restart already pending)")
+                    return
+                }
+                self.configChangeScheduled = true
+                // Debounce: wait 300ms for cascading notifications to settle
+                self.engineQueue.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                    self?.handleConfigChange()
+                }
+            }
+        }
+    }
+
+    private func handleConfigChange() {
+        dispatchPrecondition(condition: .onQueue(engineQueue))
+        configChangeScheduled = false
+
+        guard configChangeRestartFailures < Self.maxConfigChangeRestarts else {
+            let msg = "Audio engine failed after \(Self.maxConfigChangeRestarts) restart attempts"
+            diagLog("[AUDIO-BUS] \(msg) — giving up")
+            teardownEngine()
+            _error.value = msg
+            return
+        }
+
+        guard let engine else {
+            diagLog("[AUDIO-BUS] config change but engine is nil, ignoring")
+            return
+        }
+
+        diagLog("[AUDIO-BUS] AVAudioEngineConfigurationChange, restarting (attempt \(configChangeRestartFailures + 1))")
+
+        // The engine stopped itself. Re-read format, re-install tap, restart.
+        // Do NOT create a new engine — that triggers cascading config changes.
+        let inputNode = engine.inputNode
+
+        if hasTapInstalled {
+            inputNode.removeTap(onBus: 0)
+            hasTapInstalled = false
+        }
+
+        guard let tapFormat = resolveFormat(for: inputNode) else {
+            diagLog("[AUDIO-BUS] config change: invalid format, waiting for health check")
+            configChangeRestartFailures += 1
+            _running.value = false
+            return
+        }
+
+        installTap(on: inputNode, format: tapFormat)
+
+        do {
+            try engine.start()
+            _running.value = true
+            _error.value = nil
+            configChangeRestartFailures = 0
+            diagLog("[AUDIO-BUS] engine restarted after config change, isRunning=\(engine.isRunning)")
+        } catch {
+            configChangeRestartFailures += 1
+            let msg = "Engine restart failed (attempt \(configChangeRestartFailures)): \(error.localizedDescription)"
+            diagLog("[AUDIO-BUS] \(msg)")
+            if configChangeRestartFailures >= Self.maxConfigChangeRestarts {
+                teardownEngine()
+                _error.value = msg
             }
         }
     }
