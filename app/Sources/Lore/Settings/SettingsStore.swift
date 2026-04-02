@@ -511,6 +511,93 @@ final class SettingsStore {
         }
     }
 
+    @ObservationIgnored nonisolated(unsafe) private var _learnVocabularyFromCorrections: Bool
+    var learnVocabularyFromCorrections: Bool {
+        get { access(keyPath: \.learnVocabularyFromCorrections); return _learnVocabularyFromCorrections }
+        set {
+            withMutation(keyPath: \.learnVocabularyFromCorrections) {
+                _learnVocabularyFromCorrections = newValue
+                defaults.set(newValue, forKey: "learnVocabularyFromCorrections")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _autoSubmitCorrections: Bool
+    var autoSubmitCorrections: Bool {
+        get { access(keyPath: \.autoSubmitCorrections); return _autoSubmitCorrections }
+        set {
+            withMutation(keyPath: \.autoSubmitCorrections) {
+                _autoSubmitCorrections = newValue
+                defaults.set(newValue, forKey: "autoSubmitCorrections")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _correctionPhoneticThreshold: Double
+    var correctionPhoneticThreshold: Double {
+        get { access(keyPath: \.correctionPhoneticThreshold); return _correctionPhoneticThreshold }
+        set {
+            withMutation(keyPath: \.correctionPhoneticThreshold) {
+                _correctionPhoneticThreshold = newValue
+                defaults.set(newValue, forKey: "correctionPhoneticThreshold")
+            }
+        }
+    }
+
+    // MARK: - Vocabulary Log
+
+    struct LearnedWord: Codable, Identifiable {
+        let id: UUID
+        let correction: String
+        let original: String
+        let date: Date
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _learnedWords: [LearnedWord]
+    var learnedWords: [LearnedWord] {
+        get { access(keyPath: \.learnedWords); return _learnedWords }
+        set {
+            withMutation(keyPath: \.learnedWords) {
+                _learnedWords = newValue
+                if let data = try? JSONEncoder().encode(newValue) {
+                    defaults.set(data, forKey: "learnedWords")
+                }
+            }
+        }
+    }
+
+    /// Extract the term name from a vocabulary line (everything before the first colon, trimmed).
+    private func vocabularyTerm(from line: String) -> String {
+        line.split(separator: ":").first.map { $0.trimmingCharacters(in: .whitespaces) } ?? ""
+    }
+
+    /// Add a term to vocabulary. Returns true if added (false if duplicate).
+    @discardableResult
+    func addToVocabulary(correction: String, original: String) -> Bool {
+        let lines = transcriptionCustomVocabulary.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        if lines.contains(where: { vocabularyTerm(from: $0).lowercased() == correction.lowercased() }) {
+            return false
+        }
+        let entry = "\(correction): \(original)"
+        if transcriptionCustomVocabulary.isEmpty {
+            transcriptionCustomVocabulary = entry
+        } else {
+            transcriptionCustomVocabulary += "\n" + entry
+        }
+        // Log the addition
+        learnedWords.insert(LearnedWord(id: UUID(), correction: correction, original: original, date: Date()), at: 0)
+        return true
+    }
+
+    /// Remove a learned word from both the vocabulary string and the log.
+    func removeLearnedWordAndVocabulary(id: UUID) {
+        guard let word = learnedWords.first(where: { $0.id == id }) else { return }
+        let lines = transcriptionCustomVocabulary.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let filtered = lines.filter { vocabularyTerm(from: $0).lowercased() != word.correction.lowercased() }
+        transcriptionCustomVocabulary = filtered.joined(separator: "\n")
+        learnedWords.removeAll { $0.id == id }
+    }
+
     // MARK: - UI Settings
 
     @ObservationIgnored nonisolated(unsafe) private var _showLiveTranscript: Bool
@@ -663,6 +750,25 @@ final class SettingsStore {
         self._cleanupByDefault = defaults.bool(forKey: "dictationCleanupEnabled")
         self._translationByDefault = defaults.bool(forKey: "dictationTranslationEnabled")
         self._openaiApiKey = storage.secretStore.load(key: "openaiApiKey") ?? ""
+        if defaults.object(forKey: "learnVocabularyFromCorrections") == nil {
+            self._learnVocabularyFromCorrections = true
+        } else {
+            self._learnVocabularyFromCorrections = defaults.bool(forKey: "learnVocabularyFromCorrections")
+        }
+        self._autoSubmitCorrections = defaults.bool(forKey: "autoSubmitCorrections")
+        if defaults.object(forKey: "correctionPhoneticThreshold") == nil {
+            self._correctionPhoneticThreshold = 0.5
+        } else {
+            self._correctionPhoneticThreshold = defaults.double(forKey: "correctionPhoneticThreshold")
+        }
+
+        // Vocabulary log
+        if let data = defaults.data(forKey: "learnedWords"),
+           let words = try? JSONDecoder().decode([LearnedWord].self, from: data) {
+            self._learnedWords = words
+        } else {
+            self._learnedWords = []
+        }
 
         // UI Settings
         if defaults.object(forKey: "showLiveTranscript") == nil {

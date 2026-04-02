@@ -21,6 +21,13 @@ struct DictationView: View {
     @State private var searchText: String = ""
     @FocusState private var isSearchFocused: Bool
     @State private var searchKeyMonitor: Any?
+    @State private var vocabFeedbackEntryID: UUID?
+    @State private var vocabFeedbackText: String?
+    @State private var editingEntryID: UUID?
+    @State private var editingText: String = ""
+    @State private var editingOriginalText: String = ""
+    @FocusState private var isEditorFocused: Bool
+    @State private var blurMonitor: Any?
 
     var body: some View {
         VStack(spacing: 0) {
@@ -40,15 +47,47 @@ struct DictationView: View {
         }
         .frame(minWidth: 380, maxWidth: 600, minHeight: 500)
         .background(.ultraThinMaterial)
-        .onAppear { installSearchKeyMonitor() }
-        .onDisappear { removeSearchKeyMonitor() }
+        .onAppear {
+            installSearchKeyMonitor()
+            installBlurMonitor()
+        }
+        .onDisappear {
+            removeSearchKeyMonitor()
+            removeBlurMonitor()
+        }
+        .onChange(of: dictation.state) { _, newState in
+            // Force-cancel edit when dictation starts recording
+            if newState == .recording && editingEntryID != nil {
+                cancelEdit()
+            }
+        }
+        .onChange(of: selectedTab) { _, _ in
+            if editingEntryID != nil {
+                if settings.autoSubmitCorrections {
+                    commitEdit()
+                } else {
+                    cancelEdit()
+                }
+            }
+        }
+        .onChange(of: isEditorFocused) { _, focused in
+            // Primary auto-submit trigger (more reliable than NSEvent monitor alone)
+            if !focused && editingEntryID != nil && settings.autoSubmitCorrections {
+                // Defer slightly to avoid conflicts with cancel/commit already in progress
+                DispatchQueue.main.async {
+                    if editingEntryID != nil {
+                        commitEdit()
+                    }
+                }
+            }
+        }
     }
 
     // MARK: - Header
 
     private var header: some View {
         HStack {
-            Text("Lore")
+            Text("Dictation")
                 .font(.system(size: 13, weight: .semibold))
             Spacer()
         }
@@ -332,10 +371,72 @@ struct DictationView: View {
                     }
                 case .transcribed, .cleaned:
                     if let text = entry.displayText {
-                        highlightedText(text)
-                            .font(.system(size: 12))
-                            .foregroundStyle(.primary)
-                            .textSelection(.enabled)
+                        VStack(alignment: .leading, spacing: 2) {
+                            if editingEntryID == entry.id {
+                                // Edit mode
+                                VStack(alignment: .leading, spacing: 4) {
+                                    TextEditor(text: $editingText)
+                                        .font(.system(size: 12))
+                                        .scrollContentBackground(.hidden)
+                                        .frame(maxHeight: 200)
+                                        .padding(4)
+                                        .background(Color.accentColor.opacity(0.05))
+                                        .clipShape(RoundedRectangle(cornerRadius: 4))
+                                        .overlay(
+                                            RoundedRectangle(cornerRadius: 4)
+                                                .stroke(Color.accentColor.opacity(0.3), lineWidth: 1)
+                                        )
+                                        .focused($isEditorFocused)
+                                        .onExitCommand { cancelEdit() }
+                                        .onKeyPress(.return, phases: .down) { press in
+                                            if press.modifiers.contains(.command) {
+                                                commitEdit()
+                                                return .handled
+                                            }
+                                            return .ignored
+                                        }
+
+                                    if !settings.autoSubmitCorrections {
+                                        HStack(spacing: 6) {
+                                            Button {
+                                                commitEdit()
+                                            } label: {
+                                                Image(systemName: "checkmark")
+                                                    .font(.system(size: 10, weight: .semibold))
+                                                    .foregroundStyle(.green)
+                                            }
+                                            .buttonStyle(.plain)
+                                            .help("Save changes")
+
+                                            Button {
+                                                cancelEdit()
+                                            } label: {
+                                                Image(systemName: "xmark")
+                                                    .font(.system(size: 10, weight: .semibold))
+                                                    .foregroundStyle(.secondary)
+                                            }
+                                            .buttonStyle(.plain)
+                                            .help("Discard changes")
+                                        }
+                                    }
+                                }
+                            } else {
+                                // Read mode — double-click to edit
+                                highlightedText(text)
+                                    .font(.system(size: 12))
+                                    .contentShape(Rectangle())
+                                    .onTapGesture(count: 2) {
+                                        startEditing(entry: entry, text: text)
+                                    }
+                            }
+
+                            if vocabFeedbackEntryID == entry.id, let feedback = vocabFeedbackText {
+                                Text(feedback)
+                                    .font(.system(size: 9))
+                                    .foregroundStyle(.green)
+                                    .transition(.opacity)
+                            }
+                        }
                     }
                     if entry.hasBothVersions {
                         Text(entry.activeVersion == .cleaned ? "Cleaned" : "Original")
@@ -468,6 +569,33 @@ struct DictationView: View {
                         .foregroundStyle(.secondary)
                 }
 
+                // Vocabulary learning toggle
+                Toggle("Learn vocabulary from corrections", isOn: $settings.learnVocabularyFromCorrections)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .font(.system(size: 12))
+
+                // Auto-submit corrections toggle
+                Toggle("Auto-submit corrections (experimental)", isOn: $settings.autoSubmitCorrections)
+                    .toggleStyle(.switch)
+                    .controlSize(.mini)
+                    .font(.system(size: 12))
+
+                // Phonetic threshold slider
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack {
+                        Text("Phonetic threshold")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+                        Spacer()
+                        Text(String(format: "%.2f", settings.correctionPhoneticThreshold))
+                            .font(.system(size: 11, design: .monospaced))
+                            .foregroundStyle(.tertiary)
+                    }
+                    Slider(value: $settings.correctionPhoneticThreshold, in: 0.0...1.0, step: 0.05)
+                        .controlSize(.mini)
+                }
+
                 // API key warning
                 if (settings.cleanupByDefault || settings.translationByDefault)
                     && settings.openaiApiKey.isEmpty {
@@ -528,6 +656,46 @@ struct DictationView: View {
                     }
                 }
 
+                // Learned vocabulary log
+                if !settings.learnedWords.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text("Learned vocabulary")
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(.secondary)
+
+                        VStack(spacing: 0) {
+                            ForEach(settings.learnedWords.prefix(20)) { word in
+                                HStack(spacing: 6) {
+                                    VStack(alignment: .leading, spacing: 1) {
+                                        Text("\(word.correction)")
+                                            .font(.system(size: 11, weight: .medium))
+                                        Text("was: \(word.original)")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.tertiary)
+                                    }
+                                    Spacer()
+                                    Text(word.date, style: .date)
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(.quaternary)
+                                    Button {
+                                        settings.removeLearnedWordAndVocabulary(id: word.id)
+                                    } label: {
+                                        Image(systemName: "xmark.circle")
+                                            .font(.system(size: 10))
+                                            .foregroundStyle(.secondary)
+                                    }
+                                    .buttonStyle(.plain)
+                                    .help("Remove from vocabulary")
+                                }
+                                .padding(.vertical, 4)
+                                .padding(.horizontal, 6)
+                            }
+                        }
+                        .background(Color.primary.opacity(0.04))
+                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                    }
+                }
+
                 // Hotkey picker
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Hotkey")
@@ -576,13 +744,162 @@ struct DictationView: View {
         .padding(.vertical, 8)
     }
 
+    // MARK: - Inline Editing
+
+    private func startEditing(entry: DictationHistoryEntry, text: String) {
+        // Commit any existing edit first
+        if editingEntryID != nil {
+            commitEdit()
+        }
+        // Clear search so the row doesn't disappear from filtered results after save
+        searchText = ""
+        editingEntryID = entry.id
+        editingText = text
+        editingOriginalText = text
+        // Defer focus to next runloop so TextEditor is mounted
+        DispatchQueue.main.async {
+            isEditorFocused = true
+        }
+    }
+
+    private func cancelEdit() {
+        editingEntryID = nil
+        editingText = ""
+        editingOriginalText = ""
+        isEditorFocused = false
+    }
+
+    private func commitEdit() {
+        guard let entryID = editingEntryID else { return }
+        let newText = editingText.trimmingCharacters(in: .whitespacesAndNewlines)
+        let originalText = editingOriginalText
+
+        // Find the entry
+        guard let entry = dictation.history.entries.first(where: { $0.id == entryID }) else {
+            cancelEdit()
+            return
+        }
+
+        // Exit edit mode first
+        let savedEntryID = entryID
+        editingEntryID = nil
+        editingText = ""
+        editingOriginalText = ""
+        isEditorFocused = false
+
+        // If text didn't change, nothing to do
+        guard newText != originalText else { return }
+
+        // Update the entry text
+        var updated = entry
+        switch entry.activeVersion {
+        case .raw: updated.rawText = newText
+        case .cleaned: updated.cleanedText = newText
+        }
+        dictation.history.update(updated)
+
+        // Run diff for vocabulary learning
+        if settings.learnVocabularyFromCorrections {
+            learnFromDiff(original: originalText, edited: newText, entryID: savedEntryID)
+        }
+    }
+
+    private func learnFromDiff(original: String, edited: String, entryID: UUID) {
+        guard let islands = TextDiff.findIslands(original: original, edited: edited) else { return }
+
+        var addedTerms: [String] = []
+        let threshold = settings.correctionPhoneticThreshold
+
+        for island in islands {
+            let classification = PhoneticSimilarity.classifyIsland(
+                originalWords: island.originalWords,
+                editedWords: island.editedWords,
+                baseThreshold: threshold
+            )
+            if classification == .misrecognition {
+                let correction = island.editedWords.joined(separator: " ")
+                let original = island.originalWords.joined(separator: " ")
+                if addToVocabulary(correction: correction, original: original) {
+                    addedTerms.append(correction)
+                }
+            }
+        }
+
+        if !addedTerms.isEmpty {
+            let message = "Added '\(addedTerms.joined(separator: "', '"))' to vocabulary"
+            showVocabFeedback(for: entryID, message: message)
+        }
+    }
+
+    private func addToVocabulary(correction: String, original: String) -> Bool {
+        settings.addToVocabulary(correction: correction, original: original)
+    }
+
+    private func showVocabFeedback(for entryID: UUID, message: String) {
+        withAnimation(.easeIn(duration: 0.2)) {
+            vocabFeedbackEntryID = entryID
+            vocabFeedbackText = message
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2) {
+            withAnimation(.easeOut(duration: 0.3)) {
+                if vocabFeedbackEntryID == entryID {
+                    vocabFeedbackEntryID = nil
+                    vocabFeedbackText = nil
+                }
+            }
+        }
+    }
+
+    // MARK: - Blur Monitor (auto-submit mode)
+
+    private func installBlurMonitor() {
+        blurMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { event in
+            guard settings.autoSubmitCorrections, editingEntryID != nil else { return event }
+            // If the click is outside our editing area, commit the edit
+            // We check by scheduling on next runloop — if focus was lost, commit
+            DispatchQueue.main.async {
+                if !isEditorFocused && editingEntryID != nil {
+                    commitEdit()
+                }
+            }
+            return event
+        }
+    }
+
+    private func removeBlurMonitor() {
+        if let monitor = blurMonitor {
+            NSEvent.removeMonitor(monitor)
+            blurMonitor = nil
+        }
+    }
+
     // MARK: - Helpers
+
+    /// Build a Text view with search matches highlighted in yellow.
+    private func highlightedText(_ text: String) -> Text {
+        guard !searchText.isEmpty else { return Text(text) }
+        var result = Text("")
+        var current = text.startIndex
+        while let range = text.range(of: searchText, options: .caseInsensitive, range: current..<text.endIndex) {
+            if current < range.lowerBound {
+                result = result + Text(text[current..<range.lowerBound])
+            }
+            result = result + Text(text[range])
+                .foregroundColor(.yellow)
+                .bold()
+            current = range.upperBound
+        }
+        if current < text.endIndex {
+            result = result + Text(text[current..<text.endIndex])
+        }
+        return result
+    }
 
     // MARK: - Search Key Monitor
 
     private func installSearchKeyMonitor() {
         searchKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { event in
-            guard selectedTab == .history else { return event }
+            guard selectedTab == .history, editingEntryID == nil else { return event }
 
             // Escape → clear search
             if event.keyCode == 53 && !searchText.isEmpty {
@@ -629,29 +946,6 @@ struct DictationView: View {
             NSEvent.removeMonitor(monitor)
             searchKeyMonitor = nil
         }
-    }
-
-    private func highlightedText(_ text: String) -> Text {
-        guard !searchText.isEmpty else { return Text(text) }
-
-        var result = Text("")
-        var currentIndex = text.startIndex
-        var searchStart = text.startIndex
-
-        while let range = text.range(of: searchText, options: .caseInsensitive, range: searchStart..<text.endIndex) {
-            if currentIndex < range.lowerBound {
-                result = result + Text(text[currentIndex..<range.lowerBound])
-            }
-            result = result + Text(text[range])
-                .foregroundColor(.yellow)
-                .bold()
-            currentIndex = range.upperBound
-            searchStart = range.upperBound
-        }
-        if currentIndex < text.endIndex {
-            result = result + Text(text[currentIndex...])
-        }
-        return result
     }
 
     private static let timeFormatter: DateFormatter = {
