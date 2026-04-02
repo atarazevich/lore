@@ -18,8 +18,6 @@ final class HotkeyManager {
 
     private var fnDown = false
     private var fnTimer: Task<Void, Never>?
-    /// Watchdog: if fnDown stays true for 15s without lock, something went wrong
-    private var fnStaleTimer: Task<Void, Never>?
     /// Debounce timer for Fn release — Fn modifier flag flickers when other keys pressed
     private var fnReleaseDebounce: Task<Void, Never>?
     private var isHoldMode = false
@@ -169,8 +167,6 @@ final class HotkeyManager {
         fnTimer = nil
         fnReleaseDebounce?.cancel()
         fnReleaseDebounce = nil
-        fnStaleTimer?.cancel()
-        fnStaleTimer = nil
         coordinator = nil
         settings = nil
         log.info("Hotkey manager uninstalled")
@@ -197,21 +193,6 @@ final class HotkeyManager {
         if hotkeyPressed && !fnDown {
             fnDown = true
             fnReleaseDebounce?.cancel() // Cancel any pending debounced release
-
-            // Watchdog: reset fnDown if it stays stuck for 15s (missed release event)
-            fnStaleTimer?.cancel()
-            fnStaleTimer = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(15))
-                guard !Task.isCancelled, let self, self.fnDown else { return }
-                self.hkLog.warning("[HK] fnDown stuck for 15s, resetting")
-                diagLog("[HK] fnDown stuck for 15s, resetting")
-                self.fnDown = false
-                self.isHoldMode = false
-                self.fnTimer?.cancel()
-                self.fnTimer = nil
-                self.isRecordingFlag = false
-                self.isPreBufferingFlag = false
-            }
 
             guard isEnabled else { return }
 
@@ -242,8 +223,6 @@ final class HotkeyManager {
             }
         } else if !hotkeyPressed && fnDown {
             fnDown = false
-            fnStaleTimer?.cancel()
-            fnStaleTimer = nil
             fnTimer?.cancel()
             fnTimer = nil
 
@@ -503,6 +482,24 @@ final class HotkeyManager {
     private func reinstallEventTap() {
         hkLog.error("[HK] Reinstalling CGEvent tap")
         diagLog("[HK] Reinstalling CGEvent tap")
+
+        // If a recording was in progress, the tap death means we lost Fn tracking.
+        // Stop the recording so it doesn't get orphaned.
+        if fnDown || isHoldMode || isLocked {
+            diagLog("[HK] tap died mid-recording, stopping")
+            fnDown = false
+            isHoldMode = false
+            isLocked = false
+            isLockedFlag = false
+            isRecordingFlag = false
+            isPreBufferingFlag = false
+            fnTimer?.cancel()
+            fnTimer = nil
+            Task { [weak self] in
+                await self?.coordinator?.stopRecording()
+            }
+        }
+
         teardownEventTap()
         installEventTap()
     }
