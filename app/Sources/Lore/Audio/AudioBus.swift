@@ -54,22 +54,19 @@ final class AudioBus: @unchecked Sendable {
         return Date().timeIntervalSince(lastFrame) < 5.0
     }
 
-    // MARK: - Device Change Listener
+    // MARK: - Config Change Observer
 
-    private var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock?
     private var configChangeObserver: NSObjectProtocol?
     private var healthTimer: DispatchSourceTimer?
     private var currentDeviceID: AudioDeviceID?
+    private var usesSystemDefault = true
 
     // MARK: - Init
 
-    init() {
-        installDeviceChangeListener()
-    }
+    init() {}
 
     deinit {
         healthTimer?.cancel()
-        removeDeviceChangeListener()
         removeConfigChangeObserver()
     }
 
@@ -164,8 +161,10 @@ final class AudioBus: @unchecked Sendable {
                 diagLog("[AUDIO-BUS] setInputDevice status=\(status) (0=ok)")
             }
             currentDeviceID = id
+            usesSystemDefault = false
         } else {
             currentDeviceID = Self.defaultInputDeviceID()
+            usesSystemDefault = true
             diagLog("[AUDIO-BUS] using system default device")
         }
 
@@ -240,6 +239,9 @@ final class AudioBus: @unchecked Sendable {
     }
 
     private func installTap(on inputNode: AVAudioInputNode, format: AVAudioFormat) {
+        // Defensive: remove any existing tap before installing. No-op when no tap exists.
+        inputNode.removeTap(onBus: 0)
+
         let level = _audioLevel
         let muted = _muted
         let hasCaptured = _hasCapturedFrames
@@ -329,52 +331,6 @@ final class AudioBus: @unchecked Sendable {
         }
     }
 
-    // MARK: - Device Change Listener
-
-    private func installDeviceChangeListener() {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            // Block is delivered on engineQueue (passed to AudioObjectAddPropertyListenerBlock below)
-            guard let self else { return }
-            guard self.currentDeviceID == nil || self.currentDeviceID == Self.defaultInputDeviceID() else { return }
-            guard self._running.value else { return }
-            diagLog("[AUDIO-BUS] default input device changed, restarting engine")
-            self.configChangeRestartFailures = 0
-            self.configChangeScheduled = false
-            self.teardownEngine()
-            self.startEngine(deviceID: nil)
-        }
-        defaultDeviceListenerBlock = block
-
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            engineQueue,
-            block
-        )
-    }
-
-    private func removeDeviceChangeListener() {
-        guard let block = defaultDeviceListenerBlock else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            engineQueue,
-            block
-        )
-        defaultDeviceListenerBlock = nil
-    }
-
     // MARK: - Config Change Observer
 
     /// Consecutive restart failures since last successful engine start.
@@ -423,25 +379,31 @@ final class AudioBus: @unchecked Sendable {
             return
         }
 
+        // Update device tracking — the engine follows the system default after a config change
+        if usesSystemDefault {
+            currentDeviceID = Self.defaultInputDeviceID()
+        }
+
         diagLog("[AUDIO-BUS] AVAudioEngineConfigurationChange, restarting (attempt \(configChangeRestartFailures + 1))")
 
         // The engine stopped itself. Re-read format, re-install tap, restart.
         // Do NOT create a new engine — that triggers cascading config changes.
-        let inputNode = engine.inputNode
-
         if hasTapInstalled {
-            inputNode.removeTap(onBus: 0)
+            engine.inputNode.removeTap(onBus: 0)
             hasTapInstalled = false
         }
 
-        guard let tapFormat = resolveFormat(for: inputNode) else {
+        // Reset clears internal graph connections so the engine picks up the new hardware format.
+        engine.reset()
+
+        guard let tapFormat = resolveFormat(for: engine.inputNode) else {
             diagLog("[AUDIO-BUS] config change: invalid format, waiting for health check")
             configChangeRestartFailures += 1
             _running.value = false
             return
         }
 
-        installTap(on: inputNode, format: tapFormat)
+        installTap(on: engine.inputNode, format: tapFormat)
 
         do {
             try engine.start()
