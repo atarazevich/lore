@@ -24,7 +24,7 @@ public struct LoreRootApp: App {
     }
 
     public var body: some Scene {
-        Window("Lore", id: "main") {
+        Window("Meeting", id: "main") {
             ContentView(settings: settings)
                 .environment(container)
                 .environment(coordinator)
