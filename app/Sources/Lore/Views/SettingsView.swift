@@ -1,21 +1,28 @@
 import SwiftUI
 import CoreAudio
+import LaunchAtLogin
 import Sparkle
 
 struct SettingsView: View {
+    private enum TemplateField: Hashable {
+        case name
+    }
+
     @Bindable var settings: AppSettings
     var updater: SPUUpdater
     @Environment(AppCoordinator.self) private var coordinator
     @State private var inputDevices: [(id: AudioDeviceID, name: String)] = []
+    @State private var automaticallyChecksForUpdates = false
+    @State private var templates: [MeetingTemplate] = []
     @State private var isAddingTemplate = false
     @State private var newTemplateName = ""
     @State private var newTemplateIcon = "doc.text"
     @State private var newTemplatePrompt = ""
+    @FocusState private var focusedTemplateField: TemplateField?
+    @State private var showAutoDetectExplanation = false
 
     var body: some View {
         Form {
-            // v2: Meeting Notes section (hidden for dictation-only release)
-            if false {
             Section("Meeting Notes") {
                 Text("Where meeting transcripts are saved as plain text files.")
                     .font(.system(size: 11))
@@ -34,10 +41,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            } // end v2: Meeting Notes
 
-            // v2: Knowledge Base section (hidden for dictation-only release)
-            if false {
             Section("Knowledge Base") {
                 Text("Optional. Point this to a folder of notes, docs, or reference material (.md, .txt). During meetings, Lore searches this folder to surface relevant context and talking points.")
                     .font(.system(size: 11))
@@ -64,10 +68,7 @@ struct SettingsView: View {
                     }
                 }
             }
-            } // end v2: Knowledge Base
 
-            // v2: LLM Provider section (hidden for dictation-only release)
-            if false {
             Section("LLM Provider") {
                 Picker("Provider", selection: $settings.llmProvider) {
                     ForEach(LLMProvider.allCases) { provider in
@@ -75,25 +76,39 @@ struct SettingsView: View {
                     }
                 }
                 .font(.system(size: 12))
+                .accessibilityIdentifier("settings.llmProviderPicker")
 
-                if settings.llmProvider == .openRouter {
+                switch settings.llmProvider {
+                case .openRouter:
                     SecureField("API Key", text: $settings.openRouterApiKey)
                         .font(.system(size: 12, design: .monospaced))
 
                     TextField("Model", text: $settings.selectedModel, prompt: Text("e.g. google/gemini-3-flash-preview"))
                         .font(.system(size: 12, design: .monospaced))
-                } else {
+                case .ollama:
                     TextField("Ollama URL", text: $settings.ollamaBaseURL, prompt: Text("http://localhost:11434"))
                         .font(.system(size: 12, design: .monospaced))
 
                     TextField("Model", text: $settings.ollamaLLMModel, prompt: Text("e.g. qwen3:8b"))
                         .font(.system(size: 12, design: .monospaced))
+                case .mlx:
+                    TextField("MLX Server URL", text: $settings.mlxBaseURL, prompt: Text("http://localhost:8080"))
+                        .font(.system(size: 12, design: .monospaced))
+
+                    TextField("Model", text: $settings.mlxModel, prompt: Text("e.g. mlx-community/Llama-3.2-3B-Instruct-4bit"))
+                        .font(.system(size: 12, design: .monospaced))
+                case .openAICompatible:
+                    TextField("Endpoint URL", text: $settings.openAILLMBaseURL, prompt: Text("http://localhost:4000"))
+                        .font(.system(size: 12, design: .monospaced))
+
+                    SecureField("API Key (optional)", text: $settings.openAILLMApiKey)
+                        .font(.system(size: 12, design: .monospaced))
+
+                    TextField("Model", text: $settings.openAILLMModel, prompt: Text("e.g. gpt-4o-mini"))
+                        .font(.system(size: 12, design: .monospaced))
                 }
             }
-            } // end v2: LLM Provider
 
-            // v2: Embedding Provider section (hidden for dictation-only release)
-            if false {
             Section("Embedding Provider") {
                 Picker("Provider", selection: $settings.embeddingProvider) {
                     ForEach(EmbeddingProvider.allCases) { provider in
@@ -110,7 +125,7 @@ struct SettingsView: View {
                     TextField("Embedding Model", text: $settings.ollamaEmbedModel, prompt: Text("e.g. nomic-embed-text"))
                         .font(.system(size: 12, design: .monospaced))
 
-                    if settings.llmProvider != .ollama {
+                    if settings.llmProvider != .ollama && settings.llmProvider != .mlx {
                         TextField("Ollama URL", text: $settings.ollamaBaseURL, prompt: Text("http://localhost:11434"))
                             .font(.system(size: 12, design: .monospaced))
                     }
@@ -125,7 +140,19 @@ struct SettingsView: View {
                         .font(.system(size: 12, design: .monospaced))
                 }
             }
-            } // end v2: Embedding Provider
+
+            Section("Suggestions") {
+                Picker("Verbosity", selection: $settings.suggestionVerbosity) {
+                    ForEach(SuggestionVerbosity.allCases) { level in
+                        Text(level.displayName).tag(level)
+                    }
+                }
+                .font(.system(size: 12))
+
+                Text(settings.suggestionVerbosity.description)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+            }
 
             Section("Audio Input") {
                 Picker("Microphone", selection: $settings.inputDeviceID) {
@@ -135,6 +162,21 @@ struct SettingsView: View {
                     }
                 }
                 .font(.system(size: 12))
+                .accessibilityIdentifier("settings.microphonePicker")
+            }
+
+            Section("Recording") {
+                Toggle("Save audio recording", isOn: $settings.saveAudioRecording)
+                    .font(.system(size: 12))
+                Text("Save a local audio file (.m4a) alongside each transcript. Audio never leaves your device.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Toggle("Echo cancellation", isOn: $settings.enableEchoCancellation)
+                    .font(.system(size: 12))
+                Text("Reduces duplicate transcription when using speakers and microphone simultaneously. Currently disabled during recording because it conflicts with system audio capture on macOS.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
             }
 
             Section("Transcription") {
@@ -144,9 +186,98 @@ struct SettingsView: View {
                     }
                 }
                 .font(.system(size: 12))
+                .accessibilityIdentifier("settings.transcriptionModelPicker")
 
-                TextField("Locale (e.g. en-US)", text: $settings.transcriptionLocale)
-                    .font(.system(size: 12, design: .monospaced))
+                TextField(
+                    "\(settings.transcriptionModel.localeFieldTitle) (e.g. en-US)",
+                    text: $settings.transcriptionLocale
+                )
+                .font(.system(size: 12, design: .monospaced))
+
+                Text(settings.transcriptionModel.localeHelpText)
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+
+                Toggle("Show live transcript", isOn: $settings.showLiveTranscript)
+                    .font(.system(size: 12))
+                Text("When disabled, the transcript panel is hidden during meetings. Transcription still runs in the background for suggestions and notes.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                Toggle("Clean up transcript during recording", isOn: $settings.enableTranscriptRefinement)
+                    .font(.system(size: 12))
+                Text("Automatically removes filler words and fixes punctuation as you record. You can always clean up past transcripts manually from the Notes window.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("Custom Keywords")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary)
+
+                    ZStack(alignment: .topLeading) {
+                        if settings.transcriptionCustomVocabulary.isEmpty {
+                            Text("One term per line. Optional aliases: Lore: open oats")
+                                .font(.system(size: 11))
+                                .foregroundStyle(.quaternary)
+                                .padding(.top, 6)
+                                .padding(.leading, 4)
+                                .allowsHitTesting(false)
+                        }
+
+                        TextEditor(text: $settings.transcriptionCustomVocabulary)
+                            .font(.system(size: 11, design: .monospaced))
+                            .frame(height: 90)
+                            .frame(maxWidth: .infinity)
+                            .scrollContentBackground(.hidden)
+                    }
+                    .overlay(
+                        RoundedRectangle(cornerRadius: 4)
+                            .stroke(.quaternary)
+                    )
+
+                    Text(
+                        "Optional. Boost meeting-specific jargon, names, and product terms for Parakeet TDT v2/v3. Enter one term per line, or use `Preferred Term: alias one, alias two`."
+                    )
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+                    .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+
+            Section("Batch Refinement") {
+                Toggle("Enhance transcript after meeting", isOn: $settings.enableBatchRefinement)
+                    .font(.system(size: 12))
+                Text("Re-transcribes audio with a higher-quality model after each meeting for better accuracy. Runs in the background.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                if settings.enableBatchRefinement {
+                    Picker("Batch Model", selection: $settings.batchTranscriptionModel) {
+                        ForEach(TranscriptionModel.batchSuitableModels) { model in
+                            Text(model.displayName).tag(model)
+                        }
+                    }
+                    .font(.system(size: 12))
+                }
+            }
+
+            Section("Speaker Diarization") {
+                Toggle("Identify multiple remote speakers", isOn: $settings.enableDiarization)
+                    .font(.system(size: 12))
+                Text("Uses LS-EEND to distinguish different speakers on system audio. Requires a one-time model download (~50 MB).")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                if settings.enableDiarization {
+                    Picker("Variant", selection: $settings.diarizationVariant) {
+                        ForEach(DiarizationVariant.allCases) { variant in
+                            Text(variant.displayName).tag(variant)
+                        }
+                    }
+                    .font(.system(size: 12))
+                }
             }
 
             Section("Privacy") {
@@ -157,21 +288,131 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
             }
 
-            // v2: Dictation section moved to DictationView Settings tab
-            // Section("Dictation") { ... }
+            Section("Import") {
+                Text("Import meetings from Granola. Generate an API key in the Granola desktop app under Settings.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
 
-            Section("Updates") {
-                Toggle("Automatically check for updates", isOn: Binding(
-                    get: { updater.automaticallyChecksForUpdates },
-                    set: { updater.automaticallyChecksForUpdates = $0 }
-                ))
+                SecureField("Granola API Key", text: $settings.granolaApiKey)
+                    .font(.system(size: 12, design: .monospaced))
+
+                GranolaImportButton(apiKey: settings.granolaApiKey)
+            }
+
+            Section("Meeting Detection") {
+                Toggle("Auto-detect meetings", isOn: $settings.meetingAutoDetectEnabled)
+                    .font(.system(size: 12))
+                    .onChange(of: settings.meetingAutoDetectEnabled) {
+                        if settings.meetingAutoDetectEnabled && !settings.hasShownAutoDetectExplanation {
+                            settings.meetingAutoDetectEnabled = false
+                            showAutoDetectExplanation = true
+                        }
+                    }
+
+                Text("When enabled, Lore monitors microphone activation to detect when a meeting app starts a call. No audio is captured until you accept the notification.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(.secondary)
+
+                LaunchAtLogin.Toggle("Launch at login")
+                    .font(.system(size: 12))
+            }
+            .sheet(isPresented: $showAutoDetectExplanation) {
+                VStack(spacing: 16) {
+                    Image(systemName: "waveform.badge.magnifyingglass")
+                        .font(.system(size: 40))
+                        .foregroundStyle(.tint)
+
+                    Text("How Meeting Detection Works")
+                        .font(.headline)
+
+                    VStack(alignment: .leading, spacing: 10) {
+                        Label("Lore watches for microphone activation by meeting apps (Zoom, Teams, FaceTime, etc.)", systemImage: "mic")
+                        Label("Only activation status is checked. No audio is captured or recorded until you accept.", systemImage: "lock.shield")
+                        Label("When a meeting is detected, you get a macOS notification to start transcribing.", systemImage: "bell")
+                        Label("You can always dismiss the notification or mark it as \"not a meeting\".", systemImage: "hand.raised")
+                    }
+                    .font(.system(size: 12))
+                    .frame(maxWidth: .infinity, alignment: .leading)
+
+                    HStack {
+                        Button("Cancel") {
+                            showAutoDetectExplanation = false
+                        }
+                        .keyboardShortcut(.cancelAction)
+
+                        Button("Enable Detection") {
+                            settings.hasShownAutoDetectExplanation = true
+                            settings.meetingAutoDetectEnabled = true
+                            showAutoDetectExplanation = false
+                        }
+                        .keyboardShortcut(.defaultAction)
+                        .buttonStyle(.borderedProminent)
+                    }
+                }
+                .padding(24)
+                .frame(width: 400)
+            }
+
+            if settings.meetingAutoDetectEnabled {
+                DisclosureGroup("Advanced Detection Settings") {
+                    HStack {
+                        Text("Silence timeout")
+                            .font(.system(size: 12))
+                        Spacer()
+                        TextField("", value: $settings.silenceTimeoutMinutes, format: .number)
+                            .font(.system(size: 12, design: .monospaced))
+                            .frame(width: 50)
+                            .multilineTextAlignment(.trailing)
+                        Text("min")
+                            .font(.system(size: 12))
+                            .foregroundStyle(.secondary)
+                    }
+                    Text("Auto-detected sessions stop after this many minutes of silence.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+
+                    Toggle("Detection log", isOn: $settings.detectionLogEnabled)
+                        .font(.system(size: 12))
+                    Text("Print detection events to the system console for debugging.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
                 .font(.system(size: 12))
             }
 
-            // v2: Meeting Templates section (hidden for dictation-only release)
-            if false {
+            if !settings.ignoredAppBundleIDs.isEmpty {
+                Section("Ignored Apps") {
+                    Text("These apps won't trigger meeting detection notifications.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                    ForEach(settings.ignoredAppBundleIDs, id: \.self) { bundleID in
+                        HStack {
+                            Text(bundleID)
+                                .font(.system(size: 12, design: .monospaced))
+                            Spacer()
+                            Button {
+                                settings.ignoredAppBundleIDs.removeAll { $0 == bundleID }
+                            } label: {
+                                Image(systemName: "xmark.circle.fill")
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Stop ignoring this app")
+                        }
+                    }
+                }
+            }
+
+            Section("Updates") {
+                Toggle("Automatically check for updates", isOn: $automaticallyChecksForUpdates)
+                .font(.system(size: 12))
+                .onChange(of: automaticallyChecksForUpdates) { _, newValue in
+                    syncAutomaticUpdateChecks(to: newValue)
+                }
+            }
+
             Section("Meeting Templates") {
-                ForEach(coordinator.templateStore.templates) { template in
+                ForEach(templates) { template in
                     HStack {
                         Image(systemName: template.icon)
                             .frame(width: 20)
@@ -184,14 +425,14 @@ struct SettingsView: View {
                                 .font(.system(size: 10))
                                 .foregroundStyle(.tertiary)
                             Button("Reset") {
-                                coordinator.templateStore.resetBuiltIn(id: template.id)
+                                resetTemplate(id: template.id)
                             }
                             .font(.system(size: 11))
                             .buttonStyle(.plain)
                             .foregroundStyle(.blue)
                         } else {
                             Button {
-                                coordinator.templateStore.delete(id: template.id)
+                                deleteTemplate(id: template.id)
                             } label: {
                                 Image(systemName: "trash")
                                     .font(.system(size: 11))
@@ -211,6 +452,9 @@ struct SettingsView: View {
                                 .foregroundStyle(.secondary)
                             TextField("e.g. Sprint Planning", text: $newTemplateName)
                                 .font(.system(size: 12))
+                                .textFieldStyle(.roundedBorder)
+                                .frame(maxWidth: .infinity)
+                                .focused($focusedTemplateField, equals: .name)
                         }
 
                         // Icon picker
@@ -241,6 +485,7 @@ struct SettingsView: View {
                                 TextEditor(text: $newTemplatePrompt)
                                     .font(.system(size: 11, design: .monospaced))
                                     .frame(height: 100)
+                                    .frame(maxWidth: .infinity)
                                     .scrollContentBackground(.hidden)
                             }
                             .overlay(
@@ -251,44 +496,76 @@ struct SettingsView: View {
 
                         HStack {
                             Button("Cancel") {
-                                isAddingTemplate = false
-                                newTemplateName = ""
-                                newTemplateIcon = "doc.text"
-                                newTemplatePrompt = ""
+                                resetNewTemplateForm()
                             }
                             .buttonStyle(.plain)
                             Button("Save") {
                                 let template = MeetingTemplate(
                                     id: UUID(),
-                                    name: newTemplateName,
+                                    name: trimmedTemplateName,
                                     icon: newTemplateIcon,
-                                    systemPrompt: newTemplatePrompt,
+                                    systemPrompt: trimmedTemplatePrompt,
                                     isBuiltIn: false
                                 )
-                                coordinator.templateStore.add(template)
-                                isAddingTemplate = false
-                                newTemplateName = ""
-                                newTemplateIcon = "doc.text"
-                                newTemplatePrompt = ""
+                                addTemplate(template)
+                                resetNewTemplateForm()
                             }
                             .buttonStyle(.borderedProminent)
-                            .disabled(newTemplateName.isEmpty || newTemplatePrompt.isEmpty)
+                            .disabled(!canSaveNewTemplate)
                         }
                     }
                     .padding(.vertical, 4)
                 } else {
                     Button("New Template") {
                         isAddingTemplate = true
+                        Task { @MainActor in
+                            focusedTemplateField = .name
+                        }
                     }
                     .font(.system(size: 12))
                 }
             }
-            } // end v2: Meeting Templates
         }
+        .accessibilityIdentifier("settings.form")
         .formStyle(.grouped)
-        .frame(width: 450, height: 580)
+        .frame(width: 450, height: 750)
         .onAppear {
-            inputDevices = MicCapture.availableInputDevices()
+            refreshViewState()
+        }
+    }
+
+    private func refreshViewState() {
+        inputDevices = AudioBus.availableInputDevices()
+        Task { @MainActor in
+            automaticallyChecksForUpdates = updater.automaticallyChecksForUpdates
+            templates = coordinator.templateStore.templates
+        }
+    }
+
+    private func syncAutomaticUpdateChecks(to newValue: Bool) {
+        Task { @MainActor in
+            updater.automaticallyChecksForUpdates = newValue
+        }
+    }
+
+    private func addTemplate(_ template: MeetingTemplate) {
+        Task { @MainActor in
+            coordinator.templateStore.add(template)
+            templates = coordinator.templateStore.templates
+        }
+    }
+
+    private func resetTemplate(id: UUID) {
+        Task { @MainActor in
+            coordinator.templateStore.resetBuiltIn(id: id)
+            templates = coordinator.templateStore.templates
+        }
+    }
+
+    private func deleteTemplate(id: UUID) {
+        Task { @MainActor in
+            coordinator.templateStore.delete(id: id)
+            templates = coordinator.templateStore.templates
         }
     }
 
@@ -314,6 +591,26 @@ struct SettingsView: View {
         if panel.runModal() == .OK, let url = panel.url {
             settings.notesFolderPath = url.path
         }
+    }
+
+    private var trimmedTemplateName: String {
+        newTemplateName.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var trimmedTemplatePrompt: String {
+        newTemplatePrompt.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private var canSaveNewTemplate: Bool {
+        !trimmedTemplateName.isEmpty && !trimmedTemplatePrompt.isEmpty
+    }
+
+    private func resetNewTemplateForm() {
+        isAddingTemplate = false
+        newTemplateName = ""
+        newTemplateIcon = "doc.text"
+        newTemplatePrompt = ""
+        focusedTemplateField = nil
     }
 }
 
@@ -354,6 +651,97 @@ private struct IconPickerGrid: View {
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(selected == icon ? .primary : .secondary)
+            }
+        }
+    }
+}
+
+// MARK: - Granola Import Button
+
+private struct GranolaImportButton: View {
+    @Environment(AppCoordinator.self) private var coordinator
+    let apiKey: String
+    @State private var importState: GranolaImportState = .idle
+    @State private var isImporting = false
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            switch importState {
+            case .idle:
+                EmptyView()
+            case .fetching(let progress):
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text(progress)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            case .importing(let current, let total):
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                    Text("Importing \(current) of \(total)...")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            case .completed(let imported, let skipped):
+                HStack(spacing: 4) {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(.green)
+                        .font(.system(size: 12))
+                    Text("Imported \(imported) meeting\(imported == 1 ? "" : "s")\(skipped > 0 ? ", \(skipped) already existed" : "")")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.secondary)
+                }
+            case .failed(let error):
+                HStack(spacing: 4) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .foregroundStyle(.red)
+                        .font(.system(size: 12))
+                    Text(error)
+                        .font(.system(size: 11))
+                        .foregroundStyle(.red)
+                }
+            }
+
+            Button("Import from Granola") {
+                startImport()
+            }
+            .font(.system(size: 12))
+            .disabled(isImporting)
+        }
+    }
+
+    private func startImport() {
+        guard !apiKey.isEmpty else {
+            importState = .failed("Enter your Granola API key above.")
+            return
+        }
+
+        isImporting = true
+        importState = .fetching(progress: "Connecting to Granola...")
+
+        let repo = coordinator.sessionRepository
+        let importer = GranolaImporter()
+
+        Task { @MainActor in
+            do {
+                let result = try await importer.importAll(
+                    apiKey: apiKey,
+                    sessionRepository: repo,
+                    onProgress: { state in
+                        Task { @MainActor in
+                            self.importState = state
+                        }
+                    }
+                )
+                importState = .completed(imported: result.imported, skipped: result.skipped)
+                isImporting = false
+                await coordinator.loadHistory()
+            } catch {
+                importState = .failed(error.localizedDescription)
+                isImporting = false
             }
         }
     }

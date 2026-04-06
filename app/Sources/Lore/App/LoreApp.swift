@@ -1,99 +1,485 @@
 import SwiftUI
 import AppKit
+import AVFoundation
 import Sparkle
+import UniformTypeIdentifiers
+import UserNotifications
 
-@main
-struct LoreApp: App {
+public struct LoreRootApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
-    @State private var settings = AppSettings()
-    @State private var coordinator = AppCoordinator()
-    @State private var didSetupDictation = false
-    @AppStorage("completedDictationOnboarding") private var completedDictationOnboarding = false
-    private let updaterController = AppUpdaterController()
+    @Environment(\.openWindow) private var openWindow
+    @State private var settings: AppSettings
+    @State private var coordinator: AppCoordinator
+    @State private var container: AppContainer
+    private let updaterController: AppUpdaterController
+    private let defaults: UserDefaults
 
-    var body: some Scene {
-        WindowGroup {
-            Group {
-                if completedDictationOnboarding {
-                    DictationView(settings: settings)
-                        .environment(coordinator)
-                } else {
-                    OnboardingView(settings: settings)
+    public init() {
+        let context = AppContainer.bootstrap()
+        self._settings = State(initialValue: context.settings)
+        self._coordinator = State(initialValue: context.coordinator)
+        self._container = State(initialValue: context.container)
+        self.updaterController = context.updaterController
+        self.defaults = context.container.defaults
+    }
+
+    public var body: some Scene {
+        Window("Meeting", id: "main") {
+            ContentView(settings: settings)
+                .environment(container)
+                .environment(coordinator)
+                .defaultAppStorage(defaults)
+                .onAppear {
+                    appDelegate.coordinator = coordinator
+                    appDelegate.settings = settings
+                    appDelegate.defaults = defaults
+                    appDelegate.container = container
+                    if case .live = container.mode {
+                        appDelegate.setupMenuBarIfNeeded(
+                            coordinator: coordinator,
+                            settings: settings,
+                            showMainWindow: { [self] in showMainWindow() },
+                            checkForUpdates: { updaterController.checkForUpdatesFromMenuBar() }
+                        )
+                        appDelegate.setupDictationIfNeeded(
+                            coordinator: coordinator,
+                            settings: settings
+                        )
+                    }
+                    settings.applyScreenShareVisibility()
+                }
+                .onOpenURL { url in
+                    guard let command = LoreDeepLink.parse(url) else { return }
+                    if NSApp.activationPolicy() == .accessory {
+                        NSApp.setActivationPolicy(.regular)
+                        NSApp.activate(ignoringOtherApps: true)
+                    }
+                    switch command {
+                    case .openNotes(let sessionID):
+                        coordinator.queueSessionSelection(sessionID)
+                        openNotesWindow()
+                    default:
+                        coordinator.queueExternalCommand(command)
+                    }
+                }
+        }
+        .windowStyle(.hiddenTitleBar)
+        .windowResizability(.contentSize)
+        .defaultSize(width: 320, height: 560)
+        .commands {
+            CommandGroup(after: .appInfo) {
+                if case .live = container.mode {
+                    CheckForUpdatesView(updater: updaterController.updater)
+
+                    Divider()
+                }
+
+                Button("Toggle Meeting") {
+                    appDelegate.toggleMeeting()
+                }
+                .keyboardShortcut("l", modifiers: [.command, .shift])
+
+                Button("Past Meetings") {
+                    openNotesWindow()
+                }
+                .keyboardShortcut("m", modifiers: [.command, .shift])
+
+                Button("Import Meeting Recording...") {
+                    importMeetingRecording()
+                }
+                .keyboardShortcut("i", modifiers: [.command, .shift])
+                .disabled(coordinator.isRecording || isBatchEngineBusy)
+
+                Button("Dictation") {
+                    openWindow(id: "dictation")
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+
+                Button("GitHub Repository...") {
+                    if let url = URL(string: "https://github.com/atarazevich/lore") {
+                        NSWorkspace.shared.open(url)
+                    }
                 }
             }
-            .onAppear {
-                settings.applyScreenShareVisibility()
-                if !didSetupDictation {
-                    setupDictation()
-                    didSetupDictation = true
-                }
-            }
+        }
+
+        Window("Dictation", id: "dictation") {
+            DictationWindowContent(settings: settings)
+                .environment(container)
+                .environment(coordinator)
+                .environment(coordinator.dictationCoordinator)
+                .defaultAppStorage(defaults)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .defaultSize(width: 400, height: 560)
-        .commands {
-            CommandGroup(after: .appInfo) {
-                CheckForUpdatesView(updater: updaterController.updater)
-            }
+
+        Window("Notes", id: "notes") {
+            NotesView(settings: settings)
+                .environment(container)
+                .environment(coordinator)
+                .defaultAppStorage(defaults)
         }
+        .defaultSize(width: 700, height: 550)
 
-        // v2: Notes window (hidden for dictation-only release)
-        // Window("Notes", id: "notes") {
-        //     NotesView(settings: settings)
-        //         .environment(coordinator)
-        // }
-        // .defaultSize(width: 700, height: 550)
-
-        // v2: Separate dictation window (main window already shows DictationView)
-        // Window("Dictation", id: "dictation") {
-        //     DictationView(settings: settings)
-        //         .environment(coordinator)
-        // }
+        Window("Transcript", id: "transcript") {
+            TranscriptWindowView()
+                .environment(container)
+                .environment(coordinator)
+                .environment(coordinator.transcriptStore)
+                .defaultAppStorage(defaults)
+        }
+        .defaultSize(width: 600, height: 700)
 
         Settings {
             SettingsView(settings: settings, updater: updaterController.updater)
+                .environment(container)
                 .environment(coordinator)
+                .defaultAppStorage(defaults)
         }
-    }
-
-    private func setupDictation() {
-        coordinator.dictationCoordinator.settings = settings
-        coordinator.hotkeyManager.install(coordinator: coordinator.dictationCoordinator, settings: settings)
-        coordinator.dictationIndicator.start(coordinator: coordinator.dictationCoordinator, hotkeyManager: coordinator.hotkeyManager)
     }
 }
 
-/// Observes new window creation and applies screen-share visibility setting.
+/// Wraps DictationView with the onboarding gate.
+private struct DictationWindowContent: View {
+    @Bindable var settings: AppSettings
+    @AppStorage("completedDictationOnboarding") private var completedDictationOnboarding = false
+
+    var body: some View {
+        if completedDictationOnboarding {
+            DictationView(settings: settings)
+        } else {
+            DictationOnboardingView(settings: settings)
+        }
+    }
+}
+
+extension LoreRootApp {
+    static let mainWindowID = "main"
+
+    private func openNotesWindow() {
+        openWindow(id: "notes")
+    }
+
+    private var isBatchEngineBusy: Bool {
+        switch coordinator.batchStatus {
+        case .idle, .completed, .failed, .cancelled: return false
+        default: return true
+        }
+    }
+
+    private func importMeetingRecording() {
+        let panel = NSOpenPanel()
+        panel.title = "Import Meeting Recording"
+        panel.allowedContentTypes = [
+            .audio,
+            .init(filenameExtension: "m4a")!,
+            .init(filenameExtension: "mp3")!,
+            .init(filenameExtension: "wav")!,
+            .init(filenameExtension: "caf")!,
+        ]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+
+        guard panel.runModal() == .OK, let fileURL = panel.url else { return }
+
+        guard let batchEngine = coordinator.batchEngine else { return }
+
+        let model = settings.transcriptionModel
+        let locale = settings.locale
+        let repo = coordinator.sessionRepository
+
+        let fm = FileManager.default
+        let startDate: Date
+        if let attrs = try? fm.attributesOfItem(atPath: fileURL.path),
+           let creation = attrs[.creationDate] as? Date {
+            startDate = creation
+        } else {
+            startDate = Date()
+        }
+
+        var estimatedEnd = startDate
+        if let audioFile = try? AVAudioFile(forReading: fileURL) {
+            let duration = Double(audioFile.length) / audioFile.processingFormat.sampleRate
+            estimatedEnd = startDate.addingTimeInterval(duration)
+        }
+
+        let title = fileURL.deletingPathExtension().lastPathComponent
+
+        Task {
+            let sessionID = await repo.createImportedSession(
+                config: .init(
+                    title: title,
+                    startedAt: startDate,
+                    endedAt: estimatedEnd,
+                    language: settings.transcriptionLocale,
+                    engine: model.rawValue
+                )
+            )
+
+            await batchEngine.importFile(
+                url: fileURL,
+                sessionID: sessionID,
+                model: model,
+                locale: locale,
+                sessionRepository: repo
+            )
+
+            let status = await batchEngine.status
+            if case .completed = status {
+                coordinator.queueSessionSelection(sessionID)
+                openNotesWindow()
+                await coordinator.loadHistory()
+            } else if case .failed = status {
+                await repo.deleteSession(sessionID: sessionID)
+                await coordinator.loadHistory()
+            } else if case .cancelled = status {
+                await repo.deleteSession(sessionID: sessionID)
+                await coordinator.loadHistory()
+            }
+        }
+    }
+
+    private func showMainWindow() {
+        NSApp.setActivationPolicy(.regular)
+        NSApp.activate(ignoringOtherApps: true)
+        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == Self.mainWindowID }) {
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            openWindow(id: Self.mainWindowID)
+        }
+    }
+}
+
 @MainActor
-final class AppDelegate: NSObject, NSApplicationDelegate {
+final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var windowObserver: Any?
+    private var menuBarController: MenuBarController?
+    private var isTerminating = false
+    var coordinator: AppCoordinator?
+    var settings: AppSettings?
+    var container: AppContainer?
+    var defaults: UserDefaults = .standard
+
+    func setupMenuBarIfNeeded(
+        coordinator: AppCoordinator,
+        settings: AppSettings,
+        showMainWindow: @escaping () -> Void,
+        checkForUpdates: @escaping () -> Void
+    ) {
+        guard menuBarController == nil else { return }
+
+        container?.ensureServicesInitialized(settings: settings, coordinator: coordinator)
+
+        let controller = MenuBarController(
+            coordinator: coordinator,
+            settings: settings,
+            onCheckForUpdates: checkForUpdates
+        )
+        controller.onShowMainWindow = showMainWindow
+        controller.onQuitApp = { [weak self] in
+            self?.handleQuit()
+        }
+        menuBarController = controller
+    }
+
+    private var isUITest: Bool {
+        ProcessInfo.processInfo.environment["LORE_UI_TEST"] != nil
+    }
+
+    private var appNapActivity: NSObjectProtocol?
+    private var globalHotkeyMonitor: Any?
+    private var localHotkeyMonitor: Any?
+    private var didSetupDictation = false
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        let hidden = UserDefaults.standard.object(forKey: "hideFromScreenShare") == nil
+        if !isUITest {
+            NSApp.setActivationPolicy(.regular)
+            appNapActivity = ProcessInfo.processInfo.beginActivity(
+                options: .userInitiatedAllowingIdleSystemSleep,
+                reason: "Background hotkey monitoring and audio processing"
+            )
+        }
+
+        let hidden = defaults.object(forKey: "hideFromScreenShare") == nil
             ? true
-            : UserDefaults.standard.bool(forKey: "hideFromScreenShare")
+            : defaults.bool(forKey: "hideFromScreenShare")
         let sharingType: NSWindow.SharingType = hidden ? .none : .readOnly
 
         for window in NSApp.windows {
             window.sharingType = sharingType
         }
 
-        // Watch for new windows being created (e.g. Settings window)
+        if !isUITest {
+            // Set delegate on main window for close-to-background behavior
+            for window in NSApp.windows where window.identifier?.rawValue == LoreRootApp.mainWindowID {
+                window.delegate = self
+            }
+        }
+
         windowObserver = NotificationCenter.default.addObserver(
             forName: NSWindow.didBecomeKeyNotification,
             object: nil,
             queue: .main
         ) { _ in
             Task { @MainActor in
-                let hide = UserDefaults.standard.object(forKey: "hideFromScreenShare") == nil
+                let hide = self.defaults.object(forKey: "hideFromScreenShare") == nil
                     ? true
-                    : UserDefaults.standard.bool(forKey: "hideFromScreenShare")
+                    : self.defaults.bool(forKey: "hideFromScreenShare")
                 let type: NSWindow.SharingType = hide ? .none : .readOnly
                 for window in NSApp.windows {
                     window.sharingType = type
                 }
             }
         }
+
+        registerGlobalHotkey()
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard let coordinator else { return .terminateNow }
+
+        if isTerminating {
+            return .terminateNow
+        }
+
+        guard coordinator.isRecording else {
+            return .terminateNow
+        }
+
+        let alert = NSAlert()
+        alert.messageText = "Recording in Progress"
+        alert.informativeText = "Stop recording and quit?"
+        alert.alertStyle = .warning
+        alert.addButton(withTitle: "Stop & Quit")
+        alert.addButton(withTitle: "Cancel")
+
+        let response = alert.runModal()
+        guard response == .alertFirstButtonReturn else {
+            return .terminateCancel
+        }
+
+        isTerminating = true
+        coordinator.handle(.userStopped, settings: settings)
+
+        Task { @MainActor [weak self] in
+            let deadline = Date().addingTimeInterval(30)
+            while Date() < deadline {
+                if case .idle = coordinator.state { break }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+            self?.isTerminating = true
+            NSApp.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
+        isUITest
+    }
+
+    // MARK: - NSWindowDelegate
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard !isUITest else { return true }
+
+        let isMainWindow = sender.identifier?.rawValue == LoreRootApp.mainWindowID
+
+        if isMainWindow {
+            sender.orderOut(nil)
+            NSApp.setActivationPolicy(.accessory)
+            showBackgroundModeHintIfNeeded()
+            return false
+        }
+        return true
+    }
+
+    // MARK: - One-Shot Background Notification
+
+    private func showBackgroundModeHintIfNeeded() {
+        guard !defaults.bool(forKey: "hasShownBackgroundModeHint") else { return }
+        guard settings?.meetingAutoDetectEnabled == true else { return }
+
+        defaults.set(true, forKey: "hasShownBackgroundModeHint")
+
+        Task {
+            let center = UNUserNotificationCenter.current()
+            let granted = try? await center.requestAuthorization(options: [.alert])
+            guard granted == true else { return }
+
+            let content = UNMutableNotificationContent()
+            content.title = "Lore is still running"
+            content.body = "Meeting detection is active. Click the menu bar icon to access controls."
+
+            let request = UNNotificationRequest(
+                identifier: "background-mode-hint",
+                content: content,
+                trigger: nil
+            )
+            try? await center.add(request)
+        }
+    }
+
+    // MARK: - Dictation Setup
+
+    func setupDictationIfNeeded(coordinator: AppCoordinator, settings: AppSettings) {
+        guard !didSetupDictation else { return }
+        didSetupDictation = true
+
+        coordinator.dictationCoordinator.settings = settings
+        coordinator.dictationCoordinator.audioBus = container?.audioBus
+        coordinator.dictationCoordinator.backendCache = coordinator.sharedBackendCache
+        coordinator.hotkeyManager.install(
+            coordinator: coordinator.dictationCoordinator,
+            settings: settings
+        )
+        coordinator.dictationIndicator.start(
+            coordinator: coordinator.dictationCoordinator,
+            hotkeyManager: coordinator.hotkeyManager
+        )
+
+        // Preload model via shared cache so first dictation is instant
+        Task {
+            let model = settings.transcriptionModel
+            let vocab = settings.transcriptionCustomVocabulary
+            try? await coordinator.sharedBackendCache.prepare(model: model, vocabulary: vocab)
+        }
+    }
+
+    // MARK: - Global Hotkey (Cmd+Shift+L)
+
+    private func registerGlobalHotkey() {
+        let matchesHotkey: (NSEvent) -> Bool = { event in
+            event.modifierFlags.contains([.command, .shift])
+                && event.charactersIgnoringModifiers?.lowercased() == "l"
+        }
+
+        globalHotkeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard matchesHotkey(event) else { return }
+            Task { @MainActor in self?.toggleMeeting() }
+        }
+
+        localHotkeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard matchesHotkey(event) else { return event }
+            Task { @MainActor in self?.toggleMeeting() }
+            return nil
+        }
+    }
+
+    func toggleMeeting() {
+        guard let coordinator, let settings else { return }
+        guard settings.hasAcknowledgedRecordingConsent else { return }
+
+        if coordinator.isRecording {
+            coordinator.handle(.userStopped, settings: settings)
+        } else {
+            coordinator.handle(.userStarted(.manual()), settings: settings)
+        }
+    }
+
+    // MARK: - Quit
+
+    private func handleQuit() {
+        NSApp.terminate(nil)
     }
 }

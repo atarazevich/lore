@@ -13,6 +13,11 @@ struct DictationIndicatorView: View {
     var hideCleanupButton = false
     var upgradeCountdown: Double?
     var lastError: String?
+    var bluetoothRedirected = false
+    var noSignal = false
+    var switchingMic = false
+    var switchedToDevice: String?
+    @State private var showBluetoothInfo = false
     var onUpgrade: ((UpgradeAction) -> Void)?
 
     var body: some View {
@@ -47,19 +52,57 @@ struct DictationIndicatorView: View {
 
     private var recordingContent: some View {
         HStack(spacing: 10) {
-            Circle()
-                .fill(.red)
-                .frame(width: 8, height: 8)
+            if noSignal || switchingMic {
+                Circle()
+                    .fill(.white.opacity(0.3))
+                    .frame(width: 8, height: 8)
+            } else {
+                Circle()
+                    .fill(.red)
+                    .frame(width: 8, height: 8)
+            }
             if isLocked {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.7))
             }
-            WaveformBars(level: audioLevel)
-            Text(timerString)
-                .font(.system(size: 13, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.6))
-                .monospacedDigit()
+            WaveformBars(level: audioLevel, noSignal: noSignal || switchingMic)
+            if noSignal {
+                Text("No audio")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+            } else if switchingMic {
+                Text("Switching\u{2026}")
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(.white.opacity(0.6))
+            } else {
+                Text(timerString)
+                    .font(.system(size: 13, design: .monospaced))
+                    .foregroundStyle(.white.opacity(0.6))
+                    .monospacedDigit()
+                if let deviceName = switchedToDevice {
+                    Text("Switched to \(deviceName)")
+                        .font(.system(size: 11))
+                        .foregroundStyle(.white.opacity(0.7))
+                }
+            }
+            if bluetoothRedirected {
+                Group {
+                    if showBluetoothInfo {
+                        Text("Using laptop mic — AirPods mic compresses audio below what speech recognition needs")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.7))
+                            .lineLimit(2)
+                            .fixedSize(horizontal: false, vertical: true)
+                    } else {
+                        Image(systemName: "laptopcomputer.and.arrow.down")
+                            .font(.system(size: 11))
+                            .foregroundStyle(.white.opacity(0.5))
+                    }
+                }
+                .onTapGesture { showBluetoothInfo.toggle() }
+                .onHover { hovering in showBluetoothInfo = hovering }
+            }
             if let mode = pendingMode {
                 Text("+ \(mode == .cleanup ? "Cleanup" : "Translate")")
                     .font(.system(size: 13, weight: .medium))
@@ -159,14 +202,15 @@ struct DictationIndicatorView: View {
 
 private struct WaveformBars: View {
     let level: Float
+    var noSignal = false
     private let barCount = 7
 
     var body: some View {
         HStack(spacing: 2) {
             ForEach(0..<barCount, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 1)
-                    .fill(.red.opacity(0.8))
-                    .frame(width: 3, height: barHeight(for: index))
+                    .fill(noSignal ? .white.opacity(0.3) : .red.opacity(0.8))
+                    .frame(width: noSignal ? 2 : 3, height: noSignal ? 4 : barHeight(for: index))
             }
         }
         .frame(height: 18)
@@ -197,6 +241,10 @@ final class DictationIndicatorModel {
     var hideCleanupButton = false
     var upgradeCountdown: Double?
     var lastError: String?
+    var bluetoothRedirected = false
+    var noSignal = false
+    var switchingMic = false
+    var switchedToDevice: String?
     var onUpgrade: ((UpgradeAction) -> Void)?
 }
 
@@ -215,6 +263,10 @@ private struct DictationIndicatorHost: View {
             hideCleanupButton: model.hideCleanupButton,
             upgradeCountdown: model.upgradeCountdown,
             lastError: model.lastError,
+            bluetoothRedirected: model.bluetoothRedirected,
+            noSignal: model.noSignal,
+            switchingMic: model.switchingMic,
+            switchedToDevice: model.switchedToDevice,
             onUpgrade: model.onUpgrade
         )
     }
@@ -230,16 +282,15 @@ final class DictationIndicatorManager {
     private let model = DictationIndicatorModel()
     private var recordingStartDate: Date?
     private var lastPanelSize: NSSize = .zero
-    private var screenWidth: CGFloat = 1440
-    private var visibleTop: CGFloat = 900
+    private var currentScreen: NSScreen?
 
     func start(coordinator: DictationCoordinator, hotkeyManager: HotkeyManager) {
-        let screen = NSScreen.main
-        screenWidth = screen?.frame.width ?? 1440
-        visibleTop = screen?.visibleFrame.maxY ?? ((screen?.frame.height ?? 900) - 25)
+        guard let screen = screenForMouse() else { return }
+        currentScreen = screen
 
         // Initial off-screen rect — panel resizes to content dynamically
-        let rect = NSRect(x: screenWidth / 2, y: visibleTop - 50, width: 1, height: 1)
+        let screenOrigin = screen.frame.origin
+        let rect = NSRect(x: screenOrigin.x + screen.frame.width / 2, y: screen.visibleFrame.maxY - 50, width: 1, height: 1)
         let p = OverlayPanel(contentRect: rect)
         p.styleMask = [.nonactivatingPanel, .fullSizeContentView]
         p.titlebarAppearsTransparent = true
@@ -248,7 +299,7 @@ final class DictationIndicatorManager {
         p.backgroundColor = .clear
         p.hasShadow = false
         p.becomesKeyOnlyIfNeeded = true
-        p.sharingType = .readOnly
+        p.setFrameAutosaveName("")
 
         let hv = NSHostingView(rootView: DictationIndicatorHost(model: model))
         if #available(macOS 13.0, *) {
@@ -301,6 +352,10 @@ final class DictationIndicatorManager {
                 self.model.hideCleanupButton = coordinator.cleanupAlreadyApplied
                 self.model.upgradeCountdown = coordinator.upgradeCountdown
                 self.model.lastError = coordinator.lastError
+                self.model.bluetoothRedirected = coordinator.bluetoothMicRedirected
+                self.model.noSignal = coordinator.noSignal
+                self.model.switchingMic = coordinator.switchingMic
+                self.model.switchedToDevice = coordinator.switchedToDevice
 
                 // Keep CGEvent tap flag in sync
                 hotkeyManager?.updateUpgradeShowingFlag(coordinator.isUpgradePanelVisible)
@@ -321,25 +376,45 @@ final class DictationIndicatorManager {
 
     private func resizePanelToContent() {
         guard let panel, let hostingView else { return }
+        guard let screen = screenForMouse() else { return }
         hostingView.layoutSubtreeIfNeeded()
         let size = hostingView.fittingSize
         guard size.width > 10 && size.height > 5 else { return }
 
+        // Detect cross-screen move by identity, not dimensions
+        let screenChanged = screen !== currentScreen
+        if screenChanged {
+            currentScreen = screen
+        }
+
         // Only resize when dimensions actually change (avoid 20x/sec animation calls)
         let widthChanged = abs(size.width - lastPanelSize.width) > 1
         let heightChanged = abs(size.height - lastPanelSize.height) > 1
-        guard widthChanged || heightChanged else { return }
+        guard widthChanged || heightChanged || screenChanged else { return }
         lastPanelSize = size
 
-        let x = (screenWidth - size.width) / 2
-        let y = visibleTop - size.height - 8
+        let screenOrigin = screen.frame.origin
+        let x = screenOrigin.x + (screen.frame.width - size.width) / 2
+        let y = screen.visibleFrame.maxY - size.height - 8
         let newFrame = NSRect(x: x, y: y, width: size.width, height: size.height)
 
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0.15
-            context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-            panel.animator().setFrame(newFrame, display: true)
+        if screenChanged {
+            // Snap instantly across screens — no sliding through the gap
+            panel.setFrame(newFrame, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.15
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(newFrame, display: true)
+            }
         }
+    }
+
+    private func screenForMouse() -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouseLocation) }
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
     }
 
     func stop() {

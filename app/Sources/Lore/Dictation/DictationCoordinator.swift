@@ -1,5 +1,4 @@
 @preconcurrency import AVFoundation
-import FluidAudio
 import os
 
 enum DictationState: Sendable, Equatable {
@@ -32,13 +31,24 @@ final class DictationCoordinator {
     private(set) var pendingCleanupMode: UpgradeAction?
     /// True while audio is being buffered before hold is confirmed (pre-buffer phase).
     private(set) var isPreBuffering = false
+    /// True when Bluetooth mic was detected and capture redirected to built-in mic.
+    private(set) var bluetoothMicRedirected = false
+    /// True when the audio bus reports zero signal (dead mic input).
+    private(set) var noSignal = false
+    /// True while actively switching to a fallback microphone.
+    private(set) var switchingMic = false
+    /// Device name after successful fallback switch; nil normally. Shown for 3 seconds.
+    private(set) var switchedToDevice: String?
 
     private let log = Logger(subsystem: "com.lore.app", category: "DictationCoordinator")
-    private var mic: MicCapture?
+    private var busConsumerID: UUID?
     private var recordingTask: Task<Void, Never>?
     private var audioLevelTask: Task<Void, Never>?
     private var autoHideTask: Task<Void, Never>?
     private var upgradeDismissTask: Task<Void, Never>?
+    private var switchedToDeviceTask: Task<Void, Never>?
+    private var currentResolvedDeviceID: AudioDeviceID?
+    private var fallbackExhausted = false
     private var accumulatedSamples: [Float] = []
     private var converter: AVAudioConverter?
     private let cleanupClient = CleanupClient()
@@ -47,8 +57,18 @@ final class DictationCoordinator {
     private static let maxChunkSamples = 480_000
     static let upgradePanelDuration: Double = 3.0
 
-    private var asrManager: AsrManager?
-    private var isModelLoaded = false
+    /// Shared audio bus — set by AppDelegate during dictation setup.
+    var audioBus: AudioBus?
+
+    /// Shared backend cache — set by AppDelegate during dictation setup.
+    var backendCache: SharedBackendCache?
+
+    /// Private backend instance for dictation transcription.
+    /// Separate from the shared cache to avoid concurrent decoder state mutation
+    /// when TranscriptionEngine also transcribes via the shared backend.
+    private var ownBackend: (any TranscriptionBackend)?
+    private var ownBackendModel: TranscriptionModel?
+    private var ownBackendVocabulary: String?
 
     /// The current history entry being processed (needed for upgrades).
     private var currentEntryID: UUID?
@@ -61,6 +81,9 @@ final class DictationCoordinator {
     func startPreBuffer() {
         guard !isPreBuffering else { return }
         guard state == .idle || state == .done else { return }
+        if settings == nil {
+            diagLog("[DICTATION] WARNING: settings not wired — dictation disabled")
+        }
         guard let settings, settings.dictationEnabled else { return }
 
         autoHideTask?.cancel()
@@ -316,17 +339,56 @@ final class DictationCoordinator {
     // MARK: - Mic Helpers
 
     private func startMicCapture() {
-        let capture = MicCapture()
-        self.mic = capture
+        let requestedDevice = settings?.inputDeviceID ?? 0
+        let (resolvedDevice, redirected) = AudioBus.resolveBestInputDevice(requested: requestedDevice)
+        bluetoothMicRedirected = redirected
+        currentResolvedDeviceID = resolvedDevice > 0 ? resolvedDevice : AudioBus.defaultInputDeviceID()
+        if redirected {
+            diagLog("[DICTATION] Bluetooth mic detected, redirecting to built-in mic (device \(resolvedDevice))")
+        }
 
-        let deviceID = settings?.inputDeviceID ?? 0
-        let stream = capture.bufferStream(deviceID: deviceID > 0 ? deviceID : nil)
+        guard let bus = audioBus else {
+            diagLog("[DICTATION] WARNING: audioBus not wired")
+            return
+        }
 
-        audioLevelTask = Task { [weak self, weak capture] in
+        let (id, stream) = bus.subscribe(deviceID: resolvedDevice > 0 ? resolvedDevice : nil)
+        busConsumerID = id
+
+        audioLevelTask = Task { [weak self, weak bus] in
+            var zeroSignalStart: Date?
+            var everHadSignal = false
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(50))
-                guard let self, let capture else { break }
-                self.audioLevel = capture.audioLevel
+                guard let self, let bus else { break }
+                self.audioLevel = bus.audioLevel
+
+                let signal = bus.hasSignal
+                let captured = bus.hasCapturedFrames
+                if signal { everHadSignal = true }
+
+                // Show "no audio" indicator only if we've captured frames but never had signal
+                // (truly dead mic). Don't show it for normal silence gaps — voice isolation
+                // produces digital silence between speech, which is not a mic problem.
+                let shouldShowNoSignal = captured && !signal && !everHadSignal
+                if self.noSignal != shouldShowNoSignal {
+                    self.noSignal = shouldShowNoSignal
+                }
+
+                // Only attempt fallback if the mic has NEVER produced signal.
+                // If it had signal before, it's a normal speech gap, not a dead mic.
+                if captured && !signal && !everHadSignal && !fallbackExhausted {
+                    if zeroSignalStart == nil {
+                        zeroSignalStart = Date()
+                    }
+                    if let start = zeroSignalStart, Date().timeIntervalSince(start) >= 3.0 {
+                        zeroSignalStart = nil
+                        await self.attemptMicFallback()
+                    }
+                } else {
+                    zeroSignalStart = nil
+                    if signal { fallbackExhausted = false }
+                }
             }
         }
 
@@ -340,14 +402,89 @@ final class DictationCoordinator {
         }
     }
 
+    private func attemptMicFallback() async {
+        guard let bus = audioBus else { return }
+        let deadDeviceID = currentResolvedDeviceID
+
+        switchingMic = true
+        noSignal = false
+        diagLog("[DICTATION] zero-signal detected, attempting mic fallback (dead device: \(String(describing: deadDeviceID)))")
+
+        // Only fall back to built-in or wired devices.
+        // Never try Bluetooth (unreliable) or Continuity devices (triggers iPhone permission prompts).
+        let allDevices = AudioBus.availableInputDevices()
+        let candidates = allDevices.filter { device in
+            if deadDeviceID != nil && device.id == deadDeviceID { return false }
+            guard let transport = AudioBus.transportType(for: device.id) else { return false }
+            let safe: Set<UInt32> = [
+                kAudioDeviceTransportTypeBuiltIn,
+                kAudioDeviceTransportTypeUSB,
+                kAudioDeviceTransportTypeFireWire,
+                kAudioDeviceTransportTypeThunderbolt,
+                kAudioDeviceTransportTypePCI,
+            ]
+            return safe.contains(transport)
+        }
+
+        // Built-in first, then wired
+        let sorted = candidates.sorted { a, _ in
+            AudioBus.transportType(for: a.id) == kAudioDeviceTransportTypeBuiltIn
+        }
+
+        for candidate in sorted {
+            diagLog("[DICTATION] trying fallback device: \(candidate.name) (\(candidate.id))")
+            bus.switchDevice(candidate.id)
+            currentResolvedDeviceID = candidate.id
+
+            // Wait for engine restart + first buffer (switchDevice is async on engineQueue)
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else {
+                switchingMic = false
+                return
+            }
+
+            if bus.hasCapturedFrames && bus.hasSignal {
+                switchingMic = false
+                let name = candidate.name
+                switchedToDevice = name
+                diagLog("[DICTATION] fallback succeeded: \(name)")
+
+                // Clear the "Switched to" flash after 3 seconds
+                switchedToDeviceTask?.cancel()
+                switchedToDeviceTask = Task { [weak self] in
+                    try? await Task.sleep(for: .seconds(3))
+                    guard let self, !Task.isCancelled else { return }
+                    self.switchedToDevice = nil
+                }
+                return
+            }
+        }
+
+        // All candidates exhausted — show no-signal, stop retrying
+        switchingMic = false
+        noSignal = true
+        fallbackExhausted = true
+        diagLog("[DICTATION] all fallback devices exhausted, no signal available")
+    }
+
     private func stopMicCapture() {
         audioLevelTask?.cancel()
         audioLevelTask = nil
         audioLevel = 0
-        mic?.stop()
+        if let id = busConsumerID {
+            audioBus?.unsubscribe(id)
+            busConsumerID = nil
+        }
         recordingTask?.cancel()
         recordingTask = nil
-        mic = nil
+        bluetoothMicRedirected = false
+        noSignal = false
+        switchingMic = false
+        switchedToDevice = nil
+        switchedToDeviceTask?.cancel()
+        switchedToDeviceTask = nil
+        currentResolvedDeviceID = nil
+        fallbackExhausted = false
     }
 
     /// Toggle pre-paste cleanup mode during recording.
@@ -405,9 +542,16 @@ final class DictationCoordinator {
     // MARK: - Transcription
 
     private func transcribeEntry(_ entry: inout DictationHistoryEntry, samples: [Float]) async {
-        if !isModelLoaded {
+        let model = settings?.transcriptionModel ?? .parakeetV3
+        let vocab = settings?.transcriptionCustomVocabulary ?? ""
+        let locale = settings?.locale ?? .current
+
+        // Ensure the shared cache has downloaded model files (fast no-op if already cached)
+        if let cache = backendCache {
             do {
-                try await loadModel()
+                try await cache.prepare(model: model, vocabulary: vocab) { [weak self] status in
+                    Task { @MainActor in self?.state = .loadingModel }
+                }
             } catch {
                 entry.status = .failed
                 entry.errorMessage = "Model loading failed: \(error.localizedDescription)"
@@ -415,17 +559,39 @@ final class DictationCoordinator {
                 history.update(entry)
                 return
             }
+        } else {
+            diagLog("[DICTATION] backendCache nil — dictation setup may not have run")
         }
-        state = .processing
 
-        guard let asrManager else {
+        // Use a private backend instance to avoid sharing mutable decoder state
+        // with TranscriptionEngine's backend from the shared cache.
+        // Creating a fresh backend when model files are already on disk is fast (~1s).
+        let trimmedVocab = vocab.trimmingCharacters(in: .whitespacesAndNewlines)
+        if ownBackend == nil || ownBackendModel != model || ownBackendVocabulary != trimmedVocab {
+            diagLog("[DICTATION] creating private backend for \(model.rawValue)")
+            let fresh = model.makeBackend(customVocabulary: trimmedVocab)
+            do {
+                try await fresh.prepare(onStatus: { _ in }, onProgress: { _ in })
+            } catch {
+                entry.status = .failed
+                entry.errorMessage = "Backend prepare failed: \(error.localizedDescription)"
+                lastError = entry.errorMessage
+                history.update(entry)
+                return
+            }
+            ownBackend = fresh
+            ownBackendModel = model
+            ownBackendVocabulary = trimmedVocab
+        }
+
+        guard let backend = ownBackend else {
             entry.status = .failed
-            entry.errorMessage = "AsrManager not available"
+            entry.errorMessage = "Backend not available after prepare"
             history.update(entry)
             return
         }
 
-        nonisolated(unsafe) let asr = asrManager
+        state = .processing
 
         // Build chunks, merging short tails into the previous chunk
         var chunks: [[Float]] = []
@@ -444,8 +610,7 @@ final class DictationCoordinator {
 
         for (i, chunk) in chunks.enumerated() {
             do {
-                let result = try await asr.transcribe(chunk)
-                let segment = result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+                let segment = try await backend.transcribe(chunk, locale: locale, previousContext: nil)
                 if !segment.isEmpty {
                     segments.append(segment)
                     diagLog("[DICTATION] chunk \(i+1)/\(chunks.count): \(segment.prefix(60))")
@@ -507,24 +672,4 @@ final class DictationCoordinator {
         history.update(entry)
     }
 
-    // MARK: - Model Loading
-
-    private func loadModel() async throws {
-        let needsDownload = !AsrModels.modelsExist(
-            at: AsrModels.defaultCacheDirectory(for: .v3),
-            version: .v3
-        )
-        if needsDownload {
-            diagLog("[DICTATION] model not cached, downloading parakeetV3...")
-            state = .loadingModel
-        } else {
-            diagLog("[DICTATION] loading cached model parakeetV3...")
-        }
-        let models = try await AsrModels.downloadAndLoad(version: .v3)
-        let asr = AsrManager(config: .default)
-        try await asr.initialize(models: models)
-        self.asrManager = asr
-        isModelLoaded = true
-        diagLog("[DICTATION] model loaded")
-    }
 }

@@ -4,6 +4,19 @@ import Foundation
 actor OpenRouterClient {
     private static let defaultBaseURL = URL(string: "https://openrouter.ai/api/v1/chat/completions")!
 
+    /// Builds a chat completions URL from a user-provided base URL, stripping
+    /// any trailing `/v1` or `/v1/chat/completions` to avoid double-pathing.
+    static func chatCompletionsURL(from rawBase: String) -> URL? {
+        var base = rawBase.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        // Strip paths that users commonly include so we don't get /v1/v1/...
+        for suffix in ["/v1/chat/completions", "/v1"] {
+            if base.hasSuffix(suffix) {
+                base = String(base.dropLast(suffix.count))
+            }
+        }
+        return URL(string: base + "/v1/chat/completions")
+    }
+
     struct Message: Codable, Sendable {
         let role: String
         let content: String
@@ -14,6 +27,7 @@ actor OpenRouterClient {
         let messages: [Message]
         let stream: Bool
         let max_tokens: Int?
+        let max_completion_tokens: Int?
     }
 
     /// Streams the completion response, yielding text chunks.
@@ -31,7 +45,8 @@ actor OpenRouterClient {
                         model: model,
                         messages: messages,
                         stream: true,
-                        max_tokens: maxTokens
+                        max_tokens: nil,
+                        max_completion_tokens: maxTokens
                     )
 
                     let targetURL = baseURL ?? Self.defaultBaseURL
@@ -51,7 +66,7 @@ actor OpenRouterClient {
                     guard let httpResponse = response as? HTTPURLResponse,
                           (200...299).contains(httpResponse.statusCode) else {
                         let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-                        continuation.finish(throwing: OpenRouterError.httpError(statusCode))
+                        continuation.finish(throwing: OpenRouterError.httpError(statusCode, host: targetURL.host))
                         return
                     }
 
@@ -91,7 +106,8 @@ actor OpenRouterClient {
             model: model,
             messages: messages,
             stream: false,
-            max_tokens: maxTokens
+            max_tokens: nil,
+            max_completion_tokens: maxTokens
         )
 
         let targetURL = baseURL ?? Self.defaultBaseURL
@@ -111,7 +127,7 @@ actor OpenRouterClient {
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
-            throw OpenRouterError.httpError(statusCode)
+            throw OpenRouterError.httpError(statusCode, host: targetURL.host)
         }
 
         let completionResponse = try JSONDecoder().decode(CompletionResponse.self, from: data)
@@ -119,11 +135,18 @@ actor OpenRouterClient {
     }
 
     enum OpenRouterError: Error, LocalizedError {
-        case httpError(Int)
+        case httpError(Int, host: String?)
 
         var errorDescription: String? {
             switch self {
-            case .httpError(let code): "OpenRouter API error (HTTP \(code))"
+            case .httpError(let code, let host):
+                let provider = switch host {
+                case let h? where h.contains("openrouter.ai"): "OpenRouter"
+                case let h? where h.contains("localhost"), let h? where h.contains("127.0.0.1"): "Local LLM"
+                case let h?: h
+                case nil: "LLM"
+                }
+                return "\(provider) API error (HTTP \(code))"
             }
         }
     }
