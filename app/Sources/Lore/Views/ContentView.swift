@@ -298,7 +298,7 @@ struct ContentView: View {
             controller.onRunningStateChanged = { [weak miniBarManager] isRunning in
                 if isRunning {
                     miniBarManager?.state.onTap = {
-                        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == "meeting" }) {
+                        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == LoreRootApp.mainWindowID }) {
                             window.makeKeyAndOrderFront(nil)
                             NSApp.activate(ignoringOtherApps: true)
                         }

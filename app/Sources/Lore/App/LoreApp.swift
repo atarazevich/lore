@@ -24,11 +24,10 @@ public struct LoreRootApp: App {
     }
 
     public var body: some Scene {
-        Window("Dictation", id: "dictation") {
-            DictationWindowContent(settings: settings)
+        Window("Meeting", id: "main") {
+            ContentView(settings: settings)
                 .environment(container)
                 .environment(coordinator)
-                .environment(coordinator.dictationCoordinator)
                 .defaultAppStorage(defaults)
                 .onAppear {
                     appDelegate.coordinator = coordinator
@@ -66,7 +65,7 @@ public struct LoreRootApp: App {
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
-        .defaultSize(width: 400, height: 560)
+        .defaultSize(width: 320, height: 560)
         .commands {
             CommandGroup(after: .appInfo) {
                 if case .live = container.mode {
@@ -74,11 +73,6 @@ public struct LoreRootApp: App {
 
                     Divider()
                 }
-
-                Button("Meeting") {
-                    openWindow(id: "meeting")
-                }
-                .keyboardShortcut("d", modifiers: [.command, .shift])
 
                 Button("Toggle Meeting") {
                     appDelegate.toggleMeeting()
@@ -96,6 +90,11 @@ public struct LoreRootApp: App {
                 .keyboardShortcut("i", modifiers: [.command, .shift])
                 .disabled(coordinator.isRecording || isBatchEngineBusy)
 
+                Button("Dictation") {
+                    openWindow(id: "dictation")
+                }
+                .keyboardShortcut("d", modifiers: [.command, .shift])
+
                 Button("GitHub Repository...") {
                     if let url = URL(string: "https://github.com/atarazevich/lore") {
                         NSWorkspace.shared.open(url)
@@ -104,15 +103,16 @@ public struct LoreRootApp: App {
             }
         }
 
-        Window("Meeting", id: "meeting") {
-            ContentView(settings: settings)
+        Window("Dictation", id: "dictation") {
+            DictationWindowContent(settings: settings)
                 .environment(container)
                 .environment(coordinator)
+                .environment(coordinator.dictationCoordinator)
                 .defaultAppStorage(defaults)
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
-        .defaultSize(width: 320, height: 560)
+        .defaultSize(width: 400, height: 560)
 
         Window("Notes", id: "notes") {
             NotesView(settings: settings)
@@ -155,7 +155,7 @@ private struct DictationWindowContent: View {
 }
 
 extension LoreRootApp {
-    static let mainWindowID = "dictation"
+    static let mainWindowID = "main"
 
     private func openNotesWindow() {
         openWindow(id: "notes")
@@ -408,8 +408,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard granted == true else { return }
 
             let content = UNMutableNotificationContent()
-            content.title = "Meeting detection is active in the background"
-            content.body = "Click the menu bar icon to access controls."
+            content.title = "Lore is still running"
+            content.body = "Meeting detection is active. Click the menu bar icon to access controls."
 
             let request = UNNotificationRequest(
                 identifier: "background-mode-hint",
