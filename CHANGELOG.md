@@ -1,5 +1,11 @@
 # Changelog
 
+## v1.15.2 — 2026-04-09
+
+Hotfix: AudioBus infinite restart loop from startup config change transients.
+
+- Fix: `engine.start()` and tap installation fire spurious `AVAudioEngineConfigurationChange` notifications. Since each restart succeeded, the failure counter reset to 0, creating an infinite loop (~1 cycle/sec) that caused the mic indicator to blink and eventual crashes. Added 1.5s post-start cooldown to suppress transient config changes.
+
 ## v1.15.1 — 2026-04-09
 
 Hotfix: AudioBus crash on Bluetooth device transitions.
