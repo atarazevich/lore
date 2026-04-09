@@ -30,8 +30,14 @@ let package = Package(
     ],
     targets: [
         .target(
+            name: "ObjCExceptionCatcher",
+            path: "Sources/ObjCExceptionCatcher",
+            publicHeadersPath: "include"
+        ),
+        .target(
             name: "LoreKit",
             dependencies: [
+                "ObjCExceptionCatcher",
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "Sparkle", package: "Sparkle"),
                 .product(name: "WhisperKit", package: "WhisperKit"),

@@ -2,6 +2,7 @@
 import Accelerate
 import CoreAudio
 import Foundation
+import ObjCExceptionCatcher
 import os
 
 private let busLog = Logger(subsystem: "com.lore", category: "AudioBus")
@@ -175,7 +176,12 @@ final class AudioBus: @unchecked Sendable {
             return
         }
 
-        installTap(on: inputNode, format: tapFormat)
+        guard installTap(on: inputNode, format: tapFormat) else {
+            let msg = "Failed to install audio tap"
+            diagLog("[AUDIO-BUS] FAIL: \(msg)")
+            _error.value = msg
+            return
+        }
         // Register observer before start() so no config change can be lost during startup.
         installConfigChangeObserver(for: newEngine)
 
@@ -238,7 +244,9 @@ final class AudioBus: @unchecked Sendable {
         }
     }
 
-    private func installTap(on inputNode: AVAudioInputNode, format: AVAudioFormat) {
+    /// Returns true if the tap was installed successfully.
+    @discardableResult
+    private func installTap(on inputNode: AVAudioInputNode, format: AVAudioFormat) -> Bool {
         // Defensive: remove any existing tap before installing. No-op when no tap exists.
         inputNode.removeTap(onBus: 0)
 
@@ -250,27 +258,41 @@ final class AudioBus: @unchecked Sendable {
         let consumersRef = consumers
         var tapCallCount = 0
 
-        inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
-            tapCallCount += 1
-            hasCaptured.value = true
-            lastFrame.value = Date()
+        // AVAudioNode.installTap throws an ObjC NSException (not a Swift error) when the
+        // node is in a transient state — e.g., during Bluetooth device transitions.
+        // Swift cannot catch NSException, so we use an ObjC @try/@catch wrapper.
+        var exceptionMessage: NSString?
+        let ok = LRECatchException({
+            inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
+                tapCallCount += 1
+                hasCaptured.value = true
+                lastFrame.value = Date()
 
-            let rms = Self.normalizedRMS(from: buffer)
-            level.value = min(rms * 25, 1.0)
-            hasSignal.value = rms > 1e-6
+                let rms = Self.normalizedRMS(from: buffer)
+                level.value = min(rms * 25, 1.0)
+                hasSignal.value = rms > 1e-6
 
-            if tapCallCount <= 5 || tapCallCount % 100 == 0 {
-                diagLog("[AUDIO-BUS] tap #\(tapCallCount): frames=\(buffer.frameLength) rms=\(rms)")
+                if tapCallCount <= 5 || tapCallCount % 100 == 0 {
+                    diagLog("[AUDIO-BUS] tap #\(tapCallCount): frames=\(buffer.frameLength) rms=\(rms)")
+                }
+
+                guard !muted.value else { return }
+
+                let snapshot = consumersRef.withLock { Array($0.values) }
+                for continuation in snapshot {
+                    continuation.yield(buffer)
+                }
             }
+        }, &exceptionMessage)
 
-            guard !muted.value else { return }
-
-            let snapshot = consumersRef.withLock { Array($0.values) }
-            for continuation in snapshot {
-                continuation.yield(buffer)
-            }
+        if ok {
+            hasTapInstalled = true
+            return true
+        } else {
+            diagLog("[AUDIO-BUS] installTap threw ObjC exception: \(exceptionMessage ?? "unknown")")
+            hasTapInstalled = false
+            return false
         }
-        hasTapInstalled = true
     }
 
     private func teardownEngine() {
@@ -374,49 +396,28 @@ final class AudioBus: @unchecked Sendable {
             return
         }
 
-        guard let engine else {
+        guard engine != nil else {
             diagLog("[AUDIO-BUS] config change but engine is nil, ignoring")
             return
         }
 
-        // Update device tracking — the engine follows the system default after a config change
-        if usesSystemDefault {
-            currentDeviceID = Self.defaultInputDeviceID()
-        }
-
         diagLog("[AUDIO-BUS] AVAudioEngineConfigurationChange, restarting (attempt \(configChangeRestartFailures + 1))")
 
-        // The engine stopped itself. Re-read format, re-install tap, restart.
-        // Do NOT create a new engine — that triggers cascading config changes.
-        if hasTapInstalled {
-            engine.inputNode.removeTap(onBus: 0)
-            hasTapInstalled = false
-        }
+        // Full teardown + fresh engine. The previous approach (engine.reset() + reinstall tap)
+        // crashed because the input node can be in a transient state during Bluetooth transitions,
+        // causing installTap(onBus:) to throw an unrecoverable ObjC NSException.
+        // The debounce mechanism (configChangeScheduled + 300ms delay) prevents cascading.
+        let device = usesSystemDefault ? nil : currentDeviceID
+        teardownEngine()
+        startEngine(deviceID: device)
 
-        // Reset clears internal graph connections so the engine picks up the new hardware format.
-        engine.reset()
-
-        guard let tapFormat = resolveFormat(for: engine.inputNode) else {
-            diagLog("[AUDIO-BUS] config change: invalid format, waiting for health check")
-            configChangeRestartFailures += 1
-            _running.value = false
-            return
-        }
-
-        installTap(on: engine.inputNode, format: tapFormat)
-
-        do {
-            try engine.start()
-            _running.value = true
-            _error.value = nil
+        if _running.value {
             configChangeRestartFailures = 0
-            diagLog("[AUDIO-BUS] engine restarted after config change, isRunning=\(engine.isRunning)")
-        } catch {
+        } else {
             configChangeRestartFailures += 1
-            let msg = "Engine restart failed (attempt \(configChangeRestartFailures)): \(error.localizedDescription)"
-            diagLog("[AUDIO-BUS] \(msg)")
             if configChangeRestartFailures >= Self.maxConfigChangeRestarts {
-                teardownEngine()
+                let msg = "Audio engine failed after \(Self.maxConfigChangeRestarts) restart attempts"
+                diagLog("[AUDIO-BUS] \(msg)")
                 _error.value = msg
             }
         }
