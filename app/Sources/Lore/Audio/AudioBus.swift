@@ -192,6 +192,7 @@ final class AudioBus: @unchecked Sendable {
             _running.value = true
             _error.value = nil
             configChangeRestartFailures = 0
+            lastEngineStartTime = .now()
             diagLog("[AUDIO-BUS] engine started, isRunning=\(newEngine.isRunning)")
         } catch {
             let msg = "Audio engine failed: \(error.localizedDescription)"
@@ -360,6 +361,8 @@ final class AudioBus: @unchecked Sendable {
     private static let maxConfigChangeRestarts = 3
     /// Debounce: when set, a restart is already scheduled on engineQueue.
     private var configChangeScheduled = false
+    /// Timestamp of last successful engine start — config changes within the cooldown are startup transients.
+    private var lastEngineStartTime: DispatchTime = DispatchTime(uptimeNanoseconds: 0)
 
     private func installConfigChangeObserver(for engine: AVAudioEngine) {
         removeConfigChangeObserver()
@@ -387,6 +390,15 @@ final class AudioBus: @unchecked Sendable {
     private func handleConfigChange() {
         dispatchPrecondition(condition: .onQueue(engineQueue))
         configChangeScheduled = false
+
+        // Suppress startup transients: engine.start() and tap installation fire spurious
+        // config change notifications. If the engine just started and is running, ignore.
+        // Real device failures within the cooldown window are caught by the health monitor.
+        let nsSinceStart = DispatchTime.now().uptimeNanoseconds - lastEngineStartTime.uptimeNanoseconds
+        if nsSinceStart < 1_500_000_000, _running.value {
+            diagLog("[AUDIO-BUS] config change \(nsSinceStart / 1_000_000)ms after start, ignoring (startup transient)")
+            return
+        }
 
         guard configChangeRestartFailures < Self.maxConfigChangeRestarts else {
             let msg = "Audio engine failed after \(Self.maxConfigChangeRestarts) restart attempts"
