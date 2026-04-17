@@ -11,7 +11,7 @@ final class AppContainer {
     let appSupportDirectory: URL
     let notesDirectory: URL
 
-    /// Persistent shared audio bus — one AVAudioEngine for all consumers.
+    /// Persistent shared audio bus — one CoreAudio HAL IOProc for all consumers (D-029).
     let audioBus = AudioBus()
 
     /// Detection controller for the meeting auto-detect lifecycle.

@@ -2,26 +2,49 @@
 import Accelerate
 import CoreAudio
 import Foundation
-import ObjCExceptionCatcher
 import os
 
 private let busLog = Logger(subsystem: "com.lore", category: "AudioBus")
 
-/// Persistent shared audio bus that owns a single AVAudioEngine.
-/// Consumers subscribe/unsubscribe to receive PCM buffers without touching the engine.
-/// The engine starts on first subscribe and stays running for the lifetime of the process.
+/// Persistent shared audio bus that captures microphone input via a CoreAudio HAL IOProc.
+/// Consumers subscribe/unsubscribe to receive PCM buffers without touching the HAL.
+/// Capture starts on first subscribe and stays running for the lifetime of the process.
+///
+/// The public API is preserved across the AVAudioEngine → HAL IOProc rewrite (see D-029).
 final class AudioBus: @unchecked Sendable {
     typealias ConsumerID = UUID
 
-    // MARK: - Engine State
+    // MARK: - HAL State (halQueue only)
 
-    private var engine: AVAudioEngine?
-    private var hasTapInstalled = false
+    /// All HAL calls (Start/Stop/Create/Destroy IOProc, property listener install/remove) run on this
+    /// serial queue. The IOProc callback block is also dispatched here (by AudioToolbox).
+    /// HAL calls are synchronous IPC to coreaudiod and can block for seconds after wake-from-sleep
+    /// — never call them from main or any other queue.
+    private let halQueue = DispatchQueue(label: "com.lore.audio-bus.hal", qos: .userInitiated)
 
-    /// All engine operations happen on this serial queue — never main thread.
-    private let engineQueue = DispatchQueue(label: "com.lore.audio-bus", qos: .userInitiated)
+    /// Property listener callbacks are delivered here and bounce onto halQueue.
+    private let listenerQueue = DispatchQueue(label: "com.lore.audio-bus.listener", qos: .userInitiated)
 
-    /// Consumer continuations. The tap callback reads a snapshot under the unfair lock.
+    private var ioProcID: AudioDeviceIOProcID?
+    private var currentDeviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
+    private var usesSystemDefault = true
+    private var currentFormat: AVAudioFormat?
+
+    /// Re-entry guard for reconfigureLocked(). halQueue is serial so this is just belt-and-braces
+    /// against a reconfigure triggering another reconfigure synchronously inside the same call.
+    private var isReconfiguring = false
+
+    /// Whether a default-input-device listener is currently installed on the system object.
+    private var defaultDeviceListenerInstalled = false
+    /// Whether a stream-format listener is currently installed on `currentDeviceID`.
+    private var formatListenerDeviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
+
+    /// Retry tracking for a failed start. Bounded at 3 attempts before giving up loudly.
+    private var startRetryAttempt = 0
+    private static let maxStartRetries = 3
+    private var pendingRetryItem: DispatchWorkItem?
+
+    /// Consumer continuations. The IOProc callback reads a snapshot under the unfair lock.
     /// OSAllocatedUnfairLock is real-time safe on Darwin (no priority inversion).
     private let consumers = OSAllocatedUnfairLock<[UUID: AsyncStream<AVAudioPCMBuffer>.Continuation]>(
         uncheckedState: [:]
@@ -48,19 +71,23 @@ final class AudioBus: @unchecked Sendable {
         set { _muted.value = newValue }
     }
 
-    /// Returns true if the engine is running AND a frame was received within the last 5 seconds.
+    /// Returns true if capture is running AND a frame was received within the last 5 seconds.
     var isEngineAlive: Bool {
         guard _running.value else { return false }
         guard let lastFrame = _lastFrameTime.value else { return false }
         return Date().timeIntervalSince(lastFrame) < 5.0
     }
 
-    // MARK: - Config Change Observer
+    // MARK: - Silent-Mic Watchdog (halQueue only — IOProc runs here)
 
-    private var configChangeObserver: NSObjectProtocol?
+    private var windowStartTime: DispatchTime = .now()
+    private var peakInCurrentWindow: Float = 0
+    private var consecutiveSilentWindows = 0
+    private var builtInFallbackTaken = false
+
+    // MARK: - Health Timer
+
     private var healthTimer: DispatchSourceTimer?
-    private var currentDeviceID: AudioDeviceID?
-    private var usesSystemDefault = true
 
     // MARK: - Init
 
@@ -68,13 +95,15 @@ final class AudioBus: @unchecked Sendable {
 
     deinit {
         healthTimer?.cancel()
-        removeConfigChangeObserver()
+        pendingRetryItem?.cancel()
+        // We cannot safely dispatch to halQueue from deinit (queue may outlive us); trust the
+        // process exiting for the final teardown. IOProc/device handles are released by the OS.
     }
 
     // MARK: - Public API
 
     /// Subscribe to the audio bus. Returns a consumer ID and an AsyncStream of PCM buffers.
-    /// If no engine is running, starts one on the engine queue.
+    /// If capture isn't running yet, starts it on the HAL queue.
     func subscribe(deviceID: AudioDeviceID?) -> (id: ConsumerID, stream: AsyncStream<AVAudioPCMBuffer>) {
         let id = UUID()
         let (stream, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream(
@@ -91,14 +120,14 @@ final class AudioBus: @unchecked Sendable {
             startHealthMonitor()
         }
 
-        // Start engine or switch device — decision happens on engineQueue to avoid TOCTOU
+        // Start capture or switch device — decision happens on halQueue to avoid TOCTOU.
         let requestedDevice = deviceID
-        engineQueue.async { [weak self] in
+        halQueue.async { [weak self] in
             guard let self else { return }
             if !self._running.value {
-                self.startEngine(deviceID: requestedDevice)
+                self.startCaptureLocked(deviceID: requestedDevice)
             } else if let requestedDevice, requestedDevice > 0, requestedDevice != self.currentDeviceID {
-                self.performSwitchDevice(requestedDevice)
+                self.performSwitchDeviceLocked(requestedDevice)
             }
         }
 
@@ -106,7 +135,9 @@ final class AudioBus: @unchecked Sendable {
         return (id: id, stream: stream)
     }
 
-    /// Unsubscribe from the audio bus. Engine stays running.
+    /// Unsubscribe from the audio bus. Capture keeps running for remaining consumers.
+    /// TODO: consider stopping the IOProc when consumers become empty to free the device.
+    /// Matches prior engine-stays-running behavior for now.
     func unsubscribe(_ id: ConsumerID) {
         let (continuation, isEmpty) = consumers.withLock { state -> (AsyncStream<AVAudioPCMBuffer>.Continuation?, Bool) in
             let c = state.removeValue(forKey: id)
@@ -120,10 +151,11 @@ final class AudioBus: @unchecked Sendable {
         diagLog("[AUDIO-BUS] unsubscribe id=\(id.uuidString.prefix(8)), consumers=\(consumerCount)")
     }
 
-    /// Switch the engine to a different input device. Consumer streams stay alive.
+    /// Switch capture to a different input device. Consumer streams stay alive.
+    /// Passing nil (or 0) means "use system default input" and reinstalls the default-device listener.
     func switchDevice(_ deviceID: AudioDeviceID?) {
-        engineQueue.async { [weak self] in
-            self?.performSwitchDevice(deviceID)
+        halQueue.async { [weak self] in
+            self?.performSwitchDeviceLocked(deviceID)
         }
     }
 
@@ -131,182 +163,117 @@ final class AudioBus: @unchecked Sendable {
         consumers.withLock { $0.count }
     }
 
-    // MARK: - Engine Lifecycle (engineQueue only)
+    // MARK: - Capture Lifecycle (halQueue only)
 
-    private func startEngine(deviceID: AudioDeviceID?) {
-        dispatchPrecondition(condition: .onQueue(engineQueue))
+    /// Start capture on the given device (nil = system default). Called on halQueue.
+    private func startCaptureLocked(deviceID: AudioDeviceID?) {
+        dispatchPrecondition(condition: .onQueue(halQueue))
 
-        // Clean up any prior engine
-        teardownEngine()
+        // Clean up any prior IOProc, listeners, watchdog state.
+        teardownCaptureLocked()
 
-        let newEngine = AVAudioEngine()
-        self.engine = newEngine
-
-        diagLog("[AUDIO-BUS] engine created")
-
-        let inputNode = newEngine.inputNode
-        diagLog("[AUDIO-BUS] input node ready")
-
-        // Set input device
+        // Resolve device.
+        let resolved: AudioDeviceID
         if let id = deviceID, id > 0 {
-            if let audioUnit = inputNode.audioUnit {
-                var devID = id
-                let status = AudioUnitSetProperty(
-                    audioUnit,
-                    kAudioOutputUnitProperty_CurrentDevice,
-                    kAudioUnitScope_Global,
-                    0,
-                    &devID,
-                    UInt32(MemoryLayout<AudioDeviceID>.size)
-                )
-                diagLog("[AUDIO-BUS] setInputDevice status=\(status) (0=ok)")
-            }
-            currentDeviceID = id
+            resolved = id
             usesSystemDefault = false
         } else {
-            currentDeviceID = Self.defaultInputDeviceID()
+            guard let def = Self.defaultInputDeviceID(), def > 0 else {
+                let msg = "No default input device"
+                diagLog("[AUDIO-BUS] FAIL: \(msg)")
+                _error.value = msg
+                scheduleStartRetryLocked(deviceID: deviceID)
+                return
+            }
+            resolved = def
             usesSystemDefault = true
             diagLog("[AUDIO-BUS] using system default device")
         }
 
-        guard let tapFormat = resolveFormat(for: inputNode) else {
-            let msg = "Invalid audio format"
+        currentDeviceID = resolved
+        diagLog("[AUDIO-BUS] start on device=\(resolved) usesSystemDefault=\(usesSystemDefault)")
+
+        // Query stream format (input scope) and build AVAudioFormat.
+        guard let format = resolveStreamFormatLocked(for: resolved) else {
+            let msg = "Invalid audio format for device \(resolved)"
             diagLog("[AUDIO-BUS] FAIL: \(msg)")
             _error.value = msg
+            scheduleStartRetryLocked(deviceID: deviceID)
+            return
+        }
+        currentFormat = format
+
+        diagLog("[AUDIO-BUS] format: sr=\(format.sampleRate) ch=\(format.channelCount) interleaved=\(format.isInterleaved)")
+
+        // Create IOProc. The block is invoked by AudioToolbox on halQueue.
+        var newIOProcID: AudioDeviceIOProcID?
+        let status = AudioDeviceCreateIOProcIDWithBlock(
+            &newIOProcID,
+            resolved,
+            halQueue
+        ) { [weak self] _, inInputData, _, _, _ in
+            self?.handleInputData(inInputData)
+        }
+        guard status == noErr, let newIOProcID else {
+            let msg = "AudioDeviceCreateIOProcIDWithBlock failed (OSStatus \(status))"
+            diagLog("[AUDIO-BUS] FAIL: \(msg)")
+            _error.value = msg
+            scheduleStartRetryLocked(deviceID: deviceID)
+            return
+        }
+        ioProcID = newIOProcID
+
+        // Install listeners before starting the device so we don't miss transitions.
+        installFormatListenerLocked(for: resolved)
+        if usesSystemDefault {
+            installDefaultDeviceListenerLocked()
+        } else {
+            removeDefaultDeviceListenerLocked()
+        }
+
+        // Start the device.
+        let startStatus = AudioDeviceStart(resolved, newIOProcID)
+        guard startStatus == noErr else {
+            let msg = "AudioDeviceStart failed (OSStatus \(startStatus))"
+            diagLog("[AUDIO-BUS] FAIL: \(msg)")
+            _error.value = msg
+            // Clean up the IOProc we just created before retrying.
+            _ = AudioDeviceDestroyIOProcID(resolved, newIOProcID)
+            ioProcID = nil
+            removeFormatListenerLocked()
+            removeDefaultDeviceListenerLocked()
+            scheduleStartRetryLocked(deviceID: deviceID)
             return
         }
 
-        guard installTap(on: inputNode, format: tapFormat) else {
-            let msg = "Failed to install audio tap"
-            diagLog("[AUDIO-BUS] FAIL: \(msg)")
-            _error.value = msg
-            return
-        }
-        // Register observer before start() so no config change can be lost during startup.
-        installConfigChangeObserver(for: newEngine)
-
-        diagLog("[AUDIO-BUS] tap installed, starting engine...")
-
-        do {
-            try newEngine.start()
-            _running.value = true
-            _error.value = nil
-            configChangeRestartFailures = 0
-            lastEngineStartTime = .now()
-            diagLog("[AUDIO-BUS] engine started, isRunning=\(newEngine.isRunning)")
-        } catch {
-            let msg = "Audio engine failed: \(error.localizedDescription)"
-            diagLog("[AUDIO-BUS] FAIL: \(msg)")
-            _error.value = msg
-            _running.value = false
-            hasTapInstalled = false
-        }
+        // Success.
+        _running.value = true
+        _error.value = nil
+        startRetryAttempt = 0
+        resetWatchdogLocked()
+        diagLog("[AUDIO-BUS] capture started on device=\(resolved)")
     }
 
-    private func performSwitchDevice(_ deviceID: AudioDeviceID?) {
-        dispatchPrecondition(condition: .onQueue(engineQueue))
+    /// Stop + destroy current IOProc and detach listeners. Called on halQueue.
+    /// Does NOT clear device state or format — caller is responsible for what happens next.
+    private func stopCaptureLocked() {
+        dispatchPrecondition(condition: .onQueue(halQueue))
 
-        diagLog("[AUDIO-BUS] switching device to \(String(describing: deviceID))")
-
-        // Tear down old engine, start new one. Consumer continuations stay alive.
-        // Reset failure counter — device switch is intentional, not a config-change cascade.
-        configChangeRestartFailures = 0
-        configChangeScheduled = false
-        teardownEngine()
-        startEngine(deviceID: deviceID)
-
-        diagLog("[AUDIO-BUS] device switch complete")
+        if let procID = ioProcID, currentDeviceID != AudioDeviceID(kAudioObjectUnknown) {
+            _ = AudioDeviceStop(currentDeviceID, procID)
+            _ = AudioDeviceDestroyIOProcID(currentDeviceID, procID)
+        }
+        ioProcID = nil
+        removeFormatListenerLocked()
     }
 
-    private func resolveFormat(for inputNode: AVAudioInputNode) -> AVAudioFormat? {
-        let format = inputNode.outputFormat(forBus: 0)
+    /// Full teardown for restart — stops capture, removes listeners, resets observable state.
+    private func teardownCaptureLocked() {
+        dispatchPrecondition(condition: .onQueue(halQueue))
 
-        var sampleRate = format.sampleRate
-        if let devID = currentDeviceID,
-           let hwRate = Self.deviceNominalSampleRate(for: devID),
-           hwRate > 0, hwRate != sampleRate {
-            diagLog("[AUDIO-BUS] hardware sr=\(hwRate) differs from inputNode sr=\(sampleRate), using hardware rate")
-            sampleRate = hwRate
-        }
+        stopCaptureLocked()
+        removeDefaultDeviceListenerLocked()
 
-        diagLog("[AUDIO-BUS] format: sr=\(format.sampleRate) ch=\(format.channelCount), effective sr=\(sampleRate)")
-
-        guard sampleRate > 0 && format.channelCount > 0 else { return nil }
-
-        if let f = AVAudioFormat(standardFormatWithSampleRate: sampleRate, channels: format.channelCount) {
-            return f
-        } else if sampleRate != format.sampleRate,
-                  let f = AVAudioFormat(standardFormatWithSampleRate: format.sampleRate, channels: format.channelCount) {
-            diagLog("[AUDIO-BUS] hardware-rate format failed, using node rate \(format.sampleRate)")
-            return f
-        } else {
-            diagLog("[AUDIO-BUS] standard formats failed, using native input format")
-            return format
-        }
-    }
-
-    /// Returns true if the tap was installed successfully.
-    @discardableResult
-    private func installTap(on inputNode: AVAudioInputNode, format: AVAudioFormat) -> Bool {
-        // Defensive: remove any existing tap before installing. No-op when no tap exists.
-        inputNode.removeTap(onBus: 0)
-
-        let level = _audioLevel
-        let muted = _muted
-        let hasCaptured = _hasCapturedFrames
-        let hasSignal = _hasSignal
-        let lastFrame = _lastFrameTime
-        let consumersRef = consumers
-        var tapCallCount = 0
-
-        // AVAudioNode.installTap throws an ObjC NSException (not a Swift error) when the
-        // node is in a transient state — e.g., during Bluetooth device transitions.
-        // Swift cannot catch NSException, so we use an ObjC @try/@catch wrapper.
-        var exceptionMessage: NSString?
-        let ok = LRECatchException({
-            inputNode.installTap(onBus: 0, bufferSize: 4096, format: format) { buffer, _ in
-                tapCallCount += 1
-                hasCaptured.value = true
-                lastFrame.value = Date()
-
-                let rms = Self.normalizedRMS(from: buffer)
-                level.value = min(rms * 25, 1.0)
-                hasSignal.value = rms > 1e-6
-
-                if tapCallCount <= 5 || tapCallCount % 100 == 0 {
-                    diagLog("[AUDIO-BUS] tap #\(tapCallCount): frames=\(buffer.frameLength) rms=\(rms)")
-                }
-
-                guard !muted.value else { return }
-
-                let snapshot = consumersRef.withLock { Array($0.values) }
-                for continuation in snapshot {
-                    continuation.yield(buffer)
-                }
-            }
-        }, &exceptionMessage)
-
-        if ok {
-            hasTapInstalled = true
-            return true
-        } else {
-            diagLog("[AUDIO-BUS] installTap threw ObjC exception: \(exceptionMessage ?? "unknown")")
-            hasTapInstalled = false
-            return false
-        }
-    }
-
-    private func teardownEngine() {
-        dispatchPrecondition(condition: .onQueue(engineQueue))
-
-        removeConfigChangeObserver()
-        if hasTapInstalled, let engine {
-            engine.inputNode.removeTap(onBus: 0)
-            hasTapInstalled = false
-        }
-        engine?.stop()
-        engine?.reset()
-        engine = nil
         _running.value = false
         _audioLevel.value = 0
         _hasCapturedFrames.value = false
@@ -314,132 +281,369 @@ final class AudioBus: @unchecked Sendable {
         _lastFrameTime.value = nil
     }
 
+    /// Reconfigure capture in response to a route / format change.
+    /// Settles 300ms for hardware transitions before rebuilding the IOProc.
+    private func reconfigureLocked() {
+        dispatchPrecondition(condition: .onQueue(halQueue))
+
+        guard !isReconfiguring else {
+            diagLog("[AUDIO-BUS] reconfigure already in progress, skipping")
+            return
+        }
+        isReconfiguring = true
+        defer { isReconfiguring = false }
+
+        diagLog("[AUDIO-BUS] reconfigure begin (usesSystemDefault=\(usesSystemDefault))")
+
+        // 1-4. Stop + destroy old IOProc, remove format listener.
+        stopCaptureLocked()
+
+        // 5. Settle 300ms for hardware to quiesce after a route change.
+        //    This is documented as critical for Bluetooth A2DP <-> SCO transitions.
+        usleep(300_000)
+
+        // 6-8. Re-resolve device, rebuild IOProc, restart.
+        let targetDevice: AudioDeviceID? = usesSystemDefault ? nil : currentDeviceID
+        startCaptureLocked(deviceID: targetDevice)
+
+        diagLog("[AUDIO-BUS] reconfigure end (running=\(_running.value))")
+    }
+
+    private func performSwitchDeviceLocked(_ deviceID: AudioDeviceID?) {
+        dispatchPrecondition(condition: .onQueue(halQueue))
+
+        diagLog("[AUDIO-BUS] switching device to \(String(describing: deviceID))")
+
+        // Intentional device change — reset retry/fallback state.
+        startRetryAttempt = 0
+        pendingRetryItem?.cancel()
+        pendingRetryItem = nil
+        builtInFallbackTaken = false
+
+        teardownCaptureLocked()
+        startCaptureLocked(deviceID: deviceID)
+
+        diagLog("[AUDIO-BUS] device switch complete (running=\(_running.value))")
+    }
+
+    /// Bounded retry with backoff: 1s, 2s, 3s. After maxStartRetries, give up loudly.
+    private func scheduleStartRetryLocked(deviceID: AudioDeviceID?) {
+        dispatchPrecondition(condition: .onQueue(halQueue))
+
+        pendingRetryItem?.cancel()
+        pendingRetryItem = nil
+
+        guard startRetryAttempt < Self.maxStartRetries else {
+            let msg = "Audio capture failed after \(Self.maxStartRetries) attempts"
+            diagLog("[AUDIO-BUS] \(msg) — giving up")
+            _error.value = msg
+            return
+        }
+
+        startRetryAttempt += 1
+        let delay = Double(startRetryAttempt) // 1s, 2s, 3s
+        diagLog("[AUDIO-BUS] retry start in \(delay)s (attempt \(startRetryAttempt)/\(Self.maxStartRetries))")
+
+        let item = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.startCaptureLocked(deviceID: deviceID)
+        }
+        pendingRetryItem = item
+        halQueue.asyncAfter(deadline: .now() + delay, execute: item)
+    }
+
+    // MARK: - Format Resolution
+
+    /// Query `kAudioDevicePropertyStreamFormat` in input scope. Build an AVAudioFormat.
+    /// Falls back to `standardFormatWithSampleRate:channels:` using the nominal sample rate.
+    private func resolveStreamFormatLocked(for deviceID: AudioDeviceID) -> AVAudioFormat? {
+        dispatchPrecondition(condition: .onQueue(halQueue))
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamFormat,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var asbd = AudioStreamBasicDescription()
+        var size = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &asbd)
+        if status == noErr, asbd.mSampleRate > 0, asbd.mChannelsPerFrame > 0 {
+            if let f = AVAudioFormat(streamDescription: &asbd) {
+                return f
+            }
+            // ASBD didn't map to a supported AVAudioFormat — fall through to standard format.
+            diagLog("[AUDIO-BUS] AVAudioFormat(streamDescription:) failed, using standard format")
+        } else {
+            diagLog("[AUDIO-BUS] kAudioDevicePropertyStreamFormat query failed (OSStatus \(status))")
+        }
+
+        let rate = asbd.mSampleRate > 0 ? asbd.mSampleRate
+                : (Self.deviceNominalSampleRate(for: deviceID) ?? 0)
+        let channels = asbd.mChannelsPerFrame > 0 ? UInt32(asbd.mChannelsPerFrame) : 1
+        guard rate > 0, channels > 0 else { return nil }
+        return AVAudioFormat(standardFormatWithSampleRate: rate, channels: AVAudioChannelCount(channels))
+    }
+
+    // MARK: - Property Listeners
+
+    /// Listener block for the default-input-device change.
+    /// Fires on listenerQueue, hops onto halQueue for reconfigure.
+    private lazy var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        guard let self else { return }
+        diagLog("[AUDIO-BUS] default input device changed")
+        self.queueReconfigure(reason: "default-device-change")
+    }
+
+    /// Listener block for `kAudioDevicePropertyStreamFormat` on the current device.
+    /// Fires on listenerQueue, hops onto halQueue for reconfigure.
+    private lazy var formatListenerBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+        guard let self else { return }
+        diagLog("[AUDIO-BUS] stream format changed")
+        self.queueReconfigure(reason: "format-change")
+    }
+
+    /// Hop onto halQueue for reconfigure. halQueue is serial, so queued reconfigures run in
+    /// order; the 300ms settle inside reconfigureLocked() is the real route-change shock absorber.
+    private func queueReconfigure(reason: String) {
+        halQueue.async { [weak self] in
+            guard let self else { return }
+            // If the default-device listener fires while we're pinned to a specific device,
+            // we ignore it. The format listener is always relevant because it's installed on
+            // the current device only.
+            if reason == "default-device-change", !self.usesSystemDefault {
+                return
+            }
+            self.reconfigureLocked()
+        }
+    }
+
+    private func installDefaultDeviceListenerLocked() {
+        dispatchPrecondition(condition: .onQueue(halQueue))
+        guard !defaultDeviceListenerInstalled else { return }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            listenerQueue,
+            defaultDeviceListenerBlock
+        )
+        if status == noErr {
+            defaultDeviceListenerInstalled = true
+        } else {
+            diagLog("[AUDIO-BUS] install default-device listener failed (OSStatus \(status))")
+        }
+    }
+
+    private func removeDefaultDeviceListenerLocked() {
+        dispatchPrecondition(condition: .onQueue(halQueue))
+        guard defaultDeviceListenerInstalled else { return }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        _ = AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address,
+            listenerQueue,
+            defaultDeviceListenerBlock
+        )
+        defaultDeviceListenerInstalled = false
+    }
+
+    private func installFormatListenerLocked(for deviceID: AudioDeviceID) {
+        dispatchPrecondition(condition: .onQueue(halQueue))
+        removeFormatListenerLocked()
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamFormat,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        let status = AudioObjectAddPropertyListenerBlock(
+            deviceID,
+            &address,
+            listenerQueue,
+            formatListenerBlock
+        )
+        if status == noErr {
+            formatListenerDeviceID = deviceID
+        } else {
+            diagLog("[AUDIO-BUS] install format listener failed (OSStatus \(status))")
+        }
+    }
+
+    private func removeFormatListenerLocked() {
+        dispatchPrecondition(condition: .onQueue(halQueue))
+        guard formatListenerDeviceID != AudioDeviceID(kAudioObjectUnknown) else { return }
+
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyStreamFormat,
+            mScope: kAudioDevicePropertyScopeInput,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        _ = AudioObjectRemovePropertyListenerBlock(
+            formatListenerDeviceID,
+            &address,
+            listenerQueue,
+            formatListenerBlock
+        )
+        formatListenerDeviceID = AudioDeviceID(kAudioObjectUnknown)
+    }
+
+    // MARK: - IOProc Callback
+
+    /// Invoked by AudioToolbox on halQueue. Builds an AVAudioPCMBuffer, updates observable
+    /// state, fans out to consumers, and feeds the silent-mic watchdog.
+    private func handleInputData(_ inputData: UnsafePointer<AudioBufferList>) {
+        guard let format = currentFormat else { return }
+
+        let sourceBuffers = UnsafeMutableAudioBufferListPointer(
+            UnsafeMutablePointer(mutating: inputData)
+        )
+        let streamDescription = format.streamDescription
+        let bytesPerFrame = Int(streamDescription.pointee.mBytesPerFrame)
+        guard bytesPerFrame > 0, let firstBuffer = sourceBuffers.first else { return }
+
+        let frameCount = AVAudioFrameCount(Int(firstBuffer.mDataByteSize) / bytesPerFrame)
+        guard frameCount > 0 else { return }
+
+        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+            return
+        }
+        pcmBuffer.frameLength = frameCount
+
+        let destBuffers = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
+        guard destBuffers.count == sourceBuffers.count else { return }
+
+        for index in 0..<sourceBuffers.count {
+            let src = sourceBuffers[index]
+            let copySize = min(
+                Int(src.mDataByteSize),
+                Int(destBuffers[index].mDataByteSize)
+            )
+            guard copySize > 0,
+                  let sourceData = src.mData,
+                  let destinationData = destBuffers[index].mData
+            else {
+                continue
+            }
+            memcpy(destinationData, sourceData, copySize)
+            destBuffers[index].mDataByteSize = UInt32(copySize)
+        }
+
+        let rms = Self.normalizedRMS(from: pcmBuffer)
+
+        _lastFrameTime.value = Date()
+        _hasCapturedFrames.value = true
+        _hasSignal.value = rms > 1e-6
+        _audioLevel.value = min(rms * 25, 1.0)
+
+        // Fan-out to consumers. Snapshot under the unfair lock so we don't hold it during yield().
+        if !_muted.value {
+            let snapshot = consumers.withLock { Array($0.values) }
+            for continuation in snapshot {
+                continuation.yield(pcmBuffer)
+            }
+        }
+
+        // Silent-mic watchdog.
+        updateWatchdogLocked(rms: rms)
+    }
+
+    // MARK: - Silent-Mic Watchdog (halQueue)
+
+    private func resetWatchdogLocked() {
+        windowStartTime = .now()
+        peakInCurrentWindow = 0
+        consecutiveSilentWindows = 0
+        // Do NOT reset builtInFallbackTaken here — that's only cleared on explicit switchDevice.
+    }
+
+    private func updateWatchdogLocked(rms: Float) {
+        // Update running peak for this window.
+        if rms > peakInCurrentWindow {
+            peakInCurrentWindow = rms
+        }
+
+        // Close the window once >= 1s has elapsed.
+        let elapsedNS = DispatchTime.now().uptimeNanoseconds &- windowStartTime.uptimeNanoseconds
+        guard elapsedNS >= 1_000_000_000 else { return }
+
+        let peak = peakInCurrentWindow
+        windowStartTime = .now()
+        peakInCurrentWindow = 0
+
+        // Gate: only count silent windows when on Bluetooth and no fallback has been taken.
+        let isBluetooth = Self.isBluetoothDevice(currentDeviceID)
+        if peak < 1e-6, isBluetooth, !builtInFallbackTaken {
+            consecutiveSilentWindows += 1
+            diagLog("[AUDIO-BUS] silent window \(consecutiveSilentWindows) on Bluetooth device \(currentDeviceID)")
+            if consecutiveSilentWindows >= 2 {
+                builtInFallbackTaken = true
+                // Dispatch async so the IOProc callback returns promptly.
+                halQueue.async { [weak self] in
+                    self?.takeBuiltInFallbackLocked()
+                }
+            }
+        } else {
+            consecutiveSilentWindows = 0
+        }
+    }
+
+    /// Bypasses the normal switchDevice flow: stops current IOProc, pins to built-in mic,
+    /// and removes the default-device listener so route changes cannot drag us back.
+    private func takeBuiltInFallbackLocked() {
+        dispatchPrecondition(condition: .onQueue(halQueue))
+
+        diagLog("[AUDIO-BUS] silent-mic fallback to built-in")
+
+        stopCaptureLocked()
+        removeDefaultDeviceListenerLocked()
+        usesSystemDefault = false
+
+        guard let builtIn = Self.builtInInputDevice() else {
+            let msg = "Silent-mic fallback: no built-in input available"
+            diagLog("[AUDIO-BUS] \(msg)")
+            _error.value = msg
+            return
+        }
+
+        startCaptureLocked(deviceID: builtIn)
+    }
+
     // MARK: - Health Monitoring
 
     private func startHealthMonitor() {
         healthTimer?.cancel()
-        let timer = DispatchSource.makeTimerSource(queue: engineQueue)
+        let timer = DispatchSource.makeTimerSource(queue: halQueue)
         timer.schedule(deadline: .now() + 10, repeating: 5)
         timer.setEventHandler { [weak self] in
-            self?.checkHealth()
+            self?.checkHealthLocked()
         }
         timer.resume()
         healthTimer = timer
     }
 
-    private func checkHealth() {
-        dispatchPrecondition(condition: .onQueue(engineQueue))
+    private func checkHealthLocked() {
+        dispatchPrecondition(condition: .onQueue(halQueue))
 
         guard _running.value else { return }
 
-        // If engine reports running but no frames in 5 seconds, restart
-        guard let engine, engine.isRunning else {
-            diagLog("[AUDIO-BUS-HEALTH] engine not running, restarting")
-            configChangeRestartFailures = 0
-            let device = currentDeviceID
-            teardownEngine()
-            startEngine(deviceID: device)
-            return
-        }
-
+        // If we've received frames and the last one is older than 5s, reconfigure.
         if let lastFrame = _lastFrameTime.value, Date().timeIntervalSince(lastFrame) > 5.0 {
-            diagLog("[AUDIO-BUS-HEALTH] silent for >5s, restarting engine")
-            configChangeRestartFailures = 0
-            let device = currentDeviceID
-            teardownEngine()
-            startEngine(deviceID: device)
-        } else if _lastFrameTime.value == nil && _hasCapturedFrames.value == false {
-            // Engine started but never produced frames — give it time on first check
-            return
-        }
-    }
-
-    // MARK: - Config Change Observer
-
-    /// Consecutive restart failures since last successful engine start.
-    private var configChangeRestartFailures = 0
-    private static let maxConfigChangeRestarts = 3
-    /// Debounce: when set, a restart is already scheduled on engineQueue.
-    private var configChangeScheduled = false
-    /// Timestamp of last successful engine start — config changes within the cooldown are startup transients.
-    private var lastEngineStartTime: DispatchTime = DispatchTime(uptimeNanoseconds: 0)
-
-    private func installConfigChangeObserver(for engine: AVAudioEngine) {
-        removeConfigChangeObserver()
-        configChangeObserver = NotificationCenter.default.addObserver(
-            forName: .AVAudioEngineConfigurationChange,
-            object: engine,
-            queue: nil
-        ) { [weak self] _ in
-            guard let self else { return }
-            self.engineQueue.async {
-                guard self.engine != nil else { return }
-                guard !self.configChangeScheduled else {
-                    diagLog("[AUDIO-BUS] config change coalesced (restart already pending)")
-                    return
-                }
-                self.configChangeScheduled = true
-                // Debounce: wait 300ms for cascading notifications to settle
-                self.engineQueue.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                    self?.handleConfigChange()
-                }
-            }
-        }
-    }
-
-    private func handleConfigChange() {
-        dispatchPrecondition(condition: .onQueue(engineQueue))
-        configChangeScheduled = false
-
-        // Suppress startup transients: engine.start() and tap installation fire spurious
-        // config change notifications. If the engine just started and is running, ignore.
-        // Real device failures within the cooldown window are caught by the health monitor.
-        let nsSinceStart = DispatchTime.now().uptimeNanoseconds - lastEngineStartTime.uptimeNanoseconds
-        if nsSinceStart < 1_500_000_000, _running.value {
-            diagLog("[AUDIO-BUS] config change \(nsSinceStart / 1_000_000)ms after start, ignoring (startup transient)")
+            diagLog("[AUDIO-BUS-HEALTH] silent for >5s, reconfiguring")
+            reconfigureLocked()
             return
         }
 
-        guard configChangeRestartFailures < Self.maxConfigChangeRestarts else {
-            let msg = "Audio engine failed after \(Self.maxConfigChangeRestarts) restart attempts"
-            diagLog("[AUDIO-BUS] \(msg) — giving up")
-            teardownEngine()
-            _error.value = msg
-            return
-        }
-
-        guard engine != nil else {
-            diagLog("[AUDIO-BUS] config change but engine is nil, ignoring")
-            return
-        }
-
-        diagLog("[AUDIO-BUS] AVAudioEngineConfigurationChange, restarting (attempt \(configChangeRestartFailures + 1))")
-
-        // Full teardown + fresh engine. The previous approach (engine.reset() + reinstall tap)
-        // crashed because the input node can be in a transient state during Bluetooth transitions,
-        // causing installTap(onBus:) to throw an unrecoverable ObjC NSException.
-        // The debounce mechanism (configChangeScheduled + 300ms delay) prevents cascading.
-        let device = usesSystemDefault ? nil : currentDeviceID
-        teardownEngine()
-        startEngine(deviceID: device)
-
-        if _running.value {
-            configChangeRestartFailures = 0
-        } else {
-            configChangeRestartFailures += 1
-            if configChangeRestartFailures >= Self.maxConfigChangeRestarts {
-                let msg = "Audio engine failed after \(Self.maxConfigChangeRestarts) restart attempts"
-                diagLog("[AUDIO-BUS] \(msg)")
-                _error.value = msg
-            }
-        }
-    }
-
-    private func removeConfigChangeObserver() {
-        if let observer = configChangeObserver {
-            NotificationCenter.default.removeObserver(observer)
-            configChangeObserver = nil
-        }
+        // Otherwise — we're either producing frames or still warming up. Do nothing.
     }
 
     // MARK: - RMS Calculation
