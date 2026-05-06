@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.16.0 — 2026-05-07
+
+Major audio-stack rewrite and Parakeet upgrade.
+
+- AudioBus rewritten on CoreAudio HAL IOProc — silent-mic Bluetooth fallback (AirPods route to built-in mic), settling-delay reconfigure for hardware route changes, supersedes the AVAudioEngine path that drove the v1.15.x crash hotfixes (#31, D-029)
+- FluidAudio bumped 0.13.2 → 0.14.4: Cyrillic emission bug fix in Parakeet TDT v3, 2.2-2.8x speedup on long audio via parallel chunk processing, 300ms minimum utterance length (improves short dictation), int4 encoder (#35)
+- Vocabulary boosting removed: FluidAudio v0.14 dropped `configureVocabularyBoosting` from the offline `AsrManager`; live decode no longer biases toward mined terms. The `transcriptionCustomVocabulary` setting and word-correction history are unchanged. Re-introducing boost via `SlidingWindowAsrManager` is tracked separately (#34)
+- Release script hardened: pre-flight CHANGELOG check, atomic post-release tagging + Info.plist bump
+
 ## v1.15.2 — 2026-04-09
 
 Hotfix: AudioBus infinite restart loop from startup config change transients.
