@@ -13,7 +13,7 @@ actor DiarizationManager {
 
     /// Load the LS-EEND model for the given variant. Must be called before feedAudio/dominantSpeaker.
     func load(variant: LSEENDVariant = .dihard3) async throws {
-        diarizationLog.info("Loading LS-EEND model (variant: \(variant.rawValue))")
+        diarizationLog.info("Loading LS-EEND model (variant: \(String(describing: variant)))")
         try await diarizer.initialize(variant: variant)
         isInitialized = true
         diarizationLog.info("LS-EEND model loaded")
@@ -84,5 +84,17 @@ actor DiarizationManager {
     func reset() {
         guard isInitialized else { return }
         diarizer.reset()
+    }
+}
+
+extension DiarizationVariant {
+    /// Maps the local settings variant to the FluidAudio LS-EEND model variant.
+    /// FluidAudio 0.14 dropped RawRepresentable on `LSEENDVariant`, so we map by case.
+    var lseendVariant: LSEENDVariant {
+        switch self {
+        case .ami: return .ami
+        case .callhome: return .callhome
+        case .dihard3: return .dihard3
+        }
     }
 }

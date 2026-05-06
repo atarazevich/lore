@@ -20,7 +20,7 @@ let package = Package(
         ),
     ],
     dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.13.0"),
+        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.14.4"),
         .package(url: "https://github.com/sparkle-project/Sparkle", from: "2.7.0"),
         // Fork with relaxed swift-transformers constraint (from: "1.1.6" instead of upToNextMinor)
         // to allow coexistence with FluidAudio 0.12.5 which requires swift-transformers >= 1.2.0.

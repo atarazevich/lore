@@ -263,8 +263,7 @@ actor BatchTranscriptionEngine {
             if enableDiarization {
                 batchLog.info("Running LS-EEND diarization on system audio...")
                 let dm = DiarizationManager()
-                let variant = LSEENDVariant(rawValue: diarizationVariant.rawValue) ?? .dihard3
-                try await dm.load(variant: variant)
+                try await dm.load(variant: diarizationVariant.lseendVariant)
                 // Process complete audio file through diarizer
                 let converter = AudioConverter(sampleRate: 16000)
                 let samples = try converter.resampleAudioFile(sysURL)

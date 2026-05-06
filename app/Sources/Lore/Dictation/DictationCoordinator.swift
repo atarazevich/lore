@@ -68,7 +68,6 @@ final class DictationCoordinator {
     /// when TranscriptionEngine also transcribes via the shared backend.
     private var ownBackend: (any TranscriptionBackend)?
     private var ownBackendModel: TranscriptionModel?
-    private var ownBackendVocabulary: String?
 
     /// The current history entry being processed (needed for upgrades).
     private var currentEntryID: UUID?
@@ -543,13 +542,12 @@ final class DictationCoordinator {
 
     private func transcribeEntry(_ entry: inout DictationHistoryEntry, samples: [Float]) async {
         let model = settings?.transcriptionModel ?? .parakeetV3
-        let vocab = settings?.transcriptionCustomVocabulary ?? ""
         let locale = settings?.locale ?? .current
 
         // Ensure the shared cache has downloaded model files (fast no-op if already cached)
         if let cache = backendCache {
             do {
-                try await cache.prepare(model: model, vocabulary: vocab) { [weak self] status in
+                try await cache.prepare(model: model) { [weak self] status in
                     Task { @MainActor in self?.state = .loadingModel }
                 }
             } catch {
@@ -566,10 +564,9 @@ final class DictationCoordinator {
         // Use a private backend instance to avoid sharing mutable decoder state
         // with TranscriptionEngine's backend from the shared cache.
         // Creating a fresh backend when model files are already on disk is fast (~1s).
-        let trimmedVocab = vocab.trimmingCharacters(in: .whitespacesAndNewlines)
-        if ownBackend == nil || ownBackendModel != model || ownBackendVocabulary != trimmedVocab {
+        if ownBackend == nil || ownBackendModel != model {
             diagLog("[DICTATION] creating private backend for \(model.rawValue)")
-            let fresh = model.makeBackend(customVocabulary: trimmedVocab)
+            let fresh = model.makeBackend()
             do {
                 try await fresh.prepare(onStatus: { _ in }, onProgress: { _ in })
             } catch {
@@ -581,7 +578,6 @@ final class DictationCoordinator {
             }
             ownBackend = fresh
             ownBackendModel = model
-            ownBackendVocabulary = trimmedVocab
         }
 
         guard let backend = ownBackend else {

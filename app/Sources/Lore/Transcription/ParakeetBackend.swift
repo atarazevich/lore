@@ -6,12 +6,10 @@ import Foundation
 final class ParakeetBackend: TranscriptionBackend, @unchecked Sendable {
     let displayName: String
     private let version: AsrModelVersion
-    private let customVocabularyText: String
     private var asrManager: AsrManager?
 
-    init(version: AsrModelVersion, customVocabulary: String = "") {
+    init(version: AsrModelVersion) {
         self.version = version
-        self.customVocabularyText = customVocabulary
         self.displayName = version == .v2 ? "Parakeet TDT v2" : "Parakeet TDT v3"
     }
 
@@ -35,27 +33,9 @@ final class ParakeetBackend: TranscriptionBackend, @unchecked Sendable {
         }
         onStatus("Initializing \(displayName)...")
         let asr = AsrManager(config: .default)
-        try await asr.initialize(models: models)
-
-        // Configure custom vocabulary boosting if provided
-        let vocab = customVocabularyText.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !vocab.isEmpty {
-            let tempURL = FileManager.default.temporaryDirectory
-                .appendingPathComponent("lore-custom-vocabulary-\(UUID().uuidString).txt")
-            try vocab.write(to: tempURL, atomically: true, encoding: .utf8)
-            defer { try? FileManager.default.removeItem(at: tempURL) }
-
-            let (customVocabulary, ctcModels) = try await CustomVocabularyContext.loadWithCtcTokens(
-                from: tempURL.path
-            )
-            if !customVocabulary.terms.isEmpty {
-                try await asr.configureVocabularyBoosting(
-                    vocabulary: customVocabulary,
-                    ctcModels: ctcModels
-                )
-            }
-        }
-
+        // FluidAudio 0.14 renamed `initialize(models:)` to `loadModels(_:)`.
+        try await asr.loadModels(models)
+        // Vocabulary boosting removed with FluidAudio v0.14 bump (#35); will return via SlidingWindowAsrManager (#34).
         self.asrManager = asr
     }
 
@@ -63,7 +43,10 @@ final class ParakeetBackend: TranscriptionBackend, @unchecked Sendable {
         guard let asrManager else {
             throw TranscriptionBackendError.notPrepared
         }
-        let result = try await asrManager.transcribe(samples)
+        // FluidAudio 0.14 requires an explicit decoder state. Each utterance is stateless,
+        // so we make a fresh state per call (matches upstream CLI / benchmark idiom).
+        var decoderState = TdtDecoderState.make(decoderLayers: await asrManager.decoderLayerCount)
+        let result = try await asrManager.transcribe(samples, decoderState: &decoderState)
         return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }

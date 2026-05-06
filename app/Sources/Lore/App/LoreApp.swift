@@ -441,8 +441,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // Preload model via shared cache so first dictation is instant
         Task {
             let model = settings.transcriptionModel
-            let vocab = settings.transcriptionCustomVocabulary
-            try? await coordinator.sharedBackendCache.prepare(model: model, vocabulary: vocab)
+            try? await coordinator.sharedBackendCache.prepare(model: model)
         }
     }
 

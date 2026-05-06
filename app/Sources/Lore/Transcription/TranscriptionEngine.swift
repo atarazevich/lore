@@ -126,7 +126,6 @@ final class TranscriptionEngine {
     private var cachedMicBackend: (any TranscriptionBackend)?
     private var cachedSystemBackend: (any TranscriptionBackend)?
     private var cachedModel: TranscriptionModel?
-    private var cachedVocabulary: String?
 
     /// Audio recorder for tapping streams (set by ContentView when recording is enabled).
     var audioRecorder: AudioRecorder?
@@ -212,9 +211,7 @@ final class TranscriptionEngine {
         isRunning = true
 
         // 1. Load transcription models via backend protocol
-        let vocab = settings.transcriptionCustomVocabulary
         let canReuseCache = cachedModel == transcriptionModel
-            && cachedVocabulary == vocab
             && cachedMicBackend != nil
             && cachedSystemBackend != nil
 
@@ -237,15 +234,13 @@ final class TranscriptionEngine {
         do {
             if !canReuseCache {
                 // Try shared cache first — reuse the preloaded dictation backend as mic backend
-                let trimmedVocab = vocab.trimmingCharacters(in: .whitespacesAndNewlines)
                 if let shared = sharedBackendCache,
                    shared.model == transcriptionModel,
-                   shared.vocabulary == trimmedVocab,
                    let sharedBackend = shared.backend {
                     self.micBackend = sharedBackend
                     diagLog("[ENGINE-1] reusing shared cache backend for mic")
                 } else {
-                    let mic = transcriptionModel.makeBackend(customVocabulary: vocab)
+                    let mic = transcriptionModel.makeBackend()
                     try await mic.prepare(
                         onStatus: { [weak self] status in
                             Task { @MainActor in
@@ -266,7 +261,7 @@ final class TranscriptionEngine {
                 if transcriptionModel == .qwen3ASR06B {
                     self.systemBackend = self.micBackend
                 } else {
-                    let sys = transcriptionModel.makeBackend(customVocabulary: vocab)
+                    let sys = transcriptionModel.makeBackend()
                     try await sys.prepare { _ in }
                     self.systemBackend = sys
                 }
@@ -280,7 +275,6 @@ final class TranscriptionEngine {
                 }
                 cachedSystemBackend = self.systemBackend
                 cachedModel = transcriptionModel
-                cachedVocabulary = vocab
             }
 
             if self.vadManager == nil {
@@ -295,8 +289,7 @@ final class TranscriptionEngine {
                 assetStatus = "Loading diarization model..."
                 diagLog("[ENGINE-1c] loading LS-EEND diarization model...")
                 let dm = DiarizationManager()
-                let variant = LSEENDVariant(rawValue: settings.diarizationVariant.rawValue) ?? .dihard3
-                try await dm.load(variant: variant)
+                try await dm.load(variant: settings.diarizationVariant.lseendVariant)
                 self.diarizationManager = dm
                 diagLog("[ENGINE-1c] diarization model loaded")
             } else {
@@ -868,7 +861,6 @@ final class TranscriptionEngine {
         cachedMicBackend = nil
         cachedSystemBackend = nil
         cachedModel = nil
-        cachedVocabulary = nil
         diagLog("[ENGINE-CACHE] backend cache invalidated")
     }
 }
