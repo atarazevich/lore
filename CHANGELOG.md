@@ -1,5 +1,14 @@
 # Changelog
 
+## v1.17.0 — 2026-06-09
+
+Deterministic mic selection — no more mid-recording device switching.
+
+- Input device is picked once at recording start via a transport allowlist: built-in and wired mics are used as-is; any wireless input (AirPods, iPhone/Continuity, Bluetooth) redirects to the built-in mic, verified by device UID. The device stays pinned for the entire recording (#39, D-030)
+- Fixes empty transcriptions caused by a phantom Continuity device being pinned as "built-in mic" (stale persisted device id + transport-only matching) and the resulting device ping-pong between recordings
+- Removed the silent-mic watchdog, the dictation zero-signal fallback walker, and the follow-system-default listener; a dead mic now shows a "No signal from microphone" warning instead of hopping devices
+- FluidAudio bumped 0.14.4 → 0.15.2 in app and benchmark tool (#38)
+
 ## v1.16.0 — 2026-05-07
 
 Major audio-stack rewrite and Parakeet upgrade.
