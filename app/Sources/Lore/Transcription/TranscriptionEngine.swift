@@ -322,7 +322,7 @@ final class TranscriptionEngine {
         // 2. Start mic capture
         userSelectedDeviceID = inputDeviceID
         guard let targetMicID = resolvedMicDeviceID(for: inputDeviceID) else {
-            let msg = unavailableMicMessage(for: inputDeviceID)
+            let msg = Self.unavailableMicMessage
             diagLog("[ENGINE-3-FAIL] \(msg)")
             lastError = msg
             assetStatus = "Ready"
@@ -394,7 +394,7 @@ final class TranscriptionEngine {
         }
     }
 
-    // MARK: - Default Device Listener (AudioBus handles input device changes)
+    // MARK: - Default Output Device Listener (input device is pinned at capture start, #39)
 
     private func installDefaultOutputDeviceListener() {
         guard defaultOutputDeviceListenerBlock == nil else { return }
@@ -545,7 +545,7 @@ final class TranscriptionEngine {
         userSelectedDeviceID = inputDeviceID
 
         guard let targetMicID = resolvedMicDeviceID(for: inputDeviceID) else {
-            let msg = unavailableMicMessage(for: inputDeviceID)
+            let msg = Self.unavailableMicMessage
             diagLog("[ENGINE-MIC-SWAP-FAIL] \(msg)")
             lastError = msg
             return
@@ -774,32 +774,14 @@ final class TranscriptionEngine {
     }
 
     private func resolvedMicDeviceID(for inputDeviceID: AudioDeviceID) -> AudioDeviceID? {
-        if inputDeviceID > 0 {
-            let availableDeviceIDs = Set(AudioBus.availableInputDevices().map(\.id))
-            guard availableDeviceIDs.contains(inputDeviceID) else { return nil }
-            // Redirect Bluetooth to built-in mic
-            let (resolved, redirected) = AudioBus.resolveBestInputDevice(requested: inputDeviceID)
-            if redirected {
-                diagLog("[ENGINE] Bluetooth mic detected, redirecting to built-in mic (device \(resolved))")
-            }
-            return resolved
-        }
-
-        // System default — check if it resolves to Bluetooth
-        let (resolved, redirected) = AudioBus.resolveBestInputDevice(requested: 0)
-        if redirected {
-            diagLog("[ENGINE] Default input is Bluetooth, redirecting to built-in mic (device \(resolved))")
-        }
-        return resolved > 0 ? resolved : nil
+        // One allowlist selection per (re)start, fresh enumeration each call (#39).
+        // Wireless inputs redirect to built-in; stale device IDs fall back to default.
+        AudioBus.resolveBestInputDevice(requested: inputDeviceID)?.deviceID
     }
 
-    private func unavailableMicMessage(for inputDeviceID: AudioDeviceID) -> String {
-        if inputDeviceID > 0 {
-            return "The selected microphone is no longer available."
-        }
-
-        return "No default microphone is currently available."
-    }
+    /// Selection only fails when no input devices exist at all — stale selected
+    /// device IDs silently fall back to the default/built-in mic (#39).
+    private static let unavailableMicMessage = "No microphone is currently available."
 
     private static func modelNeedsDownload(_ model: TranscriptionModel) -> Bool {
         let backend = model.makeBackend()

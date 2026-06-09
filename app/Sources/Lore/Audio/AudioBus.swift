@@ -27,15 +27,12 @@ final class AudioBus: @unchecked Sendable {
 
     private var ioProcID: AudioDeviceIOProcID?
     private var currentDeviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
-    private var usesSystemDefault = true
     private var currentFormat: AVAudioFormat?
 
     /// Re-entry guard for reconfigureLocked(). halQueue is serial so this is just belt-and-braces
     /// against a reconfigure triggering another reconfigure synchronously inside the same call.
     private var isReconfiguring = false
 
-    /// Whether a default-input-device listener is currently installed on the system object.
-    private var defaultDeviceListenerInstalled = false
     /// Whether a stream-format listener is currently installed on `currentDeviceID`.
     private var formatListenerDeviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
 
@@ -77,13 +74,6 @@ final class AudioBus: @unchecked Sendable {
         guard let lastFrame = _lastFrameTime.value else { return false }
         return Date().timeIntervalSince(lastFrame) < 5.0
     }
-
-    // MARK: - Silent-Mic Watchdog (halQueue only — IOProc runs here)
-
-    private var windowStartTime: DispatchTime = .now()
-    private var peakInCurrentWindow: Float = 0
-    private var consecutiveSilentWindows = 0
-    private var builtInFallbackTaken = false
 
     // MARK: - Health Timer
 
@@ -152,7 +142,7 @@ final class AudioBus: @unchecked Sendable {
     }
 
     /// Switch capture to a different input device. Consumer streams stay alive.
-    /// Passing nil (or 0) means "use system default input" and reinstalls the default-device listener.
+    /// Passing nil (or 0) resolves the current system default once and pins to it.
     func switchDevice(_ deviceID: AudioDeviceID?) {
         halQueue.async { [weak self] in
             self?.performSwitchDeviceLocked(deviceID)
@@ -165,18 +155,17 @@ final class AudioBus: @unchecked Sendable {
 
     // MARK: - Capture Lifecycle (halQueue only)
 
-    /// Start capture on the given device (nil = system default). Called on halQueue.
+    /// Start capture on the given device (nil = resolve system default once, then pin). Called on halQueue.
     private func startCaptureLocked(deviceID: AudioDeviceID?) {
         dispatchPrecondition(condition: .onQueue(halQueue))
 
-        // Clean up any prior IOProc, listeners, watchdog state.
+        // Clean up any prior IOProc and listeners.
         teardownCaptureLocked()
 
         // Resolve device.
         let resolved: AudioDeviceID
         if let id = deviceID, id > 0 {
             resolved = id
-            usesSystemDefault = false
         } else {
             guard let def = Self.defaultInputDeviceID(), def > 0 else {
                 let msg = "No default input device"
@@ -186,12 +175,11 @@ final class AudioBus: @unchecked Sendable {
                 return
             }
             resolved = def
-            usesSystemDefault = true
-            diagLog("[AUDIO-BUS] using system default device")
+            diagLog("[AUDIO-BUS] resolved system default device once — pinned for this capture")
         }
 
         currentDeviceID = resolved
-        diagLog("[AUDIO-BUS] start on device=\(resolved) usesSystemDefault=\(usesSystemDefault)")
+        diagLog("[AUDIO-BUS] start on device=\(resolved)")
 
         // Query stream format (input scope) and build AVAudioFormat.
         guard let format = resolveStreamFormatLocked(for: resolved) else {
@@ -223,13 +211,10 @@ final class AudioBus: @unchecked Sendable {
         }
         ioProcID = newIOProcID
 
-        // Install listeners before starting the device so we don't miss transitions.
+        // Install the format listener before starting the device so we don't miss transitions.
+        // No default-device listener: the device is pinned for the whole capture (#39) —
+        // mid-capture system-default changes must not switch the device.
         installFormatListenerLocked(for: resolved)
-        if usesSystemDefault {
-            installDefaultDeviceListenerLocked()
-        } else {
-            removeDefaultDeviceListenerLocked()
-        }
 
         // Start the device.
         let startStatus = AudioDeviceStart(resolved, newIOProcID)
@@ -241,7 +226,6 @@ final class AudioBus: @unchecked Sendable {
             _ = AudioDeviceDestroyIOProcID(resolved, newIOProcID)
             ioProcID = nil
             removeFormatListenerLocked()
-            removeDefaultDeviceListenerLocked()
             scheduleStartRetryLocked(deviceID: deviceID)
             return
         }
@@ -250,7 +234,6 @@ final class AudioBus: @unchecked Sendable {
         _running.value = true
         _error.value = nil
         startRetryAttempt = 0
-        resetWatchdogLocked()
         diagLog("[AUDIO-BUS] capture started on device=\(resolved)")
     }
 
@@ -272,7 +255,6 @@ final class AudioBus: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(halQueue))
 
         stopCaptureLocked()
-        removeDefaultDeviceListenerLocked()
 
         _running.value = false
         _audioLevel.value = 0
@@ -293,7 +275,7 @@ final class AudioBus: @unchecked Sendable {
         isReconfiguring = true
         defer { isReconfiguring = false }
 
-        diagLog("[AUDIO-BUS] reconfigure begin (usesSystemDefault=\(usesSystemDefault))")
+        diagLog("[AUDIO-BUS] reconfigure begin (device=\(currentDeviceID))")
 
         // 1-4. Stop + destroy old IOProc, remove format listener.
         stopCaptureLocked()
@@ -302,9 +284,9 @@ final class AudioBus: @unchecked Sendable {
         //    This is documented as critical for Bluetooth A2DP <-> SCO transitions.
         usleep(300_000)
 
-        // 6-8. Re-resolve device, rebuild IOProc, restart.
-        let targetDevice: AudioDeviceID? = usesSystemDefault ? nil : currentDeviceID
-        startCaptureLocked(deviceID: targetDevice)
+        // 6-8. Rebuild IOProc on the same device and restart. Never re-resolve —
+        //      the device chosen at capture start stays pinned (#39).
+        startCaptureLocked(deviceID: currentDeviceID)
 
         diagLog("[AUDIO-BUS] reconfigure end (running=\(_running.value))")
     }
@@ -314,11 +296,10 @@ final class AudioBus: @unchecked Sendable {
 
         diagLog("[AUDIO-BUS] switching device to \(String(describing: deviceID))")
 
-        // Intentional device change — reset retry/fallback state.
+        // Intentional device change — reset retry state.
         startRetryAttempt = 0
         pendingRetryItem?.cancel()
         pendingRetryItem = nil
-        builtInFallbackTaken = false
 
         teardownCaptureLocked()
         startCaptureLocked(deviceID: deviceID)
@@ -386,75 +367,16 @@ final class AudioBus: @unchecked Sendable {
 
     // MARK: - Property Listeners
 
-    /// Listener block for the default-input-device change.
-    /// Fires on listenerQueue, hops onto halQueue for reconfigure.
-    private lazy var defaultDeviceListenerBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-        guard let self else { return }
-        diagLog("[AUDIO-BUS] default input device changed")
-        self.queueReconfigure(reason: "default-device-change")
-    }
-
     /// Listener block for `kAudioDevicePropertyStreamFormat` on the current device.
-    /// Fires on listenerQueue, hops onto halQueue for reconfigure.
+    /// Fires on listenerQueue, hops onto halQueue for reconfigure. halQueue is serial, so
+    /// queued reconfigures run in order; the 300ms settle inside reconfigureLocked() is the
+    /// real route-change shock absorber.
     private lazy var formatListenerBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
         guard let self else { return }
         diagLog("[AUDIO-BUS] stream format changed")
-        self.queueReconfigure(reason: "format-change")
-    }
-
-    /// Hop onto halQueue for reconfigure. halQueue is serial, so queued reconfigures run in
-    /// order; the 300ms settle inside reconfigureLocked() is the real route-change shock absorber.
-    private func queueReconfigure(reason: String) {
-        halQueue.async { [weak self] in
-            guard let self else { return }
-            // If the default-device listener fires while we're pinned to a specific device,
-            // we ignore it. The format listener is always relevant because it's installed on
-            // the current device only.
-            if reason == "default-device-change", !self.usesSystemDefault {
-                return
-            }
-            self.reconfigureLocked()
+        self.halQueue.async { [weak self] in
+            self?.reconfigureLocked()
         }
-    }
-
-    private func installDefaultDeviceListenerLocked() {
-        dispatchPrecondition(condition: .onQueue(halQueue))
-        guard !defaultDeviceListenerInstalled else { return }
-
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let status = AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            listenerQueue,
-            defaultDeviceListenerBlock
-        )
-        if status == noErr {
-            defaultDeviceListenerInstalled = true
-        } else {
-            diagLog("[AUDIO-BUS] install default-device listener failed (OSStatus \(status))")
-        }
-    }
-
-    private func removeDefaultDeviceListenerLocked() {
-        dispatchPrecondition(condition: .onQueue(halQueue))
-        guard defaultDeviceListenerInstalled else { return }
-
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultInputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        _ = AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            listenerQueue,
-            defaultDeviceListenerBlock
-        )
-        defaultDeviceListenerInstalled = false
     }
 
     private func installFormatListenerLocked(for deviceID: AudioDeviceID) {
@@ -500,7 +422,7 @@ final class AudioBus: @unchecked Sendable {
     // MARK: - IOProc Callback
 
     /// Invoked by AudioToolbox on halQueue. Builds an AVAudioPCMBuffer, updates observable
-    /// state, fans out to consumers, and feeds the silent-mic watchdog.
+    /// state, and fans out to consumers.
     private func handleInputData(_ inputData: UnsafePointer<AudioBufferList>) {
         guard let format = currentFormat else { return }
 
@@ -552,70 +474,6 @@ final class AudioBus: @unchecked Sendable {
                 continuation.yield(pcmBuffer)
             }
         }
-
-        // Silent-mic watchdog.
-        updateWatchdogLocked(rms: rms)
-    }
-
-    // MARK: - Silent-Mic Watchdog (halQueue)
-
-    private func resetWatchdogLocked() {
-        windowStartTime = .now()
-        peakInCurrentWindow = 0
-        consecutiveSilentWindows = 0
-        // Do NOT reset builtInFallbackTaken here — that's only cleared on explicit switchDevice.
-    }
-
-    private func updateWatchdogLocked(rms: Float) {
-        // Update running peak for this window.
-        if rms > peakInCurrentWindow {
-            peakInCurrentWindow = rms
-        }
-
-        // Close the window once >= 1s has elapsed.
-        let elapsedNS = DispatchTime.now().uptimeNanoseconds &- windowStartTime.uptimeNanoseconds
-        guard elapsedNS >= 1_000_000_000 else { return }
-
-        let peak = peakInCurrentWindow
-        windowStartTime = .now()
-        peakInCurrentWindow = 0
-
-        // Gate: only count silent windows when on Bluetooth and no fallback has been taken.
-        let isBluetooth = Self.isBluetoothDevice(currentDeviceID)
-        if peak < 1e-6, isBluetooth, !builtInFallbackTaken {
-            consecutiveSilentWindows += 1
-            diagLog("[AUDIO-BUS] silent window \(consecutiveSilentWindows) on Bluetooth device \(currentDeviceID)")
-            if consecutiveSilentWindows >= 2 {
-                builtInFallbackTaken = true
-                // Dispatch async so the IOProc callback returns promptly.
-                halQueue.async { [weak self] in
-                    self?.takeBuiltInFallbackLocked()
-                }
-            }
-        } else {
-            consecutiveSilentWindows = 0
-        }
-    }
-
-    /// Bypasses the normal switchDevice flow: stops current IOProc, pins to built-in mic,
-    /// and removes the default-device listener so route changes cannot drag us back.
-    private func takeBuiltInFallbackLocked() {
-        dispatchPrecondition(condition: .onQueue(halQueue))
-
-        diagLog("[AUDIO-BUS] silent-mic fallback to built-in")
-
-        stopCaptureLocked()
-        removeDefaultDeviceListenerLocked()
-        usesSystemDefault = false
-
-        guard let builtIn = Self.builtInInputDevice() else {
-            let msg = "Silent-mic fallback: no built-in input available"
-            diagLog("[AUDIO-BUS] \(msg)")
-            _error.value = msg
-            return
-        }
-
-        startCaptureLocked(deviceID: builtIn)
     }
 
     // MARK: - Health Monitoring
@@ -796,26 +654,96 @@ final class AudioBus: @unchecked Sendable {
         return status == noErr ? transportType : nil
     }
 
-    static func isBluetoothDevice(_ deviceID: AudioDeviceID) -> Bool {
-        guard let transport = transportType(for: deviceID) else { return false }
-        return transport == kAudioDeviceTransportTypeBluetooth ||
-               transport == kAudioDeviceTransportTypeBluetoothLE
+    /// Transports allowed for recording: built-in and wired. Anything else (Bluetooth,
+    /// Continuity/iPhone, AirPlay, virtual) is wireless or unreliable and gets redirected.
+    /// Allowlist, not Bluetooth-blocklist, so Continuity devices cannot slip through (#39).
+    private static let allowedTransports: Set<UInt32> = [
+        kAudioDeviceTransportTypeBuiltIn,
+        kAudioDeviceTransportTypeUSB,
+        kAudioDeviceTransportTypeThunderbolt,
+        kAudioDeviceTransportTypeFireWire,
+        kAudioDeviceTransportTypePCI,
+    ]
+
+    /// Canonical UID of the real built-in microphone. Continuity phantoms have been observed
+    /// reporting the built-in transport type, so transport alone is not trustworthy (#39).
+    private static let builtInMicrophoneUID = "BuiltInMicrophoneDevice"
+
+    /// Pick the input device for a recording. Called once at recording start; the result is
+    /// pinned for the whole recording (#39). Enumerates devices fresh on every call — never
+    /// trusts a cached AudioDeviceID (IDs are not stable across sessions).
+    ///
+    /// Rule: if the requested device (or, failing that, the system default) is built-in or
+    /// wired, use it. Otherwise use the built-in mic; if none exists (Mac mini), the first
+    /// wired input; else keep the candidate. Returns nil when no input devices are present.
+    static func resolveBestInputDevice(requested: AudioDeviceID) -> (deviceID: AudioDeviceID, redirectedToBuiltIn: Bool)? {
+        let available = availableInputDevices()
+        guard !available.isEmpty else {
+            diagLog("[AUDIO-BUS] select input: no input devices available")
+            return nil
+        }
+
+        func isAllowed(_ id: AudioDeviceID) -> Bool {
+            guard let transport = transportType(for: id) else { return false }
+            guard allowedTransports.contains(transport) else { return false }
+            // BuiltIn transport is not enough — Continuity phantoms report it too (#39).
+            // Require the canonical built-in mic UID; anything else falls through to
+            // builtInInputDevice(in:), which picks the real built-in mic.
+            if transport == kAudioDeviceTransportTypeBuiltIn {
+                return deviceUID(for: id) == builtInMicrophoneUID
+            }
+            return true
+        }
+        func name(_ id: AudioDeviceID) -> String {
+            available.first(where: { $0.id == id })?.name ?? "unknown"
+        }
+
+        // Candidate: explicit selection if it still exists, else the current system default.
+        var candidate: AudioDeviceID = 0
+        if requested > 0, available.contains(where: { $0.id == requested }) {
+            candidate = requested
+        } else if let def = defaultInputDeviceID(), available.contains(where: { $0.id == def }) {
+            candidate = def
+        }
+
+        if candidate > 0, isAllowed(candidate) {
+            diagLog("[AUDIO-BUS] selected input device=\(candidate) (\(name(candidate)))")
+            return (candidate, false)
+        }
+
+        // Candidate is wireless (or unresolvable) — redirect per the allowlist.
+        if let builtIn = builtInInputDevice(in: available) {
+            // Report the redirect (drives the "wireless mic compresses audio" UI hint) only
+            // when the candidate's transport was readable and actually disallowed — not when
+            // the transport was unreadable or the device merely failed the built-in UID check.
+            let candidateTransport = candidate > 0 ? transportType(for: candidate) : nil
+            let redirectedFromWireless = candidateTransport.map { !allowedTransports.contains($0) } ?? false
+            diagLog("[AUDIO-BUS] wireless/unavailable input (\(candidate > 0 ? name(candidate) : "none")), selected built-in device=\(builtIn) (\(name(builtIn)))")
+            return (builtIn, redirectedFromWireless)
+        }
+        if let wired = available.first(where: { isAllowed($0.id) }) {
+            diagLog("[AUDIO-BUS] no built-in mic, selected wired device=\(wired.id) (\(wired.name))")
+            return (wired.id, false)
+        }
+        guard candidate > 0 else {
+            diagLog("[AUDIO-BUS] select input: no usable input device")
+            return nil
+        }
+        diagLog("[AUDIO-BUS] no built-in or wired mic, keeping device=\(candidate) (\(name(candidate)))")
+        return (candidate, false)
     }
 
-    static func builtInInputDevice() -> AudioDeviceID? {
-        let devices = availableInputDevices()
-        return devices.first { transportType(for: $0.id) == kAudioDeviceTransportTypeBuiltIn }?.id
-    }
-
-    static func resolveBestInputDevice(requested: AudioDeviceID) -> (deviceID: AudioDeviceID, redirectedFromBluetooth: Bool) {
-        let resolved = requested > 0 ? requested : (defaultInputDeviceID() ?? requested)
-        guard resolved > 0, isBluetoothDevice(resolved) else {
-            return (resolved, false)
+    /// The real built-in microphone, disambiguated by UID: Continuity iPhone mics have been
+    /// observed reporting the built-in transport type with session-unstable device IDs, so
+    /// transport alone is not trustworthy (#39 — phantom device 146/114 vs real built-in 102).
+    private static func builtInInputDevice(in available: [(id: AudioDeviceID, name: String)]) -> AudioDeviceID? {
+        let candidates = available.filter {
+            transportType(for: $0.id) == kAudioDeviceTransportTypeBuiltIn
         }
-        if let builtIn = builtInInputDevice() {
-            return (builtIn, true)
+        if let canonical = candidates.first(where: { deviceUID(for: $0.id) == builtInMicrophoneUID }) {
+            return canonical.id
         }
-        return (resolved, false)
+        return candidates.first?.id
     }
 
     static func defaultInputDeviceID() -> AudioDeviceID? {

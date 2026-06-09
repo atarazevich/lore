@@ -31,14 +31,10 @@ final class DictationCoordinator {
     private(set) var pendingCleanupMode: UpgradeAction?
     /// True while audio is being buffered before hold is confirmed (pre-buffer phase).
     private(set) var isPreBuffering = false
-    /// True when Bluetooth mic was detected and capture redirected to built-in mic.
+    /// True when a wireless default input was detected and capture redirected to built-in mic.
     private(set) var bluetoothMicRedirected = false
     /// True when the audio bus reports zero signal (dead mic input).
     private(set) var noSignal = false
-    /// True while actively switching to a fallback microphone.
-    private(set) var switchingMic = false
-    /// Device name after successful fallback switch; nil normally. Shown for 3 seconds.
-    private(set) var switchedToDevice: String?
 
     private let log = Logger(subsystem: "com.lore.app", category: "DictationCoordinator")
     private var busConsumerID: UUID?
@@ -46,9 +42,6 @@ final class DictationCoordinator {
     private var audioLevelTask: Task<Void, Never>?
     private var autoHideTask: Task<Void, Never>?
     private var upgradeDismissTask: Task<Void, Never>?
-    private var switchedToDeviceTask: Task<Void, Never>?
-    private var currentResolvedDeviceID: AudioDeviceID?
-    private var fallbackExhausted = false
     private var accumulatedSamples: [Float] = []
     private var converter: AVAudioConverter?
     private let cleanupClient = CleanupClient()
@@ -338,55 +331,39 @@ final class DictationCoordinator {
     // MARK: - Mic Helpers
 
     private func startMicCapture() {
-        let requestedDevice = settings?.inputDeviceID ?? 0
-        let (resolvedDevice, redirected) = AudioBus.resolveBestInputDevice(requested: requestedDevice)
-        bluetoothMicRedirected = redirected
-        currentResolvedDeviceID = resolvedDevice > 0 ? resolvedDevice : AudioBus.defaultInputDeviceID()
-        if redirected {
-            diagLog("[DICTATION] Bluetooth mic detected, redirecting to built-in mic (device \(resolvedDevice))")
-        }
-
         guard let bus = audioBus else {
             diagLog("[DICTATION] WARNING: audioBus not wired")
             return
         }
 
-        let (id, stream) = bus.subscribe(deviceID: resolvedDevice > 0 ? resolvedDevice : nil)
+        // One device selection per recording, via transport allowlist on a fresh
+        // enumeration (#39). The result is pinned — no mid-recording switching.
+        let requestedDevice = settings?.inputDeviceID ?? 0
+        let selection = AudioBus.resolveBestInputDevice(requested: requestedDevice)
+        bluetoothMicRedirected = selection?.redirectedToBuiltIn ?? false
+
+        let (id, stream) = bus.subscribe(deviceID: selection?.deviceID)
         busConsumerID = id
 
         audioLevelTask = Task { [weak self, weak bus] in
-            var zeroSignalStart: Date?
             var everHadSignal = false
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(50))
                 guard let self, let bus else { break }
                 self.audioLevel = bus.audioLevel
 
-                let signal = bus.hasSignal
-                let captured = bus.hasCapturedFrames
-                if signal { everHadSignal = true }
+                if bus.hasSignal { everHadSignal = true }
 
-                // Show "no audio" indicator only if we've captured frames but never had signal
-                // (truly dead mic). Don't show it for normal silence gaps — voice isolation
-                // produces digital silence between speech, which is not a mic problem.
-                let shouldShowNoSignal = captured && !signal && !everHadSignal
+                // Show "no audio" indicator if we've captured frames but never had signal
+                // (truly dead mic), or if the bus reports a capture failure (pinned device
+                // died mid-recording and retries are failing/exhausted). Don't show it for
+                // normal silence gaps — voice isolation produces digital silence between
+                // speech, which is not a mic problem.
+                // The device stays pinned — warn honestly, never hop devices (#39).
+                let shouldShowNoSignal = (bus.hasCapturedFrames && !everHadSignal)
+                    || bus.captureError != nil
                 if self.noSignal != shouldShowNoSignal {
                     self.noSignal = shouldShowNoSignal
-                }
-
-                // Only attempt fallback if the mic has NEVER produced signal.
-                // If it had signal before, it's a normal speech gap, not a dead mic.
-                if captured && !signal && !everHadSignal && !fallbackExhausted {
-                    if zeroSignalStart == nil {
-                        zeroSignalStart = Date()
-                    }
-                    if let start = zeroSignalStart, Date().timeIntervalSince(start) >= 3.0 {
-                        zeroSignalStart = nil
-                        await self.attemptMicFallback()
-                    }
-                } else {
-                    zeroSignalStart = nil
-                    if signal { fallbackExhausted = false }
                 }
             }
         }
@@ -401,71 +378,6 @@ final class DictationCoordinator {
         }
     }
 
-    private func attemptMicFallback() async {
-        guard let bus = audioBus else { return }
-        let deadDeviceID = currentResolvedDeviceID
-
-        switchingMic = true
-        noSignal = false
-        diagLog("[DICTATION] zero-signal detected, attempting mic fallback (dead device: \(String(describing: deadDeviceID)))")
-
-        // Only fall back to built-in or wired devices.
-        // Never try Bluetooth (unreliable) or Continuity devices (triggers iPhone permission prompts).
-        let allDevices = AudioBus.availableInputDevices()
-        let candidates = allDevices.filter { device in
-            if deadDeviceID != nil && device.id == deadDeviceID { return false }
-            guard let transport = AudioBus.transportType(for: device.id) else { return false }
-            let safe: Set<UInt32> = [
-                kAudioDeviceTransportTypeBuiltIn,
-                kAudioDeviceTransportTypeUSB,
-                kAudioDeviceTransportTypeFireWire,
-                kAudioDeviceTransportTypeThunderbolt,
-                kAudioDeviceTransportTypePCI,
-            ]
-            return safe.contains(transport)
-        }
-
-        // Built-in first, then wired
-        let sorted = candidates.sorted { a, _ in
-            AudioBus.transportType(for: a.id) == kAudioDeviceTransportTypeBuiltIn
-        }
-
-        for candidate in sorted {
-            diagLog("[DICTATION] trying fallback device: \(candidate.name) (\(candidate.id))")
-            bus.switchDevice(candidate.id)
-            currentResolvedDeviceID = candidate.id
-
-            // Wait for engine restart + first buffer (switchDevice is async on engineQueue)
-            try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled else {
-                switchingMic = false
-                return
-            }
-
-            if bus.hasCapturedFrames && bus.hasSignal {
-                switchingMic = false
-                let name = candidate.name
-                switchedToDevice = name
-                diagLog("[DICTATION] fallback succeeded: \(name)")
-
-                // Clear the "Switched to" flash after 3 seconds
-                switchedToDeviceTask?.cancel()
-                switchedToDeviceTask = Task { [weak self] in
-                    try? await Task.sleep(for: .seconds(3))
-                    guard let self, !Task.isCancelled else { return }
-                    self.switchedToDevice = nil
-                }
-                return
-            }
-        }
-
-        // All candidates exhausted — show no-signal, stop retrying
-        switchingMic = false
-        noSignal = true
-        fallbackExhausted = true
-        diagLog("[DICTATION] all fallback devices exhausted, no signal available")
-    }
-
     private func stopMicCapture() {
         audioLevelTask?.cancel()
         audioLevelTask = nil
@@ -478,12 +390,6 @@ final class DictationCoordinator {
         recordingTask = nil
         bluetoothMicRedirected = false
         noSignal = false
-        switchingMic = false
-        switchedToDevice = nil
-        switchedToDeviceTask?.cancel()
-        switchedToDeviceTask = nil
-        currentResolvedDeviceID = nil
-        fallbackExhausted = false
     }
 
     /// Toggle pre-paste cleanup mode during recording.

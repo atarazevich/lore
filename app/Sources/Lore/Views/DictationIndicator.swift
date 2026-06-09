@@ -15,8 +15,6 @@ struct DictationIndicatorView: View {
     var lastError: String?
     var bluetoothRedirected = false
     var noSignal = false
-    var switchingMic = false
-    var switchedToDevice: String?
     @State private var showBluetoothInfo = false
     var onUpgrade: ((UpgradeAction) -> Void)?
 
@@ -52,7 +50,7 @@ struct DictationIndicatorView: View {
 
     private var recordingContent: some View {
         HStack(spacing: 10) {
-            if noSignal || switchingMic {
+            if noSignal {
                 Circle()
                     .fill(.white.opacity(0.3))
                     .frame(width: 8, height: 8)
@@ -66,13 +64,9 @@ struct DictationIndicatorView: View {
                     .font(.system(size: 11))
                     .foregroundStyle(.white.opacity(0.7))
             }
-            WaveformBars(level: audioLevel, noSignal: noSignal || switchingMic)
+            WaveformBars(level: audioLevel, noSignal: noSignal)
             if noSignal {
-                Text("No audio")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.6))
-            } else if switchingMic {
-                Text("Switching\u{2026}")
+                Text("No signal from microphone")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(.white.opacity(0.6))
             } else {
@@ -80,11 +74,6 @@ struct DictationIndicatorView: View {
                     .font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(.white.opacity(0.6))
                     .monospacedDigit()
-                if let deviceName = switchedToDevice {
-                    Text("Switched to \(deviceName)")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.white.opacity(0.7))
-                }
             }
             if bluetoothRedirected {
                 Group {
@@ -243,8 +232,6 @@ final class DictationIndicatorModel {
     var lastError: String?
     var bluetoothRedirected = false
     var noSignal = false
-    var switchingMic = false
-    var switchedToDevice: String?
     var onUpgrade: ((UpgradeAction) -> Void)?
 }
 
@@ -265,8 +252,6 @@ private struct DictationIndicatorHost: View {
             lastError: model.lastError,
             bluetoothRedirected: model.bluetoothRedirected,
             noSignal: model.noSignal,
-            switchingMic: model.switchingMic,
-            switchedToDevice: model.switchedToDevice,
             onUpgrade: model.onUpgrade
         )
     }
@@ -354,8 +339,6 @@ final class DictationIndicatorManager {
                 self.model.lastError = coordinator.lastError
                 self.model.bluetoothRedirected = coordinator.bluetoothMicRedirected
                 self.model.noSignal = coordinator.noSignal
-                self.model.switchingMic = coordinator.switchingMic
-                self.model.switchedToDevice = coordinator.switchedToDevice
 
                 // Keep CGEvent tap flag in sync
                 hotkeyManager?.updateUpgradeShowingFlag(coordinator.isUpgradePanelVisible)
