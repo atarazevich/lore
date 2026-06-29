@@ -129,17 +129,20 @@ struct DictationIndicatorView: View {
             Image(systemName: icon)
                 .foregroundStyle(iconColor)
                 .font(.system(size: 14))
-            // Errors can carry a longer message — wrap to 2 lines at a capped width
-            // (same pattern as the Bluetooth hint) instead of stretching the panel into one
-            // wide line. The panel is `.fixedSize()`, so a concrete width is what forces the
-            // wrap; at lineLimit 1 the alignment/fixedSize modifiers and nil maxWidth are no-ops.
+            // Errors can carry a longer message — wrap at a capped width instead of stretching
+            // the panel into one wide line. The panel is `.fixedSize()`, so the width must be
+            // constrained BEFORE `.fixedSize(vertical:)` measures height — otherwise the text is
+            // measured at unbounded width (one line), that 1-line height is locked in, and the
+            // later wrap clips vertically. A definite `.frame(width:)` is proposed to the Text so
+            // it wraps; `fixedSize(vertical:)` then reports the true multi-line height the panel
+            // grows to. No line limit on wrap so the full message always shows.
             Text(text)
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.8))
-                .lineLimit(wrap ? 2 : 1)
+                .lineLimit(wrap ? nil : 1)
                 .multilineTextAlignment(.leading)
+                .frame(width: wrap ? 260 : nil, alignment: .leading)
                 .fixedSize(horizontal: false, vertical: true)
-                .frame(maxWidth: wrap ? 260 : nil, alignment: .leading)
         }
     }
 
