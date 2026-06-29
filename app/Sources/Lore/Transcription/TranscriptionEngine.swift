@@ -357,7 +357,7 @@ final class TranscriptionEngine {
             guard let self, self.isRunning else { return }
             if !self.audioBus.hasCapturedFrames && self.audioBus.captureError == nil {
                 diagLog("[ENGINE-HEALTH] no mic audio after 5s")
-                self.lastError = "Microphone is not producing audio. Check your input device in System Settings."
+                self.lastError = MicrophonePermission.noAudioMessage
             }
         }
 
@@ -439,22 +439,22 @@ final class TranscriptionEngine {
     }
 
     private func ensureMicrophonePermission() async -> Bool {
-        switch AVCaptureDevice.authorizationStatus(for: .audio) {
+        switch MicrophonePermission.status {
         case .authorized:
             return true
         case .notDetermined:
-            let granted = await AVCaptureDevice.requestAccess(for: .audio)
+            let granted = await MicrophonePermission.request()
             if !granted {
-                lastError = "Microphone access denied. Enable it in System Settings > Privacy & Security > Microphone."
+                lastError = MicrophonePermission.requestDeniedMessage
                 assetStatus = "Ready"
             }
             return granted
         case .denied, .restricted:
-            lastError = "Microphone access is disabled. Enable it in System Settings > Privacy & Security > Microphone."
+            lastError = MicrophonePermission.deniedMessage
             assetStatus = "Ready"
             return false
         @unknown default:
-            lastError = "Unable to verify microphone permission."
+            lastError = MicrophonePermission.unknownMessage
             assetStatus = "Ready"
             return false
         }
