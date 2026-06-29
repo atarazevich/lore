@@ -746,6 +746,15 @@ final class AudioBus: @unchecked Sendable {
         return candidates.first?.id
     }
 
+    /// Human-readable name of the input device that would be selected for a recording,
+    /// for error messaging. Enumeration needs no microphone permission, so this is safe
+    /// to call on a denied/failure path. Returns nil if no input device resolves.
+    static func resolvedInputDeviceName(requested: AudioDeviceID) -> String? {
+        let available = availableInputDevices()
+        guard let selection = resolveBestInputDevice(requested: requested) else { return nil }
+        return available.first(where: { $0.id == selection.deviceID })?.name
+    }
+
     static func defaultInputDeviceID() -> AudioDeviceID? {
         var propertyAddress = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDefaultInputDevice,

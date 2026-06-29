@@ -228,9 +228,13 @@ final class HotkeyManager {
 
             if isLocked {
                 if fnHeldAtLock {
-                    // First release after lock-while-holding — just continue recording
+                    // First release after lock-while-holding — just continue recording.
+                    // Still a genuine Fn release: clear any sticky mic error (no-op when none
+                    // is showing). The `.sticky` hide path leaves autoHideTask nil, so without
+                    // this an error reached through this branch would never clear.
                     fnHeldAtLock = false
                     diagLog("[HOTKEY] hotkey released after lock → continues (initial release)")
+                    coordinator?.dismissMicErrorAfterRelease()
                     return
                 }
                 // Subsequent release — stop recording (with debounce for Fn flag flicker)
@@ -242,6 +246,9 @@ final class HotkeyManager {
                     self.isLockedFlag = false
                     self.isRecordingFlag = false
                     diagLog("[HOTKEY] hotkey released while locked → stop + paste")
+                    // Genuine release (past the 30ms flag-flicker debounce): if a sticky
+                    // mic error is showing, begin its grace hide; otherwise stop normally.
+                    self.coordinator?.dismissMicErrorAfterRelease()
                     await self.coordinator?.stopRecording()
                 }
                 return
@@ -256,14 +263,20 @@ final class HotkeyManager {
                     self.isHoldMode = false
                     self.isRecordingFlag = false
                     diagLog("[HOTKEY] hold mode release → stop + paste")
+                    // Genuine release (past the 30ms flag-flicker debounce): if a sticky
+                    // mic error is showing, begin its grace hide; otherwise stop normally.
+                    self.coordinator?.dismissMicErrorAfterRelease()
                     await self.coordinator?.stopRecording()
                 }
                 return
             }
 
-            // Tap within 150ms — cancel pre-buffer (no debounce needed for taps)
+            // Tap within 150ms — cancel pre-buffer (no debounce needed for taps).
+            // A sticky mic error can surface on a tap too (synchronous .denied path), so
+            // start its grace hide here; startPreBuffer cancels it if Fn is pressed again.
             isPreBufferingFlag = false
             coordinator?.cancelPreBuffer()
+            coordinator?.dismissMicErrorAfterRelease()
         }
     }
 
@@ -420,22 +433,33 @@ final class HotkeyManager {
                 }
 
                 // Space while recording/pre-buffering and not locked → consume and lock
-                if keyCode == 49 && (manager.isRecordingFlag || manager.isPreBufferingFlag) && !manager.isLockedFlag {
-                    manager.isLockedFlag = true
-                    manager.isPreBufferingFlag = false
-                    manager.isRecordingFlag = true
-                    Task { @MainActor in
-                        if manager.coordinator?.isPreBuffering == true {
-                            manager.coordinator?.confirmRecording()
-                        }
-                        manager.fnHeldAtLock = manager.fnDown
-                        manager.isLocked = true
-                        manager.fnTimer?.cancel()
-                        manager.fnTimer = nil
-                        manager.isHoldMode = false
-                        diagLog("[HOTKEY] Space (CGEvent tap) → confirm + locked")
+                if keyCode == 49 && !manager.isLockedFlag {
+                    // Consult the coordinator's live state, not just the sync flags: a failed
+                    // pre-buffer parks in `.done` but leaves isPreBufferingFlag stale, which
+                    // would phantom-lock onto a recording that never started. The tap is added
+                    // to the main run loop (CFRunLoopGetMain), so the callback runs on the main
+                    // thread and assumeIsolated is valid here. Mirrors the keyDown Space path,
+                    // which guards on `coordinator.state == .recording || coordinator.isPreBuffering`.
+                    let recordingLive = MainActor.assumeIsolated {
+                        manager.coordinator.map { $0.state == .recording || $0.isPreBuffering } ?? false
                     }
-                    return nil
+                    if recordingLive {
+                        manager.isLockedFlag = true
+                        manager.isPreBufferingFlag = false
+                        manager.isRecordingFlag = true
+                        Task { @MainActor in
+                            if manager.coordinator?.isPreBuffering == true {
+                                manager.coordinator?.confirmRecording()
+                            }
+                            manager.fnHeldAtLock = manager.fnDown
+                            manager.isLocked = true
+                            manager.fnTimer?.cancel()
+                            manager.fnTimer = nil
+                            manager.isHoldMode = false
+                            diagLog("[HOTKEY] Space (CGEvent tap) → confirm + locked")
+                        }
+                        return nil
+                    }
                 }
 
                 // Esc while locked → consume and discard

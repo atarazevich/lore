@@ -25,7 +25,7 @@ struct DictationIndicatorView: View {
                 if let error = lastError {
                     // Mic stall surfaced by the first-frame watchdog — show it loudly
                     // instead of a normal-looking recording meter.
-                    statusRow(icon: "xmark.circle.fill", iconColor: .red, text: error)
+                    statusRow(icon: "xmark.circle.fill", iconColor: .red, text: error, wrap: true)
                 } else {
                     recordingContent
                 }
@@ -37,7 +37,7 @@ struct DictationIndicatorView: View {
                 if showUpgradeButtons {
                     upgradeContent
                 } else if let error = lastError {
-                    statusRow(icon: "xmark.circle.fill", iconColor: .red, text: error)
+                    statusRow(icon: "xmark.circle.fill", iconColor: .red, text: error, wrap: true)
                 } else {
                     statusRow(icon: "checkmark.circle.fill", iconColor: .green, text: "Done")
                 }
@@ -124,15 +124,22 @@ struct DictationIndicatorView: View {
         }
     }
 
-    private func statusRow(icon: String, iconColor: Color = .white.opacity(0.7), text: String) -> some View {
+    private func statusRow(icon: String, iconColor: Color = .white.opacity(0.7), text: String, wrap: Bool = false) -> some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
                 .foregroundStyle(iconColor)
                 .font(.system(size: 14))
+            // Errors can carry a longer message — wrap to 2 lines at a capped width
+            // (same pattern as the Bluetooth hint) instead of stretching the panel into one
+            // wide line. The panel is `.fixedSize()`, so a concrete width is what forces the
+            // wrap; at lineLimit 1 the alignment/fixedSize modifiers and nil maxWidth are no-ops.
             Text(text)
                 .font(.system(size: 13))
                 .foregroundStyle(.white.opacity(0.8))
-                .lineLimit(1)
+                .lineLimit(wrap ? 2 : 1)
+                .multilineTextAlignment(.leading)
+                .fixedSize(horizontal: false, vertical: true)
+                .frame(maxWidth: wrap ? 260 : nil, alignment: .leading)
         }
     }
 
