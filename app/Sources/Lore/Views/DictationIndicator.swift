@@ -22,7 +22,13 @@ struct DictationIndicatorView: View {
         Group {
             switch state {
             case .recording:
-                recordingContent
+                if let error = lastError {
+                    // Mic stall surfaced by the first-frame watchdog — show it loudly
+                    // instead of a normal-looking recording meter.
+                    statusRow(icon: "xmark.circle.fill", iconColor: .red, text: error)
+                } else {
+                    recordingContent
+                }
             case .loadingModel:
                 statusRow(icon: "arrow.down.circle", text: "Downloading model...")
             case .processing:

@@ -40,6 +40,7 @@ final class DictationCoordinator {
     private var busConsumerID: UUID?
     private var recordingTask: Task<Void, Never>?
     private var audioLevelTask: Task<Void, Never>?
+    private var firstFrameWatchdogTask: Task<Void, Never>?
     private var autoHideTask: Task<Void, Never>?
     private var upgradeDismissTask: Task<Void, Never>?
     private var accumulatedSamples: [Float] = []
@@ -92,8 +93,42 @@ final class DictationCoordinator {
         converter = nil
         isPreBuffering = true
 
-        startMicCapture()
-        diagLog("[DICTATION] pre-buffering started")
+        // Microphone permission gate. The common (.authorized) case is a synchronous
+        // status read, so it adds no latency to hold-to-talk. Only a first-ever
+        // dictation hits the async .notDetermined branch.
+        switch MicrophonePermission.status {
+        case .authorized:
+            startMicCapture()
+            diagLog("[DICTATION] pre-buffering started")
+        case .denied, .restricted:
+            failPreBuffer(MicrophonePermission.deniedMessage)
+        case .notDetermined:
+            // Present the system prompt. The triggering hold won't complete (the
+            // user is interacting with the prompt); once granted, the next press
+            // takes the synchronous .authorized path above.
+            isPreBuffering = false
+            Task { @MainActor [weak self] in
+                let granted = await MicrophonePermission.request()
+                guard let self, !granted else { return }
+                self.surfaceMicError(MicrophonePermission.requestDeniedMessage)
+            }
+        @unknown default:
+            failPreBuffer(MicrophonePermission.unknownMessage)
+        }
+    }
+
+    /// Abort a pre-buffer that never started capture and surface an error.
+    private func failPreBuffer(_ message: String) {
+        isPreBuffering = false
+        surfaceMicError(message)
+    }
+
+    /// Show a mic error in the floating indicator and auto-hide it.
+    /// The indicator only renders while non-idle, so we park in `.done` briefly.
+    private func surfaceMicError(_ message: String) {
+        lastError = message
+        state = .done
+        scheduleAutoHide()
     }
 
     /// Confirm that the hold gesture was detected — transition to visible recording.
@@ -129,6 +164,23 @@ final class DictationCoordinator {
 
         let durationSeconds = Double(samples.count) / 16000.0
         diagLog("[DICTATION] recording stopped, samples=\(samples.count), duration=\(String(format: "%.1f", durationSeconds))s")
+
+        // Zero frames captured = mic failure (e.g. the macOS 27 HAL stall), not a
+        // brief utterance. Surface it instead of silently going idle, and don't save
+        // an empty history entry. A non-empty but short recording falls through to
+        // the quiet "too short" path below, preserving prior behavior.
+        guard !samples.isEmpty else {
+            let message = lastError ?? MicrophonePermission.noAudioMessage
+            diagLog("[DICTATION] zero frames captured — mic failure: \(message)")
+            surfaceMicError(message)
+            return
+        }
+
+        // Audio was captured, so the recording is proceeding to save/transcribe. If a
+        // transient stall set lastError (watchdog or the immediate captureError check)
+        // and the mic then recovered and delivered frames, clear it now so the success
+        // path doesn't render a stale red error row at `.done`.
+        lastError = nil
 
         guard samples.count > Self.minimumSpeechSamples else {
             log.info("Too short, ignoring")
@@ -345,6 +397,31 @@ final class DictationCoordinator {
         let (id, stream) = bus.subscribe(deviceID: selection?.deviceID)
         busConsumerID = id
 
+        // Surface a pre-existing capture failure. This reads prior/stale capture state:
+        // `subscribe` starts the new capture asynchronously on AudioBus's halQueue, so
+        // this check can't observe the new subscription's outcome — the new capture's
+        // immediate stall is the watchdog's job below.
+        if let micError = bus.captureError {
+            diagLog("[DICTATION] mic capture error: \(micError)")
+            lastError = micError
+        }
+
+        // First-frame watchdog: if the HAL IOProc stalls (macOS 27) and this recording
+        // captures no audio within 5s while still active, surface it loudly instead of
+        // appearing to record normally. Keyed on this recording's own accumulatedSamples
+        // (cleared at startPreBuffer), not AudioBus's process-global hasCapturedFrames —
+        // which never resets after the first capture, so it would let the watchdog fire
+        // only on the first capture after launch. This makes the guard fire per-recording.
+        firstFrameWatchdogTask = Task { @MainActor [weak self, weak bus] in
+            try? await Task.sleep(for: .seconds(5))
+            guard let self, let bus else { return }
+            guard self.isPreBuffering || self.state == .recording else { return }
+            if self.accumulatedSamples.isEmpty && bus.captureError == nil {
+                diagLog("[DICTATION] no mic audio after 5s")
+                self.lastError = MicrophonePermission.noAudioMessage
+            }
+        }
+
         audioLevelTask = Task { [weak self, weak bus] in
             var everHadSignal = false
             while !Task.isCancelled {
@@ -379,6 +456,8 @@ final class DictationCoordinator {
     }
 
     private func stopMicCapture() {
+        firstFrameWatchdogTask?.cancel()
+        firstFrameWatchdogTask = nil
         audioLevelTask?.cancel()
         audioLevelTask = nil
         audioLevel = 0
