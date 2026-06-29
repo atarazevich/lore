@@ -43,6 +43,9 @@ final class DictationCoordinator {
     private var firstFrameWatchdogTask: Task<Void, Never>?
     private var autoHideTask: Task<Void, Never>?
     private var upgradeDismissTask: Task<Void, Never>?
+    /// True when a mic error is parked in `.done` while Fn may still be held — it must
+    /// stay visible (no auto-hide) until the genuine Fn release starts the grace hide.
+    private var micErrorSticky = false
     private var accumulatedSamples: [Float] = []
     private var converter: AVAudioConverter?
     private let cleanupClient = CleanupClient()
@@ -89,6 +92,7 @@ final class DictationCoordinator {
         pendingCleanupMode = nil
 
         lastError = nil
+        micErrorSticky = false
         accumulatedSamples.removeAll()
         converter = nil
         isPreBuffering = true
@@ -101,7 +105,7 @@ final class DictationCoordinator {
             startMicCapture()
             diagLog("[DICTATION] pre-buffering started")
         case .denied, .restricted:
-            failPreBuffer(MicrophonePermission.deniedMessage)
+            failPreBuffer(micUnavailableMessage())
         case .notDetermined:
             // Present the system prompt. The triggering hold won't complete (the
             // user is interacting with the prompt); once granted, the next press
@@ -110,25 +114,55 @@ final class DictationCoordinator {
             Task { @MainActor [weak self] in
                 let granted = await MicrophonePermission.request()
                 guard let self, !granted else { return }
-                self.surfaceMicError(MicrophonePermission.requestDeniedMessage)
+                // The key was released while the OS prompt was up, so use the grace
+                // hide directly rather than waiting for a release that already happened.
+                self.surfaceMicError(self.micUnavailableMessage(), hide: .grace)
             }
         @unknown default:
             failPreBuffer(MicrophonePermission.unknownMessage)
         }
     }
 
-    /// Abort a pre-buffer that never started capture and surface an error.
-    private func failPreBuffer(_ message: String) {
-        isPreBuffering = false
-        surfaceMicError(message)
+    /// How a surfaced mic error should hide.
+    private enum MicErrorHide {
+        /// Fn may still be held — keep it visible (no timer) until release starts the grace hide.
+        case sticky
+        /// Fn is already released — start the ~4s grace hide immediately.
+        case grace
     }
 
-    /// Show a mic error in the floating indicator and auto-hide it.
-    /// The indicator only renders while non-idle, so we park in `.done` briefly.
-    private func surfaceMicError(_ message: String) {
+    /// Abort a pre-buffer that never started capture and surface a held error.
+    /// Called only from the synchronous permission branches in `startPreBuffer`, where
+    /// the Fn key is still down, so the error stays sticky until release.
+    private func failPreBuffer(_ message: String) {
+        isPreBuffering = false
+        surfaceMicError(message, hide: .sticky)
+    }
+
+    /// Show a mic error in the floating indicator. The indicator only renders while
+    /// non-idle, so we park in `.done`. A sticky error stays until the Fn release
+    /// (`dismissMicErrorAfterRelease`); a grace error hides after a readable ~4s.
+    private func surfaceMicError(_ message: String, hide: MicErrorHide) {
         lastError = message
         state = .done
-        scheduleAutoHide()
+        switch hide {
+        case .sticky:
+            autoHideTask?.cancel()
+            autoHideTask = nil
+            micErrorSticky = true
+        case .grace:
+            micErrorSticky = false
+            scheduleAutoHide(after: .seconds(4))
+        }
+    }
+
+    /// Called by HotkeyManager on a genuine Fn release to begin hiding a sticky mic
+    /// error after a readable grace period. No-op unless a sticky error is showing, so
+    /// it's safe to call from every release path (locked/hold/tap).
+    func dismissMicErrorAfterRelease() {
+        guard micErrorSticky, state == .done else { return }
+        micErrorSticky = false
+        scheduleAutoHide(after: .seconds(4))
     }
 
     /// Confirm that the hold gesture was detected — transition to visible recording.
@@ -170,9 +204,12 @@ final class DictationCoordinator {
         // an empty history entry. A non-empty but short recording falls through to
         // the quiet "too short" path below, preserving prior behavior.
         guard !samples.isEmpty else {
-            let message = lastError ?? MicrophonePermission.noAudioMessage
+            // Prefer a concrete bus capture error if one was recorded; otherwise the
+            // unified message. Fn is already released here (stop came from the release
+            // path), so use the grace hide directly.
+            let message = lastError ?? micUnavailableMessage()
             diagLog("[DICTATION] zero frames captured — mic failure: \(message)")
-            surfaceMicError(message)
+            surfaceMicError(message, hide: .grace)
             return
         }
 
@@ -358,13 +395,26 @@ final class DictationCoordinator {
         scheduleAutoHide()
     }
 
-    private func scheduleAutoHide() {
+    /// Hide the indicator after a grace period. The default ~800ms covers the normal
+    /// `.done` flash; the mic-error grace path passes ~4s so the message stays readable.
+    /// Uses the single `autoHideTask` slot so a subsequent Fn press cancels it via
+    /// `startPreBuffer`, and so a flicker that re-arms a release path simply restarts it.
+    private func scheduleAutoHide(after delay: Duration = .milliseconds(800)) {
         autoHideTask?.cancel()
         autoHideTask = Task { [weak self] in
-            try? await Task.sleep(for: .milliseconds(800))
+            try? await Task.sleep(for: delay)
             guard let self, self.state == .done else { return }
             self.state = .idle
         }
+    }
+
+    /// Build the unified mic-failure message for the dictation path, resolving the input
+    /// device name from AudioBus (enumeration needs no mic permission, so it works even
+    /// on the denied path).
+    private func micUnavailableMessage() -> String {
+        let requested = settings?.inputDeviceID ?? 0
+        let name = AudioBus.resolvedInputDeviceName(requested: requested)
+        return MicrophonePermission.micUnavailableMessage(deviceName: name)
     }
 
     func discardRecording() {
@@ -418,7 +468,7 @@ final class DictationCoordinator {
             guard self.isPreBuffering || self.state == .recording else { return }
             if self.accumulatedSamples.isEmpty && bus.captureError == nil {
                 diagLog("[DICTATION] no mic audio after 5s")
-                self.lastError = MicrophonePermission.noAudioMessage
+                self.lastError = self.micUnavailableMessage()
             }
         }
 
