@@ -36,7 +36,7 @@ final class TranscriptionBackendTests: XCTestCase {
     // MARK: - Mock Backend (protocol contract)
 
     func testMockBackendPrepareSetStatus() async throws {
-        let mock = MockTranscriptionBackend()
+        let mock = StubTranscriptionBackend()
         let collector = StatusCollector()
         try await mock.prepare { status in
             collector.append(status)
@@ -45,14 +45,14 @@ final class TranscriptionBackendTests: XCTestCase {
     }
 
     func testMockBackendTranscribeAfterPrepare() async throws {
-        let mock = MockTranscriptionBackend()
+        let mock = StubTranscriptionBackend()
         try await mock.prepare { _ in }
         let text = try await mock.transcribe([1.0, 2.0, 3.0])
         XCTAssertEqual(text, "mock transcription")
     }
 
     func testMockBackendTranscribeWithoutPrepareThrows() async {
-        let mock = MockTranscriptionBackend()
+        let mock = StubTranscriptionBackend()
         do {
             _ = try await mock.transcribe([1.0])
             XCTFail("Expected error")
@@ -64,7 +64,7 @@ final class TranscriptionBackendTests: XCTestCase {
     }
 
     func testMockBackendCheckStatus() {
-        let mock = MockTranscriptionBackend()
+        let mock = StubTranscriptionBackend()
         XCTAssertEqual(mock.checkStatus(), .ready)
     }
 
@@ -82,22 +82,4 @@ final class TranscriptionBackendTests: XCTestCase {
 private final class StatusCollector: @unchecked Sendable {
     var statuses: [String] = []
     func append(_ status: String) { statuses.append(status) }
-}
-
-// MARK: - Mock Backend
-
-private final class MockTranscriptionBackend: TranscriptionBackend, @unchecked Sendable {
-    private var prepared = false
-
-    func checkStatus() -> BackendStatus { .ready }
-
-    func prepare(onStatus: @Sendable (String) -> Void, onProgress: @escaping @Sendable (Double) -> Void) async throws {
-        onStatus("Preparing Mock...")
-        prepared = true
-    }
-
-    func transcribe(_ samples: [Float], previousContext: String? = nil) async throws -> String {
-        guard prepared else { throw TranscriptionBackendError.notPrepared }
-        return "mock transcription"
-    }
 }

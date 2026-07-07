@@ -552,9 +552,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hotkeyManager: coordinator.hotkeyManager
         )
 
-        // Preload model via shared cache so first dictation is instant
+        // Preload models so the first use is instant. Detached; launch never
+        // blocks. Two loads cover the common warm set: the shared cache (meeting
+        // mic reuses it) and dictation's private backend (its own decoder state).
+        // The meeting system-audio backend is left lazy on purpose — it's a
+        // second decoder only a meeting recording needs, so preloading it would
+        // hold a third model resident for users who only ever dictate.
         Task {
             try? await coordinator.sharedBackendCache.prepare()
+        }
+        Task {
+            await coordinator.dictationCoordinator.prewarm()
         }
     }
 

@@ -80,6 +80,10 @@ final class DictationCoordinator {
     /// when TranscriptionEngine also transcribes via the shared backend.
     private var ownBackend: (any TranscriptionBackend)?
 
+    /// In-flight build of `ownBackend`, if any. Lets the launch prewarm and a
+    /// real first dictation share one load instead of each building a backend.
+    private var ownBackendTask: Task<any TranscriptionBackend, Error>?
+
     /// The current history entry being processed (needed for upgrades).
     private var currentEntryID: UUID?
 
@@ -635,6 +639,39 @@ final class DictationCoordinator {
 
     // MARK: - Transcription
 
+    /// Eagerly build the private dictation backend so the first dictation pays
+    /// no model-load latency. Non-blocking: fire from a detached Task at launch;
+    /// launch never waits on it. Idempotent — reuses any in-flight/complete load.
+    func prewarm() async {
+        _ = try? await ensureOwnBackend()
+    }
+
+    /// Return the private dictation backend, building it once. Concurrent callers
+    /// (launch prewarm + first transcription) await the same in-flight build
+    /// rather than each constructing a backend and double-loading the model.
+    private func ensureOwnBackend() async throws -> any TranscriptionBackend {
+        if let ownBackend { return ownBackend }
+        if let ownBackendTask { return try await ownBackendTask.value }
+
+        diagLog("[DICTATION] creating private backend")
+        let cache = backendCache
+        let task = Task { () throws -> any TranscriptionBackend in
+            // Download the model once through the shared cache (its dedup token
+            // guarantees a single fetch even when the launch prewarms race); the
+            // private build then finds files on disk and only loads its own
+            // decoder state, so we never launch two concurrent HF downloads.
+            try await cache?.prepare()
+            let fresh = ParakeetBackend()
+            try await fresh.prepare(onStatus: { _ in }, onProgress: { _ in })
+            return fresh
+        }
+        ownBackendTask = task
+        defer { ownBackendTask = nil }
+        let backend = try await task.value
+        ownBackend = backend
+        return backend
+    }
+
     private func transcribeEntry(_ entry: inout DictationHistoryEntry, samples: [Float]) async {
         // Ensure the shared cache has downloaded model files (fast no-op if already cached)
         if let cache = backendCache {
@@ -654,26 +691,16 @@ final class DictationCoordinator {
         }
 
         // Use a private backend instance to avoid sharing mutable decoder state
-        // with TranscriptionEngine's backend from the shared cache.
-        // Creating a fresh backend when model files are already on disk is fast (~1s).
-        if ownBackend == nil {
-            diagLog("[DICTATION] creating private backend")
-            let fresh = ParakeetBackend()
-            do {
-                try await fresh.prepare(onStatus: { _ in }, onProgress: { _ in })
-            } catch {
-                entry.status = .failed
-                entry.errorMessage = "Backend prepare failed: \(error.localizedDescription)"
-                lastError = entry.errorMessage
-                history.update(entry)
-                return
-            }
-            ownBackend = fresh
-        }
-
-        guard let backend = ownBackend else {
+        // with TranscriptionEngine's backend from the shared cache. Deduped so
+        // the launch prewarm and this first use don't both build one (see
+        // `ensureOwnBackend`); already-warm if prewarm finished at launch.
+        let backend: any TranscriptionBackend
+        do {
+            backend = try await ensureOwnBackend()
+        } catch {
             entry.status = .failed
-            entry.errorMessage = "Backend not available after prepare"
+            entry.errorMessage = "Backend prepare failed: \(error.localizedDescription)"
+            lastError = entry.errorMessage
             history.update(entry)
             return
         }
