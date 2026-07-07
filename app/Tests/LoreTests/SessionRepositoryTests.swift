@@ -94,7 +94,10 @@ final class SessionRepositoryTests: XCTestCase {
     // MARK: - finalizeSession writes session.json
 
     func testFinalizeSessionWritesMetadata() async {
-        let handle = await repo.startSession()
+        // Title set at creation (#58) must survive finalization.
+        let handle = await repo.startSession(
+            config: SessionStartConfig(title: "Test Meeting")
+        )
         let sessionID = handle.sessionID
         let startDate = Date()
 
@@ -106,7 +109,6 @@ final class SessionRepositoryTests: XCTestCase {
             metadata: SessionFinalizeMetadata(
                 endedAt: Date(),
                 utteranceCount: 1,
-                title: "Test Meeting",
                 language: "fr-FR",
                 meetingApp: "Zoom",
                 engine: "parakeetV2",
@@ -126,6 +128,80 @@ final class SessionRepositoryTests: XCTestCase {
         XCTAssertNotNil(found?.endedAt)
 
         await repo.deleteSession(sessionID: sessionID)
+    }
+
+    /// A rename during the recording must not be overwritten by finalization.
+    func testFinalizeSessionPreservesMidRecordingRename() async {
+        let handle = await repo.startSession(
+            config: SessionStartConfig(title: "Thu 03:01")
+        )
+        let sessionID = handle.sessionID
+
+        await repo.renameSession(sessionID: sessionID, title: "Pilot kickoff")
+
+        let utterance = Utterance(text: "Test", speaker: .you, timestamp: Date())
+        await repo.appendLiveUtterance(sessionID: sessionID, utterance: utterance)
+        let index = await repo.finalizeSession(
+            sessionID: sessionID,
+            metadata: SessionFinalizeMetadata(
+                endedAt: Date(),
+                utteranceCount: 1,
+                language: nil,
+                meetingApp: nil,
+                engine: nil,
+                templateSnapshot: nil,
+                utterances: [utterance]
+            )
+        )
+
+        XCTAssertEqual(index.title, "Pilot kickoff")
+        let sessions = await repo.listSessions()
+        XCTAssertEqual(sessions.first(where: { $0.id == sessionID })?.title, "Pilot kickoff")
+
+        await repo.deleteSession(sessionID: sessionID)
+    }
+
+    /// Display-only fallback (#58): sessions without a stored title render
+    /// the derived "Weekday HH:MM" name, never "Untitled". No migration.
+    func testDisplayTitleFallsBackToDerivedName() {
+        let startedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        let index = SessionIndex(
+            id: "s1", startedAt: startedAt, endedAt: nil,
+            templateSnapshot: nil, title: nil, utteranceCount: 0,
+            hasNotes: false, language: nil, meetingApp: nil, engine: nil
+        )
+        XCTAssertEqual(index.displayTitle, SessionIndex.defaultTitle(startedAt: startedAt))
+        XCTAssertFalse(index.displayTitle.isEmpty)
+
+        let named = SessionIndex(
+            id: "s2", startedAt: startedAt, endedAt: nil,
+            templateSnapshot: nil, title: "Named", utteranceCount: 0,
+            hasNotes: false, language: nil, meetingApp: nil, engine: nil
+        )
+        XCTAssertEqual(named.displayTitle, "Named")
+    }
+
+    /// defaultTitle uses Date.FormatStyle; pin that its shape matches the
+    /// DateFormatter "EEEjmm" template it replaced, across a 12h and a 24h
+    /// locale (e.g. "Tue 10:13 PM" / "Вт 22:13").
+    func testDefaultTitleStyleMatchesTemplateAcrossLocales() {
+        let date = Date(timeIntervalSince1970: 1_700_000_000)
+        for identifier in ["en_US", "ru_RU"] {
+            let locale = Locale(identifier: identifier)
+
+            let template = DateFormatter()
+            template.locale = locale
+            template.setLocalizedDateFormatFromTemplate("EEEjmm")
+
+            let style = Date.FormatStyle(locale: locale)
+                .weekday(.abbreviated).hour().minute()
+
+            XCTAssertEqual(
+                date.formatted(style),
+                template.string(from: date),
+                "FormatStyle output diverged from the EEEjmm template for \(identifier)"
+            )
+        }
     }
 
     // MARK: - saveNotes writes both files
@@ -442,6 +518,81 @@ final class SessionRepositoryTests: XCTestCase {
         XCTAssertNil(notes)
     }
 
+    // MARK: - Ask Lore chat persistence (#60)
+
+    func testChatExchangesAppendAndLoad() async {
+        let handle = await repo.startSession()
+        let sessionID = handle.sessionID
+
+        await repo.appendChatExchange(
+            sessionID: sessionID,
+            exchange: ChatExchange(question: "Summarise so far", answer: "You discussed the pilot.")
+        )
+        await repo.appendChatExchange(
+            sessionID: sessionID,
+            exchange: ChatExchange(question: "Any action items?", answer: "Define baseline metrics.")
+        )
+
+        let chat = await repo.loadChat(sessionID: sessionID)
+        XCTAssertEqual(chat.count, 2)
+        XCTAssertEqual(chat[0].question, "Summarise so far")
+        XCTAssertEqual(chat[0].answer, "You discussed the pilot.")
+        XCTAssertEqual(chat[1].question, "Any action items?")
+
+        await repo.deleteSession(sessionID: sessionID)
+    }
+
+    /// Legacy sessions have no chat.json — loadChat must return empty,
+    /// never error.
+    func testLoadChatMissingFileReturnsEmpty() async {
+        let chat = await repo.loadChat(sessionID: "session_without_chat")
+        XCTAssertTrue(chat.isEmpty)
+    }
+
+    /// A chat.json that exists but fails to decode must never be rebuilt
+    /// over: append moves it aside to chat.json.corrupt (prior bytes
+    /// preserved) and starts fresh with the new exchange.
+    func testAppendChatExchangePreservesCorruptFileAside() async throws {
+        let handle = await repo.startSession()
+        let sessionID = handle.sessionID
+
+        let sessionDir = repo.sessionsDirectoryURL
+            .appendingPathComponent(sessionID, isDirectory: true)
+        let chatURL = sessionDir.appendingPathComponent("chat.json")
+        let corruptBytes = Data("{not json".utf8)
+        try corruptBytes.write(to: chatURL)
+
+        await repo.appendChatExchange(
+            sessionID: sessionID,
+            exchange: ChatExchange(question: "Still there?", answer: "Yes.")
+        )
+
+        // Prior bytes preserved aside; new exchange saved cleanly.
+        let asideURL = sessionDir.appendingPathComponent("chat.json.corrupt")
+        XCTAssertEqual(try Data(contentsOf: asideURL), corruptBytes)
+        let chat = await repo.loadChat(sessionID: sessionID)
+        XCTAssertEqual(chat.count, 1)
+        XCTAssertEqual(chat[0].question, "Still there?")
+
+        // Second corruption gets a unique aside name — the first aside
+        // must survive untouched.
+        let corruptBytes2 = Data("[broken again".utf8)
+        try corruptBytes2.write(to: chatURL)
+        await repo.appendChatExchange(
+            sessionID: sessionID,
+            exchange: ChatExchange(question: "Again?", answer: "Still yes.")
+        )
+
+        let asideURL2 = sessionDir.appendingPathComponent("chat.json.corrupt.1")
+        XCTAssertEqual(try Data(contentsOf: asideURL), corruptBytes)
+        XCTAssertEqual(try Data(contentsOf: asideURL2), corruptBytes2)
+        let chatAfter = await repo.loadChat(sessionID: sessionID)
+        XCTAssertEqual(chatAfter.count, 1)
+        XCTAssertEqual(chatAfter[0].question, "Again?")
+
+        await repo.deleteSession(sessionID: sessionID)
+    }
+
     // MARK: - SessionRecord encoding roundtrip
 
     func testSessionRecordRoundTrip() throws {
@@ -449,8 +600,6 @@ final class SessionRepositoryTests: XCTestCase {
             speaker: .you,
             text: "Hello there",
             timestamp: Date(timeIntervalSince1970: 1_000_000),
-            suggestions: ["Try asking about X"],
-            kbHits: ["doc.md"],
             refinedText: "Hello there."
         )
 
@@ -464,8 +613,117 @@ final class SessionRepositoryTests: XCTestCase {
 
         XCTAssertEqual(decoded.speaker, .you)
         XCTAssertEqual(decoded.text, "Hello there")
-        XCTAssertEqual(decoded.suggestions, ["Try asking about X"])
-        XCTAssertEqual(decoded.kbHits, ["doc.md"])
         XCTAssertEqual(decoded.refinedText, "Hello there.")
+    }
+
+    /// Records written by the retired suggestion pipeline carry extra keys
+    /// (suggestions, kbHits, suggestionDecision, surfacedSuggestionText,
+    /// conversationStateSummary) — they must still decode.
+    func testSessionRecordWithRetiredSuggestionKeysDecodes() throws {
+        let json = """
+        {"speaker":"you","text":"Hello","timestamp":"2024-01-01T00:00:00Z",\
+        "suggestions":["Try asking about X"],"kbHits":["doc.md"],\
+        "surfacedSuggestionText":"Try asking about X",\
+        "conversationStateSummary":"Intro chat"}
+        """
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .iso8601
+        let decoded = try decoder.decode(SessionRecord.self, from: Data(json.utf8))
+
+        XCTAssertEqual(decoded.speaker, .you)
+        XCTAssertEqual(decoded.text, "Hello")
+        XCTAssertNil(decoded.refinedText)
+    }
+
+    // MARK: - Unviewed marker (MREV-39, additive field)
+
+    /// A session.json written before the `unviewed` field existed must still
+    /// decode, with `unviewed == nil`.
+    func testSessionMetadataWithoutUnviewedFieldDecodes() async throws {
+        let sessionID = "session_pre_unviewed"
+        let sessionsDir = rootDir.appendingPathComponent("sessions", isDirectory: true)
+        let sessionDir = sessionsDir.appendingPathComponent(sessionID, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+        // Legacy-shaped session.json: no "unviewed" key.
+        let json = """
+        {
+          "id": "\(sessionID)",
+          "startedAt": "2026-01-15T10:00:00Z",
+          "endedAt": "2026-01-15T10:30:00Z",
+          "title": "Old Meeting",
+          "utteranceCount": 12,
+          "hasNotes": false
+        }
+        """
+        try json.write(
+            to: sessionDir.appendingPathComponent("session.json"),
+            atomically: true,
+            encoding: .utf8
+        )
+
+        let sessions = await repo.listSessions()
+        let found = sessions.first(where: { $0.id == sessionID })
+        XCTAssertNotNil(found)
+        XCTAssertEqual(found?.title, "Old Meeting")
+        XCTAssertEqual(found?.utteranceCount, 12)
+        XCTAssertNil(found?.unviewed)
+
+        await repo.deleteSession(sessionID: sessionID)
+    }
+
+    func testMarkSessionUnviewedAndViewedRoundTrip() async {
+        let sessionID = "session_fresh_marker"
+        await repo.seedSession(
+            id: sessionID,
+            records: [SessionRecord(speaker: .you, text: "Hi", timestamp: Date())],
+            startedAt: Date()
+        )
+
+        await repo.markSessionUnviewed(sessionID: sessionID)
+        var found = await repo.listSessions().first(where: { $0.id == sessionID })
+        XCTAssertEqual(found?.unviewed, true)
+
+        await repo.markSessionViewed(sessionID: sessionID)
+        found = await repo.listSessions().first(where: { $0.id == sessionID })
+        XCTAssertNil(found?.unviewed)
+
+        // Other metadata survives the marker round trip.
+        XCTAssertEqual(found?.utteranceCount, 1)
+
+        await repo.deleteSession(sessionID: sessionID)
+    }
+
+    // MARK: - Imported audio retained for retry (#43)
+
+    /// The audio copied into an imported session at kickoff must be
+    /// retrievable via `audioFileURL(for:)` — it is the retry source after
+    /// a failed import.
+    func testCopiedImportAudioIsRetrievable() async {
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let sessionID = await repo.createImportedSession(
+            config: .init(
+                title: "Imported Meeting",
+                startedAt: start,
+                endedAt: start.addingTimeInterval(60),
+                language: "en-US",
+                engine: "parakeet"
+            )
+        )
+
+        let source = rootDir.appendingPathComponent("source.m4a")
+        try? Data("fake audio".utf8).write(to: source)
+        await repo.copyAudioFileToSession(sessionID: sessionID, sourceURL: source)
+
+        let audioURL = await repo.audioFileURL(for: sessionID)
+        XCTAssertEqual(audioURL?.lastPathComponent, "imported.m4a")
+
+        // Re-copying from the session's own file (the retry path) is a no-op
+        // that leaves the audio in place.
+        await repo.copyAudioFileToSession(sessionID: sessionID, sourceURL: audioURL!)
+        let stillThere = await repo.audioFileURL(for: sessionID)
+        XCTAssertEqual(stillThere?.lastPathComponent, "imported.m4a")
+
+        await repo.deleteSession(sessionID: sessionID)
     }
 }

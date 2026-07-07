@@ -1,13 +1,25 @@
 import SwiftUI
 
+/// Live transcript in the XMO design (MREC-11/12): speaker rows with a 64px
+/// label column ("You" blue, diarized remotes keep the current palette),
+/// 13px text, max-width 720. Interim (volatile) partials render as a dimmed
+/// row with a blinking blue caret. Rows are keyed by utterance ID so
+/// retroactive replacement (issue #19 sliding window) and echo-suppression
+/// removals (MREC-14) re-render cleanly without confusing row identity.
 struct TranscriptView: View {
     let utterances: [Utterance]
     let volatileYouText: String
     let volatileThemText: String
+    /// Recording start for the elapsed stamps (#63) — the live session's
+    /// `metadata.startedAt` while recording; nil after stop, when the anchor
+    /// falls back to the first utterance's timestamp (matching what
+    /// finalization persists as the session's startedAt).
+    let startedAt: Date?
     var showSearch: Bool = false
 
     @State private var searchText = ""
     @State private var autoScrollEnabled = true
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private var filteredUtterances: [Utterance] {
         guard !searchText.isEmpty else { return utterances }
@@ -24,7 +36,7 @@ struct TranscriptView: View {
         VStack(spacing: 0) {
             if showSearch {
                 searchBar
-                Divider()
+                XMODivider()
             }
             transcriptScrollView
         }
@@ -34,38 +46,39 @@ struct TranscriptView: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
-                .foregroundStyle(.tertiary)
+                .foregroundStyle(XMOTheme.TextColor.faint)
             TextField("Search transcript…", text: $searchText)
                 .textFieldStyle(.plain)
-                .font(.system(size: 12))
+                .font(XMOTheme.Typography.secondary)
+                .foregroundStyle(XMOTheme.TextColor.primary)
             if !searchText.isEmpty {
                 Button {
                     searchText = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 11))
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(XMOTheme.TextColor.faint)
                 }
                 .buttonStyle(.plain)
                 .help("Clear search")
             }
 
-            Divider()
-                .frame(height: 14)
+            XMOTheme.Surface.line
+                .frame(width: 1, height: 14)
 
             Button {
                 autoScrollEnabled.toggle()
             } label: {
                 Image(systemName: "arrow.down.to.line")
                     .font(.system(size: 11))
-                    .foregroundStyle(autoScrollEnabled ? Color.secondary : Color.red)
+                    .foregroundStyle(autoScrollEnabled ? XMOTheme.TextColor.muted
+                                                       : XMOTheme.Accent.red)
             }
             .buttonStyle(.plain)
             .help(autoScrollEnabled ? "Pause auto-scroll" : "Resume auto-scroll")
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
-        .background(.ultraThinMaterial)
     }
 
     private var transcriptScrollView: some View {
@@ -74,37 +87,47 @@ struct TranscriptView: View {
                 let visible = filteredUtterances
                 if visible.isEmpty && isSearching {
                     Text("No matches")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.tertiary)
+                        .font(XMOTheme.Typography.secondary)
+                        .foregroundStyle(XMOTheme.TextColor.muted)
                         .frame(maxWidth: .infinity, minHeight: 60)
                 } else {
-                    LazyVStack(alignment: .leading, spacing: 8) {
-                        ForEach(Array(visible.enumerated()), id: \.element.id) { index, utterance in
-                            UtteranceBubble(
-                                utterance: utterance,
-                                showTimestamp: shouldShowTimestamp(at: index, in: visible)
+                    // Anchor from the full list, not the search-filtered one —
+                    // stamps must not shift while searching.
+                    let anchor = ElapsedStamp.anchor(
+                        startedAt: startedAt,
+                        firstTimestamp: utterances.first?.timestamp
+                    )
+                    LazyVStack(alignment: .leading, spacing: 15) {
+                        ForEach(visible) { utterance in
+                            TranscriptSpeakerRow(
+                                speaker: utterance.speaker,
+                                text: utterance.displayText,
+                                elapsed: utterance.timestamp.timeIntervalSince(anchor ?? utterance.timestamp)
                             )
                             .id(utterance.id)
                         }
 
                         if !isSearching {
                             if !volatileYouText.isEmpty {
-                                VolatileIndicator(text: volatileYouText, speaker: .you)
+                                InterimRow(speaker: .you, text: volatileYouText)
                                     .id("volatile-you")
                             }
 
                             if !volatileThemText.isEmpty {
-                                VolatileIndicator(text: volatileThemText, speaker: .them)
+                                InterimRow(speaker: .them, text: volatileThemText)
                                     .id("volatile-them")
                             }
                         }
                     }
-                    .padding(16)
+                    .frame(maxWidth: 720, alignment: .leading)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
             .onChange(of: utterances.count) {
                 guard !isSearching, autoScrollEnabled else { return }
-                withAnimation(.easeOut(duration: 0.2)) {
+                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
                     if let last = utterances.last {
                         proxy.scrollTo(last.id, anchor: .bottom)
                     }
@@ -128,102 +151,120 @@ struct TranscriptView: View {
                     Button {
                         autoScrollEnabled = true
                         if let last = utterances.last {
-                            withAnimation(.easeOut(duration: 0.2)) {
+                            withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) {
                                 proxy.scrollTo(last.id, anchor: .bottom)
                             }
                         }
                     } label: {
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.system(size: 20))
-                            .foregroundStyle(.white, Color.accentTeal)
+                            .foregroundStyle(.white, XMOTheme.Accent.blue)
                             .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
                     }
                     .buttonStyle(.plain)
                     .help("Resume auto-scroll")
                     .padding(12)
-                    .transition(.opacity.combined(with: .scale))
+                    .transition(reduceMotion ? .opacity : .opacity.combined(with: .scale))
                 }
             }
         }
     }
+}
 
-    private func shouldShowTimestamp(at index: Int, in visible: [Utterance]) -> Bool {
-        guard index > 0 else { return true }
-        let current = Calendar.current.dateComponents([.hour, .minute], from: visible[index].timestamp)
-        let previous = Calendar.current.dateComponents([.hour, .minute], from: visible[index - 1].timestamp)
-        return current.hour != previous.hour || current.minute != previous.minute
+// MARK: - Elapsed stamps (#63)
+
+/// Elapsed-from-start stamp for transcript rows: mm:ss below one hour,
+/// h:mm:ss from there. Visual only — the copy paths keep absolute HH:MM:SS,
+/// and the markdown mirror keeps its own relative format
+/// (`MarkdownMeetingWriter.formatRelativeTimestamp`). Negatives (clock skew,
+/// legacy data) clamp to 00:00.
+enum ElapsedStamp {
+    static func label(_ seconds: TimeInterval) -> String {
+        let total = max(0, Int(seconds))
+        return total < 3600
+            ? String(format: "%02d:%02d", total / 60, total % 60)
+            : String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
+    }
+
+    /// The anchor both renderers stamp against: the recorded start when
+    /// known, else the first utterance's timestamp (legacy sessions without
+    /// a stored start; the live view after stop).
+    static func anchor(startedAt: Date?, firstTimestamp: Date?) -> Date? {
+        startedAt ?? firstTimestamp
     }
 }
 
-// MARK: - Timestamp Formatter
+// MARK: - Rows
 
-private let timestampFormatter: DateFormatter = {
-    let f = DateFormatter()
-    f.dateFormat = "HH:mm"
-    return f
-}()
+/// Fixed leading column width for the elapsed stamp so speaker labels stay
+/// aligned across finalized and interim rows (#57).
+private let timestampColumnWidth: CGFloat = 54
 
-private struct UtteranceBubble: View {
-    let utterance: Utterance
-    var showTimestamp: Bool = true
-
-    var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            if showTimestamp {
-                Text(timestampFormatter.string(from: utterance.timestamp))
-                    .font(.system(size: 10, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .frame(width: 34, alignment: .trailing)
-            } else {
-                Spacer()
-                    .frame(width: 34)
-            }
-
-            Text(utterance.speaker.displayLabel)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(utterance.speaker.color)
-                .frame(minWidth: 36, alignment: .trailing)
-
-            Text(utterance.displayText)
-                .font(.system(size: 13))
-                .foregroundStyle(.primary)
-                .textSelection(.enabled)
-        }
-    }
-}
-
-private struct VolatileIndicator: View {
-    let text: String
+/// Finalized utterance: elapsed mono stamp + 64px speaker label + body text
+/// (MREC-11, #57, #63). Shared by the live view and the review transcript;
+/// render-only.
+struct TranscriptSpeakerRow: View {
     let speaker: Speaker
+    let text: String
+    /// Seconds since recording start; the formatter clamps negatives.
+    let elapsed: TimeInterval
 
     var body: some View {
-        HStack(alignment: .firstTextBaseline, spacing: 6) {
-            Spacer()
-                .frame(width: 34)
-
-            Text(speaker.displayLabel)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(speaker.color)
-                .frame(minWidth: 36, alignment: .trailing)
-
-            HStack(spacing: 4) {
+        HStack(alignment: .top, spacing: 0) {
+            Text(ElapsedStamp.label(elapsed))
+                .font(XMOTheme.Typography.mono(10.5))
+                .foregroundStyle(XMOTheme.TextColor.muted)
+                .frame(width: timestampColumnWidth, alignment: .leading)
+                .padding(.top, 2)
+            XMOSpeakerRow(speaker: speaker) {
                 Text(text)
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
-                Circle()
-                    .fill(speaker.color)
-                    .frame(width: 4, height: 4)
-                    .opacity(0.6)
+                    .font(XMOTheme.Typography.body)
+                    .lineSpacing(4)
+                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .textSelection(.enabled)
             }
         }
-        .opacity(0.6)
     }
 }
 
-// MARK: - Colors
+/// Volatile partial (MREC-12): row dimmed to .72 with a blinking blue caret.
+/// The caret blinks step-end at the token duration via a periodic timeline
+/// (no animation state); under Reduce Motion it renders statically without
+/// the timer. The row is replaced by a finalized `TranscriptSpeakerRow`
+/// when the segment lands.
+private struct InterimRow: View {
+    let speaker: Speaker
+    let text: String
+    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-extension Color {
-    static let youColor = Color(red: 0.35, green: 0.55, blue: 0.75)    // muted blue
-    static let themColor = Color(red: 0.82, green: 0.6, blue: 0.3)     // warm amber
-    static let accentTeal = Color(red: 0.15, green: 0.55, blue: 0.55)  // deep teal
+    private static let halfBlink = XMOTheme.Motion.blinkDuration / 2
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            // Empty stamp slot: keeps the speaker label column aligned with
+            // finalized rows; the stamp lands when the segment finalizes.
+            Color.clear.frame(width: timestampColumnWidth, height: 1)
+            XMOSpeakerRow(speaker: speaker) {
+                if reduceMotion {
+                    interimText(caretOn: true)
+                } else {
+                    TimelineView(.periodic(from: .now, by: Self.halfBlink)) { context in
+                        let phase = Int(context.date.timeIntervalSinceReferenceDate / Self.halfBlink)
+                        interimText(caretOn: phase % 2 == 0)
+                    }
+                }
+            }
+        }
+        .opacity(0.72)
+    }
+
+    private func interimText(caretOn: Bool) -> some View {
+        (Text(text)
+            + Text(" ")
+            + Text("\u{258D}") // ▍ inline caret block, wraps with the text
+                .foregroundStyle(caretOn ? XMOTheme.Accent.blue : Color.clear))
+            .font(XMOTheme.Typography.body)
+            .lineSpacing(4)
+            .foregroundStyle(XMOTheme.TextColor.primary)
+    }
 }

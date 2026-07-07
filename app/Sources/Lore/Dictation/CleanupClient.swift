@@ -1,10 +1,16 @@
 import Foundation
 import os
 
-struct CleanupClient: Sendable {
+/// Seam for tests: DictationCoordinator takes any cleanup provider so a
+/// throwing stub can drive the failure-surfacing paths without the network.
+protocol CleanupProviding: Sendable {
+    func cleanup(rawText: String, prompt: String, apiKey: String) async throws -> String
+}
+
+struct CleanupClient: CleanupProviding, Sendable {
     private static let log = Logger(subsystem: "com.lore.app", category: "CleanupClient")
-    private static let model = "gpt-5.4-mini"
-    private static let endpoint = URL(string: "https://api.openai.com/v1/chat/completions")!
+    private static let model = ChatCompletionsClient.defaultOpenAIModel
+    private static let endpoint = ChatCompletionsClient.openAIEndpoint
 
     func cleanup(rawText: String, prompt: String, apiKey: String) async throws -> String {
         let body: [String: Any] = [

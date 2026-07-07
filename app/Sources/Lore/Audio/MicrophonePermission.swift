@@ -38,9 +38,9 @@ enum MicrophonePermission {
     /// Used by the dictation path only; the meeting path keeps the strings above.
     static func micUnavailableMessage(deviceName: String?) -> String {
         guard let name = strippedMicName(deviceName) else {
-            return "The microphone is unavailable. Enable it, then restart the app after changing it."
+            return "The microphone is unavailable. Check your input device and try again."
         }
-        return "The \(name) microphone is unavailable. Enable it, then restart the app after changing it."
+        return "The \(name) microphone is unavailable. Check your input device and try again."
     }
 
     private static func strippedMicName(_ name: String?) -> String? {

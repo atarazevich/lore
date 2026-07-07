@@ -51,7 +51,19 @@ typealias AppSettingsStorage = SettingsStorage
 enum KeychainHelper {
     private static let service = "com.lore.app"
 
+    /// Regression guard: unit tests must never reach the real Keychain — a
+    /// test that does triggers a macOS permission prompt against the user's
+    /// actual secrets. Tests inject `AppSecretStore.ephemeral`; this trips
+    /// (debug builds only) if any test path forgets.
+    private static func assertNotRunningUnitTests() {
+        assert(
+            NSClassFromString("XCTestCase") == nil,
+            "KeychainHelper used from a unit test — inject AppSecretStore.ephemeral instead"
+        )
+    }
+
     static func save(key: String, value: String) {
+        assertNotRunningUnitTests()
         guard let data = value.data(using: .utf8) else { return }
         delete(key: key)
 
@@ -66,6 +78,7 @@ enum KeychainHelper {
     }
 
     static func load(key: String) -> String? {
+        assertNotRunningUnitTests()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,
@@ -81,6 +94,7 @@ enum KeychainHelper {
     }
 
     static func delete(key: String) {
+        assertNotRunningUnitTests()
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: service,

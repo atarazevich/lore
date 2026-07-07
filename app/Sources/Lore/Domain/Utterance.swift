@@ -107,26 +107,3 @@ struct Utterance: Identifiable, Codable, Sendable {
     }
 }
 
-// MARK: - Conversation State
-
-struct ConversationState: Sendable, Codable {
-    var currentTopic: String
-    var shortSummary: String
-    var openQuestions: [String]
-    var activeTensions: [String]
-    var recentDecisions: [String]
-    var themGoals: [String]
-    var suggestedAnglesRecentlyShown: [String]
-    var lastUpdatedAt: Date
-
-    static let empty = ConversationState(
-        currentTopic: "",
-        shortSummary: "",
-        openQuestions: [],
-        activeTensions: [],
-        recentDecisions: [],
-        themGoals: [],
-        suggestedAnglesRecentlyShown: [],
-        lastUpdatedAt: .distantPast
-    )
-}

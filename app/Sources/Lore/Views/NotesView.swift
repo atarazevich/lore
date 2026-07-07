@@ -1,12 +1,25 @@
 import SwiftUI
-import UniformTypeIdentifiers
 
+/// Meetings review (XMO Stage E, MREV-01…40): designed header + 228px meeting
+/// list rail + Transcript/Notes detail pane. Presentation only — all business
+/// logic stays in NotesController (D-031: current behavior wins).
 struct NotesView: View {
     @Bindable var settings: AppSettings
+    /// False while the unified shell shows another destination/section.
+    /// Gates the Cmd+1/Cmd+2 shortcuts (`.keyboardShortcut` fires even at
+    /// opacity 0) and defers controller creation + session auto-select until
+    /// the review layout is first shown.
+    var isActiveInShell: Bool = true
     @Environment(AppCoordinator.self) private var coordinator
+    @Environment(ShellModel.self) private var shell
     @State private var notesController: NotesController?
     @State private var renamingSessionID: String?
     @State private var renameText: String = ""
+    /// Header click-to-edit rename (#61) — separate from the list-row rename
+    /// state so editing one surface doesn't flip the other.
+    @State private var headerRenaming = false
+    @State private var headerRenameText: String = ""
+    @FocusState private var headerTitleFocused: Bool
     @State private var sessionToDelete: String?
     @State private var showDeleteConfirmation = false
     @State private var bulkDeleteMode = false
@@ -16,13 +29,36 @@ struct NotesView: View {
     @State private var editingTags: [String] = []
     @State private var newTagText: String = ""
     @State private var availableTags: [String] = []
+    /// Review chat model (#62): one conversation at a time, swapped (with a
+    /// generation bump) whenever the selected session changes.
+    @State private var reviewChat = AskXMOChatModel(isLive: false)
+    /// Dedupe guard: the engine keeps `.completed` while the poll loop resets
+    /// and re-copies it, so the same completion arrives more than once.
+    @State private var lastHandledBatchCompletion: String?
+    /// True once the user selects a meeting themselves during a recording —
+    /// the fresh-meeting auto-select at recording end must not clobber it.
+    @State private var userNavigatedDuringRecording = false
 
-    enum DetailViewMode: String, CaseIterable {
+    enum DetailViewMode: String {
         case transcript = "Transcript"
+        case chat = "Chat"
         case notes = "Notes"
     }
 
     @State private var detailViewMode: DetailViewMode = .transcript
+
+    /// Transcript | Chat for every meeting; a read-only Notes tab only for
+    /// meetings that already have stored notes (legacy generations, Granola
+    /// imports) — generation itself is gone (#62).
+    private func availableModes(state: NotesState) -> [DetailViewMode] {
+        selectedSession(state)?.hasNotes == true
+            ? [.transcript, .chat, .notes]
+            : [.transcript, .chat]
+    }
+
+    private func selectedSession(_ state: NotesState) -> SessionIndex? {
+        state.sessionHistory.first { $0.id == state.selectedSessionID }
+    }
 
     var body: some View {
         Group {
@@ -32,7 +68,11 @@ struct NotesView: View {
                 ProgressView()
             }
         }
-        .task {
+        .task(id: isActiveInShell) {
+            // Deferred until the review layout is first shown — at launch this
+            // view is mounted (keep-alive) but hidden, and auto-selecting a
+            // session then would be invisible work.
+            guard isActiveInShell, notesController == nil else { return }
             let controller = NotesController(coordinator: coordinator)
             notesController = controller
             await controller.loadHistory()
@@ -42,39 +82,240 @@ struct NotesView: View {
             // transaction as session selection (matches pre-Phase 6 behavior).
             if let requested = coordinator.consumeRequestedSessionSelection() {
                 controller.selectSession(requested)
-                // Show Transcript tab for imported sessions (no notes generated yet)
-                let isImported = controller.state.sessionHistory.first(where: { $0.id == requested })?.source == "imported"
-                detailViewMode = isImported ? .transcript : .notes
+                applyDetailMode(for: requested, controller: controller)
             } else if let last = coordinator.lastEndedSession {
                 controller.selectSession(last.id)
             }
         }
     }
 
+    /// Deep links (post-session banner, notifications) land on the stored
+    /// notes when the meeting has them, otherwise on the transcript.
+    private func applyDetailMode(for sessionID: String?, controller: NotesController) {
+        let hasNotes = controller.state.sessionHistory
+            .first(where: { $0.id == sessionID })?.hasNotes == true
+        detailViewMode = hasNotes ? .notes : .transcript
+    }
+
     @ViewBuilder
     private func mainContent(controller: NotesController) -> some View {
         let state = controller.state
-        HStack(spacing: 0) {
-            sidebar(controller: controller, state: state)
-                .frame(width: 250)
-            Divider()
-            detailContent(controller: controller, state: state)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        VStack(spacing: 0) {
+            reviewHeader(controller: controller, state: state)
+            XMODivider()
+            HStack(spacing: 0) {
+                sidebar(controller: controller, state: state)
+                    .frame(width: 228)
+                XMOTheme.Surface.line.frame(width: 1)
+                detailContent(controller: controller, state: state)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+            }
         }
         .onChange(of: coordinator.lastEndedSession?.id) {
-            Task { await controller.handleLastEndedSessionChanged() }
+            Task {
+                await controller.loadHistory()
+                // Fresh-meeting auto-select (MREV-34) — unless the user
+                // navigated to another meeting during this recording.
+                if !userNavigatedDuringRecording, let last = coordinator.lastEndedSession {
+                    controller.selectSession(last.id)
+                }
+                userNavigatedDuringRecording = false
+            }
         }
         .onChange(of: coordinator.sessionHistory.count) {
             Task { await controller.loadHistory() }
         }
         .onChange(of: coordinator.requestedSessionSelectionID) {
             if controller.handleRequestedSessionSelection() {
-                detailViewMode = .notes
+                applyDetailMode(for: controller.state.selectedSessionID, controller: controller)
+                if coordinator.state != .idle {
+                    userNavigatedDuringRecording = true
+                }
+            }
+        }
+        .onChange(of: coordinator.state) { _, newState in
+            // Keyed to the full state, not a derived `== .idle` Bool — a
+            // coalesced .ending → .idle → .recording frame would leave the
+            // Bool unchanged and carry a stale "don't auto-select" into the
+            // next recording.
+            if case .recording = newState { userNavigatedDuringRecording = false }
+        }
+        // Review chat lifecycle (#62): a selection change immediately swaps
+        // (and generation-guards) the conversation and rebinds persistence to
+        // the new session ID; the async chat.json load then hydrates it.
+        .onChange(of: controller.state.selectedSessionID, initial: true) { _, newID in
+            rewireReviewChat(controller: controller, sessionID: newID)
+            if !availableModes(state: controller.state).contains(detailViewMode) {
+                detailViewMode = .transcript
+            }
+        }
+        .onChange(of: controller.state.loadedChat) { _, exchanges in
+            reviewChat.loadPersistedHistory(exchanges)
+        }
+        // Batch completion: refresh the index (utterance counts change) and,
+        // if the fresh meeting is selected, resolve the Processing state into
+        // the enhanced Transcript (MREV-30/32). Deduped — the poll loop
+        // re-copies `.completed` from the engine after its 3s auto-dismiss.
+        .onChange(of: coordinator.batchStatus) { _, newStatus in
+            switch newStatus {
+            case .completed(let sid):
+                guard lastHandledBatchCompletion != sid else { return }
+                lastHandledBatchCompletion = sid
+                Task { await controller.loadHistory() }
+                if controller.state.selectedSessionID == sid {
+                    controller.selectSession(sid)
+                    detailViewMode = .transcript
+                }
+            case .loading, .transcribing:
+                // A new run (e.g. retry) may complete the same session again.
+                lastHandledBatchCompletion = nil
+            default:
+                break
+            }
+        }
+        // Fresh/green-dot lifetime (MREV-39): clears once the user views the
+        // meeting while no batch is in flight for it.
+        .onChange(of: viewedClearCandidate(controller: controller), initial: true) { _, candidate in
+            if let candidate {
+                controller.markViewed(sessionID: candidate)
             }
         }
     }
 
-    // MARK: - Sidebar
+    // MARK: - Fresh marker (MREV-03/39)
+
+    /// Session whose `unviewed` marker should be cleared right now, or nil.
+    /// A failed batch/import (#43) never clears: batchStatus is memory-only,
+    /// so the persisted dot is what still marks the failed import after a
+    /// relaunch — it stays until a retry succeeds.
+    private func viewedClearCandidate(controller: NotesController) -> String? {
+        guard isActiveInShell,
+              let id = controller.state.selectedSessionID,
+              !isBatchInFlight(sessionID: id),
+              !isBatchFailed(sessionID: id),
+              controller.state.sessionHistory.first(where: { $0.id == id })?.unviewed == true
+        else { return nil }
+        return id
+    }
+
+    private func isBatchFailed(sessionID: String) -> Bool {
+        if case .failed(_, let sid) = coordinator.batchStatus { return sid == sessionID }
+        return false
+    }
+
+    private func isBatchInFlight(sessionID: String) -> Bool {
+        switch coordinator.batchStatus {
+        case .loading(let sid), .transcribing(_, let sid):
+            return sid == sessionID
+        default:
+            return false
+        }
+    }
+
+    /// Green dot: batch/import in flight, or processed but not yet viewed.
+    private func isFresh(_ session: SessionIndex) -> Bool {
+        session.unviewed == true || isBatchInFlight(sessionID: session.id)
+    }
+
+    // MARK: - Header (MREV-05)
+
+    @ViewBuilder
+    private func reviewHeader(controller: NotesController, state: NotesState) -> some View {
+        let selected = state.sessionHistory.first { $0.id == state.selectedSessionID }
+        XMOScreenHeader {
+            headerTitle(controller: controller, selected: selected)
+        } meta: {
+            if let selected {
+                dateDotTime(selected.startedAt)
+                    + Text(" \u{00B7} \(selected.utteranceCount) utterances")
+            } else {
+                Text("\(state.sessionHistory.count) recorded")
+            }
+        } trailing: {
+            // Routes into the existing guarded start/stop flows in ContentView.
+            // While recording (review side shown via the header switch) the
+            // button reads Stop and stops the session — it must never say
+            // "Start recording" over a running one.
+            let recordingActive = shell.isRecordingActive()
+            XMOStartStopButton(isRecording: recordingActive) {
+                (recordingActive ? shell.requestMeetingRecordingStop
+                                 : shell.requestMeetingRecordingStart)?()
+            }
+            .accessibilityIdentifier("meetings.startRecordingButton")
+        }
+        .onChange(of: state.selectedSessionID) {
+            headerRenaming = false
+        }
+    }
+
+    /// Click-to-edit title (#61): same repository rename as the list row's
+    /// context menu. Return commits; losing focus (blur) commits too; Esc
+    /// cancels — it flips `headerRenaming` off while still focused, so the
+    /// subsequent focus loss is guarded out and never commits. Clearing the
+    /// field commits an empty title, which falls back to the derived
+    /// default name.
+    @ViewBuilder
+    private func headerTitle(controller: NotesController, selected: SessionIndex?) -> some View {
+        if let selected {
+            if headerRenaming {
+                TextField("Title", text: $headerRenameText, onCommit: {
+                    commitHeaderRename(controller: controller, sessionID: selected.id)
+                })
+                .textFieldStyle(.plain)
+                .frame(maxWidth: 420)
+                .focused($headerTitleFocused)
+                .onAppear { headerTitleFocused = true }
+                .onChange(of: headerTitleFocused) { _, focused in
+                    if !focused && headerRenaming {
+                        commitHeaderRename(controller: controller, sessionID: selected.id)
+                    }
+                }
+                .onExitCommand {
+                    headerRenaming = false
+                }
+            } else {
+                Text(selected.displayTitle)
+                    .onTapGesture {
+                        // Prefill with what's on screen: the stored title, or
+                        // the derived default (committing it unchanged simply
+                        // stores that name).
+                        headerRenameText = selected.displayTitle
+                        headerRenaming = true
+                    }
+                    .help("Click to rename")
+                    .accessibilityAddTraits(.isButton)
+                    .accessibilityHint("Rename meeting")
+            }
+        } else {
+            Text("No meeting selected")
+                .foregroundStyle(XMOTheme.TextColor.muted)
+        }
+    }
+
+    private func commitHeaderRename(controller: NotesController, sessionID: String) {
+        guard headerRenaming else { return }
+        headerRenaming = false
+        controller.renameSession(sessionID: sessionID, newTitle: headerRenameText)
+    }
+
+    private func dateDotTime(_ date: Date) -> Text {
+        Text(date, style: .date) + Text(" \u{00B7} ") + Text(date, style: .time)
+    }
+
+    /// Compact recorded duration for the list row meta (#58), derived from
+    /// SessionIndex startedAt/endedAt. Nil when endedAt is missing (legacy
+    /// or still-recording rows) — the row then shows utterances only.
+    private func durationLabel(_ session: SessionIndex) -> String? {
+        guard let endedAt = session.endedAt else { return nil }
+        let seconds = endedAt.timeIntervalSince(session.startedAt)
+        guard seconds >= 0 else { return nil }
+        let minutes = Int(seconds / 60)
+        if minutes < 1 { return "<1 min" }
+        let hours = minutes / 60
+        return hours > 0 ? "\(hours)h \(minutes % 60)m" : "\(minutes) min"
+    }
+
+    // MARK: - Meeting list rail (MREV-01…10)
 
     @ViewBuilder
     private func sidebar(controller: NotesController, state: NotesState) -> some View {
@@ -89,7 +330,7 @@ struct NotesView: View {
                     }
                     .font(.system(size: 11))
                     .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(XMOTheme.Accent.blue)
                     Spacer()
                     if !bulkDeleteSelection.isEmpty {
                         Button("Delete \(bulkDeleteSelection.count)") {
@@ -97,7 +338,7 @@ struct NotesView: View {
                         }
                         .font(.system(size: 11, weight: .medium))
                         .buttonStyle(.plain)
-                        .foregroundStyle(.red)
+                        .foregroundStyle(XMOTheme.Accent.red)
                     }
                     Button("Done") {
                         bulkDeleteMode = false
@@ -105,57 +346,20 @@ struct NotesView: View {
                     }
                     .font(.system(size: 11))
                     .buttonStyle(.plain)
-                    .foregroundStyle(Color.accentColor)
+                    .foregroundStyle(XMOTheme.Accent.blue)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                Divider()
+                XMODivider()
             }
 
-            if bulkDeleteMode {
-                List(controller.filteredSessions, selection: $bulkDeleteSelection) { session in
-                    sessionRow(controller: controller, session: session)
+            ScrollView {
+                LazyVStack(spacing: 2) {
+                    ForEach(controller.filteredSessions) { session in
+                        sessionRow(controller: controller, session: session)
+                    }
                 }
-                .listStyle(.sidebar)
-            } else {
-                let selectedBinding = Binding<String?>(
-                    get: { state.selectedSessionID },
-                    set: { controller.selectSession($0) }
-                )
-                List(controller.filteredSessions, selection: selectedBinding) { session in
-                    sessionRow(controller: controller, session: session)
-                        .contextMenu {
-                            Button("Rename...") {
-                                renameText = session.title ?? ""
-                                renamingSessionID = session.id
-                            }
-                            Button("Edit Tags...") {
-                                editingTags = session.tags ?? []
-                                newTagText = ""
-                                editingTagsSessionID = session.id
-                                Task {
-                                    availableTags = await controller.allTags()
-                                }
-                            }
-                            Divider()
-                            Button("Select Multiple...") {
-                                bulkDeleteMode = true
-                                bulkDeleteSelection = [session.id]
-                            }
-                            Divider()
-                            Button("Delete", role: .destructive) {
-                                sessionToDelete = session.id
-                                showDeleteConfirmation = true
-                            }
-                        }
-                        .popover(isPresented: Binding(
-                            get: { editingTagsSessionID == session.id },
-                            set: { if !$0 { editingTagsSessionID = nil } }
-                        )) {
-                            tagEditorPopover(controller: controller, sessionID: session.id)
-                        }
-                }
-                .listStyle(.sidebar)
+                .padding(10)
             }
         }
         .frame(maxHeight: .infinity)
@@ -183,64 +387,166 @@ struct NotesView: View {
 
     @ViewBuilder
     private func sessionRow(controller: NotesController, session: SessionIndex) -> some View {
-        VStack(alignment: .leading, spacing: 4) {
-            HStack(spacing: 6) {
-                if let snap = session.templateSnapshot {
-                    Image(systemName: snap.icon)
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
+        sessionRowButton(controller: controller, session: session)
+            .contextMenu {
+                if !bulkDeleteMode {
+                    Button("Rename...") {
+                        renameText = session.title ?? ""
+                        renamingSessionID = session.id
+                    }
+                    Button("Edit Tags...") {
+                        editingTags = session.tags ?? []
+                        newTagText = ""
+                        editingTagsSessionID = session.id
+                        Task {
+                            availableTags = await controller.allTags()
+                        }
+                    }
+                    Divider()
+                    Button("Select Multiple...") {
+                        bulkDeleteMode = true
+                        bulkDeleteSelection = [session.id]
+                    }
+                    Divider()
+                    Button("Delete", role: .destructive) {
+                        sessionToDelete = session.id
+                        showDeleteConfirmation = true
+                    }
+                }
+            }
+            .popover(isPresented: Binding(
+                get: { editingTagsSessionID == session.id },
+                set: { if !$0 { editingTagsSessionID = nil } }
+            )) {
+                tagEditorPopover(controller: controller, sessionID: session.id)
+            }
+    }
+
+    @ViewBuilder
+    private func sessionRowButton(controller: NotesController, session: SessionIndex) -> some View {
+        let isSelected = !bulkDeleteMode && controller.state.selectedSessionID == session.id
+        let isBulkSelected = bulkDeleteMode && bulkDeleteSelection.contains(session.id)
+        let styled = sessionRowContent(
+            controller: controller,
+            session: session,
+            isSelected: isSelected,
+            isBulkSelected: isBulkSelected
+        )
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .xmoSelectableRow(
+            isActive: isSelected || isBulkSelected,
+            activeFill: XMOTheme.Surface.card3
+        )
+
+        Group {
+            if renamingSessionID == session.id {
+                // No button wrapper while renaming — it would swallow the
+                // clicks the inline TextField needs.
+                styled
+            } else {
+                Button {
+                    if bulkDeleteMode {
+                        if isBulkSelected {
+                            bulkDeleteSelection.remove(session.id)
+                        } else {
+                            bulkDeleteSelection.insert(session.id)
+                        }
+                    } else {
+                        controller.selectSession(session.id)
+                        if coordinator.state != .idle {
+                            userNavigatedDuringRecording = true
+                        }
+                    }
+                } label: {
+                    styled
+                }
+                .buttonStyle(.plain)
+            }
+        }
+        .accessibilityIdentifier("notes.session.\(session.id)")
+    }
+
+    @ViewBuilder
+    private func sessionRowContent(
+        controller: NotesController,
+        session: SessionIndex,
+        isSelected: Bool,
+        isBulkSelected: Bool
+    ) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            HStack(spacing: 7) {
+                if bulkDeleteMode {
+                    Image(systemName: isBulkSelected ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 12))
+                        .foregroundStyle(isBulkSelected ? XMOTheme.Accent.green
+                                                        : XMOTheme.TextColor.muted)
+                }
+                if isFresh(session) {
+                    Circle()
+                        .fill(XMOTheme.Accent.green)
+                        .frame(width: 7, height: 7)
+                        .accessibilityLabel("New")
                 }
                 if renamingSessionID == session.id {
                     TextField("Title", text: $renameText, onCommit: {
                         controller.renameSession(sessionID: session.id, newTitle: renameText)
                         renamingSessionID = nil
                     })
-                    .font(.system(size: 13, weight: .medium))
+                    .font(.system(size: 13, weight: .semibold))
                     .textFieldStyle(.plain)
                     .onExitCommand {
                         renamingSessionID = nil
                     }
                 } else {
-                    Text(session.title ?? "Untitled")
-                        .font(.system(size: 13, weight: .medium))
+                    Text(session.displayTitle)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(isSelected ? Color.white : XMOTheme.TextColor.primary)
                         .lineLimit(1)
                 }
-                Spacer()
+                Spacer(minLength: 4)
+                if let snap = session.templateSnapshot {
+                    Image(systemName: snap.icon)
+                        .font(.system(size: 10))
+                        .foregroundStyle(XMOTheme.TextColor.muted)
+                }
                 if session.hasNotes {
                     Image(systemName: "doc.text.fill")
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
+                        .font(.system(size: 9))
+                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .accessibilityLabel("Has notes")
                 }
             }
 
-            HStack(spacing: 6) {
-                Text(session.startedAt, style: .date)
-                Text(session.startedAt, style: .time)
-                Spacer()
-                Text("\(session.utteranceCount) utterances")
-            }
-            .font(.system(size: 11))
-            .foregroundStyle(.tertiary)
+            dateDotTime(session.startedAt)
+                .font(XMOTheme.Typography.monoMeta)
+                .foregroundStyle(XMOTheme.TextColor.muted)
+                .lineLimit(1)
+
+            Text(
+                [durationLabel(session), "\(session.utteranceCount) utterances"]
+                    .compactMap { $0 }
+                    .joined(separator: " \u{00B7} ")
+            )
+            .font(XMOTheme.Typography.monoMeta)
+            .foregroundStyle(XMOTheme.TextColor.muted)
 
             if let tags = session.tags, !tags.isEmpty {
                 HStack(spacing: 4) {
                     ForEach(tags, id: \.self) { tag in
                         Text(tag)
                             .font(.system(size: 10))
+                            .foregroundStyle(XMOTheme.TextColor.muted)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(.quaternary)
+                            .background(XMOTheme.Surface.card3)
                             .clipShape(Capsule())
                     }
                 }
-                .foregroundStyle(.secondary)
             }
         }
-        .padding(.vertical, 2)
-        .accessibilityIdentifier("notes.session.\(session.id)")
     }
 
-    // MARK: - Tag Filter Bar
+    // MARK: - Tag Filter Bar (MREV-09)
 
     @ViewBuilder
     private func tagFilterBar(controller: NotesController, state: NotesState) -> some View {
@@ -255,12 +561,13 @@ struct NotesView: View {
                         } label: {
                             Text(tag)
                                 .font(.system(size: 11))
+                                .foregroundStyle(isActive ? Color.white : XMOTheme.TextColor.muted)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 3)
-                                .background(isActive ? Color.accentColor.opacity(0.2) : Color.clear)
+                                .background(isActive ? Color.white.opacity(0.12) : Color.clear)
                                 .overlay(
                                     Capsule()
-                                        .strokeBorder(.quaternary, lineWidth: 1)
+                                        .strokeBorder(XMOTheme.Surface.line, lineWidth: 1)
                                 )
                                 .clipShape(Capsule())
                         }
@@ -270,7 +577,7 @@ struct NotesView: View {
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
             }
-            Divider()
+            XMODivider()
         }
     }
 
@@ -392,81 +699,132 @@ struct NotesView: View {
 
     @ViewBuilder
     private func detailContent(controller: NotesController, state: NotesState) -> some View {
-        if let sessionID = state.selectedSessionID {
-            VStack(spacing: 0) {
-                detailToolbar(controller: controller, state: state)
-                Divider()
-                detailBody(controller: controller, state: state, sessionID: sessionID)
+        Group {
+            if let sessionID = state.selectedSessionID {
+                if isBatchInFlight(sessionID: sessionID) {
+                    // Processing state (MREV-30): controls hidden while the
+                    // batch/import pass runs for the selected meeting.
+                    processingView
+                } else {
+                    VStack(spacing: 0) {
+                        detailToolbar(controller: controller, state: state)
+                        XMODivider()
+                        detailBody(controller: controller, state: state, sessionID: sessionID)
+                    }
+                }
+            } else {
+                ContentUnavailableView("Select a Session", systemImage: "doc.text", description: Text("Choose a session from the sidebar to view its transcript and chat."))
             }
-            .background {
+        }
+        .background {
+            // Gated: .keyboardShortcut fires app-wide even at opacity 0,
+            // and this view stays mounted while other destinations show.
+            if isActiveInShell {
                 Group {
                     Button("") { detailViewMode = .transcript }
                         .keyboardShortcut("1", modifiers: .command)
-                    Button("") { detailViewMode = .notes }
+                    Button("") { detailViewMode = .chat }
                         .keyboardShortcut("2", modifiers: .command)
                 }
                 .frame(width: 0, height: 0)
                 .opacity(0)
                 .accessibilityHidden(true)
             }
-        } else {
-            ContentUnavailableView("Select a Session", systemImage: "doc.text", description: Text("Choose a session from the sidebar to view or generate notes."))
         }
     }
 
-    private enum CleanupState {
-        case notCleaned
-        case inProgress
-        case partiallyCleaned
-        case cleaned
+    // MARK: - Processing state (MREV-30/32)
+
+    private var processingView: some View {
+        VStack(spacing: 10) {
+            XMOPulsingDot(color: XMOTheme.Accent.blue, size: 10)
+            Text("Transcribing\u{2026}")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(XMOTheme.TextColor.primary)
+            Text(coordinator.batchIsImporting
+                 ? "Importing \u{2014} the transcript will appear here in a moment"
+                 : "The enhanced transcript will appear here in a moment")
+                .font(XMOTheme.Typography.secondary)
+                .foregroundStyle(XMOTheme.TextColor.muted)
+            if case .transcribing(let progress, _) = coordinator.batchStatus, progress > 0 {
+                Text("\(Int(progress * 100))%")
+                    .font(XMOTheme.Typography.monoMeta)
+                    .foregroundStyle(XMOTheme.TextColor.muted)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityIdentifier("meetings.processing")
     }
 
-    private func cleanupState(from status: CleanupStatus, transcript: [SessionRecord]) -> CleanupState {
-        if case .inProgress = status { return .inProgress }
-        guard !transcript.isEmpty else { return .notCleaned }
-        let hasAnyRefined = transcript.contains(where: { $0.refinedText != nil })
-        if !hasAnyRefined { return .notCleaned }
-        let allRefined = !transcript.contains(where: { $0.refinedText == nil })
-        return allRefined ? .cleaned : .partiallyCleaned
-    }
+    // MARK: - Detail toolbar (MREV-11/28)
 
     @ViewBuilder
     private func detailToolbar(controller: NotesController, state: NotesState) -> some View {
-        HStack(spacing: 8) {
-            Picker("View", selection: $detailViewMode) {
-                ForEach(DetailViewMode.allCases, id: \.self) { mode in
-                    Text(mode.rawValue).tag(mode)
-                }
-            }
-            .pickerStyle(.segmented)
-            .frame(minWidth: 120, maxWidth: 220)
-            .layoutPriority(1)
-
+        HStack(spacing: 11) {
+            segmentedControl(state: state)
             Spacer(minLength: 4)
+            HStack(spacing: 7) {
+                if detailViewMode == .transcript {
+                    transcriptToolbarActions(controller: controller, state: state)
+                }
 
-            if detailViewMode == .transcript {
-                transcriptToolbarActions(controller: controller, state: state)
-            } else if detailViewMode == .notes {
-                notesToolbarActions(controller: controller, state: state)
-            }
+                if state.audioFileURL != nil {
+                    audioPlaybackButton(controller: controller, state: state)
+                }
 
-            if state.audioFileURL != nil {
-                audioPlaybackButton(controller: controller, state: state)
+                XMOCopyButton {
+                    copyCurrentContent(state: state)
+                }
+                .disabled(copyContentIsEmpty(state: state))
             }
-
-            Button {
-                copyCurrentContent(state: state)
-            } label: {
-                Label("Copy", systemImage: "doc.on.doc")
-                    .font(.system(size: 12))
-            }
-            .labelStyle(.iconOnly)
-            .buttonStyle(.bordered)
-            .disabled(copyContentIsEmpty(state: state))
-            .help("Copy to clipboard")
         }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 10)
+        .padding(.horizontal, 22)
+        .padding(.vertical, 12)
+    }
+
+    /// Design `.seg`: white .05 track, active segment white .12 + white text.
+    private func segmentedControl(state: NotesState) -> some View {
+        HStack(spacing: 3) {
+            ForEach(availableModes(state: state), id: \.self) { mode in
+                segmentButton(mode)
+            }
+        }
+        .padding(3)
+        .background(
+            XMOTheme.Surface.hover,
+            in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+        )
+    }
+
+    private func segmentButton(_ mode: DetailViewMode) -> some View {
+        let isOn = detailViewMode == mode
+        return Button {
+            detailViewMode = mode
+        } label: {
+            Text(mode.rawValue)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(isOn ? Color.white : XMOTheme.TextColor.muted)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 14)
+                .background(
+                    isOn ? Color.white.opacity(0.12) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// 30×30 icon label for the audio menu.
+    private func iconMenuLabel(systemName: String, tint: Color = XMOTheme.TextColor.muted) -> some View {
+        Image(systemName: systemName)
+            .font(.system(size: 12, weight: .medium))
+            .foregroundStyle(tint)
+            .frame(width: 30, height: 30)
+            .background(
+                XMOTheme.Surface.card3,
+                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+            )
     }
 
     @ViewBuilder
@@ -487,182 +845,44 @@ struct NotesView: View {
                 Label("Show in Finder", systemImage: "folder")
             }
         } label: {
-            Label(
-                state.isPlayingAudio ? "Pause" : "Play",
-                systemImage: state.isPlayingAudio ? "pause.fill" : "play.fill"
+            iconMenuLabel(
+                systemName: state.isPlayingAudio ? "pause.fill" : "play.fill",
+                tint: state.isPlayingAudio ? XMOTheme.Accent.blue : XMOTheme.TextColor.muted
             )
-            .font(.system(size: 12))
         } primaryAction: {
             controller.toggleAudioPlayback()
         }
         .menuStyle(.button)
-        .buttonStyle(.bordered)
+        .buttonStyle(.plain)
         .fixedSize()
         .help(state.isPlayingAudio ? "Pause audio recording" : "Play audio recording")
+        .accessibilityLabel(state.isPlayingAudio ? "Pause audio recording" : "Play audio recording")
     }
 
+    /// Transcript-mode extra: the Show Original toggle, shown once any
+    /// utterance carries refined text (live refinement or batch enhance).
     @ViewBuilder
     private func transcriptToolbarActions(controller: NotesController, state: NotesState) -> some View {
-        let cleanup = cleanupState(from: state.cleanupStatus, transcript: state.loadedTranscript)
-        switch cleanup {
-        case .notCleaned:
-            Button {
-                controller.cleanUpTranscript(settings: settings)
-            } label: {
-                Label("Clean Up", systemImage: "sparkles")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(state.loadedTranscript.isEmpty)
-            .help("Remove filler words and fix punctuation")
-
-        case .inProgress:
-            if case .inProgress(let completed, let total) = state.cleanupStatus {
-                HStack(spacing: 6) {
-                    Text("\(completed)/\(total) cleaning...")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                    Button("Cancel") {
-                        controller.cancelCleanup()
-                    }
-                    .buttonStyle(.bordered)
-                    .font(.system(size: 11))
-                    .controlSize(.small)
-                }
-            }
-
-        case .partiallyCleaned:
-            Button {
-                controller.cleanUpTranscript(settings: settings)
-            } label: {
-                Label("Clean Up", systemImage: "sparkles")
-                    .font(.system(size: 12))
-            }
-            .buttonStyle(.borderedProminent)
-            .help("Clean up remaining utterances")
-
-            showOriginalButton(controller: controller, state: state)
-
-        case .cleaned:
+        if state.loadedTranscript.contains(where: { $0.refinedText != nil }) {
             showOriginalButton(controller: controller, state: state)
         }
     }
 
-    @ViewBuilder
+    /// Raw ↔ cleaned toggle (MREV-17): ↺ while the cleaned text is shown,
+    /// ✦ while the original is shown. Same semantics as before, dictation
+    /// row treatment.
     private func showOriginalButton(controller: NotesController, state: NotesState) -> some View {
-        Button {
+        XMOIconButton(
+            systemName: state.showingOriginal ? "sparkles" : "arrow.uturn.backward",
+            label: state.showingOriginal ? "Show cleaned transcript" : "Show original transcript",
+            tint: state.showingOriginal ? XMOTheme.Accent.amber : XMOTheme.TextColor.muted
+        ) {
             controller.toggleShowingOriginal()
-        } label: {
-            Label("Show Original", systemImage: state.showingOriginal ? "text.badge.checkmark" : "text.badge.minus")
-                .font(.system(size: 12))
         }
-        .buttonStyle(.bordered)
-        .tint(state.showingOriginal ? .accentColor : nil)
         .help(state.showingOriginal ? "Showing original transcript" : "Show original transcript")
     }
 
-    @ViewBuilder
-    private func notesToolbarActions(controller: NotesController, state: NotesState) -> some View {
-        if let notes = state.loadedNotes {
-            Menu {
-                ForEach(controller.availableTemplates) { template in
-                    Button {
-                        controller.regenerateNotes(with: template, settings: settings)
-                    } label: {
-                        Label(template.name, systemImage: template.icon)
-                    }
-                    .disabled(notes.template.id == template.id)
-                }
-            } label: {
-                Label(notes.template.name, systemImage: notes.template.icon)
-                    .font(.system(size: 12))
-            } primaryAction: {
-                controller.regenerateNotes(settings: settings)
-            }
-            .menuStyle(.button)
-            .buttonStyle(.bordered)
-            .fixedSize()
-            .help("Click to regenerate, or pick a different template")
-        }
-
-        imageInsertMenu(controller: controller, state: state)
-    }
-
-    @ViewBuilder
-    private func imageInsertMenu(controller: NotesController, state: NotesState) -> some View {
-        Menu {
-            Button {
-                insertImageFromFile(controller: controller)
-            } label: {
-                Label("From File\u{2026}", systemImage: "folder")
-            }
-            Button {
-                insertImageFromClipboard(controller: controller)
-            } label: {
-                Label("From Clipboard", systemImage: "doc.on.clipboard")
-            }
-            .disabled(!clipboardHasImage())
-            Button {
-                captureScreenshot(controller: controller)
-            } label: {
-                Label("Capture Screenshot", systemImage: "camera.viewfinder")
-            }
-        } label: {
-            Label("Insert Image", systemImage: "photo.badge.plus")
-                .font(.system(size: 12))
-        }
-        .menuStyle(.button)
-        .buttonStyle(.bordered)
-        .fixedSize()
-        .disabled(state.notesGenerationStatus == .generating || state.selectedSessionID == nil)
-        .help("Insert an image into notes")
-    }
-
-    private func clipboardHasImage() -> Bool {
-        let pb = NSPasteboard.general
-        return pb.canReadItem(withDataConformingToTypes: [UTType.png.identifier, UTType.tiff.identifier, UTType.jpeg.identifier])
-    }
-
-    private func insertImageFromFile(controller: NotesController) {
-        let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.image]
-        panel.allowsMultipleSelection = false
-        panel.message = "Choose an image to insert into notes"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
-        guard let nsImage = NSImage(contentsOf: url),
-              let tiff = nsImage.tiffRepresentation,
-              let rep = NSBitmapImageRep(data: tiff),
-              let pngData = rep.representation(using: .png, properties: [:]) else { return }
-        controller.insertImage(imageData: pngData)
-    }
-
-    private func insertImageFromClipboard(controller: NotesController) {
-        let pb = NSPasteboard.general
-        if let data = pb.data(forType: .png) {
-            controller.insertImage(imageData: data)
-        } else if let data = pb.data(forType: .tiff),
-                  let rep = NSBitmapImageRep(data: data),
-                  let pngData = rep.representation(using: .png, properties: [:]) {
-            controller.insertImage(imageData: pngData)
-        }
-    }
-
-    private func captureScreenshot(controller: NotesController) {
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("\(UUID().uuidString).png")
-        let process = Process()
-        process.executableURL = URL(fileURLWithPath: "/usr/sbin/screencapture")
-        process.arguments = ["-i", tempURL.path]
-        process.terminationHandler = { proc in
-            defer { try? FileManager.default.removeItem(at: tempURL) }
-            guard proc.terminationStatus == 0,
-                  let data = try? Data(contentsOf: tempURL) else { return }
-            Task { @MainActor in
-                controller.insertImage(imageData: data)
-            }
-        }
-        try? process.run()
-    }
+    // MARK: - Detail body
 
     @ViewBuilder
     private func detailBody(controller: NotesController, state: NotesState, sessionID: String) -> some View {
@@ -670,179 +890,213 @@ struct NotesView: View {
             switch detailViewMode {
             case .transcript:
                 transcriptView(controller: controller, state: state)
+            case .chat:
+                chatTab(state: state)
             case .notes:
-                notesTab(controller: controller, state: state, sessionID: sessionID)
+                // The tab exists only when the index says notes are stored;
+                // the brief nil window is the async load.
+                if let notes = state.loadedNotes {
+                    notesContentView(notes, sessionDirectory: state.selectedSessionDirectory)
+                } else {
+                    ProgressView()
+                        .frame(maxWidth: .infinity, maxHeight: .infinity)
+                }
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    @ViewBuilder
-    private func notesTab(controller: NotesController, state: NotesState, sessionID: String) -> some View {
-        switch state.notesGenerationStatus {
-        case .generating:
-            generatingView(controller: controller, state: state)
-        case .idle, .completed, .error:
-            if let notes = state.loadedNotes {
-                notesContentView(notes, sessionDirectory: state.selectedSessionDirectory)
-            } else {
-                notesEmptyState(controller: controller, state: state, sessionID: sessionID)
-            }
-        }
-    }
-
-    private func generatingView(controller: NotesController, state: NotesState) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 12) {
-                HStack {
-                    ProgressView()
-                        .controlSize(.small)
-                    Text("Generating notes...")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("notes.generating")
-                    Spacer()
-                    Button("Cancel") {
-                        controller.cancelGeneration()
-                    }
-                    .buttonStyle(.bordered)
-                    .font(.system(size: 11))
-                }
-
-                markdownContent(state.streamingMarkdown)
-            }
-            .padding(16)
-        }
-    }
-
     private func notesContentView(_ notes: EnhancedNotes, sessionDirectory: URL?) -> some View {
         ScrollView {
             markdownContent(notes.markdown, sessionDirectory: sessionDirectory)
-                .padding(16)
+                .frame(maxWidth: 760, alignment: .leading)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 18)
+                .frame(maxWidth: .infinity, alignment: .leading)
                 .accessibilityIdentifier("notes.renderedMarkdown")
         }
     }
 
-    private func notesEmptyState(controller: NotesController, state: NotesState, sessionID: String) -> some View {
-        ContentUnavailableView {
-            Label("Generate Notes", systemImage: "sparkles")
-        } description: {
-            Text("Summarize this transcript into structured meeting notes.")
-        } actions: {
-            if case .error(let error) = state.notesGenerationStatus {
-                Text(error)
-                    .foregroundStyle(.red)
-                    .font(.system(size: 12))
-            }
-
-            Button {
-                controller.generateNotes(sessionID: sessionID, settings: settings)
-            } label: {
-                Label("Generate Notes", systemImage: "sparkles")
-            }
-            .buttonStyle(.borderedProminent)
-            .disabled(state.loadedTranscript.isEmpty)
-            .accessibilityIdentifier("notes.generateButton")
-        }
-    }
-
-    // MARK: - Transcript Views
+    // MARK: - Transcript view (MREV-12…17)
 
     @ViewBuilder
     private func transcriptView(controller: NotesController, state: NotesState) -> some View {
-        if state.loadedTranscript.isEmpty {
-            ContentUnavailableView("No Transcript", systemImage: "waveform", description: Text("This session has no recorded utterances."))
-        } else {
-            ScrollView {
-                if case .inProgress(let completed, let total) = state.cleanupStatus {
-                    cleanupProgressBanner(controller: controller, completed: completed, total: total)
+        VStack(spacing: 0) {
+            // Failed batch/import banner (MREV-32, #43): above the content —
+            // not inside the scroll — so it also shows when the transcript
+            // is empty, which is what a failed import leaves behind.
+            if case .failed(let batchError, let sid) = coordinator.batchStatus,
+               sid == state.selectedSessionID {
+                let isImport = selectedSession(state)?.source == SessionIndex.importedSource
+                errorBanner(isImport
+                            ? "Import failed: \(batchError)"
+                            : "Transcript enhancement failed: \(batchError)") {
+                    controller.retryBatch(sessionID: sid, settings: settings)
                 }
-                if case .error(let cleanupError) = state.cleanupStatus {
-                    Text(cleanupError)
-                        .font(.system(size: 12))
-                        .foregroundStyle(.red)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 4)
-                }
-                LazyVStack(alignment: .leading, spacing: 8) {
-                    let isCleaning: Bool = {
-                        if case .inProgress = state.cleanupStatus { return true }
-                        return false
-                    }()
-                    ForEach(Array(state.loadedTranscript.enumerated()), id: \.offset) { _, record in
-                        transcriptRow(record: record, isCleaning: isCleaning, showingOriginal: state.showingOriginal)
+                .padding(.top, 12)
+            }
+            if state.loadedTranscript.isEmpty {
+                ContentUnavailableView("No Transcript", systemImage: "waveform", description: Text("This session has no recorded utterances."))
+            } else {
+                ScrollView {
+                    // Elapsed-stamp anchor (#63): the session's recorded start,
+                    // falling back to the first utterance's timestamp for legacy
+                    // sessions whose metadata never stored one.
+                    let anchor = ElapsedStamp.anchor(
+                        startedAt: selectedSession(state)?.startedAt,
+                        firstTimestamp: state.loadedTranscript.first?.timestamp
+                    )
+                    LazyVStack(alignment: .leading, spacing: 16) {
+                        ForEach(Array(state.loadedTranscript.enumerated()), id: \.offset) { _, record in
+                            transcriptRow(record: record, anchor: anchor, showingOriginal: state.showingOriginal)
+                        }
                     }
+                    .frame(maxWidth: 760, alignment: .leading)
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 18)
+                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(16)
             }
         }
     }
 
-    private func cleanupProgressBanner(controller: NotesController, completed: Int, total: Int) -> some View {
-        HStack(spacing: 8) {
-            ProgressView()
-                .controlSize(.small)
-            Text("Cleaning up transcript... \(completed)/\(total) sections")
-                .font(.system(size: 12))
-                .lineLimit(1)
-                .foregroundStyle(.secondary)
-            Spacer()
-            Button("Cancel") {
-                controller.cancelCleanup()
-            }
-            .buttonStyle(.bordered)
-            .font(.system(size: 11))
-        }
-        .padding(.horizontal, 16)
-        .padding(.vertical, 8)
-        .background(.bar)
-    }
+    // MARK: - Ask Lore chat tab (#62)
 
-    @ViewBuilder
-    private func transcriptRow(record: SessionRecord, isCleaning: Bool, showingOriginal: Bool) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 8) {
-            Text(record.speaker.displayLabel)
-                .font(.system(size: 11, weight: .semibold))
-                .foregroundStyle(record.speaker.color)
-                .frame(minWidth: 36, alignment: .trailing)
-
-            let displayText = showingOriginal ? record.text : (record.refinedText ?? record.text)
-            Text(displayText)
-                .font(.system(size: 13))
-                .foregroundStyle(
-                    isCleaning && record.refinedText == nil ? .secondary : .primary
+    /// The rail chat, re-hosted: persisted exchanges plus a live input over
+    /// the STORED transcript of the selected session. Same speaker-labeled
+    /// context lines as the live path (`Speaker.displayLabel: displayText`).
+    private func chatTab(state: NotesState) -> some View {
+        AskXMOSection(
+            model: reviewChat,
+            utterances: state.loadedTranscript.map {
+                Utterance(
+                    text: $0.text,
+                    speaker: $0.speaker,
+                    timestamp: $0.timestamp,
+                    refinedText: $0.refinedText
                 )
-                .textSelection(.enabled)
+            },
+            apiKey: settings.openaiApiKey,
+            isLive: false
+        )
+        .frame(maxWidth: 760)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    /// Selection changed: swap the conversation and bind persistence to the
+    /// new session ID. The ID is captured here, at bind time, and the model
+    /// captures the hook at send time — so a completed exchange always lands
+    /// in its ORIGIN session's chat.json, even when the user has switched
+    /// away (the generation bump only suppresses rendering it). The echo
+    /// into `loadedChat` keeps the in-memory copy matching disk while that
+    /// session is still the selected one.
+    private func rewireReviewChat(controller: NotesController, sessionID: String?) {
+        reviewChat.loadPersistedHistory(controller.state.loadedChat)
+        guard let sessionID else {
+            reviewChat.onExchange = nil
+            return
         }
+        let repo = coordinator.sessionRepository
+        reviewChat.onExchange = { question, answer in
+            let exchange = ChatExchange(question: question, answer: answer)
+            Task {
+                await repo.appendChatExchange(sessionID: sessionID, exchange: exchange)
+            }
+            controller.appendLoadedChat(sessionID: sessionID, exchange: exchange)
+        }
+    }
+
+    /// Red token error line; optional retry (batch failures, MREV-32).
+    @ViewBuilder
+    private func errorBanner(_ message: String, retryAction: (() -> Void)? = nil) -> some View {
+        HStack(spacing: 8) {
+            Text(message)
+                .font(.system(size: 12))
+                .foregroundStyle(XMOTheme.Accent.red)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            if let retryAction {
+                XMOIconButton(
+                    systemName: "arrow.clockwise",
+                    label: "Retry",
+                    tint: XMOTheme.Accent.red,
+                    background: XMOTheme.Accent.red.opacity(0.12),
+                    action: retryAction
+                )
+                .help("Retry transcript enhancement")
+            }
+        }
+        .padding(.horizontal, 24)
+        .padding(.vertical, 4)
+    }
+
+    /// Speaker rows (MREV-13, #63): the live view's stamped row — elapsed
+    /// mono stamp + 64px speaker label — with the raw/original choice made
+    /// here. Copy keeps absolute HH:MM:SS (see copyCurrentContent).
+    private func transcriptRow(record: SessionRecord, anchor: Date?, showingOriginal: Bool) -> some View {
+        TranscriptSpeakerRow(
+            speaker: record.speaker,
+            text: showingOriginal ? record.text : (record.refinedText ?? record.text),
+            elapsed: record.timestamp.timeIntervalSince(anchor ?? record.timestamp)
+        )
     }
 
     private func copyContentIsEmpty(state: NotesState) -> Bool {
         switch detailViewMode {
         case .transcript:
             return state.loadedTranscript.isEmpty
+        case .chat:
+            return !reviewChat.messages.contains { $0.role != .failure }
         case .notes:
             return state.loadedNotes == nil
         }
     }
 
-    // MARK: - Markdown Rendering
+    // MARK: - Markdown Rendering (MREV-20)
 
+    /// Renders template-generated markdown in the design's notes style:
+    /// H2 headings become uppercase mono section labels, H3 a smaller
+    /// heading, list items get blue markers. Arbitrary template sections
+    /// render as-is.
     private func markdownContent(_ markdown: String, sessionDirectory: URL? = nil) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        VStack(alignment: .leading, spacing: 20) {
             let sections = parseMarkdownSections(markdown)
             ForEach(Array(sections.enumerated()), id: \.offset) { _, section in
-                if let heading = section.heading {
-                    Text(heading)
-                        .font(.system(size: section.level == 1 ? 18 : 15, weight: .bold))
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                        .padding(.top, section.level == 1 ? 4 : 2)
-                }
-                if !section.body.isEmpty {
-                    sectionBodyView(section.body, sessionDirectory: sessionDirectory)
+                VStack(alignment: .leading, spacing: 11) {
+                    if let heading = section.heading {
+                        headingView(heading, level: section.level)
+                    }
+                    if !section.body.isEmpty {
+                        sectionBodyView(section.body, sessionDirectory: sessionDirectory)
+                    }
                 }
             }
         }
+    }
+
+    /// H1 15/600 · H2 uppercase mono section label · H3 12/600 — hierarchy
+    /// survives, and inline markdown is stripped before uppercasing rather
+    /// than uppercased raw.
+    @ViewBuilder
+    private func headingView(_ heading: String, level: Int) -> some View {
+        let plain = plainInline(heading)
+        switch level {
+        case ...1:
+            Text(plain)
+                .font(XMOTheme.Typography.heading)
+                .foregroundStyle(XMOTheme.TextColor.primary)
+        case 2:
+            XMOSectionLabel(text: plain, size: 11, mono: true, trackingEm: 0.07)
+        default:
+            Text(plain)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(XMOTheme.TextColor.primary)
+        }
+    }
+
+    /// Strip inline markdown (emphasis, code, links) down to plain characters.
+    private func plainInline(_ text: String) -> String {
+        guard let attributed = try? AttributedString(markdown: text) else { return text }
+        return String(attributed.characters)
     }
 
     @ViewBuilder
@@ -851,17 +1105,7 @@ struct NotesView: View {
         ForEach(Array(blocks.enumerated()), id: \.offset) { _, block in
             switch block {
             case .text(let text):
-                if let attributed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
-                    Text(attributed)
-                        .font(.system(size: 13))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                } else {
-                    Text(text)
-                        .font(.system(size: 13))
-                        .textSelection(.enabled)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
+                textBlockView(text)
             case .image(let path):
                 if let dir = sessionDirectory,
                    let nsImage = NSImage(contentsOf: dir.appendingPathComponent(path)) {
@@ -869,14 +1113,136 @@ struct NotesView: View {
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: 500, maxHeight: 400)
-                        .clipShape(RoundedRectangle(cornerRadius: 6))
+                        .clipShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
                 } else {
                     Label("Image not found", systemImage: "photo")
                         .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
+                        .foregroundStyle(XMOTheme.TextColor.muted)
                 }
             }
         }
+    }
+
+    /// Paragraphs, bulleted items (blue dot) and ordered items (blue number),
+    /// with nesting preserved as insets.
+    private func textBlockView(_ text: String) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            let items = parseTextItems(text)
+            ForEach(Array(items.enumerated()), id: \.offset) { _, item in
+                switch item {
+                case .paragraph(let content):
+                    bodyText(content)
+                case .bullet(let content, let indent):
+                    listRow(indent: indent, content: content) {
+                        Circle()
+                            .fill(XMOTheme.Accent.blue)
+                            .frame(width: 6, height: 6)
+                            .padding(.top, 6)
+                    }
+                case .ordered(let number, let content, let indent):
+                    listRow(indent: indent, content: content) {
+                        Text("\(number).")
+                            .font(.system(size: 12, weight: .semibold))
+                            .foregroundStyle(XMOTheme.Accent.blue)
+                            .padding(.top, 1)
+                    }
+                }
+            }
+        }
+    }
+
+    private func listRow(
+        indent: Int,
+        content: String,
+        @ViewBuilder marker: () -> some View
+    ) -> some View {
+        HStack(alignment: .top, spacing: 11) {
+            marker()
+            bodyText(content)
+        }
+        .padding(.leading, CGFloat(indent) * 14)
+    }
+
+    private func bodyText(_ content: String) -> some View {
+        inlineMarkdownText(content)
+            .font(XMOTheme.Typography.body)
+            .lineSpacing(3)
+            .foregroundStyle(XMOTheme.TextColor.primary)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private enum TextItem {
+        case paragraph(String)
+        case bullet(text: String, indent: Int)
+        case ordered(number: String, text: String, indent: Int)
+    }
+
+    private func parseTextItems(_ text: String) -> [TextItem] {
+        var items: [TextItem] = []
+        var paragraphLines: [String] = []
+        var lastWasListItem = false
+
+        func flushParagraph() {
+            let joined = paragraphLines.joined(separator: "\n")
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if !joined.isEmpty {
+                items.append(.paragraph(joined))
+            }
+            paragraphLines = []
+        }
+
+        func appendToLastListItem(_ line: String) {
+            guard let last = items.indices.last else { return }
+            switch items[last] {
+            case .bullet(let text, let indent):
+                items[last] = .bullet(text: text + "\n" + line, indent: indent)
+            case .ordered(let number, let text, let indent):
+                items[last] = .ordered(number: number, text: text + "\n" + line, indent: indent)
+            case .paragraph:
+                paragraphLines.append(line)
+            }
+        }
+
+        for line in text.components(separatedBy: "\n") {
+            let leading = line.prefix(while: { $0 == " " || $0 == "\t" })
+                .reduce(0) { $0 + ($1 == "\t" ? 4 : 1) }
+            let trimmed = line.trimmingCharacters(in: .whitespaces)
+            let indent = min(leading / 2, 4)
+
+            if let marker = ["- ", "* ", "+ "].first(where: { trimmed.hasPrefix($0) }) {
+                flushParagraph()
+                items.append(.bullet(text: String(trimmed.dropFirst(marker.count)), indent: indent))
+                lastWasListItem = true
+            } else if let match = trimmed.firstMatch(of: /^(\d+)[.)]\s+/) {
+                flushParagraph()
+                items.append(.ordered(
+                    number: String(match.1),
+                    text: String(trimmed[match.range.upperBound...]),
+                    indent: indent
+                ))
+                lastWasListItem = true
+            } else if trimmed.isEmpty {
+                flushParagraph()
+                lastWasListItem = false
+            } else if lastWasListItem && leading >= 2 {
+                // Continuation line stays attached to its list item.
+                appendToLastListItem(trimmed)
+            } else {
+                paragraphLines.append(line)
+                lastWasListItem = false
+            }
+        }
+        flushParagraph()
+
+        return items
+    }
+
+    private func inlineMarkdownText(_ text: String) -> Text {
+        if let attributed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) {
+            return Text(attributed)
+        }
+        return Text(text)
     }
 
     private enum BodyBlock {
@@ -972,6 +1338,13 @@ struct NotesView: View {
                 let content = state.showingOriginal ? record.text : (record.refinedText ?? record.text)
                 return "[\(Self.transcriptTimeFormatter.string(from: record.timestamp))] \(label): \(content)"
             }.joined(separator: "\n")
+        case .chat:
+            // The conversation as Q:/A: lines; failure bubbles are transient
+            // UI, not conversation.
+            text = reviewChat.messages
+                .filter { $0.role != .failure }
+                .map { "\($0.role == .user ? "Q" : "A"): \($0.text)" }
+                .joined(separator: "\n")
         case .notes:
             text = state.loadedNotes?.markdown ?? ""
         }

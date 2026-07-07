@@ -15,7 +15,6 @@ final class NotesContractTests: XCTestCase {
         let coordinator = AppCoordinator(
             sessionRepository: sessionRepository,
             templateStore: templateStore,
-            notesEngine: NotesEngine(mode: .scripted(markdown: "# Test Notes\n\nGenerated.")),
             transcriptStore: TranscriptStore()
         )
         return (sessionRepository, templateStore, coordinator, root)
@@ -98,40 +97,4 @@ final class NotesContractTests: XCTestCase {
         XCTAssertEqual(loaded[1].text, "Second")
     }
 
-    func testNotesGenerationProducesMarkdownInScriptedMode() async {
-        let (_, _, coordinator, root) = await makeTestEnvironment()
-
-        let notesDir = root.appendingPathComponent("Notes", isDirectory: true)
-        try? FileManager.default.createDirectory(at: notesDir, withIntermediateDirectories: true)
-
-        let suiteName = "com.lore.tests.notes.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
-        defaults.removePersistentDomain(forName: suiteName)
-        defaults.set(notesDir.path, forKey: "notesFolderPath")
-        let storage = AppSettingsStorage(
-            defaults: defaults,
-            secretStore: .ephemeral,
-            defaultNotesDirectory: notesDir,
-            runMigrations: false
-        )
-        let settings = AppSettings(storage: storage)
-
-        let records = [
-            SessionRecord(speaker: .you, text: "Hello", timestamp: Date()),
-            SessionRecord(speaker: .them, text: "World", timestamp: Date()),
-        ]
-        let template = TemplateStore.builtInTemplates.first!
-
-        let notesEngine = coordinator.notesEngine
-        await notesEngine.generate(transcript: records, template: template, settings: settings)
-
-        XCTAssertFalse(notesEngine.generatedMarkdown.isEmpty)
-        XCTAssertTrue(notesEngine.generatedMarkdown.contains("Test Notes"))
-        XCTAssertFalse(notesEngine.isGenerating)
-    }
-
-    func testCleanupEngineExists() async {
-        let coordinator = AppCoordinator()
-        XCTAssertNotNil(coordinator.cleanupEngine)
-    }
 }

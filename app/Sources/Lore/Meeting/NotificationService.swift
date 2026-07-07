@@ -81,7 +81,21 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
                 .requestAuthorization(options: [.alert, .sound])
             return granted
         } catch {
+            diagLog("[DETECT] notification authorization request failed: \(error.localizedDescription)")
             return false
+        }
+    }
+
+    private func authorizationStatusDescription() async -> String {
+        let status = await UNUserNotificationCenter.current().notificationSettings()
+            .authorizationStatus
+        switch status {
+        case .authorized: return ".authorized"
+        case .denied: return ".denied"
+        case .notDetermined: return ".notDetermined"
+        case .provisional: return ".provisional"
+        case .ephemeral: return ".ephemeral"
+        @unknown default: return ".unknown(\(status.rawValue))"
         }
     }
 
@@ -90,7 +104,10 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
     /// Post a meeting detection notification with the given app name.
     /// Returns false if permission was denied.
     func postMeetingDetected(appName: String?) async -> Bool {
-        guard await ensurePermission() else { return false }
+        guard await ensurePermission() else {
+            diagLog("[DETECT] notification NOT posted, authorization missing (auth=\(await authorizationStatusDescription()))")
+            return false
+        }
 
         // Cancel any existing timeout
         pendingTimeoutTask?.cancel()
@@ -120,17 +137,22 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 
         do {
             try await UNUserNotificationCenter.current().add(request)
+            diagLog("[DETECT] notification posted")
         } catch {
+            diagLog("[DETECT] notification post FAILED: \(error.localizedDescription)")
             return false
         }
 
-        // Start 60-second timeout
+        // Start 60-second timeout. The task inherits this class's MainActor
+        // isolation, so the cancellation check and the callback are atomic
+        // with respect to cancelPending() — an extra uncancellable hop here
+        // would let a concurrent withdrawal (e.g. the notch surface
+        // resolving, #79) cancel this task after the check but before
+        // onTimeout fires, double-yielding .timeout.
         pendingTimeoutTask = Task { [weak self] in
             try? await Task.sleep(for: .seconds(60))
             guard !Task.isCancelled else { return }
-            Task { @MainActor [weak self] in
-                self?.onTimeout?()
-            }
+            self?.onTimeout?()
             UNUserNotificationCenter.current().removeDeliveredNotifications(
                 withIdentifiers: ["meeting-detection"]
             )

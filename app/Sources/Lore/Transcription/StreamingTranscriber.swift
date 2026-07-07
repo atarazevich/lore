@@ -6,7 +6,6 @@ import os
 /// and transcribes completed speech segments via the TranscriptionBackend protocol.
 final class StreamingTranscriber: @unchecked Sendable {
     private let backend: any TranscriptionBackend
-    private let locale: Locale
     private let vadManager: VadManager
     private let speaker: Speaker
     private let onPartial: @Sendable (String) -> Void
@@ -22,23 +21,16 @@ final class StreamingTranscriber: @unchecked Sendable {
         interleaved: false
     )!
 
-    /// Flush interval in 16kHz samples. Determined by the transcription model.
-    private let flushInterval: Int
-
     init(
         backend: any TranscriptionBackend,
-        locale: Locale,
         vadManager: VadManager,
         speaker: Speaker,
-        flushInterval: Int,
         onPartial: @escaping @Sendable (String) -> Void,
         onFinal: @escaping @Sendable (String) -> Void
     ) {
         self.backend = backend
-        self.locale = locale
         self.vadManager = vadManager
         self.speaker = speaker
-        self.flushInterval = flushInterval
         self.onPartial = onPartial
         self.onFinal = onFinal
     }
@@ -48,7 +40,9 @@ final class StreamingTranscriber: @unchecked Sendable {
     /// Parakeet TDT requires >= 1s of audio; shorter segments produce unreliable output.
     private static let minimumSpeechSamples = 16_000
     private static let prerollChunkCount = 2
-    // flushInterval is now an instance property, set per-model via TranscriptionModel.flushIntervalSamples
+    /// Flush interval in 16kHz samples. Longer chunks give the decoder more
+    /// context and reduce WER (5s=41% vs 10s=36% on OpenOats benchmark).
+    private let flushInterval = 10 * 16_000
     /// Number of trailing words to carry across segment boundaries for decoder priming.
     private static let contextWordCount = 5
 
@@ -161,7 +155,7 @@ final class StreamingTranscriber: @unchecked Sendable {
 
     private func transcribeSegment(_ samples: [Float]) async {
         do {
-            let text = try await backend.transcribe(samples, locale: locale, previousContext: previousContext)
+            let text = try await backend.transcribe(samples, previousContext: previousContext)
             guard !text.isEmpty else { return }
             log.info("[\(self.speaker.storageKey)] transcribed: \(text.prefix(80))")
             // Store trailing words for cross-segment context

@@ -33,6 +33,18 @@ final class SystemAudioCapture: @unchecked Sendable {
             self._sysContinuation.withLock { $0 = continuation }
         }
 
+        // All tap/aggregate/IOProc control calls are HAL IPC — they serialize on the
+        // process-wide HAL queue with AudioBus's own start/stop (#64), entered through
+        // the async door (never sync). IOProc delivery stays on callbackQueue.
+        try await AudioBus.onHALQueue { [self] in
+            try startCaptureOnHALQueue(outputDeviceID: outputDeviceID)
+        }
+
+        return CaptureStreams(systemAudio: sysStream)
+    }
+
+    /// Runs on AudioBus's shared HAL queue only (via the `onHALQueue` door).
+    private func startCaptureOnHALQueue(outputDeviceID: AudioDeviceID?) throws {
         let outputDeviceID = try (outputDeviceID ?? Self.defaultOutputDeviceID())
         let outputUID = try Self.deviceUID(for: outputDeviceID)
         let tapUUID = UUID()
@@ -121,6 +133,7 @@ final class SystemAudioCapture: @unchecked Sendable {
             throw CaptureError.startFailed(status)
         }
 
+        // Copy to lets: withLock closures are @Sendable and cannot capture the vars.
         let activeTapID = tapID
         let activeAggregateDeviceID = aggregateDeviceID
         let activeIOProcID = ioProcID
@@ -128,8 +141,6 @@ final class SystemAudioCapture: @unchecked Sendable {
         _tapID.withLock { $0 = activeTapID }
         _aggregateDeviceID.withLock { $0 = activeAggregateDeviceID }
         _ioProcID.withLock { $0 = activeIOProcID }
-
-        return CaptureStreams(systemAudio: sysStream)
     }
 
     /// Finish the async stream so consumers exit their for-await loop.
@@ -157,16 +168,21 @@ final class SystemAudioCapture: @unchecked Sendable {
             return current
         }
 
-        if aggregateDeviceID != AudioObjectID(kAudioObjectUnknown) {
-            if let ioProcID {
-                _ = AudioDeviceStop(aggregateDeviceID, ioProcID)
-                _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
-            }
-            _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-        }
+        guard aggregateDeviceID != AudioObjectID(kAudioObjectUnknown)
+                || tapID != AudioObjectID(kAudioObjectUnknown) else { return }
 
-        if tapID != AudioObjectID(kAudioObjectUnknown) {
-            _ = AudioHardwareDestroyProcessTap(tapID)
+        // Teardown is HAL IPC — same single serialization point as setup (#64).
+        await AudioBus.onHALQueue {
+            if aggregateDeviceID != AudioObjectID(kAudioObjectUnknown) {
+                if let ioProcID {
+                    _ = AudioDeviceStop(aggregateDeviceID, ioProcID)
+                    _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+                }
+                _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            }
+            if tapID != AudioObjectID(kAudioObjectUnknown) {
+                _ = AudioHardwareDestroyProcessTap(tapID)
+            }
         }
     }
 
@@ -250,7 +266,8 @@ final class SystemAudioCapture: @unchecked Sendable {
         return processObjectID
     }
 
-    static func defaultOutputDeviceID() throws -> AudioDeviceID {
+    /// HAL property read — called only from startCaptureOnHALQueue (shared HAL queue).
+    private static func defaultOutputDeviceID() throws -> AudioDeviceID {
         var address = propertyAddress(selector: kAudioHardwarePropertyDefaultOutputDevice)
         var deviceID = AudioDeviceID(kAudioObjectUnknown)
         var dataSize = UInt32(MemoryLayout<AudioDeviceID>.size)

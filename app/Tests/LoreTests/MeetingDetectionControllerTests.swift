@@ -179,6 +179,66 @@ final class MeetingDetectionControllerTests: XCTestCase {
         // Reaching this point means the stream didn't block on init
     }
 
+    // MARK: - Session-Active Suppression (#77)
+
+    // These tests pin the isSessionActive guard in handleMeetingDetected; the
+    // AppContainer closure wiring (isRecording || dictationCoordinator.state
+    // == .recording) is verified by inspection.
+
+    func testMeetingDetectedSuppressedWhileSessionActive() async {
+        let controller = MeetingDetectionController()
+        controller.isSessionActive = { true }
+
+        let prompted = await controller.handleMeetingDetected(
+            app: MeetingApp(bundleID: "us.zoom.xos", name: "Zoom")
+        )
+
+        XCTAssertFalse(
+            prompted,
+            "No notification prompt while a session (meeting recording or dictation) is active"
+        )
+    }
+
+    func testMeetingDetectedPromptsWhenNoSessionActive() async {
+        let controller = MeetingDetectionController()
+        controller.isSessionActive = { false }
+
+        // notificationService is nil without setup(), so no real notification
+        // is posted — the return value covers reaching the prompt path.
+        let prompted = await controller.handleMeetingDetected(
+            app: MeetingApp(bundleID: "us.zoom.xos", name: "Zoom")
+        )
+
+        XCTAssertTrue(prompted, "Prompt path should be reached when no session is active")
+    }
+
+    // MARK: - Enable/Disable/Enable Cycle (#78)
+
+    /// One detection stop/start cycle must not leave a ghost detector:
+    /// teardown must stop the OLD MeetingDetector so its monitor loop exits
+    /// and the detector — in production, with it the CoreAudioSignalSource
+    /// and its HAL listeners — is released (#78).
+    func testTeardownStopsAndReleasesOldDetector() async throws {
+        let controller = MeetingDetectionController()
+        let source = MockAudioSignalSource()
+
+        // Inject a started detector (setup() needs UNUserNotificationCenter,
+        // unavailable under swift test). Its monitor task now parks on the
+        // mock signal stream, holding the detector strongly.
+        var detector: MeetingDetector? = MeetingDetector(audioSource: source)
+        await detector?.start()
+        controller.injectDetectorForTesting(detector!)
+        weak var oldDetector = detector
+        detector = nil
+
+        controller.teardown()
+        XCTAssertNil(controller.meetingDetector, "teardown must clear the detector reference")
+
+        // Once stop() runs, nothing holds the detector and it deallocates.
+        let released = await waitUntil { oldDetector == nil }
+        XCTAssertTrue(released, "old detector must deallocate after teardown")
+    }
+
     // MARK: - App Exit Monitoring
 
     func testAppExitMonitorYieldsEventWhenAppNotRunning() async throws {

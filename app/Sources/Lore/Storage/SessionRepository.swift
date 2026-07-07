@@ -13,10 +13,17 @@ typealias SessionIndexEntry = SessionIndex
 struct SessionStartConfig: Sendable {
     let templateID: UUID?
     let templateSnapshot: TemplateSnapshot?
+    /// Initial title written at creation (#58: "Weekday HH:MM" default).
+    let title: String?
 
-    init(templateID: UUID? = nil, templateSnapshot: TemplateSnapshot? = nil) {
+    init(
+        templateID: UUID? = nil,
+        templateSnapshot: TemplateSnapshot? = nil,
+        title: String? = nil
+    ) {
         self.templateID = templateID
         self.templateSnapshot = templateSnapshot
+        self.title = title
     }
 }
 
@@ -29,28 +36,26 @@ struct SessionHandle: Sendable {
 /// Metadata attached to each live utterance write.
 struct LiveUtteranceMetadata: Sendable {
     let utteranceID: UUID?
-    let suggestionEngine: SuggestionEngine?
     let transcriptStore: TranscriptStore?
     let isDelayed: Bool
 
     init(
         utteranceID: UUID? = nil,
-        suggestionEngine: SuggestionEngine? = nil,
         transcriptStore: TranscriptStore? = nil,
         isDelayed: Bool = false
     ) {
         self.utteranceID = utteranceID
-        self.suggestionEngine = suggestionEngine
         self.transcriptStore = transcriptStore
         self.isDelayed = isDelayed
     }
 }
 
-/// Metadata collected at finalization time.
+/// Metadata collected at finalization time. The title is not part of it:
+/// finalization preserves the title stored at creation (or set by a rename
+/// during the recording).
 struct SessionFinalizeMetadata: Sendable {
     let endedAt: Date
     let utteranceCount: Int
-    let title: String?
     let language: String?
     let meetingApp: String?
     let engine: String?
@@ -90,6 +95,30 @@ struct SessionMetadata: Codable, Sendable {
     var tags: [String]?
     /// How the session was created (nil for live sessions, "imported" for imported audio).
     var source: String?
+    /// Fresh-meeting marker (MREV-39): true while batch/import output is
+    /// pending or unseen; cleared on view. Optional — absent in older files.
+    var unviewed: Bool? = nil
+}
+
+extension SessionIndex {
+    /// Index entry derived from a canonical `session.json`.
+    init(from meta: SessionMetadata) {
+        self.init(
+            id: meta.id,
+            startedAt: meta.startedAt,
+            endedAt: meta.endedAt,
+            templateSnapshot: meta.templateSnapshot,
+            title: meta.title,
+            utteranceCount: meta.utteranceCount,
+            hasNotes: meta.hasNotes,
+            language: meta.language,
+            meetingApp: meta.meetingApp,
+            engine: meta.engine,
+            tags: meta.tags,
+            source: meta.source,
+            unviewed: meta.unviewed
+        )
+    }
 }
 
 // MARK: - SessionRepository
@@ -194,6 +223,7 @@ actor SessionRepository {
             id: sessionID,
             startedAt: Date(),
             templateSnapshot: config.templateSnapshot,
+            title: config.title,
             utteranceCount: 0,
             hasNotes: false
         )
@@ -222,7 +252,6 @@ actor SessionRepository {
             appendRecordDelayed(
                 baseRecord: baseRecord,
                 utteranceID: metadata.utteranceID,
-                suggestionEngine: metadata.suggestionEngine,
                 transcriptStore: metadata.transcriptStore
             )
         } else {
@@ -248,11 +277,11 @@ actor SessionRepository {
         }
     }
 
-    /// Delayed write: sleeps 5s to capture pipeline enrichment, then writes.
+    /// Delayed write: sleeps 5s to capture pipeline enrichment (refined
+    /// text landing asynchronously), then writes.
     private func appendRecordDelayed(
         baseRecord: SessionRecord,
         utteranceID: UUID?,
-        suggestionEngine: SuggestionEngine?,
         transcriptStore: TranscriptStore?
     ) {
         pendingWrites += 1
@@ -260,10 +289,6 @@ actor SessionRepository {
             try? await Task.sleep(for: .seconds(5))
 
             guard let self else { return }
-
-            let decision = await suggestionEngine?.lastDecision
-            let latestSuggestion = await suggestionEngine?.suggestions.first
-            let summary = await transcriptStore?.conversationState.shortSummary
 
             let refinedText: String?
             if let utteranceID, let store = transcriptStore {
@@ -276,11 +301,6 @@ actor SessionRepository {
                 speaker: baseRecord.speaker,
                 text: baseRecord.text,
                 timestamp: baseRecord.timestamp,
-                suggestions: latestSuggestion.map { [$0.text] },
-                kbHits: latestSuggestion?.kbHits.map { $0.sourceFile },
-                suggestionDecision: decision,
-                surfacedSuggestionText: decision?.shouldSurface == true ? latestSuggestion?.text : nil,
-                conversationStateSummary: summary?.isEmpty == false ? summary : nil,
                 refinedText: refinedText
             )
 
@@ -310,7 +330,8 @@ actor SessionRepository {
 
     // MARK: - Finalization
 
-    func finalizeSession(sessionID: String, metadata: SessionFinalizeMetadata) {
+    @discardableResult
+    func finalizeSession(sessionID: String, metadata: SessionFinalizeMetadata) -> SessionIndex {
         // Close the live file handle
         try? liveFileHandle?.close()
         liveFileHandle = nil
@@ -319,13 +340,15 @@ actor SessionRepository {
         // Backfill refined text into live transcript
         backfillRefinedText(sessionID: sessionID, from: metadata.utterances)
 
-        // Write session.json with final metadata
+        // Write session.json with final metadata. The stored title (set at
+        // creation, possibly renamed mid-recording) is preserved.
+        let storedTitle = loadSessionMetadataFile(sessionID: sessionID)?.title
         let sessionMeta = SessionMetadata(
             id: sessionID,
             startedAt: metadata.utterances.first?.timestamp ?? Date(),
             endedAt: metadata.endedAt,
             templateSnapshot: metadata.templateSnapshot,
-            title: metadata.title,
+            title: storedTitle,
             utteranceCount: metadata.utteranceCount,
             hasNotes: false,
             language: metadata.language,
@@ -333,6 +356,7 @@ actor SessionRepository {
             engine: metadata.engine
         )
         writeSessionMetadata(sessionMeta, sessionID: sessionID)
+        return SessionIndex(from: sessionMeta)
     }
 
     /// End a session without full finalization (discard path).
@@ -378,7 +402,7 @@ actor SessionRepository {
             hasNotes: false,
             language: config.language,
             engine: config.engine,
-            source: "imported"
+            source: SessionIndex.importedSource
         )
         writeSessionMetadata(metadata, sessionID: sessionID)
 
@@ -393,13 +417,67 @@ actor SessionRepository {
         writeSessionMetadata(meta, sessionID: sessionID)
     }
 
+    // MARK: - Ask Lore chat (#60)
+
+    /// Append one completed exchange to the session's `chat.json`.
+    /// Write-through per successful answer so the chat survives crashes;
+    /// the file is small (a handful of turns), so read-modify-write is fine.
+    ///
+    /// Corrupt-file policy: a chat.json that exists but fails to decode is
+    /// never rebuilt over (that would destroy prior turns) — it is moved
+    /// aside to a unique name (`chat.json.corrupt`, then `.corrupt.1`,
+    /// `.corrupt.2`, …) so earlier asides survive repeat corruption, and a
+    /// fresh file starts with this exchange.
+    func appendChatExchange(sessionID: String, exchange: ChatExchange) {
+        let url = sessionDirectory(for: sessionID).appendingPathComponent("chat.json")
+
+        var exchanges: [ChatExchange] = []
+        if let data = try? Data(contentsOf: url) {
+            if let decoded = try? decoder.decode([ChatExchange].self, from: data) {
+                exchanges = decoded
+            } else {
+                var aside = url.appendingPathExtension("corrupt")
+                var suffix = 1
+                while FileManager.default.fileExists(atPath: aside.path) {
+                    aside = URL(fileURLWithPath: url.path + ".corrupt.\(suffix)")
+                    suffix += 1
+                }
+                diagLog("[CHAT] corrupt chat.json for \(sessionID) — moving aside to \(aside.lastPathComponent)")
+                try? FileManager.default.moveItem(at: url, to: aside)
+            }
+        }
+
+        exchanges.append(exchange)
+        guard let data = try? encoder.encode(exchanges) else { return }
+        try? data.write(to: url, options: .atomic)
+    }
+
+    /// Chat history for a session. Missing file (legacy sessions, sessions
+    /// without questions) or decode failure → empty, never an error.
+    func loadChat(sessionID: String) -> [ChatExchange] {
+        let url = sessionDirectory(for: sessionID).appendingPathComponent("chat.json")
+        guard let data = try? Data(contentsOf: url),
+              let exchanges = try? decoder.decode([ChatExchange].self, from: data)
+        else { return [] }
+        return exchanges
+    }
+
     /// Copy an audio file into the session's audio directory.
     func copyAudioFileToSession(sessionID: String, sourceURL: URL) {
         let audioDir = sessionDirectory(for: sessionID)
             .appendingPathComponent("audio", isDirectory: true)
         try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
         let dest = audioDir.appendingPathComponent("imported.\(sourceURL.pathExtension)")
-        try? FileManager.default.copyItem(at: sourceURL, to: dest)
+        // Retry of an import (#43) re-runs over the session's own copy —
+        // an explicit no-op, not a swallowed error.
+        guard sourceURL.standardizedFileURL.path != dest.standardizedFileURL.path else { return }
+        do {
+            try FileManager.default.copyItem(at: sourceURL, to: dest)
+        } catch {
+            // Non-fatal: the import proceeds from the source URL; only
+            // retry/playback lose the session copy.
+            diagLog("[IMPORT] audio copy into \(sessionID) failed: \(error.localizedDescription)")
+        }
     }
 
     // MARK: - Final Transcript
@@ -483,18 +561,6 @@ actor SessionRepository {
         )
     }
 
-    // MARK: - Images
-
-    func saveImage(sessionID: String, imageData: Data) -> String {
-        let dir = sessionDirectory(for: sessionID)
-            .appendingPathComponent("images", isDirectory: true)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let filename = "\(UUID().uuidString).png"
-        let url = dir.appendingPathComponent(filename)
-        try? imageData.write(to: url, options: .atomic)
-        return filename
-    }
-
     // MARK: - Listing & Loading
 
     func listSessions() -> [SessionIndex] {
@@ -517,20 +583,7 @@ actor SessionRepository {
                 let metaURL = item.appendingPathComponent("session.json")
                 if let data = try? Data(contentsOf: metaURL),
                    let meta = try? decoder.decode(SessionMetadata.self, from: data) {
-                    results.append(SessionIndex(
-                        id: meta.id,
-                        startedAt: meta.startedAt,
-                        endedAt: meta.endedAt,
-                        templateSnapshot: meta.templateSnapshot,
-                        title: meta.title,
-                        utteranceCount: meta.utteranceCount,
-                        hasNotes: meta.hasNotes,
-                        language: meta.language,
-                        meetingApp: meta.meetingApp,
-                        engine: meta.engine,
-                        tags: meta.tags,
-                        source: meta.source
-                    ))
+                    results.append(SessionIndex(from: meta))
                     continue
                 }
             }
@@ -554,20 +607,7 @@ actor SessionRepository {
         // Try canonical first
         if let data = try? Data(contentsOf: metaURL),
            let meta = try? decoder.decode(SessionMetadata.self, from: data) {
-            let index = SessionIndex(
-                id: meta.id,
-                startedAt: meta.startedAt,
-                endedAt: meta.endedAt,
-                templateSnapshot: meta.templateSnapshot,
-                title: meta.title,
-                utteranceCount: meta.utteranceCount,
-                hasNotes: meta.hasNotes,
-                language: meta.language,
-                meetingApp: meta.meetingApp,
-                engine: meta.engine,
-                tags: meta.tags,
-                source: meta.source
-            )
+            let index = SessionIndex(from: meta)
 
             let transcript = loadTranscript(sessionID: id)
             let liveTranscript = loadLiveTranscript(sessionID: id)
@@ -624,9 +664,14 @@ actor SessionRepository {
     // MARK: - Session Management
 
     func renameSession(sessionID: String, title: String) {
+        // Whitespace-only counts as empty: title clears to nil and the
+        // derived default name (#58) takes over. Fixed here so every rename
+        // surface (list context menu, review header) inherits it.
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+
         // Try canonical
         if var meta = loadSessionMetadataFile(sessionID: sessionID) {
-            meta.title = title.isEmpty ? nil : title
+            meta.title = trimmed.isEmpty ? nil : trimmed
             writeSessionMetadata(meta, sessionID: sessionID)
             mirrorNotesArtifacts(sessionID: sessionID)
             return
@@ -635,7 +680,7 @@ actor SessionRepository {
         // Fall back to legacy rename (updates sidecar)
         LegacySessionReader.renameSession(
             sessionID: sessionID,
-            newTitle: title,
+            newTitle: trimmed,
             sessionsDirectory: sessionsDirectory
         )
     }
@@ -667,6 +712,25 @@ actor SessionRepository {
         )
         let dir = sessionDirectory(for: sessionID)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        writeSessionMetadata(meta, sessionID: sessionID)
+    }
+
+    /// Mark a session as fresh/unviewed (MREV-39): called when batch
+    /// processing or an import is kicked off, so the green dot survives
+    /// relaunch mid-batch. Canonical sessions only — legacy sessions never
+    /// enter the batch pipeline.
+    func markSessionUnviewed(sessionID: String) {
+        guard var meta = loadSessionMetadataFile(sessionID: sessionID) else { return }
+        meta.unviewed = true
+        writeSessionMetadata(meta, sessionID: sessionID)
+    }
+
+    /// Clear the fresh/unviewed marker once the user views the processed
+    /// meeting.
+    func markSessionViewed(sessionID: String) {
+        guard var meta = loadSessionMetadataFile(sessionID: sessionID),
+              meta.unviewed == true else { return }
+        meta.unviewed = nil
         writeSessionMetadata(meta, sessionID: sessionID)
     }
 

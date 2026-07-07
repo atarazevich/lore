@@ -1,24 +1,22 @@
 import FluidAudio
 import Foundation
 
-/// Transcription backend for Parakeet-TDT models (v2 English-only, v3 multilingual).
+/// Transcription backend for Parakeet TDT v3 (multilingual) — the app's only
+/// transcription model since #53 (single-model decision, docs/decisions.md).
 /// @unchecked Sendable: asrManager is written once in prepare() before any transcribe() calls.
 final class ParakeetBackend: TranscriptionBackend, @unchecked Sendable {
-    let displayName: String
-    private let version: AsrModelVersion
+    let displayName = "Parakeet TDT v3"
+    /// Engine identifier persisted in session metadata and markdown frontmatter.
+    static let engineName = "parakeetV3"
+    private let version: AsrModelVersion = .v3
     private var asrManager: AsrManager?
-
-    init(version: AsrModelVersion) {
-        self.version = version
-        self.displayName = version == .v2 ? "Parakeet TDT v2" : "Parakeet TDT v3"
-    }
 
     func checkStatus() -> BackendStatus {
         let exists = AsrModels.modelsExist(
             at: AsrModels.defaultCacheDirectory(for: version),
             version: version
         )
-        return exists ? .ready : .needsDownload(prompt: "Transcription requires a one-time model download.")
+        return exists ? .ready : .needsDownload
     }
 
     func clearModelCache() {
@@ -35,11 +33,11 @@ final class ParakeetBackend: TranscriptionBackend, @unchecked Sendable {
         let asr = AsrManager(config: .default)
         // FluidAudio 0.14 renamed `initialize(models:)` to `loadModels(_:)`.
         try await asr.loadModels(models)
-        // Vocabulary boosting removed with FluidAudio v0.14 bump (#35); will return via SlidingWindowAsrManager (#34).
+        // Vocabulary boosting removed with FluidAudio v0.14 bump (#35); the vocabulary track was retired entirely in #53.
         self.asrManager = asr
     }
 
-    func transcribe(_ samples: [Float], locale: Locale, previousContext: String? = nil) async throws -> String {
+    func transcribe(_ samples: [Float], previousContext: String? = nil) async throws -> String {
         guard let asrManager else {
             throw TranscriptionBackendError.notPrepared
         }

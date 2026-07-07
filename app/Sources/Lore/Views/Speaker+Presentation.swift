@@ -1,6 +1,14 @@
 import SwiftUI
 
 extension Speaker {
+    /// XMO-design speaker color (MREC-11): "You" is the token blue; diarized
+    /// remote speakers keep the current 10-color palette (same rule as the
+    /// Stage E review side — a single muted gray loses information, D-031).
+    var xmoColor: Color {
+        if case .you = self { return XMOTheme.Accent.blue }
+        return color
+    }
+
     /// Color for this speaker in transcript and notes views.
     var color: Color {
         switch self {

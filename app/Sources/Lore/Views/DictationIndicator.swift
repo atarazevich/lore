@@ -11,6 +11,9 @@ struct DictationIndicatorView: View {
     var recordingSeconds: Int = 0
     var showUpgradeButtons = false
     var hideCleanupButton = false
+    /// DSET-06: the C/T keycap hints disappear when the upgrade-keys modifier
+    /// toggle is off; the buttons themselves stay clickable.
+    var showUpgradeKeycaps = true
     var upgradeCountdown: Double?
     var lastError: String?
     var bluetoothRedirected = false
@@ -25,7 +28,7 @@ struct DictationIndicatorView: View {
                 if let error = lastError {
                     // Mic stall surfaced by the first-frame watchdog — show it loudly
                     // instead of a normal-looking recording meter.
-                    statusRow(icon: "xmark.circle.fill", iconColor: .red, text: error, wrap: true)
+                    statusRow(icon: "xmark.circle.fill", iconColor: XMOTheme.Accent.red, text: error, wrap: true)
                 } else {
                     recordingContent
                 }
@@ -37,9 +40,9 @@ struct DictationIndicatorView: View {
                 if showUpgradeButtons {
                     upgradeContent
                 } else if let error = lastError {
-                    statusRow(icon: "xmark.circle.fill", iconColor: .red, text: error, wrap: true)
+                    statusRow(icon: "xmark.circle.fill", iconColor: XMOTheme.Accent.red, text: error, wrap: true)
                 } else {
-                    statusRow(icon: "checkmark.circle.fill", iconColor: .green, text: "Done")
+                    statusRow(icon: "checkmark.circle.fill", iconColor: XMOTheme.Accent.green, text: "Done")
                 }
             case .idle:
                 EmptyView()
@@ -56,43 +59,39 @@ struct DictationIndicatorView: View {
 
     private var recordingContent: some View {
         HStack(spacing: 10) {
-            if noSignal {
-                Circle()
-                    .fill(.white.opacity(0.3))
-                    .frame(width: 8, height: 8)
-            } else {
-                Circle()
-                    .fill(.red)
-                    .frame(width: 8, height: 8)
-            }
+            Circle()
+                // No-signal keeps its distinct dimmed look (not a token color
+                // — it must read as "not recording red").
+                .fill(noSignal ? Color.white.opacity(0.3) : XMOTheme.Accent.red)
+                .frame(width: 8, height: 8)
             if isLocked {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(.white.opacity(0.7))
+                    .foregroundStyle(XMOTheme.TextColor.muted)
             }
-            WaveformBars(level: audioLevel, noSignal: noSignal)
+            waveform
             if noSignal {
                 Text("No signal from microphone")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .foregroundStyle(XMOTheme.TextColor.muted)
             } else {
                 Text(timerString)
-                    .font(.system(size: 13, design: .monospaced))
-                    .foregroundStyle(.white.opacity(0.6))
+                    .font(XMOTheme.Typography.mono(13))
+                    .foregroundStyle(XMOTheme.TextColor.muted)
                     .monospacedDigit()
             }
             if bluetoothRedirected {
                 Group {
                     if showBluetoothInfo {
                         Text("Using laptop mic — AirPods mic compresses audio below what speech recognition needs")
-                            .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.7))
+                            .font(XMOTheme.Typography.meta)
+                            .foregroundStyle(XMOTheme.TextColor.muted)
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Image(systemName: "laptopcomputer.and.arrow.down")
                             .font(.system(size: 11))
-                            .foregroundStyle(.white.opacity(0.5))
+                            .foregroundStyle(XMOTheme.TextColor.muted)
                     }
                 }
                 .onTapGesture { showBluetoothInfo.toggle() }
@@ -101,9 +100,29 @@ struct DictationIndicatorView: View {
             if let mode = pendingMode {
                 Text("+ \(mode == .cleanup ? "Cleanup" : "Translate")")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(.white.opacity(0.9))
+                    .foregroundStyle(XMOTheme.TextColor.primary)
             }
         }
+    }
+
+    /// Shared XMO waveform while live; the no-signal state keeps its distinct
+    /// flat dimmed bars. Fixed 18pt frame preserves the pre-Stage-H panel
+    /// height (`.fixedSize()` sizing is load-bearing — see the manager).
+    private var waveform: some View {
+        Group {
+            if noSignal {
+                HStack(spacing: 2) {
+                    ForEach(0..<7, id: \.self) { _ in
+                        RoundedRectangle(cornerRadius: 1)
+                            .fill(Color.white.opacity(0.3))
+                            .frame(width: 2, height: 4)
+                    }
+                }
+            } else {
+                XMOLiveWaveform(level: audioLevel)
+            }
+        }
+        .frame(height: 18)
     }
 
     private var timerString: String {
@@ -119,12 +138,12 @@ struct DictationIndicatorView: View {
             ProgressView()
                 .controlSize(.small)
             Text("Processing...")
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.8))
+                .font(XMOTheme.Typography.body)
+                .foregroundStyle(XMOTheme.TextColor.primary)
         }
     }
 
-    private func statusRow(icon: String, iconColor: Color = .white.opacity(0.7), text: String, wrap: Bool = false) -> some View {
+    private func statusRow(icon: String, iconColor: Color = XMOTheme.TextColor.muted, text: String, wrap: Bool = false) -> some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
                 .foregroundStyle(iconColor)
@@ -137,8 +156,8 @@ struct DictationIndicatorView: View {
             // it wraps; `fixedSize(vertical:)` then reports the true multi-line height the panel
             // grows to. No line limit on wrap so the full message always shows.
             Text(text)
-                .font(.system(size: 13))
-                .foregroundStyle(.white.opacity(0.8))
+                .font(XMOTheme.Typography.body)
+                .foregroundStyle(XMOTheme.TextColor.primary)
                 .lineLimit(wrap ? nil : 1)
                 .multilineTextAlignment(.leading)
                 .frame(width: wrap ? 260 : nil, alignment: .leading)
@@ -152,15 +171,25 @@ struct DictationIndicatorView: View {
     private var upgradeContent: some View {
         VStack(spacing: 4) {
             HStack(spacing: 10) {
-                Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(.green)
-                    .font(.system(size: 12))
-                Text("Pasted")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.white.opacity(0.5))
+                // A failed cleanup/translate must not render as success (#50):
+                // red row states what happened; C/T stay available as retry.
+                if let error = lastError {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(XMOTheme.Accent.red)
+                        .font(.system(size: 12))
+                    Text(error)
+                        .font(XMOTheme.Typography.body)
+                        .foregroundStyle(XMOTheme.TextColor.primary)
+                } else {
+                    Image(systemName: "checkmark.circle.fill")
+                        .foregroundStyle(XMOTheme.Accent.green)
+                        .font(.system(size: 12))
+                    Text("Pasted")
+                        .font(XMOTheme.Typography.body)
+                        .foregroundStyle(XMOTheme.TextColor.muted)
+                }
 
-                Rectangle()
-                    .fill(Color.white.opacity(0.12))
+                XMOTheme.Surface.line
                     .frame(width: 1, height: 14)
 
                 if !hideCleanupButton {
@@ -183,52 +212,26 @@ struct DictationIndicatorView: View {
     @ViewBuilder
     private func upgradeButton(label: String, subtitle: String, action: UpgradeAction) -> some View {
         HStack(spacing: 4) {
-            Text(label)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
-                .foregroundStyle(.white.opacity(0.5))
+            if showUpgradeKeycaps {
+                Text(label)
+                    .font(XMOTheme.Typography.mono(11, weight: .semibold))
+                    .foregroundStyle(XMOTheme.TextColor.muted)
+            }
             Text(subtitle)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(.white.opacity(0.8))
+                .foregroundStyle(XMOTheme.TextColor.primary)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(
-            RoundedRectangle(cornerRadius: 5)
+            // Design `.ibtn` fill — same white .07 as XMOIconButton.
+            RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
                 .fill(Color.white.opacity(0.07))
         )
         .contentShape(Rectangle())
         .onTapGesture {
             onUpgrade?(action)
         }
-    }
-}
-
-// MARK: - Waveform
-
-private struct WaveformBars: View {
-    let level: Float
-    var noSignal = false
-    private let barCount = 7
-
-    var body: some View {
-        HStack(spacing: 2) {
-            ForEach(0..<barCount, id: \.self) { index in
-                RoundedRectangle(cornerRadius: 1)
-                    .fill(noSignal ? .white.opacity(0.3) : .red.opacity(0.8))
-                    .frame(width: noSignal ? 2 : 3, height: noSignal ? 4 : barHeight(for: index))
-            }
-        }
-        .frame(height: 18)
-        .animation(.easeInOut(duration: 0.1), value: level)
-    }
-
-    private func barHeight(for index: Int) -> CGFloat {
-        let base: CGFloat = 4
-        let maxExtra: CGFloat = 14
-        let phase = CGFloat(index) / CGFloat(barCount)
-        let variation = sin(phase * .pi + CGFloat(level) * .pi * 2)
-        let normalized = CGFloat(level) * (0.5 + 0.5 * abs(variation))
-        return base + maxExtra * normalized
     }
 }
 
@@ -244,6 +247,7 @@ final class DictationIndicatorModel {
     var recordingSeconds: Int = 0
     var showUpgradeButtons = false
     var hideCleanupButton = false
+    var showUpgradeKeycaps = true
     var upgradeCountdown: Double?
     var lastError: String?
     var bluetoothRedirected = false
@@ -264,6 +268,7 @@ private struct DictationIndicatorHost: View {
             recordingSeconds: model.recordingSeconds,
             showUpgradeButtons: model.showUpgradeButtons,
             hideCleanupButton: model.hideCleanupButton,
+            showUpgradeKeycaps: model.showUpgradeKeycaps,
             upgradeCountdown: model.upgradeCountdown,
             lastError: model.lastError,
             bluetoothRedirected: model.bluetoothRedirected,
@@ -280,7 +285,9 @@ final class DictationIndicatorManager {
     private var panel: OverlayPanel?
     private var hostingView: NSHostingView<DictationIndicatorHost>?
     private var observationTask: Task<Void, Never>?
-    private let model = DictationIndicatorModel()
+    /// Observable dictation state mirror; the shell reads `model.isLocked`
+    /// for the Dictation nav live dot (SHELL-10).
+    let model = DictationIndicatorModel()
     private var recordingStartDate: Date?
     private var lastPanelSize: NSSize = .zero
     private var currentScreen: NSScreen?
@@ -351,6 +358,8 @@ final class DictationIndicatorManager {
                 }
                 self.model.showUpgradeButtons = coordinator.isUpgradePanelVisible
                 self.model.hideCleanupButton = coordinator.cleanupAlreadyApplied
+                self.model.showUpgradeKeycaps =
+                    coordinator.settings?.modifierUpgradeKeysEnabled ?? true
                 self.model.upgradeCountdown = coordinator.upgradeCountdown
                 self.model.lastError = coordinator.lastError
                 self.model.bluetoothRedirected = coordinator.bluetoothMicRedirected

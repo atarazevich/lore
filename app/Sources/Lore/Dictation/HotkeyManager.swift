@@ -76,7 +76,8 @@ final class HotkeyManager {
 
             // Fn+V/T while recording → consume (use event's own Fn flag, not tracked flag)
             if event.modifierFlags.contains(.function) && self.isRecordingFlag {
-                if event.keyCode == 9 || event.keyCode == 17 { // V or T
+                if (event.keyCode == 9 && self.modifierOn({ $0.modifierCleanupEnabled }))
+                    || (event.keyCode == 17 && self.modifierOn({ $0.modifierTranslateEnabled })) { // V or T
                     Task { @MainActor in
                         self.handleKeyDown(event)
                     }
@@ -87,6 +88,7 @@ final class HotkeyManager {
             // C or T while upgrade panel is showing → apply upgrade
             // Only match bare keypress (no Cmd/Ctrl/Option modifiers) to avoid eating Cmd+C etc.
             if self.isUpgradeShowingFlag,
+               self.modifierOn({ $0.modifierUpgradeKeysEnabled }),
                event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
                let chars = event.characters?.lowercased() {
                 var action: UpgradeAction?
@@ -112,6 +114,7 @@ final class HotkeyManager {
 
             // Space while recording or pre-buffering → lock (consume the event)
             if event.keyCode == 49,
+               self.modifierOn({ $0.modifierLockEnabled }),
                (self.isRecordingFlag || self.isPreBufferingFlag),
                !self.isLocked {
                 Task { @MainActor in
@@ -177,8 +180,18 @@ final class HotkeyManager {
         isUpgradeShowingFlag = showing
     }
 
-    private var isEnabled: Bool {
-        settings?.dictationEnabled ?? false
+    /// Modifier enable toggle lookup (DSET-05/06): Space lock, Fn+V cleanup,
+    /// Fn+T translate, and the post-paste C/T upgrade keys each gate on one
+    /// SettingsStore flag; absent settings default to enabled. The NSEvent
+    /// monitors and the CGEvent tap callback all run on the main thread (the
+    /// tap source is added to CFRunLoopGetMain — see the Space path's
+    /// assumeIsolated precedent), so this is a cheap cached-property read in
+    /// the event path. Esc is not a modifier and is never gated.
+    nonisolated private func modifierOn(_ read: @MainActor (AppSettings) -> Bool) -> Bool {
+        MainActor.assumeIsolated {
+            guard let settings else { return true }
+            return read(settings)
+        }
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
@@ -187,14 +200,12 @@ final class HotkeyManager {
         let hotkeyPressed = hotkeyKey.matchesPress(event)
 
         let flags = event.modifierFlags.rawValue
-        hkLog.info("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(self.fnDown) locked=\(self.isLocked) enabled=\(self.isEnabled) hold=\(self.isHoldMode)")
-        diagLog("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(fnDown) locked=\(isLocked) enabled=\(isEnabled) hold=\(isHoldMode)")
+        hkLog.info("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(self.fnDown) locked=\(self.isLocked) hold=\(self.isHoldMode)")
+        diagLog("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(fnDown) locked=\(isLocked) hold=\(isHoldMode)")
 
         if hotkeyPressed && !fnDown {
             fnDown = true
             fnReleaseDebounce?.cancel() // Cancel any pending debounced release
-
-            guard isEnabled else { return }
 
             if coordinator == nil {
                 hkLog.error("[HK] coordinator is nil in handleFlagsChanged — events being dropped")
@@ -282,23 +293,21 @@ final class HotkeyManager {
 
     private func handleKeyDown(_ event: NSEvent) {
         lastEventTime = Date()
-        guard isEnabled, let coordinator else {
-            if coordinator == nil {
-                hkLog.error("[HK] coordinator is nil in handleKeyDown — events being dropped")
-                diagLog("[HK] coordinator is nil in handleKeyDown")
-            }
+        guard let coordinator else {
+            hkLog.error("[HK] coordinator is nil in handleKeyDown — events being dropped")
+            diagLog("[HK] coordinator is nil in handleKeyDown")
             return
         }
 
         // Fn+V/T while recording → set pre-paste cleanup mode
         // Use event's own .function flag (reliable even when Fn modifier flickers)
         if event.modifierFlags.contains(.function) && (coordinator.state == .recording || coordinator.isPreBuffering) {
-            if event.keyCode == 9 { // V
+            if event.keyCode == 9, modifierOn({ $0.modifierCleanupEnabled }) { // V
                 coordinator.setPendingMode(.cleanup)
                 if isLocked { fnHeldAtLock = true }
                 diagLog("[HOTKEY] Fn+V → pending cleanup")
                 return
-            } else if event.keyCode == 17 { // T
+            } else if event.keyCode == 17, modifierOn({ $0.modifierTranslateEnabled }) { // T
                 coordinator.setPendingMode(.translate)
                 if isLocked { fnHeldAtLock = true }
                 diagLog("[HOTKEY] Fn+T → pending translate")
@@ -314,7 +323,8 @@ final class HotkeyManager {
         }
 
         // Space while recording or pre-buffering → confirm + lock
-        if event.keyCode == 49 && (coordinator.state == .recording || coordinator.isPreBuffering) && !isLocked {
+        if event.keyCode == 49 && modifierOn({ $0.modifierLockEnabled })
+            && (coordinator.state == .recording || coordinator.isPreBuffering) && !isLocked {
             fnTimer?.cancel()
             fnTimer = nil
             isHoldMode = false
@@ -387,14 +397,14 @@ final class HotkeyManager {
                 // Use the EVENT's own Fn flag (reliable) instead of tracked fnDown (flickers)
                 let fnHeld = flags.contains(.maskSecondaryFn)
                 if fnHeld && manager.isRecordingFlag {
-                    if keyCode == 9 { // V
+                    if keyCode == 9, manager.modifierOn({ $0.modifierCleanupEnabled }) { // V
                         Task { @MainActor in
                             manager.coordinator?.setPendingMode(.cleanup)
                             if manager.isLocked { manager.fnHeldAtLock = true }
                             diagLog("[HOTKEY] Fn+V (CGEvent) → pending cleanup")
                         }
                         return nil
-                    } else if keyCode == 17 { // T
+                    } else if keyCode == 17, manager.modifierOn({ $0.modifierTranslateEnabled }) { // T
                         Task { @MainActor in
                             manager.coordinator?.setPendingMode(.translate)
                             if manager.isLocked { manager.fnHeldAtLock = true }
@@ -407,7 +417,7 @@ final class HotkeyManager {
                 // C or T while upgrade panel showing → apply upgrade
                 // Check no modifiers (allow Cmd+C etc. through)
                 let hasModifiers = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
-                if manager.isUpgradeShowingFlag && !hasModifiers {
+                if manager.isUpgradeShowingFlag && manager.modifierOn({ $0.modifierUpgradeKeysEnabled }) && !hasModifiers {
                     if let nsEvent = NSEvent(cgEvent: event),
                        let chars = nsEvent.characters?.lowercased() {
                         var action: UpgradeAction?
@@ -433,7 +443,7 @@ final class HotkeyManager {
                 }
 
                 // Space while recording/pre-buffering and not locked → consume and lock
-                if keyCode == 49 && !manager.isLockedFlag {
+                if keyCode == 49 && manager.modifierOn({ $0.modifierLockEnabled }) && !manager.isLockedFlag {
                     // Consult the coordinator's live state, not just the sync flags: a failed
                     // pre-buffer parks in `.done` but leaves isPreBufferingFlag stale, which
                     // would phantom-lock onto a recording that never started. The tap is added

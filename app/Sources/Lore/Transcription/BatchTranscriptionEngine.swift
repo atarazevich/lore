@@ -4,17 +4,27 @@ import os
 
 private let batchLog = Logger(subsystem: "com.lore.app", category: "BatchTranscription")
 
-/// Offline two-pass transcription engine that processes recorded CAF files
-/// using a higher-quality model after a meeting ends.
+/// Offline two-pass transcription engine that re-processes recorded CAF files
+/// after a meeting ends — same model, full-context re-pass.
 actor BatchTranscriptionEngine {
 
     enum Status: Sendable, Equatable {
         case idle
-        case loading(model: String)
-        case transcribing(progress: Double)
+        case loading(sessionID: String)
+        case transcribing(progress: Double, sessionID: String)
         case completed(sessionID: String)
         case cancelled
-        case failed(String)
+        case failed(String, sessionID: String)
+
+        /// Session the engine is/was working on, when the state names one.
+        var sessionID: String? {
+            switch self {
+            case .idle, .cancelled: return nil
+            case .loading(let id), .transcribing(_, let id),
+                 .completed(let id), .failed(_, let id):
+                return id
+            }
+        }
     }
 
     private(set) var status: Status = .idle
@@ -25,12 +35,8 @@ actor BatchTranscriptionEngine {
     /// Process batch transcription for a completed session.
     func process(
         sessionID: String,
-        model: TranscriptionModel,
-        locale: Locale,
         sessionRepository: SessionRepository,
-        notesDirectory: URL,
-        enableDiarization: Bool = false,
-        diarizationVariant: DiarizationVariant = .dihard3
+        notesDirectory: URL
     ) async {
         // Cancel any existing task
         currentTask?.cancel()
@@ -40,18 +46,14 @@ actor BatchTranscriptionEngine {
             do {
                 try await self.runTranscription(
                     sessionID: sessionID,
-                    model: model,
-                    locale: locale,
                     sessionRepository: sessionRepository,
-                    notesDirectory: notesDirectory,
-                    enableDiarization: enableDiarization,
-                    diarizationVariant: diarizationVariant
+                    notesDirectory: notesDirectory
                 )
             } catch is CancellationError {
                 await self.setStatus(.cancelled)
                 batchLog.info("Batch transcription cancelled for \(sessionID)")
             } catch {
-                await self.setStatus(.failed(error.localizedDescription))
+                await self.setStatus(.failed(error.localizedDescription, sessionID: sessionID))
                 batchLog.error("Batch transcription failed: \(error.localizedDescription)")
             }
         }
@@ -64,8 +66,20 @@ actor BatchTranscriptionEngine {
         currentTask = nil
         task?.cancel()
         await task?.value
-        status = .cancelled
+        // #43: a preempted import's own catch lands as .failed(interrupted) —
+        // preserve it so the session's failed banner + retry survive; other
+        // terminal states collapse to .cancelled as before.
+        if case .failed = status {} else {
+            status = .cancelled
+        }
         isImporting = false
+    }
+
+    /// Surface a failure that happened outside a run (#43): retry of an
+    /// imported session whose audio copy is gone cannot start — mark it
+    /// failed so the banner + retry path shows why.
+    func markFailed(_ message: String, sessionID: String) {
+        status = .failed(message, sessionID: sessionID)
     }
 
     // MARK: - Audio Import
@@ -74,8 +88,6 @@ actor BatchTranscriptionEngine {
     func importFile(
         url: URL,
         sessionID: String,
-        model: TranscriptionModel,
-        locale: Locale,
         sessionRepository: SessionRepository
     ) async {
         currentTask?.cancel()
@@ -87,16 +99,18 @@ actor BatchTranscriptionEngine {
                 try await self.runImport(
                     url: url,
                     sessionID: sessionID,
-                    model: model,
-                    locale: locale,
                     sessionRepository: sessionRepository
                 )
             } catch is CancellationError {
-                await self.setStatus(.cancelled)
+                // #43: the only canceller is a recording start preempting the
+                // engine (LiveSessionController.startTranscription) — never a
+                // user choice against the import. Land as .failed so the
+                // session keeps the banner + retry instead of vanishing.
+                await self.setStatus(.failed("Interrupted \u{2014} a recording started", sessionID: sessionID))
                 await self.setIsImporting(false)
-                batchLog.info("Audio import cancelled for \(sessionID)")
+                batchLog.info("Audio import preempted for \(sessionID)")
             } catch {
-                await self.setStatus(.failed(error.localizedDescription))
+                await self.setStatus(.failed(error.localizedDescription, sessionID: sessionID))
                 await self.setIsImporting(false)
                 batchLog.error("Audio import failed: \(error.localizedDescription)")
             }
@@ -108,15 +122,18 @@ actor BatchTranscriptionEngine {
     private func runImport(
         url: URL,
         sessionID: String,
-        model: TranscriptionModel,
-        locale: Locale,
         sessionRepository: SessionRepository
     ) async throws {
         batchLog.info("Starting audio import for \(sessionID) from \(url.lastPathComponent)")
-        status = .loading(model: model.displayName)
+        status = .loading(sessionID: sessionID)
+
+        // Copy the original audio into the session up front (#43): a failed
+        // run then keeps the audio for retry and playback. On retry the
+        // source already IS the session copy — an explicit no-op there.
+        await sessionRepository.copyAudioFileToSession(sessionID: sessionID, sourceURL: url)
 
         // Prepare backend and VAD
-        let backend = model.makeBackend()
+        let backend = ParakeetBackend()
         try await backend.prepare { statusMsg in
             batchLog.info("Backend: \(statusMsg)")
         }
@@ -127,7 +144,7 @@ actor BatchTranscriptionEngine {
 
         try Task.checkCancellation()
 
-        status = .transcribing(progress: 0)
+        status = .transcribing(progress: 0, sessionID: sessionID)
 
         // Derive start date from file attributes
         let startDate: Date
@@ -144,12 +161,12 @@ actor BatchTranscriptionEngine {
         // Transcribe the file as a single speaker
         let records = try await transcribeFile(
             url: url,
+            sessionID: sessionID,
             speaker: .them,
             startDate: startDate,
             sampleRate: nil,
             backend: backend,
             vad: vad,
-            locale: locale,
             progressBase: 0,
             progressScale: 1.0
         )
@@ -158,7 +175,7 @@ actor BatchTranscriptionEngine {
 
         guard !records.isEmpty else {
             batchLog.warning("Audio import produced no records for \(sessionID)")
-            status = .failed("No speech detected in the audio file")
+            status = .failed("No speech detected in the audio file", sessionID: sessionID)
             isImporting = false
             return
         }
@@ -175,9 +192,6 @@ actor BatchTranscriptionEngine {
             utteranceCount: records.count,
             endedAt: endedAt
         )
-
-        // Copy original audio file to session
-        await sessionRepository.copyAudioFileToSession(sessionID: sessionID, sourceURL: url)
 
         status = .completed(sessionID: sessionID)
         isImporting = false
@@ -196,21 +210,17 @@ actor BatchTranscriptionEngine {
 
     private func runTranscription(
         sessionID: String,
-        model: TranscriptionModel,
-        locale: Locale,
         sessionRepository: SessionRepository,
-        notesDirectory: URL,
-        enableDiarization: Bool,
-        diarizationVariant: DiarizationVariant
+        notesDirectory: URL
     ) async throws {
-        batchLog.info("Starting batch transcription for \(sessionID) with \(model.rawValue)")
-        status = .loading(model: model.displayName)
+        batchLog.info("Starting batch transcription for \(sessionID)")
+        status = .loading(sessionID: sessionID)
 
         // Load batch metadata
         let urls = await sessionRepository.batchAudioURLs(sessionID: sessionID)
         guard urls.mic != nil || urls.sys != nil else {
             batchLog.warning("No batch audio found for \(sessionID)")
-            status = .failed("No audio files found")
+            status = .failed("No audio files found", sessionID: sessionID)
             return
         }
 
@@ -218,7 +228,7 @@ actor BatchTranscriptionEngine {
         let anchors = await loadBatchMeta(sessionID: sessionID, sessionRepository: sessionRepository)
 
         // Create and prepare backend
-        let backend = model.makeBackend()
+        let backend = ParakeetBackend()
         try await backend.prepare { statusMsg in
             batchLog.info("Backend: \(statusMsg)")
         }
@@ -230,7 +240,7 @@ actor BatchTranscriptionEngine {
 
         try Task.checkCancellation()
 
-        status = .transcribing(progress: 0)
+        status = .transcribing(progress: 0, sessionID: sessionID)
 
         // Transcribe each audio file
         var micRecords: [SessionRecord] = []
@@ -242,12 +252,12 @@ actor BatchTranscriptionEngine {
         if let micURL = urls.mic {
             micRecords = try await transcribeFile(
                 url: micURL,
+                sessionID: sessionID,
                 speaker: .you,
                 startDate: anchors?.micStartDate,
                 sampleRate: anchors?.micSampleRate,
                 backend: backend,
                 vad: vad,
-                locale: locale,
                 progressBase: 0,
                 progressScale: 1.0 / Double(totalFiles)
             )
@@ -258,32 +268,16 @@ actor BatchTranscriptionEngine {
         try Task.checkCancellation()
 
         if let sysURL = urls.sys {
-            // Optionally run diarization on the full system audio
-            var batchDiarizer: DiarizationManager?
-            if enableDiarization {
-                batchLog.info("Running LS-EEND diarization on system audio...")
-                let dm = DiarizationManager()
-                try await dm.load(variant: diarizationVariant.lseendVariant)
-                // Process complete audio file through diarizer
-                let converter = AudioConverter(sampleRate: 16000)
-                let samples = try converter.resampleAudioFile(sysURL)
-                try await dm.feedAudio(samples)
-                await dm.finalize()
-                batchDiarizer = dm
-                batchLog.info("Diarization complete")
-            }
-
             sysRecords = try await transcribeFile(
                 url: sysURL,
+                sessionID: sessionID,
                 speaker: .them,
                 startDate: anchors?.sysStartDate,
                 sampleRate: anchors?.sysSampleRate,
                 backend: backend,
                 vad: vad,
-                locale: locale,
                 progressBase: Double(filesProcessed) / Double(totalFiles),
-                progressScale: 1.0 / Double(totalFiles),
-                diarizationManager: batchDiarizer
+                progressScale: 1.0 / Double(totalFiles)
             )
             batchLog.info("Sys transcription: \(sysRecords.count) records")
         }
@@ -318,15 +312,14 @@ actor BatchTranscriptionEngine {
 
     private func transcribeFile(
         url: URL,
+        sessionID: String,
         speaker: Speaker,
         startDate: Date?,
         sampleRate: Double?,
         backend: any TranscriptionBackend,
         vad: VadManager,
-        locale: Locale,
         progressBase: Double,
-        progressScale: Double,
-        diarizationManager: DiarizationManager? = nil
+        progressScale: Double
     ) async throws -> [SessionRecord] {
         guard let audioFile = try? AVAudioFile(forReading: url) else {
             batchLog.warning("Cannot open audio file: \(url.lastPathComponent)")
@@ -366,7 +359,7 @@ actor BatchTranscriptionEngine {
             for segment in speechSegments {
                 try Task.checkCancellation()
 
-                let text = try await backend.transcribe(segment.samples, locale: locale, previousContext: nil)
+                let text = try await backend.transcribe(segment.samples, previousContext: nil)
                 guard !text.isEmpty else { continue }
 
                 // Calculate timestamp from frame position
@@ -374,19 +367,8 @@ actor BatchTranscriptionEngine {
                 let timeOffset = sampleOffsetInFile / resolvedSampleRate
                 let timestamp = resolvedStartDate.addingTimeInterval(timeOffset)
 
-                // Resolve speaker from diarizer if available
-                let resolvedSpeaker: Speaker
-                if let dm = diarizationManager {
-                    let endSample = segment.startSample + segment.samples.count
-                    let segEndOffset = Double(frameOffset) + Double(endSample) * fileSampleRate / 16000.0
-                    let segEndTime = segEndOffset / resolvedSampleRate
-                    resolvedSpeaker = await dm.dominantSpeaker(from: timeOffset, to: segEndTime)
-                } else {
-                    resolvedSpeaker = speaker
-                }
-
                 records.append(SessionRecord(
-                    speaker: resolvedSpeaker,
+                    speaker: speaker,
                     text: text,
                     timestamp: timestamp
                 ))
@@ -396,7 +378,7 @@ actor BatchTranscriptionEngine {
 
             // Update progress
             let fileProgress = Double(frameOffset) / Double(totalFrames)
-            status = .transcribing(progress: progressBase + fileProgress * progressScale)
+            status = .transcribing(progress: progressBase + fileProgress * progressScale, sessionID: sessionID)
         }
 
         return records

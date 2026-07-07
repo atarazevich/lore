@@ -221,7 +221,8 @@ final class AudioRecorder: @unchecked Sendable {
         sysAnchors: [(frame: Int64, date: Date)]
     ) {
         lock.withLock {
-            (micStartDate, sysStartDate, micAnchors, sysAnchors)
+            (micStartDate: micStartDate, sysStartDate: sysStartDate,
+             micAnchors: micAnchors, sysAnchors: sysAnchors)
         }
     }
 

@@ -88,7 +88,6 @@ final class AppContainer {
             defaults.set(false, forKey: "saveAudioRecording")
             defaults.set(false, forKey: "enableTranscriptRefinement")
             defaults.set(notesDirectory.path, forKey: "notesFolderPath")
-            defaults.set("", forKey: "kbFolderPath")
 
             let storage = AppSettingsStorage(
                 defaults: defaults,
@@ -97,11 +96,9 @@ final class AppContainer {
                 runMigrations: false
             )
             let settings = AppSettings(storage: storage)
-            let notesEngine = NotesEngine(mode: .scripted(markdown: scriptedNotesMarkdown))
             let coordinator = AppCoordinator(
                 sessionRepository: SessionRepository(rootDirectory: appSupportDirectory),
                 templateStore: TemplateStore(rootDirectory: appSupportDirectory),
-                notesEngine: notesEngine,
                 transcriptStore: TranscriptStore()
             )
             let container = AppContainer(
@@ -124,13 +121,6 @@ final class AppContainer {
     }
 
     func makeServices(settings: AppSettings, coordinator: AppCoordinator) -> AppServices {
-        let knowledgeBase = KnowledgeBase(settings: settings)
-        let suggestionEngine = SuggestionEngine(
-            transcriptStore: coordinator.transcriptStore,
-            knowledgeBase: knowledgeBase,
-            settings: settings
-        )
-
         let transcriptionEngine: TranscriptionEngine
         switch mode {
         case .live:
@@ -148,8 +138,6 @@ final class AppContainer {
         }
 
         return AppServices(
-            knowledgeBase: knowledgeBase,
-            suggestionEngine: suggestionEngine,
             transcriptionEngine: transcriptionEngine,
             refinementEngine: TranscriptRefinementEngine(
                 settings: settings,
@@ -170,10 +158,6 @@ final class AppContainer {
         coordinator.refinementEngine = services.refinementEngine
         coordinator.audioRecorder = services.audioRecorder
         coordinator.batchEngine = services.batchEngine
-        coordinator.setViewServices(
-            knowledgeBase: services.knowledgeBase,
-            suggestionEngine: services.suggestionEngine
-        )
     }
 
     /// Create and start the detection controller, wire the coordinator event loop.
@@ -182,7 +166,13 @@ final class AppContainer {
         let controller = MeetingDetectionController()
         controller.isSessionActive = { [weak coordinator] in
             guard let coordinator else { return false }
+            // Meeting recording or Lore's own dictation (#77): dictation capture
+            // flips DeviceIsRunningSomewhere and a >5s dictation would otherwise
+            // prompt "Meeting detected" mid-dictation. Suppression is at prompt
+            // time only — the detector keeps running, so a real meeting still
+            // prompts after dictation ends.
             return coordinator.isRecording
+                || coordinator.dictationCoordinator.state == .recording
         }
         detectionController = controller
         controller.setup(settings: settings)
@@ -265,14 +255,4 @@ final class AppContainer {
         ),
     ]
 
-    private static let scriptedNotesMarkdown = """
-    # UI Test Notes
-
-    ## Summary
-    The pilot focuses on getting one team live quickly and measuring onboarding impact.
-
-    ## Action Items
-    - Define baseline metrics for the first pilot team.
-    - Report initial results after two weeks.
-    """
 }

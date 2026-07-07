@@ -1,4 +1,6 @@
+import AppKit
 @preconcurrency import AVFoundation
+import CoreAudio
 import os
 
 enum DictationState: Sendable, Equatable {
@@ -46,13 +48,26 @@ final class DictationCoordinator {
     /// True when a mic error is parked in `.done` while Fn may still be held — it must
     /// stay visible (no auto-hide) until the genuine Fn release starts the grace hide.
     private var micErrorSticky = false
+    /// A sticky mic error whose message is still resolving on the HAL queue (#64).
+    /// If the Fn release arrives before it lands, `pendingStickyRelease` makes it land
+    /// with the grace hide instead of sticking with no dismissal path.
+    private var stickyErrorInFlight = false
+    private var pendingStickyRelease = false
     private var accumulatedSamples: [Float] = []
     private var converter: AVAudioConverter?
-    private let cleanupClient = CleanupClient()
+    private let cleanupClient: any CleanupProviding
 
     private static let minimumSpeechSamples = 8000
     private static let maxChunkSamples = 480_000
     static let upgradePanelDuration: Double = 3.0
+
+    /// User-facing paste-time failure messages (#50). Raw text is still
+    /// pasted (DIC-48 fallback unchanged) — these only make the silence visible.
+    static let cleanupFailedPastedRaw = "Cleanup failed \u{2014} pasted raw text"
+    static let translateFailedPastedRaw = "Translation failed \u{2014} pasted raw text"
+    /// Upgrade-key (C/T) failures keep whatever was already pasted.
+    static let cleanupFailedKeptText = "Cleanup failed \u{2014} kept pasted text"
+    static let translateFailedKeptText = "Translation failed \u{2014} kept pasted text"
 
     /// Shared audio bus — set by AppDelegate during dictation setup.
     var audioBus: AudioBus?
@@ -64,23 +79,33 @@ final class DictationCoordinator {
     /// Separate from the shared cache to avoid concurrent decoder state mutation
     /// when TranscriptionEngine also transcribes via the shared backend.
     private var ownBackend: (any TranscriptionBackend)?
-    private var ownBackendModel: TranscriptionModel?
 
     /// The current history entry being processed (needed for upgrades).
     private var currentEntryID: UUID?
 
-    let history = DictationHistory()
+    let history: DictationHistory
     var settings: AppSettings?
+
+    /// `history` is injectable so tests can back it with an ephemeral
+    /// UserDefaults suite instead of the user's real dictation history;
+    /// `cleanupClient` so tests can force LLM failures without the network.
+    init(
+        history: DictationHistory = DictationHistory(),
+        cleanupClient: any CleanupProviding = CleanupClient()
+    ) {
+        self.history = history
+        self.cleanupClient = cleanupClient
+    }
 
     /// Start capturing audio silently before hold is confirmed (pre-buffer phase).
     /// State stays .idle — indicator does not show yet.
     func startPreBuffer() {
         guard !isPreBuffering else { return }
         guard state == .idle || state == .done else { return }
-        if settings == nil {
+        guard let settings else {
             diagLog("[DICTATION] WARNING: settings not wired — dictation disabled")
+            return
         }
-        guard let settings, settings.dictationEnabled else { return }
 
         autoHideTask?.cancel()
         autoHideTask = nil
@@ -93,6 +118,8 @@ final class DictationCoordinator {
 
         lastError = nil
         micErrorSticky = false
+        stickyErrorInFlight = false
+        pendingStickyRelease = false
         accumulatedSamples.removeAll()
         converter = nil
         isPreBuffering = true
@@ -103,9 +130,16 @@ final class DictationCoordinator {
         switch MicrophonePermission.status {
         case .authorized:
             startMicCapture()
+            // "Sound on start" (DSET-16, default off): chime at the point
+            // capture actually begins (mic live), not on key-down — the
+            // denied/undetermined branches never chime.
+            if settings.soundOnDictationStart, let sound = NSSound(named: "Pop") {
+                sound.volume = 0.4
+                sound.play()
+            }
             diagLog("[DICTATION] pre-buffering started")
         case .denied, .restricted:
-            failPreBuffer(micUnavailableMessage())
+            failPreBufferWithMicUnavailableMessage()
         case .notDetermined:
             // Present the system prompt. The triggering hold won't complete (the
             // user is interacting with the prompt); once granted, the next press
@@ -116,7 +150,7 @@ final class DictationCoordinator {
                 guard let self, !granted else { return }
                 // The key was released while the OS prompt was up, so use the grace
                 // hide directly rather than waiting for a release that already happened.
-                self.surfaceMicError(self.micUnavailableMessage(), hide: .grace)
+                self.surfaceMicError(await self.micUnavailableMessage(), hide: .grace)
             }
         @unknown default:
             failPreBuffer(MicrophonePermission.unknownMessage)
@@ -137,6 +171,24 @@ final class DictationCoordinator {
     private func failPreBuffer(_ message: String) {
         isPreBuffering = false
         surfaceMicError(message, hide: .sticky)
+    }
+
+    /// Same abort, but for the mic-unavailable message, whose device-name lookup hops
+    /// to the HAL queue (#64). If Fn is released while the hop is in flight, the error
+    /// lands with the grace hide instead of sticking with no dismissal path; a new Fn
+    /// press supersedes the in-flight error entirely.
+    private func failPreBufferWithMicUnavailableMessage() {
+        isPreBuffering = false
+        stickyErrorInFlight = true
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            let message = await self.micUnavailableMessage()
+            guard self.stickyErrorInFlight else { return } // superseded by a new press
+            self.stickyErrorInFlight = false
+            let hide: MicErrorHide = self.pendingStickyRelease ? .grace : .sticky
+            self.pendingStickyRelease = false
+            self.surfaceMicError(message, hide: hide)
+        }
     }
 
     /// Show a mic error in the floating indicator. The indicator only renders while
@@ -160,6 +212,12 @@ final class DictationCoordinator {
     /// error after a readable grace period. No-op unless a sticky error is showing, so
     /// it's safe to call from every release path (locked/hold/tap).
     func dismissMicErrorAfterRelease() {
+        // The release raced an in-flight sticky error (#64 review): record it so the
+        // error lands with the grace hide instead of persisting with no dismissal path.
+        if stickyErrorInFlight {
+            pendingStickyRelease = true
+            return
+        }
         guard micErrorSticky, state == .done else { return }
         micErrorSticky = false
         scheduleAutoHide(after: .seconds(4))
@@ -207,7 +265,7 @@ final class DictationCoordinator {
             // Prefer a concrete bus capture error if one was recorded; otherwise the
             // unified message. Fn is already released here (stop came from the release
             // path), so use the grace hide directly.
-            let message = lastError ?? micUnavailableMessage()
+            let message = if let lastError { lastError } else { await micUnavailableMessage() }
             diagLog("[DICTATION] zero frames captured — mic failure: \(message)")
             surfaceMicError(message, hide: .grace)
             return
@@ -225,8 +283,11 @@ final class DictationCoordinator {
             return
         }
 
-        // STEP 1: Save audio to disk FIRST — never lose the recording
-        let audioFilename = DictationHistory.saveAudio(samples)
+        // STEP 1: Save audio to disk FIRST — never lose the recording.
+        // Sync the audio retention limit from Settings so add-time pruning
+        // honors the user's choice (#52); history stays settings-agnostic.
+        history.audioRetentionLimit = settings?.dictationAudioRetentionCount ?? 500
+        let audioFilename = history.saveAudio(samples)
         var entry = DictationHistoryEntry(durationSeconds: durationSeconds, audioFilename: audioFilename)
         history.add(entry)
         currentEntryID = entry.id
@@ -251,32 +312,16 @@ final class DictationCoordinator {
         let hasApiKey = !(settings?.openaiApiKey.isEmpty ?? true)
         let didCleanup: Bool
 
+        // Mode name and translation meta are written only when the cleanup
+        // actually succeeded — a swallowed API failure must not relabel the
+        // pasted raw text (DIC-37/48). Pre-paste mode (Fn+V/Fn+T) overrides
+        // defaults; translate-by-default implies cleanup.
         if let pending, hasApiKey {
-            // Pre-paste mode set via Fn+V/Fn+T during recording — overrides defaults
-            let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
-            switch pending {
-            case .cleanup:
-                await cleanupEntry(&entry, rawText: rawText, prompt: basePrompt)
-                entry.cleanupModeName = "Cleanup"
-            case .translate:
-                let prompt = basePrompt + CleanupMode.translateSuffix
-                await cleanupEntry(&entry, rawText: rawText, prompt: prompt)
-                entry.cleanupModeName = "Translate"
-            }
-            didCleanup = (entry.status == .cleaned)
+            didCleanup = await runCleanupAction(pending, on: &entry, rawText: rawText)
         } else if translateEnabled && hasApiKey {
-            // Default: cleanup + translate
-            let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
-            let prompt = basePrompt + CleanupMode.translateSuffix
-            await cleanupEntry(&entry, rawText: rawText, prompt: prompt)
-            entry.cleanupModeName = "Translate"
-            didCleanup = (entry.status == .cleaned)
+            didCleanup = await runCleanupAction(.translate, on: &entry, rawText: rawText)
         } else if cleanupEnabled && hasApiKey {
-            // Default: cleanup only
-            let prompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
-            await cleanupEntry(&entry, rawText: rawText, prompt: prompt)
-            entry.cleanupModeName = "Cleanup"
-            didCleanup = (entry.status == .cleaned)
+            didCleanup = await runCleanupAction(.cleanup, on: &entry, rawText: rawText)
         } else {
             didCleanup = false
         }
@@ -291,9 +336,10 @@ final class DictationCoordinator {
         history.update(entry)
         state = .done
 
-        // STEP 4: Show upgrade options — skip if user explicitly chose a pre-paste mode
+        // STEP 4: Show upgrade options — skip if user explicitly chose a pre-paste mode.
+        // A cleanup/translate failure keeps the panel up long enough to read (#50).
         if pending != nil {
-            scheduleAutoHide()
+            scheduleAutoHide(after: lastError == nil ? .milliseconds(800) : .seconds(4))
         } else {
             showUpgradeOptions(didCleanup: didCleanup)
         }
@@ -334,26 +380,11 @@ final class DictationCoordinator {
         }
     }
 
-    /// Called when user selects an upgrade via hotkey or button.
+    /// Called when user selects an upgrade via hotkey or indicator button
+    /// (post-paste C/T): undo the previous paste and re-paste the upgraded text.
     func applyUpgradeByKey(_ action: UpgradeAction) async {
         guard isUpgradePanelVisible else { return }
 
-        let mode: CleanupMode
-        switch action {
-        case .cleanup:
-            let prompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
-            mode = CleanupMode(name: "Cleanup", prompt: prompt)
-        case .translate:
-            let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
-            let prompt = basePrompt + CleanupMode.translateSuffix
-            mode = CleanupMode(name: "Translate", prompt: prompt)
-        }
-
-        await applyUpgrade(mode)
-    }
-
-    /// Called when user clicks an upgrade button.
-    func applyUpgrade(_ mode: CleanupMode) async {
         upgradeDismissTask?.cancel()
         upgradeDismissTask = nil
         isUpgradePanelVisible = false
@@ -368,11 +399,14 @@ final class DictationCoordinator {
         }
 
         state = .processing
-        diagLog("[DICTATION] applying upgrade: \(mode.name)")
+        // A retry must not carry a stale failure row into a success (#50).
+        lastError = nil
+        diagLog("[DICTATION] applying upgrade: \(action)")
 
-        // Run cleanup on the raw text with the upgrade mode's prompt
-        await cleanupEntry(&entry, rawText: rawText, prompt: mode.prompt)
-        entry.cleanupModeName = mode.name
+        // Meta is written only on success: a failed upgrade keeps the
+        // previous cleaned text and whatever meta truthfully described it
+        // (DIC-37/48). `kept: true` selects the upgrade failure wording.
+        _ = await runCleanupAction(action, on: &entry, rawText: rawText, kept: true)
 
         // Undo previous paste, then paste upgraded text
         if let text = entry.cleanedText ?? entry.rawText {
@@ -383,7 +417,7 @@ final class DictationCoordinator {
 
         history.update(entry)
         state = .done
-        scheduleAutoHide()
+        scheduleAutoHide(after: lastError == nil ? .milliseconds(800) : .seconds(4))
     }
 
     /// Dismiss upgrade panel without action.
@@ -410,10 +444,11 @@ final class DictationCoordinator {
 
     /// Build the unified mic-failure message for the dictation path, resolving the input
     /// device name from AudioBus (enumeration needs no mic permission, so it works even
-    /// on the denied path).
-    private func micUnavailableMessage() -> String {
+    /// on the denied path). Async: the name lookup is HAL enumeration and runs on the
+    /// shared HAL queue, never on the main thread (#64).
+    private func micUnavailableMessage() async -> String {
         let requested = settings?.inputDeviceID ?? 0
-        let name = AudioBus.resolvedInputDeviceName(requested: requested)
+        let name = await AudioBus.resolvedInputDeviceName(requested: requested)
         return MicrophonePermission.micUnavailableMessage(deviceName: name)
     }
 
@@ -432,16 +467,38 @@ final class DictationCoordinator {
 
     // MARK: - Mic Helpers
 
+    /// Monotonic guard for the async device-resolution hop: every stop bumps it, so a
+    /// resolution that lands after its capture was stopped is dropped instead of leaking
+    /// a stray AudioBus subscription (#64).
+    private var captureEpoch = 0
+
     private func startMicCapture() {
-        guard let bus = audioBus else {
+        guard audioBus != nil else {
             diagLog("[DICTATION] WARNING: audioBus not wired")
             return
         }
 
         // One device selection per recording, via transport allowlist on a fresh
         // enumeration (#39). The result is pinned — no mid-recording switching.
+        // Resolution is HAL enumeration and runs on the shared HAL queue, never on
+        // the main thread (#64); capture subscribes when the hop returns.
+        captureEpoch += 1
+        let epoch = captureEpoch
         let requestedDevice = settings?.inputDeviceID ?? 0
-        let selection = AudioBus.resolveBestInputDevice(requested: requestedDevice)
+        Task { @MainActor [weak self] in
+            let selection = await AudioBus.resolveBestInputDevice(requested: requestedDevice)
+            guard let self, self.captureEpoch == epoch, let bus = self.audioBus else { return }
+            guard self.isPreBuffering || self.state == .recording else { return }
+            self.beginMicCapture(on: bus, selection: selection)
+        }
+    }
+
+    /// Second half of startMicCapture, once the device is resolved. MainActor, and only
+    /// reached while the originating pre-buffer/recording is still the active capture.
+    private func beginMicCapture(
+        on bus: AudioBus,
+        selection: (deviceID: AudioDeviceID, redirectedToBuiltIn: Bool)?
+    ) {
         bluetoothMicRedirected = selection?.redirectedToBuiltIn ?? false
 
         let (id, stream) = bus.subscribe(deviceID: selection?.deviceID)
@@ -468,7 +525,7 @@ final class DictationCoordinator {
             guard self.isPreBuffering || self.state == .recording else { return }
             if self.accumulatedSamples.isEmpty && bus.captureError == nil {
                 diagLog("[DICTATION] no mic audio after 5s")
-                self.lastError = self.micUnavailableMessage()
+                self.lastError = await self.micUnavailableMessage()
             }
         }
 
@@ -506,6 +563,7 @@ final class DictationCoordinator {
     }
 
     private func stopMicCapture() {
+        captureEpoch += 1
         firstFrameWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
         audioLevelTask?.cancel()
@@ -546,7 +604,7 @@ final class DictationCoordinator {
     func retryTranscription(entryID: UUID) async {
         guard var entry = history.entries.first(where: { $0.id == entryID }),
               let filename = entry.audioFilename,
-              let samples = DictationHistory.loadAudio(filename: filename) else {
+              let samples = history.loadAudio(filename: filename) else {
             diagLog("[DICTATION] retry failed: no audio for entry")
             return
         }
@@ -555,6 +613,8 @@ final class DictationCoordinator {
         entry.rawText = nil
         entry.cleanedText = nil
         entry.errorMessage = nil
+        entry.cleanupMethodName = nil
+        entry.translatedToLanguage = nil
         history.update(entry)
 
         await transcribeEntry(&entry, samples: samples)
@@ -576,13 +636,10 @@ final class DictationCoordinator {
     // MARK: - Transcription
 
     private func transcribeEntry(_ entry: inout DictationHistoryEntry, samples: [Float]) async {
-        let model = settings?.transcriptionModel ?? .parakeetV3
-        let locale = settings?.locale ?? .current
-
         // Ensure the shared cache has downloaded model files (fast no-op if already cached)
         if let cache = backendCache {
             do {
-                try await cache.prepare(model: model) { [weak self] status in
+                try await cache.prepare { [weak self] status in
                     Task { @MainActor in self?.state = .loadingModel }
                 }
             } catch {
@@ -599,9 +656,9 @@ final class DictationCoordinator {
         // Use a private backend instance to avoid sharing mutable decoder state
         // with TranscriptionEngine's backend from the shared cache.
         // Creating a fresh backend when model files are already on disk is fast (~1s).
-        if ownBackend == nil || ownBackendModel != model {
-            diagLog("[DICTATION] creating private backend for \(model.rawValue)")
-            let fresh = model.makeBackend()
+        if ownBackend == nil {
+            diagLog("[DICTATION] creating private backend")
+            let fresh = ParakeetBackend()
             do {
                 try await fresh.prepare(onStatus: { _ in }, onProgress: { _ in })
             } catch {
@@ -612,7 +669,6 @@ final class DictationCoordinator {
                 return
             }
             ownBackend = fresh
-            ownBackendModel = model
         }
 
         guard let backend = ownBackend else {
@@ -641,7 +697,7 @@ final class DictationCoordinator {
 
         for (i, chunk) in chunks.enumerated() {
             do {
-                let segment = try await backend.transcribe(chunk, locale: locale, previousContext: nil)
+                let segment = try await backend.transcribe(chunk, previousContext: nil)
                 if !segment.isEmpty {
                     segments.append(segment)
                     diagLog("[DICTATION] chunk \(i+1)/\(chunks.count): \(segment.prefix(60))")
@@ -662,8 +718,63 @@ final class DictationCoordinator {
         }
     }
 
-    private func cleanupEntry(_ entry: inout DictationHistoryEntry, rawText: String, prompt: String? = nil) async {
-        guard let settings, !settings.openaiApiKey.isEmpty else { return }
+    /// Single source of truth mapping an UpgradeAction to its prompt, meta
+    /// labels, and failure wording, shared by the paste-time defaults, the
+    /// Fn+V/Fn+T chords, and the post-paste C/T upgrade keys. Meta is written
+    /// only on success (DIC-37/48); `kept` selects the upgrade-retry failure
+    /// wording ("kept pasted text" — the previous paste survives, which may
+    /// not be raw).
+    private func runCleanupAction(
+        _ action: UpgradeAction,
+        on entry: inout DictationHistoryEntry,
+        rawText: String,
+        kept: Bool = false
+    ) async -> Bool {
+        let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
+        let prompt: String
+        let modeName: String
+        let translatedTo: String?
+        let failureMessage: String
+        switch action {
+        case .cleanup:
+            prompt = basePrompt
+            modeName = "Cleanup"
+            translatedTo = nil
+            failureMessage = kept ? Self.cleanupFailedKeptText : Self.cleanupFailedPastedRaw
+        case .translate:
+            prompt = basePrompt + CleanupMode.translateSuffix()
+            modeName = "Translate"
+            translatedTo = TranslationLanguage.english.key
+            failureMessage = kept ? Self.translateFailedKeptText : Self.translateFailedPastedRaw
+        }
+
+        guard await cleanupEntry(
+            &entry, rawText: rawText, prompt: prompt, failureMessage: failureMessage
+        ) else { return false }
+
+        entry.cleanupModeName = modeName
+        entry.cleanupMethodName = nil
+        entry.translatedToLanguage = translatedTo
+        return true
+    }
+
+    /// Runs the LLM cleanup and mutates the entry on success. Returns true
+    /// only when a cleaned text was actually produced and stored — callers
+    /// gate every mode/method/language meta write on this (DIC-37/48).
+    ///
+    /// `failureMessage`, when provided, is surfaced as `lastError` if the API
+    /// call itself fails — the floating indicator renders it as the red
+    /// status row instead of a fake success panel (#50). Paths with their own
+    /// failure UI (row transforms) pass nil. Internal (not private) so tests
+    /// can drive the failure path directly with a stubbed client.
+    @discardableResult
+    func cleanupEntry(
+        _ entry: inout DictationHistoryEntry,
+        rawText: String,
+        prompt: String? = nil,
+        failureMessage: String? = nil
+    ) async -> Bool {
+        guard let settings, !settings.openaiApiKey.isEmpty else { return false }
 
         let effectivePrompt: String
         if let prompt, !prompt.isEmpty {
@@ -671,7 +782,7 @@ final class DictationCoordinator {
         } else if settings.cleanupByDefault {
             effectivePrompt = settings.activeCleanupPrompt
         } else {
-            return
+            return false
         }
 
         diagLog("[DICTATION] calling cleanup API...")
@@ -683,24 +794,67 @@ final class DictationCoordinator {
             entry.status = .cleaned
             entry.activeVersion = .cleaned
             diagLog("[DICTATION] cleaned: \(cleaned.prefix(80))")
+            return true
         } catch {
             diagLog("[DICTATION] cleanup failed: \(error), using raw text")
+            if let failureMessage {
+                lastError = failureMessage
+            }
+            return false
         }
     }
 
-    /// Run cleanup on an existing history entry with a specific mode (retroactive cleanup).
-    /// Always cleans from the raw transcription to preserve the original.
-    func cleanupHistoryEntry(entryID: UUID, mode: CleanupMode) async {
+    // MARK: - Retroactive Row Transforms (history popovers, DIC-35/36)
+
+    /// Re-clean a history entry with a popover method. Always cleans from the
+    /// raw transcription to preserve the original. Returns false on failure
+    /// so the row can show visible feedback instead of closing silently (#50).
+    @discardableResult
+    func cleanupHistoryEntry(entryID: UUID, method: CleanupMethod) async -> Bool {
+        let prompt = method.prompt(
+            activePresetPrompt: settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
+        )
+        return await applyRowTransform(
+            entryID: entryID, prompt: prompt, methodKey: method.key, languageKey: nil
+        )
+    }
+
+    /// Translate a history entry to a popover language (active preset prompt
+    /// + language-parametrized suffix). Always translates from the raw
+    /// transcription to preserve the original. Returns false on failure (#50).
+    @discardableResult
+    func translateHistoryEntry(entryID: UUID, to language: TranslationLanguage) async -> Bool {
+        let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
+        return await applyRowTransform(
+            entryID: entryID,
+            prompt: basePrompt + CleanupMode.translateSuffix(to: language),
+            methodKey: nil,
+            languageKey: language.key
+        )
+    }
+
+    /// Shared row-transform core: meta keys are persisted only when the
+    /// cleanup succeeded — a failed call leaves the previous cleaned text and
+    /// its meta untouched (DIC-37/48). Failures do NOT touch `lastError` (the
+    /// floating indicator); the history row shows its own transient feedback.
+    private func applyRowTransform(
+        entryID: UUID,
+        prompt: String,
+        methodKey: String?,
+        languageKey: String?
+    ) async -> Bool {
         guard var entry = history.entries.first(where: { $0.id == entryID }),
               let text = entry.rawText else {
             diagLog("[DICTATION] retroactive cleanup: no raw text for entry")
-            return
+            return false
         }
-        guard !mode.isRawPaste else { return }
+        guard !prompt.isEmpty else { return false }
 
-        await cleanupEntry(&entry, rawText: text, prompt: mode.prompt)
-        entry.cleanupModeName = mode.name
+        guard await cleanupEntry(&entry, rawText: text, prompt: prompt) else { return false }
+        entry.cleanupMethodName = methodKey
+        entry.translatedToLanguage = languageKey
         history.update(entry)
+        return true
     }
 
 }

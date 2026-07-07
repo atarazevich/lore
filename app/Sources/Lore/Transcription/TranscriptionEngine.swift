@@ -4,17 +4,22 @@ import FluidAudio
 import Observation
 import os
 
-/// Simple file logger for diagnostics — writes to /tmp/lore.log
+/// Simple file logger for diagnostics — writes to /tmp/lore.log.
+/// O_APPEND + a single write(2) per line: the kernel makes each append atomic
+/// with respect to the file offset, so concurrent writers (MainActor, actors,
+/// the CoreAudio listener queue) cannot interleave mid-line.
+/// Under XCTest the destination is /tmp/lore-tests.log so test runs never
+/// pollute the production log (#68). Same XCTest detection as KeychainHelper.
+private let diagLogPath =
+    NSClassFromString("XCTestCase") == nil ? "/tmp/lore.log" : "/tmp/lore-tests.log"
+
 func diagLog(_ msg: String) {
     let line = "\(Date()): \(msg)\n"
-    let path = "/tmp/lore.log"
-    if let fh = FileHandle(forWritingAtPath: path) {
-        fh.seekToEndOfFile()
-        fh.write(line.data(using: .utf8)!)
-        fh.closeFile()
-    } else {
-        FileManager.default.createFile(atPath: path, contents: line.data(using: .utf8))
-    }
+    let fd = open(diagLogPath, O_WRONLY | O_APPEND | O_CREAT, 0o644)
+    guard fd >= 0 else { return }
+    let bytes = Array(line.utf8)
+    _ = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
+    close(fd)
 }
 
 enum TranscriptionEngineError: LocalizedError {
@@ -90,21 +95,27 @@ final class TranscriptionEngine {
     private let mode: Mode
 
     /// Audio level from mic for the UI meter.
-    /// nonisolated is safe here — audioBus.audioLevel is thread-safe (NSLock).
+    /// nonisolated is safe here — audioBus.audioLevel and the `_micMuted` SyncBool
+    /// are both thread-safe (NSLock).
     nonisolated var audioLevel: Float {
         switch mode {
         case .live:
-            audioBus.audioLevel
+            _micMuted.value ? 0 : audioBus.audioLevel
         case .scripted:
             _isRunning ? 0.35 : 0
         }
     }
 
-    /// Mute/unmute the microphone. When muted, mic audio is not transcribed
-    /// and the audio level reads as 0. System audio continues normally.
+    /// Engine-local mic mute (#66). Consulted only in THIS engine's mic sink: while
+    /// muted, the recorder's mic track records silence (file keeps full duration) and
+    /// VAD/[you] transcription sees nothing; the reported audio level reads 0. Other
+    /// AudioBus consumers (dictation) and system-audio capture are unaffected — the bus
+    /// itself has no mute surface. Cleared when the session ends, so mute can never
+    /// outlive the meeting.
+    private let _micMuted = SyncBool()
     nonisolated var isMicMuted: Bool {
-        get { audioBus.isMuted }
-        set { audioBus.isMuted = newValue }
+        get { _micMuted.value }
+        set { _micMuted.value = newValue }
     }
 
     private var micTask: Task<Void, Never>?
@@ -116,16 +127,13 @@ final class TranscriptionEngine {
     /// Separate backend instances for mic and system audio.
     /// Parakeet keeps mutable decoder state per manager, so mic and system audio
     /// need separate instances even when they share the same loaded model files.
-    /// For Qwen3 (actor-based, thread-safe), both point to the same backend instance.
     private var micBackend: (any TranscriptionBackend)?
     private var systemBackend: (any TranscriptionBackend)?
     private var vadManager: VadManager?
 
     /// Cached backends survive across start/stop cycles to avoid reloading models from disk.
-    /// Invalidated when the transcription model or custom vocabulary changes.
     private var cachedMicBackend: (any TranscriptionBackend)?
     private var cachedSystemBackend: (any TranscriptionBackend)?
-    private var cachedModel: TranscriptionModel?
 
     /// Audio recorder for tapping streams (set by ContentView when recording is enabled).
     var audioRecorder: AudioRecorder?
@@ -133,9 +141,6 @@ final class TranscriptionEngine {
     /// Shared backend cache — if set, the engine reuses the cached backend for mic
     /// transcription instead of loading a duplicate model.
     var sharedBackendCache: SharedBackendCache?
-
-    /// Speaker diarization manager for system audio (nil when diarization is disabled).
-    private var diarizationManager: DiarizationManager?
 
     /// Tracks the resolved mic device ID currently in use.
     private var currentMicDeviceID: AudioDeviceID = 0
@@ -145,6 +150,11 @@ final class TranscriptionEngine {
 
     /// Listens for default output device changes at the OS level.
     private var defaultOutputDeviceListenerBlock: AudioObjectPropertyListenerBlock?
+    /// True from `isRunning = true` in start() until its mic/system wiring is complete.
+    /// While set, restartMic() defers (records pendingMicDeviceID, no task) so a Settings
+    /// device change can't race the initial subscription (#64 review; also narrows the
+    /// pre-existing #30 stray-subscription window).
+    private var isStarting = false
     private var micRestartTask: Task<Void, Never>?
     private var sysRestartTask: Task<Void, Never>?
     private var pendingMicDeviceID: AudioDeviceID?
@@ -157,7 +167,7 @@ final class TranscriptionEngine {
         self.mode = mode
         switch mode {
         case .live:
-            self.needsModelDownload = Self.modelNeedsDownload(settings.transcriptionModel)
+            self.needsModelDownload = Self.modelNeedsDownload()
         case .scripted:
             self.needsModelDownload = false
         }
@@ -166,17 +176,13 @@ final class TranscriptionEngine {
     func refreshModelAvailability() {
         switch mode {
         case .live:
-            needsModelDownload = Self.modelNeedsDownload(settings.transcriptionModel)
+            needsModelDownload = Self.modelNeedsDownload()
         case .scripted:
             needsModelDownload = false
         }
     }
 
-    func start(
-        locale: Locale,
-        inputDeviceID: AudioDeviceID = 0,
-        transcriptionModel: TranscriptionModel
-    ) async {
+    func start() async {
         diagLog("[ENGINE-0] start() called, isRunning=\(isRunning)")
         guard !isRunning else { return }
         lastError = nil
@@ -184,20 +190,13 @@ final class TranscriptionEngine {
 
         if case .scripted(let scriptedUtterances) = mode {
             downloadConfirmed = false
-            assetStatus = "Transcribing (UI Test)"
+            // "Ready" is the no-status sentinel — recording state is shown by
+            // the banner/REC pill, not a status line (#57).
+            assetStatus = "Ready"
             isRunning = true
             for utterance in scriptedUtterances {
                 transcriptStore.append(utterance)
             }
-            return
-        }
-
-        if let localeMismatchMessage = localeMismatchMessage(
-            for: locale,
-            transcriptionModel: transcriptionModel
-        ) {
-            lastError = localeMismatchMessage
-            assetStatus = "Ready"
             return
         }
 
@@ -209,14 +208,16 @@ final class TranscriptionEngine {
         guard await ensureMicrophonePermission() else { return }
 
         isRunning = true
+        // Mic-restart requests are deferred while start is in flight (#64 review) —
+        // restartMic() records pendingMicDeviceID and the tail of start() applies it.
+        isStarting = true
+        defer { isStarting = false }
 
         // 1. Load transcription models via backend protocol
-        let canReuseCache = cachedModel == transcriptionModel
-            && cachedMicBackend != nil
-            && cachedSystemBackend != nil
+        let canReuseCache = cachedMicBackend != nil && cachedSystemBackend != nil
 
         if canReuseCache {
-            diagLog("[ENGINE-1] reusing cached backends for \(transcriptionModel.rawValue)")
+            diagLog("[ENGINE-1] reusing cached backends")
             self.micBackend = cachedMicBackend
             self.systemBackend = cachedSystemBackend
             assetStatus = "Models ready"
@@ -225,22 +226,20 @@ final class TranscriptionEngine {
         if !canReuseCache {
             let isDownloading = needsModelDownload
             assetStatus = isDownloading
-                ? "Downloading \(transcriptionModel.displayName)..."
-                : "Loading \(transcriptionModel.displayName)..."
+                ? "Downloading Parakeet TDT v3..."
+                : "Loading Parakeet TDT v3..."
             if isDownloading { downloadProgress = 0 }
-            diagLog("[ENGINE-1] loading transcription model \(transcriptionModel.rawValue)...")
+            diagLog("[ENGINE-1] loading transcription model...")
         }
 
         do {
             if !canReuseCache {
                 // Try shared cache first — reuse the preloaded dictation backend as mic backend
-                if let shared = sharedBackendCache,
-                   shared.model == transcriptionModel,
-                   let sharedBackend = shared.backend {
+                if let sharedBackend = sharedBackendCache?.backend {
                     self.micBackend = sharedBackend
                     diagLog("[ENGINE-1] reusing shared cache backend for mic")
                 } else {
-                    let mic = transcriptionModel.makeBackend()
+                    let mic = ParakeetBackend()
                     try await mic.prepare(
                         onStatus: { [weak self] status in
                             Task { @MainActor in
@@ -257,24 +256,18 @@ final class TranscriptionEngine {
                 }
 
                 // Parakeet needs a separate backend for system audio (mutable decoder state).
-                // Qwen3 shares one backend instance for both mic and system audio (thread-safe actor).
-                if transcriptionModel == .qwen3ASR06B {
-                    self.systemBackend = self.micBackend
-                } else {
-                    let sys = transcriptionModel.makeBackend()
-                    try await sys.prepare { _ in }
-                    self.systemBackend = sys
-                }
+                let sys = ParakeetBackend()
+                try await sys.prepare { _ in }
+                self.systemBackend = sys
 
                 // Store in cache for next session.
-                // Only cache engine-created backends — the shared cache backend is
-                // managed by SharedBackendCache and may be invalidated independently.
+                // Only cache engine-created backends — the shared cache backend
+                // is owned by SharedBackendCache.
                 let usedSharedBackend = (self.micBackend as AnyObject) === (sharedBackendCache?.backend as AnyObject)
                 if !usedSharedBackend {
                     cachedMicBackend = self.micBackend
                 }
                 cachedSystemBackend = self.systemBackend
-                cachedModel = transcriptionModel
             }
 
             if self.vadManager == nil {
@@ -282,18 +275,6 @@ final class TranscriptionEngine {
                 diagLog("[ENGINE-1b] loading VAD model...")
                 let vad = try await VadManager()
                 self.vadManager = vad
-            }
-
-            // Optionally load speaker diarization model
-            if settings.enableDiarization {
-                assetStatus = "Loading diarization model..."
-                diagLog("[ENGINE-1c] loading LS-EEND diarization model...")
-                let dm = DiarizationManager()
-                try await dm.load(variant: settings.diarizationVariant.lseendVariant)
-                self.diarizationManager = dm
-                diagLog("[ENGINE-1c] diarization model loaded")
-            } else {
-                self.diarizationManager = nil
             }
 
             needsModelDownload = false
@@ -310,8 +291,8 @@ final class TranscriptionEngine {
             downloadProgress = nil
             // Clear corrupt cache so the next attempt triggers a fresh download
             invalidateBackendCache()
-            settings.transcriptionModel.makeBackend().clearModelCache()
-            diagLog("[ENGINE-2-FAIL] cleared model cache for \(settings.transcriptionModel.rawValue)")
+            ParakeetBackend().clearModelCache()
+            diagLog("[ENGINE-2-FAIL] cleared model cache")
             needsModelDownload = true
             downloadConfirmed = false
             return
@@ -319,9 +300,11 @@ final class TranscriptionEngine {
 
         guard let vadManager else { return }
 
-        // 2. Start mic capture
-        userSelectedDeviceID = inputDeviceID
-        guard let targetMicID = resolvedMicDeviceID(for: inputDeviceID) else {
+        // 2. Start mic capture. Device resolution is HAL enumeration — it runs on the
+        // shared HAL queue, never on the main thread (#64: main blocked on HALB_Mutex
+        // here was one leg of the stop→start deadlock triangle).
+        userSelectedDeviceID = settings.inputDeviceID
+        guard let targetMicID = await resolvedMicDeviceID(for: settings.inputDeviceID) else {
             let msg = Self.unavailableMicMessage
             diagLog("[ENGINE-3-FAIL] \(msg)")
             lastError = msg
@@ -329,17 +312,15 @@ final class TranscriptionEngine {
             isRunning = false
             return
         }
-        currentMicDeviceID = targetMicID
-        // AEC (voice processing) conflicts with system audio capture on macOS —
-        // both cause CoreAudio aggregate-device reconfiguration that can stall the
-        // mic stream. Since system audio capture is always active during recording,
-        if settings.enableEchoCancellation {
-            diagLog("[ENGINE-3] AEC disabled — conflicts with system audio capture")
+        // stop() may have run while resolution was in flight — don't subscribe a mic
+        // stream for a session that is already torn down (#64 review).
+        guard isRunning else {
+            diagLog("[ENGINE-3] stopped during device resolution — aborting start")
+            return
         }
-
+        currentMicDeviceID = targetMicID
         diagLog("[ENGINE-3] starting mic capture, targetMicID=\(String(describing: targetMicID))")
         startMicStream(
-            locale: locale,
             vadManager: vadManager,
             deviceID: targetMicID
         )
@@ -362,13 +343,23 @@ final class TranscriptionEngine {
         }
 
         // 3. Start system audio capture
-        await startSystemAudioStream(locale: locale, vadManager: vadManager)
+        await startSystemAudioStream(vadManager: vadManager)
 
-        assetStatus = "Transcribing (\(micBackend?.displayName ?? transcriptionModel.displayName))"
+        // Back to the no-status sentinel: a persistent "Transcribing (model)"
+        // line was one of four simultaneous recording indicators (#57) — the
+        // red banner is the one live indicator.
+        assetStatus = "Ready"
         diagLog("[ENGINE-6] all transcription tasks started")
 
         // Install CoreAudio listener for output device changes (system audio restart)
         installDefaultOutputDeviceListener()
+
+        // Apply a device change that arrived while start was in flight (#64 review:
+        // restartMic no-ops during isStarting instead of racing the mic subscription).
+        isStarting = false
+        if pendingMicDeviceID != nil {
+            startMicRestartLoopIfNeeded()
+        }
     }
 
     /// Restart only the mic capture with a new device, keeping system audio and models intact.
@@ -378,8 +369,18 @@ final class TranscriptionEngine {
         guard isRunning else { return }
         pendingMicDeviceID = inputDeviceID
 
+        // start() is still wiring the first mic stream — defer; the tail of start()
+        // drains pendingMicDeviceID once the initial subscription exists (#64 review).
+        guard !isStarting else {
+            diagLog("[ENGINE-MIC-SWAP] deferred until start completes (device \(inputDeviceID))")
+            return
+        }
+        startMicRestartLoopIfNeeded()
+    }
+
+    private func startMicRestartLoopIfNeeded() {
         if micRestartTask != nil {
-            diagLog("[ENGINE-MIC-SWAP] queued restart for device \(inputDeviceID)")
+            diagLog("[ENGINE-MIC-SWAP] queued restart for device \(String(describing: pendingMicDeviceID))")
             return
         }
 
@@ -399,12 +400,6 @@ final class TranscriptionEngine {
     private func installDefaultOutputDeviceListener() {
         guard defaultOutputDeviceListenerBlock == nil else { return }
 
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
             Task { @MainActor in
@@ -414,28 +409,44 @@ final class TranscriptionEngine {
         }
         defaultOutputDeviceListenerBlock = block
 
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            DispatchQueue.main,
-            block
-        )
+        // Listener registration is a HAL call — serialize it on the shared HAL queue,
+        // never on the main thread (#64). Install/remove stay ordered (serial queue).
+        // nonisolated(unsafe): the block only crosses into the registration call; it is
+        // delivered on DispatchQueue.main and removed later by identity (same object).
+        nonisolated(unsafe) let listenerBlock = block
+        AudioBus.performHALOperation {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectAddPropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                DispatchQueue.main,
+                listenerBlock
+            )
+        }
     }
 
     private func removeDefaultOutputDeviceListener() {
         guard let block = defaultOutputDeviceListenerBlock else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject),
-            &address,
-            DispatchQueue.main,
-            block
-        )
         defaultOutputDeviceListenerBlock = nil
+
+        nonisolated(unsafe) let listenerBlock = block
+        AudioBus.performHALOperation {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject),
+                &address,
+                DispatchQueue.main,
+                listenerBlock
+            )
+        }
     }
 
     private func ensureMicrophonePermission() async -> Bool {
@@ -461,6 +472,7 @@ final class TranscriptionEngine {
     }
 
     func finalize() async {
+        clearMicMuteForSessionEnd()
         if case .scripted = mode {
             isRunning = false
             assetStatus = "Ready"
@@ -477,7 +489,8 @@ final class TranscriptionEngine {
         pendingMicDeviceID = nil
         pendingSystemAudioRestart = false
 
-        // Unsubscribe from audio bus (engine stays running for other consumers)
+        // Unsubscribe from audio bus. Capture keeps running only if another consumer
+        // (e.g. dictation) remains; otherwise the bus tears down and frees the mic (#30).
         if let id = micConsumerID {
             audioBus.unsubscribe(id)
             micConsumerID = nil
@@ -493,11 +506,6 @@ final class TranscriptionEngine {
         sysTask = nil
         pendingMicDeviceID = nil
         currentMicDeviceID = 0
-        // Finalize and release diarization manager
-        if let dm = diarizationManager {
-            await dm.finalize()
-        }
-        diarizationManager = nil
 
         // NOTE: cachedMicBackend/cachedSystemBackend are intentionally preserved
         // across sessions to avoid model reload. Call invalidateBackendCache() to release.
@@ -508,6 +516,7 @@ final class TranscriptionEngine {
     }
 
     func stop() {
+        clearMicMuteForSessionEnd()
         if case .scripted = mode {
             isRunning = false
             assetStatus = "Ready"
@@ -544,12 +553,14 @@ final class TranscriptionEngine {
 
         userSelectedDeviceID = inputDeviceID
 
-        guard let targetMicID = resolvedMicDeviceID(for: inputDeviceID) else {
+        guard let targetMicID = await resolvedMicDeviceID(for: inputDeviceID) else {
             let msg = Self.unavailableMicMessage
             diagLog("[ENGINE-MIC-SWAP-FAIL] \(msg)")
             lastError = msg
             return
         }
+        // stop()/finalize() may have run during the resolution hop (#64 review).
+        guard isRunning else { return }
 
         if !force, targetMicID == currentMicDeviceID {
             diagLog("[ENGINE-MIC-SWAP] same device \(targetMicID), skipping")
@@ -572,7 +583,6 @@ final class TranscriptionEngine {
         micTask = nil
         audioBus.switchDevice(targetMicID)
         startMicStream(
-            locale: settings.locale,
             vadManager: vadManager,
             deviceID: targetMicID
         )
@@ -616,19 +626,20 @@ final class TranscriptionEngine {
 
         sysTask = nil
         await systemCapture.stop()
-        await startSystemAudioStream(locale: settings.locale, vadManager: vadManager)
+        await startSystemAudioStream(vadManager: vadManager)
 
         diagLog("[ENGINE-SYS-SWAP] system audio stream restarted")
     }
 
     private func startMicStream(
-        locale: Locale,
         vadManager: VadManager,
         deviceID: AudioDeviceID
     ) {
         let (id, rawStream) = audioBus.subscribe(deviceID: deviceID)
         micConsumerID = id
-        var micStream = rawStream
+        // Mute gate sits closest to the bus so everything downstream — the recorder tap
+        // and the VAD/transcriber — sees silence while muted (#66).
+        var micStream = Self.mutedStream(rawStream, muted: _micMuted)
         if let recorder = audioRecorder {
             micStream = Self.tappedStream(micStream) { buffer in
                 recorder.writeMicBuffer(buffer)
@@ -636,7 +647,6 @@ final class TranscriptionEngine {
         }
         let store = transcriptStore
         guard let micTranscriber = makeTranscriber(
-            locale: locale,
             speaker: .you,
             vadManager: vadManager,
             onPartial: { text in
@@ -660,7 +670,6 @@ final class TranscriptionEngine {
     }
 
     private func startSystemAudioStream(
-        locale: Locale,
         vadManager: VadManager
     ) async {
         diagLog("[ENGINE-4] starting system audio capture...")
@@ -684,60 +693,17 @@ final class TranscriptionEngine {
             }
         }
 
-        // Track cumulative audio time for diarizer speaker attribution
-        let sysAudioTime = SyncDouble()
-
-        // Tee system audio to diarization manager if enabled
-        if let dm = diarizationManager {
-            let diarFlushSize = 16000
-            let originalSysStream = sysStream
-            let (diarTapped, diarContinuation) = AsyncStream<AVAudioPCMBuffer>.makeStream()
-            Task {
-                nonisolated(unsafe) let safeDm = dm
-                var diarBuf: [Float] = []
-                for await buffer in originalSysStream {
-                    nonisolated(unsafe) let b = buffer
-                    diarContinuation.yield(b)
-                    guard let channelData = buffer.floatChannelData else { continue }
-                    let frameCount = Int(buffer.frameLength)
-                    sysAudioTime.add(Double(frameCount) / buffer.format.sampleRate)
-                    diarBuf.append(contentsOf: UnsafeBufferPointer(start: channelData[0], count: frameCount))
-                    if diarBuf.count >= diarFlushSize {
-                        let batch = diarBuf
-                        diarBuf.removeAll(keepingCapacity: true)
-                        try? await safeDm.feedAudio(batch)
-                    }
-                }
-                // Flush tail
-                if !diarBuf.isEmpty {
-                    try? await safeDm.feedAudio(diarBuf)
-                }
-                diarContinuation.finish()
-            }
-            sysStream = diarTapped
-        }
-
         let store = transcriptStore
         guard let sysTranscriber = makeTranscriber(
-            locale: locale,
             speaker: .them,
             vadManager: vadManager,
             onPartial: { text in
                 Task { @MainActor in store.volatileThemText = text }
             },
-            onFinal: { [weak self] text in
+            onFinal: { text in
                 Task { @MainActor in
                     store.volatileThemText = ""
-                    let speaker: Speaker
-                    if let dm = self?.diarizationManager {
-                        // Estimate segment time: each onFinal is ~3-5s of speech
-                        let endTime = sysAudioTime.value
-                        let startTime = max(0, endTime - 5.0)
-                        speaker = await dm.dominantSpeaker(from: startTime, to: endTime)
-                    } else {
-                        speaker = .them
-                    }
-                    store.append(Utterance(text: text, speaker: speaker))
+                    store.append(Utterance(text: text, speaker: .them))
                 }
             }
         ) else {
@@ -751,7 +717,6 @@ final class TranscriptionEngine {
     }
 
     private func makeTranscriber(
-        locale: Locale,
         speaker: Speaker,
         vadManager: VadManager,
         onPartial: @escaping @Sendable (String) -> Void,
@@ -764,31 +729,58 @@ final class TranscriptionEngine {
         }
         return StreamingTranscriber(
             backend: backend,
-            locale: locale,
             vadManager: vadManager,
             speaker: speaker,
-            flushInterval: settings.transcriptionModel.flushIntervalSamples,
             onPartial: onPartial,
             onFinal: onFinal
         )
     }
 
-    private func resolvedMicDeviceID(for inputDeviceID: AudioDeviceID) -> AudioDeviceID? {
+    private func resolvedMicDeviceID(for inputDeviceID: AudioDeviceID) async -> AudioDeviceID? {
         // One allowlist selection per (re)start, fresh enumeration each call (#39).
         // Wireless inputs redirect to built-in; stale device IDs fall back to default.
-        AudioBus.resolveBestInputDevice(requested: inputDeviceID)?.deviceID
+        // Runs on the shared HAL queue — never on the main thread (#64).
+        await AudioBus.resolveBestInputDevice(requested: inputDeviceID)?.deviceID
     }
 
     /// Selection only fails when no input devices exist at all — stale selected
     /// device IDs silently fall back to the default/built-in mic (#39).
     private static let unavailableMicMessage = "No microphone is currently available."
 
-    private static func modelNeedsDownload(_ model: TranscriptionModel) -> Bool {
-        let backend = model.makeBackend()
-        if case .needsDownload = backend.checkStatus() {
+    private static func modelNeedsDownload() -> Bool {
+        if case .needsDownload = ParakeetBackend().checkStatus() {
             return true
         }
         return false
+    }
+
+    /// Wrap the mic stream with an engine-local mute gate (#66): while `muted` is set,
+    /// each buffer is replaced by a silent buffer of the same format and length, so
+    /// downstream consumers (recorder tap, VAD/transcriber) see full-duration silence
+    /// rather than a gap. Buffers are never zeroed in place — the bus yields the same
+    /// buffer instance to every consumer, and other consumers must keep their audio.
+    nonisolated static func mutedStream(
+        _ stream: AsyncStream<AVAudioPCMBuffer>,
+        muted: SyncBool
+    ) -> AsyncStream<AVAudioPCMBuffer> {
+        // Allocation failure of a silent buffer is practically impossible for these
+        // small buffers; if it ever happens, the nil transform drops the frame rather
+        // than passing audio through while the user believes they're muted.
+        mappedStream(stream) { muted.value ? Self.silentBuffer(like: $0) : $0 }
+    }
+
+    /// A zeroed buffer matching the given buffer's format and frame length.
+    private nonisolated static func silentBuffer(like buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
+        guard buffer.frameLength > 0,
+              let silent = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength)
+        else { return nil }
+        silent.frameLength = buffer.frameLength
+        for audioBuffer in UnsafeMutableAudioBufferListPointer(silent.mutableAudioBufferList) {
+            if let data = audioBuffer.mData {
+                memset(data, 0, Int(audioBuffer.mDataByteSize))
+            }
+        }
+        return silent
     }
 
     /// Wrap an audio stream to forward each buffer to a synchronous tap before yielding it downstream.
@@ -796,38 +788,27 @@ final class TranscriptionEngine {
         _ stream: AsyncStream<AVAudioPCMBuffer>,
         tap: @escaping @Sendable (AVAudioPCMBuffer) -> Void
     ) -> AsyncStream<AVAudioPCMBuffer> {
+        mappedStream(stream) { tap($0); return $0 }
+    }
+
+    /// Shared skeleton for the per-buffer stream wrappers above: yields
+    /// `transform(buffer)` downstream; nil from the transform drops the frame.
+    private nonisolated static func mappedStream(
+        _ stream: AsyncStream<AVAudioPCMBuffer>,
+        transform: @escaping @Sendable (AVAudioPCMBuffer) -> AVAudioPCMBuffer?
+    ) -> AsyncStream<AVAudioPCMBuffer> {
         struct Box: @unchecked Sendable { let stream: AsyncStream<AVAudioPCMBuffer> }
         let box = Box(stream: stream)
         let (output, continuation) = AsyncStream<AVAudioPCMBuffer>.makeStream()
         Task {
             for await buffer in box.stream {
-                tap(buffer)
-                nonisolated(unsafe) let b = buffer
-                continuation.yield(b)
+                guard let transformed = transform(buffer) else { continue }
+                nonisolated(unsafe) let t = transformed
+                continuation.yield(t)
             }
             continuation.finish()
         }
         return output
-    }
-
-    private func localeMismatchMessage(
-        for locale: Locale,
-        transcriptionModel: TranscriptionModel
-    ) -> String? {
-        guard transcriptionModel == .parakeetV2,
-              let languageCode = normalizedLanguageCode(for: locale),
-              languageCode != "en"
-        else {
-            return nil
-        }
-
-        let localeIdentifier = locale.identifier.replacingOccurrences(of: "_", with: "-")
-        return "Parakeet TDT v2 is English-only. Switch to Parakeet TDT v3 or Qwen3 ASR for \(localeIdentifier)."
-    }
-
-    private func normalizedLanguageCode(for locale: Locale) -> String? {
-        let identifier = locale.identifier.replacingOccurrences(of: "_", with: "-")
-        return identifier.split(separator: "-").first.map { String($0).lowercased() }
     }
 
     private func clearSystemAudioErrorIfPresent() {
@@ -838,11 +819,18 @@ final class TranscriptionEngine {
         }
     }
 
+    /// Mute must not outlive the session (#66): the banner button is the only unmute
+    /// control and it disappears when the meeting ends — the next session starts live.
+    private func clearMicMuteForSessionEnd() {
+        guard _micMuted.value else { return }
+        _micMuted.value = false
+        diagLog("[ENGINE] mic mute -> off (session ended)")
+    }
+
     /// Discard cached backends so the next start() creates fresh ones.
     private func invalidateBackendCache() {
         cachedMicBackend = nil
         cachedSystemBackend = nil
-        cachedModel = nil
         diagLog("[ENGINE-CACHE] backend cache invalidated")
     }
 }

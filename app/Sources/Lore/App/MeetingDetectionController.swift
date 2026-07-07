@@ -1,9 +1,6 @@
 import AppKit
 import Foundation
 import Observation
-import os
-
-private let logger = Logger(subsystem: "com.lore.app", category: "MeetingDetection")
 
 /// One-shot events emitted by the detection controller for consumption by the coordinator.
 enum DetectionEvent: Sendable {
@@ -53,8 +50,22 @@ final class MeetingDetectionController {
     /// The meeting detector actor (mic listener + process scanner).
     private(set) var meetingDetector: MeetingDetector?
 
-    /// Notification service for prompting the user.
+    #if DEBUG
+    /// Test seam: setup() can't run under swift test (NotificationService's
+    /// UNUserNotificationCenter requires a real app bundle), so tests inject
+    /// a detector with a mock signal source directly.
+    func injectDetectorForTesting(_ detector: MeetingDetector) {
+        meetingDetector = detector
+    }
+    #endif
+
+    /// Notification service for prompting the user. Kept as a secondary
+    /// surface: posting fails silently on dev-signed builds (no provisioning
+    /// profile → authorization denied); removal is deferred (#79).
     private(set) var notificationService: NotificationService?
+
+    /// Notch-anchored prompt — the primary detection surface (#79).
+    private(set) var notchPromptPresenter: NotchPromptPresenter?
 
     /// The long-running task that listens for detection events.
     private var detectionTask: Task<Void, Never>?
@@ -78,8 +89,8 @@ final class MeetingDetectionController {
     /// Retained reference to the active settings for detection callbacks.
     private(set) var activeSettings: AppSettings?
 
-    /// Closure to check if a session is currently active (recording).
-    /// Used to suppress detection prompts during active recording.
+    /// Closure to check if a session is currently active — meeting recording
+    /// or Lore's own dictation (#77). Used to suppress detection prompts.
     var isSessionActive: () -> Bool = { false }
 
     // MARK: - Init
@@ -153,6 +164,17 @@ final class MeetingDetectionController {
             }
         }
 
+        // Notch prompt: same callbacks, same handlers as the notification
+        // surface (no onDismiss — the notch has no user-driven dismiss
+        // affordance). Whichever surface resolves first wins — the handlers
+        // withdraw both.
+        let presenter = NotchPromptPresenter()
+        notchPromptPresenter = presenter
+        presenter.onAccept = { [weak self] in self?.handleDetectionAccepted() }
+        presenter.onNotAMeeting = { [weak self] in self?.handleDetectionNotAMeeting() }
+        presenter.onIgnoreApp = { [weak self] in self?.handleIgnoreApp() }
+        presenter.onTimeout = { [weak self] in self?.handleDetectionTimeout() }
+
         // Start listening for detection events from the MeetingDetector
         detectionTask = Task { [weak self] in
             await detector.start()
@@ -172,9 +194,7 @@ final class MeetingDetectionController {
 
         installSleepObserver()
 
-        if settings.detectionLogEnabled {
-            logger.info("Detection system started")
-        }
+        diagLog("[DETECT] detection system started")
     }
 
     /// Tear down the meeting detection system.
@@ -189,13 +209,23 @@ final class MeetingDetectionController {
         appExitMonitorTask?.cancel()
         appExitMonitorTask = nil
 
-        Task {
-            await meetingDetector?.stop()
+        // Capture before nil-ing: the Task body runs after the synchronous
+        // assignment below, so reading `self.meetingDetector` inside it would
+        // find nil and stop() would never run — each enable/disable cycle
+        // would leak a live detector with its HAL listeners installed (#78).
+        if let detector = meetingDetector {
+            meetingDetector = nil
+            Task {
+                await detector.stop()
+                diagLog("[DETECT] detector stopped, listeners released")
+            }
         }
-        meetingDetector = nil
 
         notificationService?.cancelPending()
         notificationService = nil
+
+        notchPromptPresenter?.cancelPending()
+        notchPromptPresenter = nil
 
         if let observer = sleepObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -208,7 +238,7 @@ final class MeetingDetectionController {
         detectedApp = nil
         lastUtteranceAt = nil
 
-        logger.info("Detection system stopped")
+        diagLog("[DETECT] detection system stopped")
     }
 
     // MARK: - Sleep Observer
@@ -221,9 +251,11 @@ final class MeetingDetectionController {
         ) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                if self.activeSettings?.detectionLogEnabled == true {
-                    logger.info("System sleep detected, yielding event")
-                }
+                diagLog("[DETECT] system sleep, yielding event")
+                // Withdraw any pending prompt: without this, the notch
+                // window survives sleep and its ContinuousClock timeout
+                // fires immediately on wake for a meeting that is long dead.
+                self.withdrawPrompts()
                 self.eventContinuation.yield(.systemSleep)
             }
         }
@@ -247,9 +279,7 @@ final class MeetingDetectionController {
                 if let lastUtterance = self.lastUtteranceAt {
                     let elapsed = Date().timeIntervalSince(lastUtterance)
                     if elapsed >= Double(timeoutMinutes) * 60.0 {
-                        if self.activeSettings?.detectionLogEnabled == true {
-                            logger.info("Silence timeout (\(timeoutMinutes)m), stopping")
-                        }
+                        diagLog("[DETECT] silence timeout (\(timeoutMinutes)m), stopping")
                         self.eventContinuation.yield(.silenceTimeout)
                         break
                     }
@@ -291,9 +321,7 @@ final class MeetingDetectionController {
                 }
 
                 if !isRunning {
-                    if self.activeSettings?.detectionLogEnabled == true {
-                        logger.info("Meeting app exited (\(bundleID, privacy: .public)), yielding event")
-                    }
+                    diagLog("[DETECT] meeting app exited (\(bundleID)), yielding event")
                     self.eventContinuation.yield(.meetingAppExited)
                     break
                 }
@@ -322,41 +350,61 @@ final class MeetingDetectionController {
 
     // MARK: - Detection Event Handlers
 
-    private func handleMeetingDetected(app: MeetingApp?) async {
+    /// Returns true when the prompt path was reached (notification post attempted),
+    /// false when suppressed. Visible for testing.
+    @discardableResult
+    func handleMeetingDetected(app: MeetingApp?) async -> Bool {
         detectedApp = app
 
-        // Don't prompt if already recording
-        guard !isSessionActive() else { return }
+        // Don't prompt if already recording (meeting session or dictation, #77)
+        guard !isSessionActive() else {
+            diagLog("[DETECT] prompt suppressed — session active")
+            return false
+        }
 
         // Don't re-prompt for dismissed apps
         if let bundleID = app?.bundleID, dismissedEvents.contains(bundleID) {
-            return
+            diagLog("[DETECT] prompt suppressed — dismissed earlier this session")
+            return false
         }
 
         // Don't prompt for permanently ignored apps
         if let bundleID = app?.bundleID,
            activeSettings?.ignoredAppBundleIDs.contains(bundleID) == true {
-            return
+            diagLog("[DETECT] prompt suppressed — app permanently ignored")
+            return false
         }
 
-        if activeSettings?.detectionLogEnabled == true {
-            logger.info("Detected: \(app?.name ?? "unknown", privacy: .public)")
-        }
+        diagLog("[DETECT] prompting")
+        // Primary surface: notch prompt (#79). The notification attempt stays
+        // as a secondary surface — it fails silently on dev-signed builds.
+        notchPromptPresenter?.present(appName: app?.name)
+        _ = await notificationService?.postMeetingDetected(appName: app?.name)
+        return true
+    }
 
-        let posted = await notificationService?.postMeetingDetected(appName: app?.name) ?? false
-        if !posted {
-            if activeSettings?.detectionLogEnabled == true {
-                logger.debug("Failed to post notification (permission denied?)")
-            }
-        }
+    /// Withdraw both prompt surfaces. Called when either surface resolves
+    /// (accept / not-a-meeting / ignore / dismiss / timeout) so the other
+    /// doesn't linger and fire a stale 60s timeout, and when the detected
+    /// meeting ends.
+    private func withdrawPrompts() {
+        notificationService?.cancelPending()
+        notchPromptPresenter?.cancelPending()
     }
 
     private func handleMeetingEnded() {
         detectedApp = nil
+        // Withdraw any stale prompt: the meeting it offers to transcribe is
+        // gone. Also closes the #77 race where dictation ends between the
+        // detector's debounce-expiry yield and MainActor delivery — the prompt
+        // would fire for a dictation that just ended and never be withdrawn.
+        withdrawPrompts()
         eventContinuation.yield(.meetingAppExited)
     }
 
     private func handleDetectionAccepted() {
+        diagLog("[DETECT] user accepted, starting session")
+        withdrawPrompts()
         Task {
             let app = await meetingDetector?.detectedApp
             let context = DetectionContext(
@@ -377,19 +425,19 @@ final class MeetingDetectionController {
     }
 
     private func handleDetectionNotAMeeting() {
+        diagLog("[DETECT] user action: not a meeting")
+        withdrawPrompts()
         Task {
             if let app = await meetingDetector?.detectedApp {
                 dismissedEvents.insert(app.bundleID)
                 eventContinuation.yield(.notAMeeting(bundleID: app.bundleID))
             }
         }
-
-        if activeSettings?.detectionLogEnabled == true {
-            logger.debug("User dismissed as not a meeting")
-        }
     }
 
     private func handleIgnoreApp() {
+        diagLog("[DETECT] user action: ignore this app permanently")
+        withdrawPrompts()
         Task {
             if let app = await meetingDetector?.detectedApp, let settings = activeSettings {
                 var ignored = settings.ignoredAppBundleIDs
@@ -400,25 +448,17 @@ final class MeetingDetectionController {
                 dismissedEvents.insert(app.bundleID)
             }
         }
-
-        if activeSettings?.detectionLogEnabled == true {
-            logger.debug("User chose to ignore this app permanently")
-        }
     }
 
     private func handleDetectionDismissed() {
+        diagLog("[DETECT] user action: dismissed notification")
+        withdrawPrompts()
         eventContinuation.yield(.dismissed)
-
-        if activeSettings?.detectionLogEnabled == true {
-            logger.debug("User dismissed notification")
-        }
     }
 
     private func handleDetectionTimeout() {
+        diagLog("[DETECT] notification timed out (60s, no user action)")
+        withdrawPrompts()
         eventContinuation.yield(.timeout)
-
-        if activeSettings?.detectionLogEnabled == true {
-            logger.debug("Notification timed out")
-        }
     }
 }

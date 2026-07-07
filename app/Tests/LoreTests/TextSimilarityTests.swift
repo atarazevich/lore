@@ -1,7 +1,7 @@
 import XCTest
 @testable import LoreKit
 
-final class KnowledgeBaseTests: XCTestCase {
+final class TextSimilarityTests: XCTestCase {
 
     // MARK: - TextSimilarity.normalizedWords
 
@@ -83,57 +83,4 @@ final class KnowledgeBaseTests: XCTestCase {
         XCTAssertEqual(score, 0.5, accuracy: 0.001)
     }
 
-    // MARK: - KBChunk Model
-
-    func testKBChunkCodable() throws {
-        let chunk = KBChunk(
-            text: "Some knowledge base text",
-            sourceFile: "notes.md",
-            headerContext: "Section > Subsection",
-            embedding: [0.1, 0.2, 0.3]
-        )
-
-        let data = try JSONEncoder().encode(chunk)
-        let decoded = try JSONDecoder().decode(KBChunk.self, from: data)
-
-        XCTAssertEqual(decoded.text, "Some knowledge base text")
-        XCTAssertEqual(decoded.sourceFile, "notes.md")
-        XCTAssertEqual(decoded.headerContext, "Section > Subsection")
-        XCTAssertEqual(decoded.embedding, [0.1, 0.2, 0.3])
-    }
-
-    // MARK: - KBResult Model
-
-    func testKBResultFields() {
-        let result = KBResult(
-            text: "Relevant text",
-            sourceFile: "doc.md",
-            headerContext: "API > Endpoints",
-            score: 0.95
-        )
-        XCTAssertEqual(result.text, "Relevant text")
-        XCTAssertEqual(result.sourceFile, "doc.md")
-        XCTAssertEqual(result.headerContext, "API > Endpoints")
-        XCTAssertEqual(result.score, 0.95, accuracy: 0.001)
-    }
-
-    func testKBResultIdentifiable() {
-        let a = KBResult(text: "A", sourceFile: "a.md", score: 0.5)
-        let b = KBResult(text: "B", sourceFile: "b.md", score: 0.6)
-        XCTAssertNotEqual(a.id, b.id)
-    }
-
-    func testKBResultCodable() throws {
-        let result = KBResult(
-            text: "Sample",
-            sourceFile: "file.md",
-            headerContext: "Header",
-            score: 0.8
-        )
-        let data = try JSONEncoder().encode(result)
-        let decoded = try JSONDecoder().decode(KBResult.self, from: data)
-        XCTAssertEqual(decoded.text, "Sample")
-        XCTAssertEqual(decoded.sourceFile, "file.md")
-        XCTAssertEqual(decoded.score, 0.8, accuracy: 0.001)
-    }
 }

@@ -4,279 +4,168 @@ import XCTest
 @MainActor
 final class LiveSessionControllerTests: XCTestCase {
 
-    // MARK: - Helpers
-
-    private func makeTempDirs() -> (root: URL, notes: URL) {
-        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("LoreLiveSessionTests", isDirectory: true)
-            .appendingPathComponent(UUID().uuidString, isDirectory: true)
-        let notesDirectory = root.appendingPathComponent("Notes", isDirectory: true)
-        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        try? FileManager.default.createDirectory(at: notesDirectory, withIntermediateDirectories: true)
-        return (root, notesDirectory)
-    }
-
-    private func makeSettings(notesDirectory: URL) -> AppSettings {
-        let suiteName = "com.lore.tests.livesession.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
-        defaults.removePersistentDomain(forName: suiteName)
-        defaults.set(notesDirectory.path, forKey: "notesFolderPath")
-        defaults.set(true, forKey: "hasAcknowledgedRecordingConsent")
-        let storage = AppSettingsStorage(
-            defaults: defaults,
-            secretStore: .ephemeral,
-            defaultNotesDirectory: notesDirectory,
-            runMigrations: false
-        )
-        return AppSettings(storage: storage)
-    }
-
-    private func makeController(
-        root: URL,
-        notesDirectory: URL,
-        settings: AppSettings,
-        scripted: [Utterance] = []
-    ) -> (LiveSessionController, AppCoordinator) {
-        let transcriptStore = TranscriptStore()
-        let coordinator = AppCoordinator(
-            sessionRepository: SessionRepository(rootDirectory: root),
-            templateStore: TemplateStore(rootDirectory: root),
-            notesEngine: NotesEngine(mode: .scripted(markdown: "Test")),
-            transcriptStore: transcriptStore
-        )
-        coordinator.transcriptionEngine = TranscriptionEngine(
-            transcriptStore: transcriptStore,
-            settings: settings,
-            mode: .scripted(scripted)
-        )
-
-        let container = AppContainer(
-            mode: .live,
-            defaults: .standard,
-            appSupportDirectory: root,
-            notesDirectory: notesDirectory
-        )
-        let controller = LiveSessionController(coordinator: coordinator, container: container)
-        coordinator.liveSessionController = controller
-        return (controller, coordinator)
-    }
-
     // MARK: - Tests
 
     func testStartSessionTransitionsStateToRecordingSynchronously() {
-        let dirs = makeTempDirs()
-        let settings = makeSettings(notesDirectory: dirs.notes)
-        let (controller, coordinator) = makeController(
-            root: dirs.root,
-            notesDirectory: dirs.notes,
-            settings: settings
-        )
+        let h = MeetingHarness.make()
 
-        XCTAssertEqual(coordinator.state, .idle)
+        XCTAssertEqual(h.coordinator.state, .idle)
 
-        controller.startSession(settings: settings)
+        h.controller.startSession(settings: h.settings)
 
         // The state machine transition must happen synchronously
-        if case .recording = coordinator.state {
+        if case .recording = h.coordinator.state {
             // expected
         } else {
-            XCTFail("Expected .recording state immediately after startSession, got \(coordinator.state)")
+            XCTFail("Expected .recording state immediately after startSession, got \(h.coordinator.state)")
         }
     }
 
     func testStartSessionWhileRunningIsNoOp() async {
-        let dirs = makeTempDirs()
-        let settings = makeSettings(notesDirectory: dirs.notes)
-        let (controller, coordinator) = makeController(
-            root: dirs.root,
-            notesDirectory: dirs.notes,
-            settings: settings,
-            scripted: [Utterance(text: "Test", speaker: .you)]
-        )
+        let h = await MeetingHarness.makeStarted(scripted: [Utterance(text: "Test", speaker: .you)])
 
-        controller.startSession(settings: settings)
-
-        // Wait for engine to start
-        for _ in 0..<20 {
-            if coordinator.transcriptionEngine?.isRunning == true { break }
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-
-        // Second start should be a no-op (state machine: recording + userStarted = no-op)
-        controller.startSession(settings: settings)
+        // Second start should be a no-op (chokepoint: session already active)
+        h.controller.startSession(settings: h.settings)
 
         // Still recording, not crashed or changed
-        if case .recording = coordinator.state {
+        if case .recording = h.coordinator.state {
             // expected
         } else {
-            XCTFail("Expected .recording state, got \(coordinator.state)")
+            XCTFail("Expected .recording state, got \(h.coordinator.state)")
         }
+    }
+
+    /// Ghost-recording regression: a stop arriving while the start's session
+    /// setup is still in flight is bounce from the same interaction (the
+    /// header button flips to "Stop" the instant coordinator.state changes)
+    /// and must be dropped — the recording continues, and a deliberate stop
+    /// afterwards still works.
+    func testStopDuringStartWindowIsDroppedAsBounce() async {
+        let h = MeetingHarness.make(scripted: [Utterance(text: "Hello", speaker: .you)])
+
+        h.controller.startSession(settings: h.settings)
+        h.controller.stopSession(settings: h.settings)
+
+        if case .recording = h.coordinator.state {
+            // expected — the bounce stop was dropped
+        } else {
+            XCTFail("Expected .recording after bounce stop, got \(h.coordinator.state)")
+        }
+
+        // The recording proceeds to a working engine.
+        await waitUntil { h.coordinator.transcriptionEngine?.isRunning == true }
+        XCTAssertEqual(h.coordinator.transcriptionEngine?.isRunning, true)
+
+        // A deliberate stop after the session is established passes through.
+        h.controller.stopSession(settings: h.settings)
+        await waitUntil { h.coordinator.state == .idle }
+        XCTAssertEqual(h.coordinator.state, .idle)
+        XCTAssertEqual(h.coordinator.transcriptionEngine?.isRunning, false)
+    }
+
+    /// Ghost-recording regression: engine capturing while the coordinator is
+    /// idle (the ghost condition itself) — a start must not stack a new
+    /// session on top of a live capture.
+    func testStartSessionNoOpsWhileEngineRunning() async {
+        let h = MeetingHarness.make(scripted: [Utterance(text: "Hello", speaker: .you)])
+
+        await h.coordinator.transcriptionEngine?.start()
+        XCTAssertEqual(h.coordinator.transcriptionEngine?.isRunning, true)
+        XCTAssertEqual(h.coordinator.state, .idle)
+
+        h.controller.startSession(settings: h.settings)
+
+        XCTAssertEqual(
+            h.coordinator.state, .idle,
+            "Start must no-op while the engine is already capturing"
+        )
     }
 
     func testStopSessionWhileIdleIsNoOp() {
-        let dirs = makeTempDirs()
-        let settings = makeSettings(notesDirectory: dirs.notes)
-        let (controller, coordinator) = makeController(
-            root: dirs.root,
-            notesDirectory: dirs.notes,
-            settings: settings
-        )
+        let h = MeetingHarness.make()
 
-        XCTAssertEqual(coordinator.state, .idle)
+        XCTAssertEqual(h.coordinator.state, .idle)
 
-        controller.stopSession(settings: settings)
+        h.controller.stopSession(settings: h.settings)
 
         // Should still be idle
-        XCTAssertEqual(coordinator.state, .idle)
+        XCTAssertEqual(h.coordinator.state, .idle)
     }
 
     func testDeepLinkStartRejectedWhenEngineNotReady() {
-        let dirs = makeTempDirs()
-        let settings = makeSettings(notesDirectory: dirs.notes)
-        let transcriptStore = TranscriptStore()
-        let coordinator = AppCoordinator(
-            sessionRepository: SessionRepository(rootDirectory: dirs.root),
-            templateStore: TemplateStore(rootDirectory: dirs.root),
-            notesEngine: NotesEngine(mode: .scripted(markdown: "Test")),
-            transcriptStore: transcriptStore
-        )
-        // No transcription engine or suggestion engine
-        let container = AppContainer(
-            mode: .live,
-            defaults: .standard,
-            appSupportDirectory: dirs.root,
-            notesDirectory: dirs.notes
-        )
-        let controller = LiveSessionController(coordinator: coordinator, container: container)
-        coordinator.liveSessionController = controller
+        // No transcription engine
+        let h = MeetingHarness.make(withEngine: false)
 
         // Queue a start command
-        coordinator.queueExternalCommand(.startSession)
+        h.coordinator.queueExternalCommand(.startSession)
 
         // Try handling - should not start because engines are not ready
-        controller.handlePendingExternalCommandIfPossible(settings: settings, openNotesWindow: nil)
+        h.controller.handlePendingExternalCommandIfPossible(settings: h.settings, showPastMeetings: nil)
 
         // Command should still be pending (not consumed)
-        XCTAssertNotNil(coordinator.pendingExternalCommand)
-        XCTAssertEqual(coordinator.state, .idle)
+        XCTAssertNotNil(h.coordinator.pendingExternalCommand)
+        XCTAssertEqual(h.coordinator.state, .idle)
     }
 
     func testDeepLinkStopRejectedWhenNotRunning() {
-        let dirs = makeTempDirs()
-        let settings = makeSettings(notesDirectory: dirs.notes)
-        let (controller, coordinator) = makeController(
-            root: dirs.root,
-            notesDirectory: dirs.notes,
-            settings: settings
-        )
+        let h = MeetingHarness.make()
 
-        coordinator.queueExternalCommand(.stopSession)
+        h.coordinator.queueExternalCommand(.stopSession)
 
         // Try handling - should not stop because not running
-        controller.handlePendingExternalCommandIfPossible(settings: settings, openNotesWindow: nil)
+        h.controller.handlePendingExternalCommandIfPossible(settings: h.settings, showPastMeetings: nil)
 
         // Command should still be pending (not consumed because guard failed)
-        XCTAssertNotNil(coordinator.pendingExternalCommand)
-        XCTAssertEqual(coordinator.state, .idle)
+        XCTAssertNotNil(h.coordinator.pendingExternalCommand)
+        XCTAssertEqual(h.coordinator.state, .idle)
     }
 
     func testDeepLinkOpenNotesAlwaysAccepted() {
-        let dirs = makeTempDirs()
-        let settings = makeSettings(notesDirectory: dirs.notes)
-        let (controller, coordinator) = makeController(
-            root: dirs.root,
-            notesDirectory: dirs.notes,
-            settings: settings
-        )
+        let h = MeetingHarness.make()
 
-        coordinator.queueExternalCommand(.openNotes(sessionID: "test_session"))
+        h.coordinator.queueExternalCommand(.openNotes(sessionID: "test_session"))
 
         var notesOpened = false
-        controller.handlePendingExternalCommandIfPossible(settings: settings) {
+        h.controller.handlePendingExternalCommandIfPossible(settings: h.settings) {
             notesOpened = true
         }
 
         XCTAssertTrue(notesOpened)
-        XCTAssertNil(coordinator.pendingExternalCommand)
-        XCTAssertEqual(coordinator.requestedSessionSelectionID, "test_session")
+        XCTAssertNil(h.coordinator.pendingExternalCommand)
+        XCTAssertEqual(h.coordinator.requestedSessionSelectionID, "test_session")
     }
 
     func testRunningStateChangeCallbackFires() async {
-        let dirs = makeTempDirs()
-        let settings = makeSettings(notesDirectory: dirs.notes)
-        let (controller, coordinator) = makeController(
-            root: dirs.root,
-            notesDirectory: dirs.notes,
-            settings: settings,
-            scripted: [Utterance(text: "Hello", speaker: .you)]
-        )
+        let h = await MeetingHarness.makeStarted(scripted: [Utterance(text: "Hello", speaker: .you)])
 
-        var runningChanges: [Bool] = []
-        controller.onRunningStateChanged = { isRunning in
-            runningChanges.append(isRunning)
-        }
-
-        controller.startSession(settings: settings)
-
-        // Wait for engine to start
-        for _ in 0..<20 {
-            if coordinator.transcriptionEngine?.isRunning == true { break }
-            try? await Task.sleep(for: .milliseconds(50))
-        }
-
-        let engineRunning = coordinator.transcriptionEngine?.isRunning ?? false
+        let engineRunning = h.coordinator.transcriptionEngine?.isRunning ?? false
         XCTAssertTrue(engineRunning, "Engine should be running after start")
     }
 
     func testConfirmDownloadSetsFlag() {
-        let dirs = makeTempDirs()
-        let settings = makeSettings(notesDirectory: dirs.notes)
-        let (controller, coordinator) = makeController(
-            root: dirs.root,
-            notesDirectory: dirs.notes,
-            settings: settings
-        )
+        let h = MeetingHarness.make()
 
-        XCTAssertFalse(coordinator.transcriptionEngine?.downloadConfirmed ?? true)
+        XCTAssertFalse(h.coordinator.transcriptionEngine?.downloadConfirmed ?? true)
 
-        controller.confirmDownloadAndStart(settings: settings)
+        h.controller.confirmDownloadAndStart(settings: h.settings)
 
-        XCTAssertTrue(coordinator.transcriptionEngine?.downloadConfirmed ?? false)
+        XCTAssertTrue(h.coordinator.transcriptionEngine?.downloadConfirmed ?? false)
     }
 
     func testFullSessionLifecycle() async {
-        let dirs = makeTempDirs()
-        let settings = makeSettings(notesDirectory: dirs.notes)
-        let (controller, coordinator) = makeController(
-            root: dirs.root,
-            notesDirectory: dirs.notes,
-            settings: settings,
-            scripted: [
-                Utterance(text: "Let me walk through this.", speaker: .you),
-                Utterance(text: "Sounds good.", speaker: .them),
-            ]
-        )
+        let h = await MeetingHarness.makeStarted(scripted: [
+            Utterance(text: "Let me walk through this.", speaker: .you),
+            Utterance(text: "Sounds good.", speaker: .them),
+        ])
 
-        // Start
-        controller.startSession(settings: settings)
+        h.controller.stopSession(settings: h.settings)
 
-        // Wait for engine
-        for _ in 0..<20 {
-            if coordinator.transcriptionEngine?.isRunning == true { break }
-            try? await Task.sleep(for: .milliseconds(50))
+        await waitUntil {
+            h.coordinator.state == .idle && h.coordinator.lastEndedSession != nil
         }
 
-        // Stop
-        controller.stopSession(settings: settings)
-
-        // Wait for finalization
-        for _ in 0..<50 {
-            if case .idle = coordinator.state, coordinator.lastEndedSession != nil { break }
-            try? await Task.sleep(for: .milliseconds(100))
-        }
-
-        XCTAssertEqual(coordinator.state, .idle)
-        XCTAssertNotNil(coordinator.lastEndedSession)
-        XCTAssertEqual(coordinator.lastEndedSession?.utteranceCount, 2)
+        XCTAssertEqual(h.coordinator.state, .idle)
+        XCTAssertNotNil(h.coordinator.lastEndedSession)
+        XCTAssertEqual(h.coordinator.lastEndedSession?.utteranceCount, 2)
     }
 }

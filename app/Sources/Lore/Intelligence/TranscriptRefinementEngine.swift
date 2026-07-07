@@ -3,7 +3,7 @@ import Foundation
 /// Refines utterances by cleaning up filler words and fixing punctuation via LLM.
 /// Runs as a background actor with bounded concurrency.
 actor TranscriptRefinementEngine {
-    private let client = OpenRouterClient()
+    private let client = ChatCompletionsClient()
     private let settings: AppSettings
     private let transcriptStore: TranscriptStore
 
@@ -12,8 +12,6 @@ actor TranscriptRefinementEngine {
     private var pendingQueue: [Utterance] = []
     private var activeTasks: [UUID: Task<Void, Never>] = [:]
 
-    /// Hardcoded cheap model for refinement (keeps cost low).
-    private let refinementModel = "openai/gpt-4o-mini"
     private let minimumWordCount = 5
 
     private let systemPrompt = """
@@ -90,53 +88,10 @@ actor TranscriptRefinementEngine {
     }
 
     private func performRefinement(_ utterance: Utterance) async {
-        let apiKey: String?
-        let baseURL: URL?
-        let model: String
+        // Same OpenAI key as cleanup and Ask Lore; read on MainActor.
+        let apiKey = await MainActor.run { settings.openaiApiKey }
 
-        // Read settings on MainActor
-        let provider = await MainActor.run { settings.llmProvider }
-        let openRouterKey = await MainActor.run { settings.openRouterApiKey }
-        let ollamaURL = await MainActor.run { settings.ollamaBaseURL }
-        let ollamaModel = await MainActor.run { settings.ollamaLLMModel }
-        let mlxURL = await MainActor.run { settings.mlxBaseURL }
-        let mlxModelName = await MainActor.run { settings.mlxModel }
-        let openAILLMURL = await MainActor.run { settings.openAILLMBaseURL }
-        let openAILLMKey = await MainActor.run { settings.openAILLMApiKey }
-        let openAILLMModelName = await MainActor.run { settings.openAILLMModel }
-
-        switch provider {
-        case .openRouter:
-            apiKey = openRouterKey.isEmpty ? nil : openRouterKey
-            baseURL = nil
-            model = refinementModel
-        case .ollama:
-            apiKey = nil
-            guard let url = OpenRouterClient.chatCompletionsURL(from: ollamaURL) else {
-                await markFailed(utterance.id)
-                return
-            }
-            baseURL = url
-            model = ollamaModel
-        case .mlx:
-            apiKey = nil
-            guard let url = OpenRouterClient.chatCompletionsURL(from: mlxURL) else {
-                await markFailed(utterance.id)
-                return
-            }
-            baseURL = url
-            model = mlxModelName
-        case .openAICompatible:
-            apiKey = openAILLMKey.isEmpty ? nil : openAILLMKey
-            guard let url = OpenRouterClient.chatCompletionsURL(from: openAILLMURL) else {
-                await markFailed(utterance.id)
-                return
-            }
-            baseURL = url
-            model = openAILLMModelName
-        }
-
-        let messages: [OpenRouterClient.Message] = [
+        let messages: [ChatCompletionsClient.Message] = [
             .init(role: "system", content: systemPrompt),
             .init(role: "user", content: utterance.text)
         ]
@@ -144,10 +99,9 @@ actor TranscriptRefinementEngine {
         do {
             let refined = try await client.complete(
                 apiKey: apiKey,
-                model: model,
+                model: ChatCompletionsClient.defaultOpenAIModel,
                 messages: messages,
-                maxTokens: 512,
-                baseURL: baseURL
+                maxTokens: 512
             )
 
             let trimmed = refined.trimmingCharacters(in: .whitespacesAndNewlines)

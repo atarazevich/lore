@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+import os
+
+private let logger = Logger(subsystem: "com.lore.app", category: "MeetingLifecycle")
 
 /// Slim coordinator that owns the meeting lifecycle state machine and all shared
 /// cross-cutting state (session history, external command queue, detection event loop).
@@ -21,12 +24,6 @@ final class AppCoordinator {
 
     @ObservationIgnored private let _templateStore: TemplateStore
     nonisolated var templateStore: TemplateStore { _templateStore }
-
-    @ObservationIgnored private let _notesEngine: NotesEngine
-    nonisolated var notesEngine: NotesEngine { _notesEngine }
-
-    @ObservationIgnored private let _cleanupEngine = TranscriptCleanupEngine()
-    nonisolated var cleanupEngine: TranscriptCleanupEngine { _cleanupEngine }
 
     @ObservationIgnored private let _transcriptStore: TranscriptStore
     nonisolated var transcriptStore: TranscriptStore { _transcriptStore }
@@ -105,26 +102,30 @@ final class AppCoordinator {
     let hotkeyManager = HotkeyManager()
     let dictationIndicator = DictationIndicatorManager()
 
-    @ObservationIgnored nonisolated(unsafe) private var _knowledgeBase: KnowledgeBase?
-    nonisolated var knowledgeBase: KnowledgeBase? {
-        get { _knowledgeBase }
-    }
-
-    @ObservationIgnored nonisolated(unsafe) private var _suggestionEngine: SuggestionEngine?
-    nonisolated var suggestionEngine: SuggestionEngine? {
-        get { _suggestionEngine }
-    }
-
-    func setViewServices(knowledgeBase: KnowledgeBase, suggestionEngine: SuggestionEngine) {
-        _knowledgeBase = knowledgeBase
-        _suggestionEngine = suggestionEngine
-    }
-
     /// The template snapshot frozen at session start (not stop).
     var sessionTemplateSnapshot: TemplateSnapshot?
 
-    /// Guard against finalization hanging forever.
+    /// Guard against finalization hanging forever. Injectable so tests can
+    /// shorten the 30s production value.
     private var finalizationTimeoutTask: Task<Void, Never>?
+    @ObservationIgnored var finalizationTimeout: Duration = .seconds(30)
+
+    /// Serial chain for lifecycle side effects (start / stop / discard).
+    /// Dispatch order is preserved: a stop enqueued behind an in-flight start
+    /// awaits the start's session setup first, so finalization can never run
+    /// before the session exists and leave the engine capturing detached from
+    /// any session (the "ghost recording" race).
+    @ObservationIgnored private var lifecycleEffectChain: Task<Void, Never>?
+
+    /// Bumped when `.finalizationTimeout` drops the chain: effects that were
+    /// queued (but not started) before the drop are invalidated and never run.
+    @ObservationIgnored private var lifecycleEpoch = 0
+
+    /// Bumped per `.userStopped` dispatch. Binds each finalize effect and its
+    /// timeout timer to the stop that created them, so a finalize that
+    /// outlives its timeout cannot disturb a later stop (cancel its timer or
+    /// flip its `.ending` to `.idle`).
+    @ObservationIgnored private var stopGeneration = 0
 
     /// Retained reference to the active settings for side effects.
     var activeSettings: AppSettings?
@@ -138,21 +139,34 @@ final class AppCoordinator {
     init(
         sessionRepository: SessionRepository = SessionRepository(),
         templateStore: TemplateStore = TemplateStore(),
-        notesEngine: NotesEngine = NotesEngine(),
         transcriptStore: TranscriptStore = TranscriptStore()
     ) {
         self._sessionRepository = sessionRepository
         self._templateStore = templateStore
-        self._notesEngine = notesEngine
         self._transcriptStore = transcriptStore
     }
 
 
     // MARK: - State Machine
 
+    /// True when a new capture session may start: lifecycle state idle AND
+    /// the engine itself not capturing — the two truth sources whose
+    /// divergence produced the ghost recording (#42).
+    var canStartCapture: Bool {
+        state == .idle && transcriptionEngine?.isRunning != true
+    }
+
     /// Drive the meeting lifecycle through the state machine, then dispatch side effects.
     func handle(_ event: MeetingEvent, settings: AppSettings? = nil) {
         let resolvedSettings = settings ?? activeSettings
+
+        // Dispatch chokepoint for every start surface (UI, menu bar, hotkey,
+        // detection): never begin a session while one is active by either
+        // truth source.
+        if case .userStarted = event, !canStartCapture {
+            logger.info("Start ignored: session already active (state not idle, or engine still capturing)")
+            return
+        }
 
         let oldState = state
         state = transition(from: oldState, on: event)
@@ -168,23 +182,27 @@ final class AppCoordinator {
     private func performSideEffects(for event: MeetingEvent, settings: AppSettings?) {
         switch event {
         case .userStarted(let metadata):
-            Task { await liveSessionController?.startTranscription(metadata: metadata, settings: settings) }
+            enqueueLifecycleEffect { [self] in
+                await liveSessionController?.startTranscription(metadata: metadata, settings: settings)
+            }
 
         case .userStopped:
-            finalizationTimeoutTask = Task {
-                try? await Task.sleep(for: .seconds(30))
-                guard !Task.isCancelled else { return }
-                handle(.finalizationTimeout)
-            }
-            Task {
+            stopGeneration += 1
+            let generation = stopGeneration
+            enqueueLifecycleEffect { [self] in
+                // Arm the timeout only when finalization actually begins — a
+                // finalize queued behind a slow start (e.g. model download)
+                // must not trip a spurious timeout, which would transiently
+                // recreate the ghost condition (engine up while state idle).
+                armFinalizationTimeout(generation: generation)
                 await liveSessionController?.finalizeCurrentSession(settings: settings)
-                finalizationTimeoutTask?.cancel()
-                finalizationTimeoutTask = nil
-                handle(.finalizationComplete)
+                completeFinalization(generation: generation)
             }
 
         case .userDiscarded:
-            Task { liveSessionController?.discardSession() }
+            enqueueLifecycleEffect { [self] in
+                liveSessionController?.discardSession()
+            }
 
         case .finalizationComplete:
             finalizationTimeoutTask?.cancel()
@@ -192,7 +210,46 @@ final class AppCoordinator {
 
         case .finalizationTimeout:
             finalizationTimeoutTask = nil
+            // A hung finalize must not queue every future lifecycle effect
+            // until relaunch: drop the chain. Queued-but-unstarted effects
+            // are invalidated via the epoch; the hung effect itself cannot
+            // be killed, but its completion is generation-guarded.
+            lifecycleEpoch += 1
+            lifecycleEffectChain = nil
         }
+    }
+
+    /// Run a lifecycle side effect after all previously dispatched ones
+    /// finish. Internal (not private) as a seam for lifecycle tests.
+    func enqueueLifecycleEffect(_ operation: @escaping @MainActor () async -> Void) {
+        let epoch = lifecycleEpoch
+        let previous = lifecycleEffectChain
+        lifecycleEffectChain = Task { @MainActor [self] in
+            await previous?.value
+            guard epoch == lifecycleEpoch else { return }
+            await operation()
+        }
+    }
+
+    private func armFinalizationTimeout(generation: Int) {
+        finalizationTimeoutTask = Task { [self] in
+            try? await Task.sleep(for: finalizationTimeout)
+            // A stale timer (its stop was superseded) must not force-idle a
+            // later stop's finalization.
+            guard !Task.isCancelled, generation == stopGeneration else { return }
+            handle(.finalizationTimeout)
+        }
+    }
+
+    /// Complete a finalize effect for `generation`. Stale generations no-op:
+    /// a finalize that outlived its timeout (chain dropped, later sessions
+    /// possibly started and stopped) must not cancel a later stop's timer or
+    /// flip a later stop's `.ending` to `.idle`. Internal for lifecycle tests.
+    func completeFinalization(generation: Int) {
+        guard generation == stopGeneration else { return }
+        finalizationTimeoutTask?.cancel()
+        finalizationTimeoutTask = nil
+        handle(.finalizationComplete)
     }
 
     // MARK: - History

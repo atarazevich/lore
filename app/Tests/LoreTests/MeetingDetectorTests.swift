@@ -232,6 +232,28 @@ final class MeetingDetectorTests: XCTestCase {
         listenTask.cancel()
     }
 
+    // MARK: - Stop Finishes Events Stream (#78)
+
+    func testStopFinishesEventsStream() async throws {
+        let source = MockAudioSignalSource()
+        let detector = MeetingDetector(audioSource: source)
+
+        let streamFinished = expectation(description: "events stream finished after stop")
+        let stream = await detector.events
+        Task {
+            for await _ in stream {}
+            streamFinished.fulfill()
+        }
+
+        await detector.start()
+        await detector.stop()
+
+        // stop() must finish the events stream even though the source is
+        // still open — otherwise the consumer's for-await loop parks forever
+        // holding a strong reference to the detector (ghost detector, #78).
+        await fulfillment(of: [streamFinished], timeout: 2.0)
+    }
+
     // MARK: - Resource Loading Tests
 
     func testBundledMeetingAppsContainZoom() {

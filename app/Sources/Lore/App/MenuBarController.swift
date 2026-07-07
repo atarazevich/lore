@@ -11,6 +11,9 @@ final class MenuBarController {
     private var iconUpdateTask: Task<Void, Never>?
 
     var onShowMainWindow: (() -> Void)?
+    /// Routes to the Meetings destination of the unified window (used when a
+    /// popover Start is blocked by the recording-consent gate).
+    var onShowMeetings: (() -> Void)?
     var onQuitApp: (() -> Void)?
 
     init(
@@ -34,6 +37,10 @@ final class MenuBarController {
                 self?.popover.performClose(nil)
                 self?.onShowMainWindow?()
             },
+            onShowMeetings: { [weak self] in
+                self?.popover.performClose(nil)
+                self?.onShowMeetings?()
+            },
             onCheckForUpdates: { [weak self] in
                 self?.popover.performClose(nil)
                 onCheckForUpdates()
@@ -46,7 +53,7 @@ final class MenuBarController {
         popover.contentViewController = NSHostingController(rootView: popoverView)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: "Lore")
+            button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: XMOTheme.wordmark)
             button.image?.isTemplate = true
             button.target = self
             button.action = #selector(togglePopover(_:))
@@ -87,7 +94,7 @@ final class MenuBarController {
         let symbolName = coordinator.isRecording ? "waveform.circle.fill" : "waveform.circle"
         statusItem.button?.image = NSImage(
             systemSymbolName: symbolName,
-            accessibilityDescription: "Lore"
+            accessibilityDescription: XMOTheme.wordmark
         )
         statusItem.button?.image?.isTemplate = true
     }

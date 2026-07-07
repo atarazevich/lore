@@ -4,21 +4,10 @@ import Observation
 @Observable
 @MainActor
 final class TranscriptStore {
-    private let acousticEchoWindow = AcousticEchoFilter.defaultWindow
-    private let acousticEchoSimilarityThreshold = AcousticEchoFilter.defaultSimilarityThreshold
-    private let acousticEchoMinimumWordCount = AcousticEchoFilter.defaultMinimumWordCount
-    private let acousticEchoMinimumCharacterCount = AcousticEchoFilter.defaultMinimumCharacterCount
-
     @ObservationIgnored nonisolated(unsafe) private var _utterances: [Utterance] = []
     private(set) var utterances: [Utterance] {
         get { access(keyPath: \.utterances); return _utterances }
         set { withMutation(keyPath: \.utterances) { _utterances = newValue } }
-    }
-
-    @ObservationIgnored nonisolated(unsafe) private var _conversationState: ConversationState = .empty
-    private(set) var conversationState: ConversationState {
-        get { access(keyPath: \.conversationState); return _conversationState }
-        set { withMutation(keyPath: \.conversationState) { _conversationState = newValue } }
     }
 
     @ObservationIgnored nonisolated(unsafe) private var _volatileYouText = ""
@@ -33,21 +22,15 @@ final class TranscriptStore {
         set { withMutation(keyPath: \.volatileThemText) { _volatileThemText = newValue } }
     }
 
-    /// Count of finalized remote utterances since last state update
-    private var remoteUtterancesSinceStateUpdate: Int = 0
-
     @discardableResult
     func append(_ utterance: Utterance) -> Bool {
         guard !shouldSuppressAcousticEcho(utterance) else { return false }
         removeEchoedByIncoming(utterance)
         utterances.append(utterance)
-        if utterance.speaker.isRemote {
-            remoteUtterancesSinceStateUpdate += 1
-        }
         return true
     }
 
-    /// Update an existing utterance's refined text by ID, without triggering suggestion regeneration.
+    /// Update an existing utterance's refined text by ID.
     func updateRefinedText(id: UUID, refinedText: String?, status: RefinementStatus) {
         guard let index = utterances.firstIndex(where: { $0.id == id }) else { return }
         utterances[index] = utterances[index].withRefinement(text: refinedText, status: status)
@@ -57,18 +40,6 @@ final class TranscriptStore {
         utterances.removeAll()
         volatileYouText = ""
         volatileThemText = ""
-        conversationState = .empty
-        remoteUtterancesSinceStateUpdate = 0
-    }
-
-    func updateConversationState(_ state: ConversationState) {
-        conversationState = state
-        remoteUtterancesSinceStateUpdate = 0
-    }
-
-    /// Whether conversation state needs a refresh (every 2-3 finalized remote utterances)
-    var needsStateUpdate: Bool {
-        remoteUtterancesSinceStateUpdate >= 2
     }
 
     var lastRemoteUtterance: Utterance? {
@@ -94,11 +65,12 @@ final class TranscriptStore {
     /// mic utterance, the mic version is the echo (speaker bleed) — remove it.
     /// This handles the common case where the mic transcriber processes faster
     /// than the system audio transcriber.
+    /// The match rule (incl. the short-text strict branch, #59) lives in
+    /// `AcousticEchoFilter.matches` — shared with the forward path and batch.
     private func removeEchoedByIncoming(_ utterance: Utterance) {
         guard utterance.speaker.isRemote else { return }
 
         let normalizedIncoming = TextSimilarity.normalizedText(utterance.text)
-        guard isEligibleForEchoCheck(normalizedIncoming) else { return }
 
         // Walk backwards through recent utterances looking for mic echoes.
         // Cap at 20 entries for performance; the time window will exit earlier in practice.
@@ -107,23 +79,17 @@ final class TranscriptStore {
             let existing = utterances[i]
             guard existing.speaker == .you else { continue }
             let timeDelta = utterance.timestamp.timeIntervalSince(existing.timestamp)
-            guard timeDelta >= 0 else { continue }
-            guard timeDelta <= acousticEchoWindow else { continue }
 
             let normalizedExisting = TextSimilarity.normalizedText(existing.text)
-            guard isEligibleForEchoCheck(normalizedExisting) else { continue }
-
-            let similarity = TextSimilarity.jaccard(normalizedIncoming, normalizedExisting)
-            let containsOther =
-                normalizedIncoming.contains(normalizedExisting) ||
-                normalizedExisting.contains(normalizedIncoming)
-
-            guard similarity >= acousticEchoSimilarityThreshold || containsOther else { continue }
+            guard AcousticEchoFilter.matches(
+                normalizedYou: normalizedExisting,
+                normalizedThem: normalizedIncoming,
+                timeDelta: timeDelta
+            ) else { continue }
 
             diagLog(
                 "[TRANSCRIPT-ECHO] removing mic echo retroactively " +
                 "dt=\(String(format: "%.2f", timeDelta)) " +
-                "similarity=\(String(format: "%.2f", similarity)) " +
                 "you='\(existing.text.prefix(80))' them='\(utterance.text.prefix(80))'"
             )
             indicesToRemove.append(i)
@@ -139,38 +105,27 @@ final class TranscriptStore {
         guard utterance.speaker == .you else { return false }
 
         let normalizedYouText = TextSimilarity.normalizedText(utterance.text)
-        guard isEligibleForEchoCheck(normalizedYouText) else { return false }
 
         for candidate in utterances.reversed() where candidate.speaker.isRemote {
             let timeDelta = utterance.timestamp.timeIntervalSince(candidate.timestamp)
             guard timeDelta >= 0 else { continue }
-            guard timeDelta <= acousticEchoWindow else { break }
+            guard timeDelta <= AcousticEchoFilter.window else { break }
 
             let normalizedThemText = TextSimilarity.normalizedText(candidate.text)
-            guard isEligibleForEchoCheck(normalizedThemText) else { continue }
-
-            let similarity = TextSimilarity.jaccard(normalizedYouText, normalizedThemText)
-            let containsOther =
-                normalizedYouText.contains(normalizedThemText) ||
-                normalizedThemText.contains(normalizedYouText)
-
-            guard similarity >= acousticEchoSimilarityThreshold || containsOther else { continue }
+            guard AcousticEchoFilter.matches(
+                normalizedYou: normalizedYouText,
+                normalizedThem: normalizedThemText,
+                timeDelta: timeDelta
+            ) else { continue }
 
             diagLog(
                 "[TRANSCRIPT-ECHO] dropped mic utterance as system-audio echo " +
                 "dt=\(String(format: "%.2f", timeDelta)) " +
-                "similarity=\(String(format: "%.2f", similarity)) " +
                 "you='\(utterance.text.prefix(80))' them='\(candidate.text.prefix(80))'"
             )
             return true
         }
 
         return false
-    }
-
-    private func isEligibleForEchoCheck(_ normalizedText: String) -> Bool {
-        let wordCount = normalizedText.split(separator: " ").count
-        return wordCount >= acousticEchoMinimumWordCount ||
-            normalizedText.count >= acousticEchoMinimumCharacterCount
     }
 }

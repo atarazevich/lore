@@ -58,8 +58,10 @@ fi
 install_name_tool -add_rpath @loader_path/../Frameworks "$MACOS/Lore" 2>/dev/null || true
 
 # Sign with Apple Development certificate (stable identity preserves Accessibility permission across rebuilds)
-# Find the first valid Apple Development identity by SHA-1 hash (avoids "ambiguous" error with duplicate certs)
-SIGN_ID=$(security find-identity -v -p codesigning ~/Library/Keychains/login.keychain-db 2>/dev/null | grep "Apple Development" | head -1 | awk '{print $2}')
+# Free personal account (hello@cognition.design) — paid enrollment pending, so releases
+# also sign with this cert (Sparkle-delivered updates don't re-trigger Gatekeeper).
+# Grep by email explicitly (not head -1) so the cognition.design cert can't be picked.
+SIGN_ID=$(security find-identity -v -p codesigning ~/Library/Keychains/login.keychain-db 2>/dev/null | grep "Apple Development: hello@cognition.design" | head -1 | awk '{print $2}')
 if [ -n "$SIGN_ID" ]; then
     # Sign Sparkle framework first if present
     if [ -d "$FRAMEWORKS/Sparkle.framework" ]; then

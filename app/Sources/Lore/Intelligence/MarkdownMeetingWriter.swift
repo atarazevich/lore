@@ -192,6 +192,10 @@ enum MarkdownMeetingWriter {
     // MARK: - Timestamp Helpers
 
     /// Format a date as a relative timestamp `HH:MM:SS` from the meeting start.
+    /// Deliberately distinct from the UI's `ElapsedStamp` (#63): this is a
+    /// persisted artifact format — fixed-width HH:MM:SS with rounding —
+    /// predating the in-app elapsed stamps; changing it would rewrite what
+    /// existing mirrored notes look like for a ±1s cosmetic gain.
     static func formatRelativeTimestamp(_ timestamp: Date, relativeTo start: Date) -> String {
         let interval = max(0, timestamp.timeIntervalSince(start))
         let totalSeconds = Int(interval.rounded())

@@ -11,19 +11,13 @@ struct LiveSessionState {
     var liveTranscript: [Utterance] = []
     var volatileYouText: String = ""
     var volatileThemText: String = ""
-    var suggestions: [Suggestion] = []
-    var isGeneratingSuggestions: Bool = false
     var batchStatus: BatchTranscriptionEngine.Status = .idle
     var batchIsImporting: Bool = false
     var lastEndedSession: SessionIndex? = nil
-    var lastSessionHasNotes: Bool = false
-    var kbIndexingProgress: String = ""
     var statusMessage: String? = nil
     var errorMessage: String? = nil
     var needsDownload: Bool = false
     var downloadProgress: Double? = nil
-    var transcriptionPrompt: String = ""
-    var modelDisplayName: String = ""
     var showLiveTranscript: Bool = true
     var isMicMuted: Bool = false
 }
@@ -41,14 +35,7 @@ final class LiveSessionController {
 
     // Tracked-change sentinels
     private var observedUtteranceCount = 0
-    private var observedIsRunning = false
-    private var observedAudioLevel: Float = 0
-    private var observedSuggestions: [Suggestion] = []
-    private var observedIsGenerating = false
-    private var observedKBFolderPath = ""
     private var observedNotesFolderPath = ""
-    private var observedVoyageApiKey = ""
-    private var observedTranscriptionModel: TranscriptionModel = .parakeetV2
     private var observedInputDeviceID: AudioDeviceID = 0
     private var observedPendingExternalCommandID: UUID?
     /// Tracks the session ID we last handled a batch completion for,
@@ -110,44 +97,56 @@ final class LiveSessionController {
     // MARK: - Session Actions
 
     func startSession(settings: AppSettings) {
-        coordinator.suggestionEngine?.clear()
+        // The duplicate-start guard lives at the dispatch chokepoint
+        // (AppCoordinator.handle); mirrored here so a rejected start does
+        // no side work.
+        guard coordinator.canStartCapture else { return }
         coordinator.handle(.userStarted(.manual()), settings: settings)
     }
 
     func stopSession(settings: AppSettings) {
+        // Bounce guard (ghost recording): the header button flips to "Stop"
+        // the instant coordinator.state changes — before the session exists
+        // on disk. A stop in that window is the second press of the same
+        // interaction that started the recording; drop it. Once the session
+        // is established, stops pass through (and the lifecycle chain
+        // serializes them behind the start).
+        if coordinator.state != .idle && _currentSessionID == nil { return }
         coordinator.handle(.userStopped, settings: settings)
     }
 
     func confirmDownloadAndStart(settings: AppSettings) {
         coordinator.transcriptionEngine?.downloadConfirmed = true
-        startSession(settings: settings)
+        if coordinator.canStartCapture {
+            startSession(settings: settings)
+        } else if coordinator.state != .idle, coordinator.transcriptionEngine?.isRunning != true {
+            // A session is already underway with the engine parked at the
+            // model-download gate (Start was pressed before the model
+            // existed). Continue that session: download and start the engine
+            // directly — a new lifecycle start would be rejected at the
+            // chokepoint. Runs on the lifecycle chain so a Stop during the
+            // download finalizes cleanly behind it.
+            coordinator.enqueueLifecycleEffect { [self] in
+                await startEngine(settings: settings)
+            }
+        }
     }
 
     func toggleMicMute() {
         guard let engine = coordinator.transcriptionEngine, engine.isRunning else { return }
         engine.isMicMuted.toggle()
-    }
-
-    // MARK: - KB Indexing
-
-    func indexKBIfNeeded(settings: AppSettings) {
-        guard let url = settings.kbFolderURL, let kb = coordinator.knowledgeBase else { return }
-        Task {
-            kb.clear()
-            await kb.index(folderURL: url)
-        }
+        diagLog("[ENGINE] mic mute -> \(engine.isMicMuted ? "on" : "off")")
     }
 
     // MARK: - External Commands
 
-    func handlePendingExternalCommandIfPossible(settings: AppSettings, openNotesWindow: (() -> Void)?) {
+    func handlePendingExternalCommandIfPossible(settings: AppSettings, showPastMeetings: (() -> Void)?) {
         guard let request = coordinator.pendingExternalCommand else { return }
         let handled: Bool
 
         switch request.command {
         case .startSession:
-            guard coordinator.transcriptionEngine != nil,
-                  coordinator.suggestionEngine != nil else { return }
+            guard coordinator.transcriptionEngine != nil else { return }
             if !state.isRunning {
                 startSession(settings: settings)
             }
@@ -158,7 +157,7 @@ final class LiveSessionController {
             handled = true
         case .openNotes(let sessionID):
             coordinator.queueSessionSelection(sessionID)
-            openNotesWindow?()
+            showPastMeetings?()
             handled = true
         }
 
@@ -180,15 +179,12 @@ final class LiveSessionController {
 
         let sessionID = currentSessionID
         if last.speaker.isRemote {
-            coordinator.suggestionEngine?.onThemUtterance(last)
-
             Task {
                 await coordinator.sessionRepository.appendLiveUtterance(
                     sessionID: sessionID ?? "",
                     utterance: last,
                     metadata: LiveUtteranceMetadata(
                         utteranceID: last.id,
-                        suggestionEngine: coordinator.suggestionEngine,
                         transcriptStore: coordinator.transcriptStore,
                         isDelayed: true
                     )
@@ -210,6 +206,10 @@ final class LiveSessionController {
         _currentSessionID
     }
     private var _currentSessionID: String?
+
+    /// The active session's ID for collaborators outside the controller
+    /// (Ask Lore chat persistence, #60). Nil once finalization completes.
+    var activeSessionID: String? { _currentSessionID }
 
     private func handleNewUtterances(startingAt startIndex: Int, settings: AppSettings) {
         let utterances = coordinator.transcriptStore.utterances
@@ -256,28 +256,40 @@ final class LiveSessionController {
         let handle = await coordinator.sessionRepository.startSession(
             config: SessionStartConfig(
                 templateID: templateID,
-                templateSnapshot: coordinator.sessionTemplateSnapshot
+                templateSnapshot: coordinator.sessionTemplateSnapshot,
+                // Readable default name from the recording start (#58);
+                // rename replaces it, nothing regenerates it later.
+                title: SessionIndex.defaultTitle(startedAt: metadata.startedAt)
             )
         )
         _currentSessionID = handle.sessionID
 
         if let settings {
-            if settings.saveAudioRecording || settings.enableBatchRefinement {
-                coordinator.audioRecorder?.startSession()
-                coordinator.transcriptionEngine?.audioRecorder = coordinator.audioRecorder
-            } else {
-                coordinator.transcriptionEngine?.audioRecorder = nil
-            }
-
-            await coordinator.transcriptionEngine?.start(
-                locale: settings.locale,
-                inputDeviceID: settings.inputDeviceID,
-                transcriptionModel: settings.transcriptionModel
-            )
+            await startEngine(settings: settings)
         }
     }
 
+    /// Wire the audio recorder and start the capture engine with the current
+    /// settings. Tail of `startTranscription`; also used by
+    /// `confirmDownloadAndStart` to continue a session whose engine was
+    /// parked at the model-download gate.
+    private func startEngine(settings: AppSettings) async {
+        if settings.saveAudioRecording || settings.enableBatchRefinement {
+            coordinator.audioRecorder?.startSession()
+            coordinator.transcriptionEngine?.audioRecorder = coordinator.audioRecorder
+        } else {
+            coordinator.transcriptionEngine?.audioRecorder = nil
+        }
+
+        await coordinator.transcriptionEngine?.start()
+    }
+
     func finalizeCurrentSession(settings: AppSettings?) async {
+        // Bind this finalize to the session that was current when it began —
+        // a finalize that outlives its timeout (chain dropped, new session
+        // started) must not touch the later session.
+        let entrySessionID = _currentSessionID
+
         // 1. Drain audio buffers
         await coordinator.transcriptionEngine?.finalize()
 
@@ -291,17 +303,21 @@ final class LiveSessionController {
 
         // 3. Build finalization metadata
         let sessionID: String
-        if let id = _currentSessionID {
+        if let id = entrySessionID {
             sessionID = id
         } else if let id = await coordinator.sessionRepository.getCurrentSessionID() {
             sessionID = id
         } else {
-            sessionID = "unknown"
+            // Stop raced ahead of session creation — the lifecycle chain in
+            // AppCoordinator makes this unreachable, but belt-and-braces: the
+            // engine is already torn down above (step 1), so it can never keep
+            // capturing after the state returns to idle, and there is no
+            // session to finalize or auto-select.
+            coordinator.sessionTemplateSnapshot = nil
+            return
         }
         let utterancesSnapshot = coordinator.transcriptStore.utterances
         let utteranceCount = utterancesSnapshot.count
-        let title = coordinator.transcriptStore.conversationState.currentTopic.isEmpty
-            ? nil : coordinator.transcriptStore.conversationState.currentTopic
 
         let meetingAppName: String?
         if case .ending(let metadata) = coordinator.state {
@@ -310,19 +326,21 @@ final class LiveSessionController {
             meetingAppName = nil
         }
 
-        let engineName = settings?.transcriptionModel.rawValue
+        // Nil-propagation is live: `AppCoordinator.handle(_:settings:)` defaults
+        // settings to nil, and a stop dispatched that way records engine: nil.
+        let engineName = settings != nil ? ParakeetBackend.engineName : nil
         let transcriptionLanguage: String? = {
             guard let locale = settings?.transcriptionLocale, !locale.isEmpty else { return nil }
             return locale
         }()
 
-        // 4. Finalize: closes file handle, backfills refined text, writes session.json
-        await coordinator.sessionRepository.finalizeSession(
+        // 4. Finalize: closes file handle, backfills refined text, writes
+        //    session.json (title preserved), returns the index for UI state.
+        let index = await coordinator.sessionRepository.finalizeSession(
             sessionID: sessionID,
             metadata: SessionFinalizeMetadata(
                 endedAt: Date(),
                 utteranceCount: utteranceCount,
-                title: title,
                 language: transcriptionLanguage,
                 meetingApp: meetingAppName,
                 engine: engineName,
@@ -331,21 +349,7 @@ final class LiveSessionController {
             )
         )
 
-        // 5. Build index for UI state
-        let index = SessionIndex(
-            id: sessionID,
-            startedAt: utterancesSnapshot.first?.timestamp ?? Date(),
-            endedAt: Date(),
-            templateSnapshot: coordinator.sessionTemplateSnapshot,
-            title: title,
-            utteranceCount: utteranceCount,
-            hasNotes: false,
-            language: transcriptionLanguage,
-            meetingApp: meetingAppName,
-            engine: engineName
-        )
-
-        // 6. Handle audio recording
+        // 5. Handle audio recording
         if let settings, let recorder = coordinator.audioRecorder {
             let wantsBatch = settings.enableBatchRefinement
             let wantsExport = settings.saveAudioRecording
@@ -406,30 +410,28 @@ final class LiveSessionController {
             }
         }
 
-        // 7. Update UI state + refresh history
+        // 6. Update UI state + refresh history
         coordinator.lastEndedSession = index
         coordinator.sessionTemplateSnapshot = nil
-        _currentSessionID = nil
+        // Only clear if it is still ours — a finalize resuming after its
+        // timeout must not null a newer session's ID.
+        if _currentSessionID == sessionID { _currentSessionID = nil }
         await coordinator.loadHistory()
 
-        // 8. Kick off batch transcription if enabled
+        // 7. Kick off batch transcription if enabled
         if let settings, settings.enableBatchRefinement, let batchEngine = coordinator.batchEngine {
             let batchSessionID = sessionID
-            let batchModel = settings.batchTranscriptionModel
-            let batchLocale = settings.locale
+            // Fresh marker (MREV-39): persisted so the green dot / processing
+            // state survive relaunch mid-batch; cleared when the user views
+            // the processed meeting.
+            await coordinator.sessionRepository.markSessionUnviewed(sessionID: batchSessionID)
             let notesDir = URL(fileURLWithPath: settings.notesFolderPath)
             let repo = coordinator.sessionRepository
-            let diarize = settings.enableDiarization
-            let diarizeVariant = settings.diarizationVariant
             Task.detached { [batchEngine] in
                 await batchEngine.process(
                     sessionID: batchSessionID,
-                    model: batchModel,
-                    locale: batchLocale,
                     sessionRepository: repo,
-                    notesDirectory: notesDir,
-                    enableDiarization: diarize,
-                    diarizationVariant: diarizeVariant
+                    notesDirectory: notesDir
                 )
             }
         }
@@ -449,18 +451,6 @@ final class LiveSessionController {
 
     @MainActor
     private func refreshState(settings: AppSettings) {
-        let lastEndedSession = coordinator.lastEndedSession
-        let lastSessionHasNotes = lastEndedSession.flatMap { lastSession in
-            coordinator.sessionHistory.first { $0.id == lastSession.id }?.hasNotes
-        } ?? false
-
-        let activeModelRaw = switch settings.llmProvider {
-        case .openRouter: settings.selectedModel
-        case .ollama: settings.ollamaLLMModel
-        case .mlx: settings.mlxModel
-        case .openAICompatible: settings.openAILLMModel
-        }
-
         var next = LiveSessionState()
         next.isRunning = coordinator.transcriptionEngine?.isRunning ?? false
         next.sessionPhase = coordinator.state
@@ -468,19 +458,13 @@ final class LiveSessionController {
         next.liveTranscript = coordinator.transcriptStore.utterances
         next.volatileYouText = coordinator.transcriptStore.volatileYouText
         next.volatileThemText = coordinator.transcriptStore.volatileThemText
-        next.suggestions = coordinator.suggestionEngine?.suggestions ?? []
-        next.isGeneratingSuggestions = coordinator.suggestionEngine?.isGenerating ?? false
         next.batchStatus = coordinator.batchStatus
         next.batchIsImporting = coordinator.batchIsImporting
-        next.lastEndedSession = lastEndedSession
-        next.lastSessionHasNotes = lastSessionHasNotes
-        next.kbIndexingProgress = coordinator.knowledgeBase?.indexingProgress ?? ""
+        next.lastEndedSession = coordinator.lastEndedSession
         next.statusMessage = coordinator.transcriptionEngine?.assetStatus
         next.errorMessage = coordinator.transcriptionEngine?.lastError
         next.needsDownload = coordinator.transcriptionEngine?.needsModelDownload ?? false
         next.downloadProgress = coordinator.transcriptionEngine?.downloadProgress
-        next.transcriptionPrompt = settings.transcriptionModel.downloadPrompt
-        next.modelDisplayName = activeModelRaw.split(separator: "/").last.map(String.init) ?? activeModelRaw
         next.showLiveTranscript = settings.showLiveTranscript
         next.isMicMuted = coordinator.transcriptionEngine?.isMicMuted ?? false
 
@@ -489,26 +473,12 @@ final class LiveSessionController {
 
     // MARK: - Derived State Synchronization
 
-    /// Callback for MiniBar show/hide — set by the view.
-    var onRunningStateChanged: ((_ isRunning: Bool) -> Void)?
-    /// Called when minibar-visible state changes during recording.
-    var onMiniBarContentUpdate: (() -> Void)?
-
-    /// Callback for opening the notes window — set by the view.
-    var openNotesWindow: (() -> Void)?
+    /// Navigates the unified window to Meetings → Past — set by the view.
+    var showPastMeetings: (() -> Void)?
 
     @MainActor
     private func synchronizeDerivedState(settings: AppSettings) {
         let currentState = state
-
-        if settings.kbFolderPath != observedKBFolderPath {
-            observedKBFolderPath = settings.kbFolderPath
-            if settings.kbFolderPath.isEmpty {
-                coordinator.knowledgeBase?.clear()
-            } else {
-                indexKBIfNeeded(settings: settings)
-            }
-        }
 
         if settings.notesFolderPath != observedNotesFolderPath {
             observedNotesFolderPath = settings.notesFolderPath
@@ -517,16 +487,6 @@ final class LiveSessionController {
                 await coordinator.sessionRepository.setNotesFolderPath(url)
             }
             coordinator.audioRecorder?.updateDirectory(url)
-        }
-
-        if settings.voyageApiKey != observedVoyageApiKey {
-            observedVoyageApiKey = settings.voyageApiKey
-            indexKBIfNeeded(settings: settings)
-        }
-
-        if settings.transcriptionModel != observedTranscriptionModel {
-            observedTranscriptionModel = settings.transcriptionModel
-            coordinator.transcriptionEngine?.refreshModelAvailability()
         }
 
         if settings.inputDeviceID != observedInputDeviceID {
@@ -544,29 +504,10 @@ final class LiveSessionController {
         }
         observedUtteranceCount = utteranceCount
 
-        if currentState.isRunning != observedIsRunning {
-            observedIsRunning = currentState.isRunning
-            onRunningStateChanged?(currentState.isRunning)
-        }
-
-        // Refresh minibar content only when visible state changed
-        if currentState.isRunning {
-            let levelChanged = abs(currentState.audioLevel - observedAudioLevel) > 0.01
-            let suggestionsChanged = currentState.suggestions.map(\.id) != observedSuggestions.map(\.id)
-            let generatingChanged = currentState.isGeneratingSuggestions != observedIsGenerating
-
-            if levelChanged || suggestionsChanged || generatingChanged {
-                observedAudioLevel = currentState.audioLevel
-                observedSuggestions = currentState.suggestions
-                observedIsGenerating = currentState.isGeneratingSuggestions
-                onMiniBarContentUpdate?()
-            }
-        }
-
         let pendingExternalCommandID = coordinator.pendingExternalCommand?.id
         if pendingExternalCommandID != observedPendingExternalCommandID {
             observedPendingExternalCommandID = pendingExternalCommandID
-            handlePendingExternalCommandIfPossible(settings: settings, openNotesWindow: openNotesWindow)
+            handlePendingExternalCommandIfPossible(settings: settings, showPastMeetings: showPastMeetings)
         }
     }
 }

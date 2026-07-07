@@ -1,23 +1,15 @@
 import SwiftUI
 
 struct ContentView: View {
-    private enum ControlBarAction {
-        case toggle
-        case confirmDownload
-    }
-
     @Bindable var settings: AppSettings
     @Environment(AppContainer.self) private var container
     @Environment(AppCoordinator.self) private var coordinator
-    @Environment(\.openWindow) private var openWindow
-    @State private var overlayManager = OverlayManager()
-    @State private var miniBarManager = MiniBarManager()
+    @Environment(ShellModel.self) private var shell
     @State private var liveSessionController: LiveSessionController?
-    @AppStorage("isTranscriptExpanded") private var isTranscriptExpanded = true
+    @State private var askXMO = AskXMOChatModel()
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @State private var showOnboarding = false
     @State private var showConsentSheet = false
-    @State private var pendingControlBarAction: ControlBarAction?
 
     var body: some View {
         bodyWithModifiers
@@ -25,235 +17,388 @@ struct ContentView: View {
 
     private var rootContent: some View {
         let controllerState = liveSessionController?.state ?? LiveSessionState()
+        let startedAt = recordingStartedAt
 
         return VStack(spacing: 0) {
-            // Compact header
-            HStack {
-                Text("Meeting")
-                    .font(.system(size: 13, weight: .semibold))
+            header(state: controllerState, startedAt: startedAt)
 
-                Spacer()
-
-                // KB indexing status (subtle, read-only)
-                if !controllerState.kbIndexingProgress.isEmpty {
-                    Text(controllerState.kbIndexingProgress)
-                        .font(.system(size: 10))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-
-                Button {
-                    openWindow(id: "notes")
-                } label: {
-                    HStack(spacing: 4) {
-                        Image(systemName: "note.text")
-                            .font(.system(size: 11))
-                        Text("Past Meetings")
-                            .font(.system(size: 11))
-                    }
-                    .padding(.horizontal, 6)
-                    .padding(.vertical, 3)
-                    .clipShape(RoundedRectangle(cornerRadius: 5))
-                }
-                .buttonStyle(.plain)
-                .foregroundStyle(.secondary)
-                .help("View past meeting notes")
-                .accessibilityIdentifier("app.pastMeetingsButton")
-            }
-            .padding(.horizontal, 16)
-            .padding(.vertical, 10)
-
-            Divider()
-
-            // Post-session banner
-            if let lastSession = controllerState.lastEndedSession, lastSession.utteranceCount > 0 {
-                HStack {
-                    Text("Session ended \u{00B7} \(lastSession.utteranceCount) utterances")
-                        .font(.system(size: 12))
-                        .foregroundStyle(.secondary)
-                        .accessibilityIdentifier("app.sessionEndedBanner")
-                    Spacer()
-                    if controllerState.lastSessionHasNotes {
-                        Button {
-                            openWindow(id: "notes")
-                        } label: {
-                            Label("View Notes", systemImage: "doc.text")
-                                .font(.system(size: 12))
-                        }
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                        .accessibilityIdentifier("app.viewNotesButton")
-                    } else {
-                        Button {
-                            openWindow(id: "notes")
-                        } label: {
-                            Label("Generate Notes", systemImage: "sparkles")
-                                .font(.system(size: 12))
-                        }
-                        .buttonStyle(.borderedProminent)
-                        .controlSize(.small)
-                        .accessibilityIdentifier("app.generateNotesButton")
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
-                .background(.ultraThinMaterial)
-
-                Divider()
+            // Failure surfacing (MREC-60/61/63): same conditions and recovery
+            // paths as before, rendered in the Stage E errorBanner vocabulary.
+            if let error = controllerState.errorMessage {
+                errorBanner(error)
             }
 
-            // Batch transcription / import progress banner
-            if case .transcribing(let progress) = controllerState.batchStatus {
-                HStack(spacing: 8) {
-                    ProgressView(value: progress, total: 1.0)
-                        .progressViewStyle(.linear)
-                        .frame(maxWidth: .infinity)
-                    Text(controllerState.batchIsImporting
-                         ? "Importing meeting recording… \(Int(progress * 100))%"
-                         : "Enhancing transcript... \(Int(progress * 100))%")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                        .lineLimit(1)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial)
+            // Model download gate (MREC-44) — flow and copy unchanged.
+            if controllerState.needsDownload && !controllerState.isRunning {
+                downloadPrompt
+            }
 
-                Divider()
-            } else if case .loading = controllerState.batchStatus {
-                HStack(spacing: 8) {
+            // Model loading / downloading status.
+            if let status = controllerState.statusMessage, status != "Ready" {
+                statusBanner(status: status, progress: controllerState.downloadProgress)
+            }
+
+            if let startedAt {
+                recordingBanner(state: controllerState, startedAt: startedAt)
+            }
+
+            postSessionBanner(state: controllerState)
+
+            // Batch progress/completion surfaces in the review layout
+            // (processing pane + fresh dot), which is always reachable via
+            // the recording-time Live/Meetings switch.
+
+            XMODivider()
+
+            HStack(spacing: 0) {
+                transcriptPane(state: controllerState, startedAt: startedAt)
+                if let startedAt {
+                    rail(state: controllerState, startedAt: startedAt)
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    /// True recording start (same source as the shell REC pill) so the banner
+    /// clock and the duration stat card tick from the real session start.
+    /// Non-nil exactly while `coordinator.state` is `.recording` — the single
+    /// state source for the Stop label, banner, stats, AND the toggle action.
+    private var recordingStartedAt: Date? {
+        if case .recording(let metadata) = coordinator.state {
+            return metadata.startedAt
+        }
+        return nil
+    }
+
+    // MARK: - Header (MREC-01/02)
+
+    private func header(state: LiveSessionState, startedAt: Date?) -> some View {
+        // No "Recording N:NN" meta line — the red banner is the one ticking
+        // recording indicator (#57).
+        XMOScreenHeader {
+            Text("New recording")
+        } meta: {
+        } trailing: {
+            // Transcript affordances stay while the finished session's
+            // transcript is still showing, not only mid-recording.
+            if state.showLiveTranscript, !state.liveTranscript.isEmpty {
+                XMOCopyButton(label: "Copy transcript") {
+                    copyTranscript()
+                }
+            }
+
+            // Label and action key off the same coordinator-phase source
+            // (recordingStartedAt): a "Stop" can never route to start.
+            XMOStartStopButton(isRecording: startedAt != nil) {
+                if startedAt != nil {
+                    stopSession()
+                } else {
+                    startSession()
+                }
+            }
+            .accessibilityIdentifier("app.controlBar.toggle")
+        }
+    }
+
+    // MARK: - Live banner (MREC-10)
+
+    /// Red recording banner: pulsing dot, "Recording", mono clock, waveform
+    /// bars driven by the real audio level, mute toggle, right-aligned hint.
+    private func recordingBanner(state: LiveSessionState, startedAt: Date) -> some View {
+        HStack(spacing: 12) {
+            XMOPulsingDot(size: 10)
+            Text("Recording")
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(XMOTheme.Accent.red)
+            Text(startedAt, style: .timer)
+                .font(XMOTheme.Typography.mono(12.5))
+                .foregroundStyle(XMOTheme.TextColor.primary)
+            XMOLiveWaveform(level: state.isMicMuted ? 0 : state.audioLevel)
+                .frame(height: 16)
+                .opacity(state.isMicMuted ? 0.35 : 1)
+            muteToggle(isMuted: state.isMicMuted)
+            Spacer(minLength: 20)
+            Text("Live transcription \u{2014} notes when you stop")
+                .font(.system(size: 11.5))
+                .foregroundStyle(XMOTheme.TextColor.muted)
+                .lineLimit(1)
+        }
+        .xmoBanner(tint: XMOTheme.Accent.red)
+    }
+
+    /// Mic mute (MREC-06) — the only pause-like control; restyled into the
+    /// banner. System audio keeps flowing while muted.
+    private func muteToggle(isMuted: Bool) -> some View {
+        Button {
+            liveSessionController?.toggleMicMute()
+        } label: {
+            Image(systemName: isMuted ? "mic.slash.fill" : "mic.fill")
+                .font(.system(size: 11, weight: .medium))
+                .foregroundStyle(isMuted ? XMOTheme.Accent.red : XMOTheme.TextColor.muted)
+                .frame(width: 24, height: 24)
+                .background(
+                    Color.white.opacity(0.07),
+                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                )
+        }
+        .buttonStyle(XMOPressButtonStyle())
+        .help(isMuted ? "Unmute microphone" : "Mute microphone")
+        .accessibilityLabel(isMuted ? "Unmute microphone" : "Mute microphone")
+        .accessibilityIdentifier("app.controlBar.muteToggle")
+    }
+
+    // MARK: - Status / error / download surfaces
+
+    /// Red token error line (Stage E vocabulary; MREC-63).
+    private func errorBanner(_ message: String) -> some View {
+        Text(message)
+            .font(.system(size: 12))
+            .foregroundStyle(XMOTheme.Accent.red)
+            .textSelection(.enabled)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(.horizontal, 26)
+            .padding(.bottom, 8)
+    }
+
+    private var downloadPrompt: some View {
+        HStack(spacing: 12) {
+            Text("Transcription requires a one-time model download.")
+                .font(XMOTheme.Typography.secondary)
+                .foregroundStyle(XMOTheme.TextColor.muted)
+                .frame(maxWidth: .infinity, alignment: .leading)
+            pillButton("Download Now", tint: XMOTheme.Accent.blue) {
+                confirmDownload()
+            }
+        }
+        .xmoBanner()
+    }
+
+    private func statusBanner(status: String, progress: Double?) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            HStack(spacing: 6) {
+                if progress == nil {
                     ProgressView()
                         .controlSize(.small)
-                    Text(controllerState.batchIsImporting
-                         ? "Preparing to import…"
-                         : "Loading batch model...")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
                 }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial)
-
-                Divider()
-            } else if case .completed = controllerState.batchStatus {
-                HStack(spacing: 6) {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(.green)
-                        .font(.system(size: 12))
-                    Text(controllerState.batchIsImporting
-                         ? "Meeting recording imported"
-                         : "Transcript enhanced")
-                        .font(.system(size: 11))
-                        .foregroundStyle(.secondary)
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 6)
-                .background(.ultraThinMaterial)
-
-                Divider()
+                Text(status)
+                    .font(.system(size: 12))
+                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .accessibilityIdentifier("app.controlBar.status")
             }
+            if let progress {
+                ProgressView(value: progress)
+                    .progressViewStyle(.linear)
+                    .tint(XMOTheme.Accent.blue)
+                    .accessibilityIdentifier("app.controlBar.downloadProgress")
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.horizontal, 26)
+        .padding(.bottom, 8)
+    }
 
-            // Main content: Suggestions
-            VStack(alignment: .leading, spacing: 0) {
-                Text("SUGGESTIONS")
-                    .font(.system(size: 10, weight: .bold, design: .monospaced))
-                    .foregroundStyle(.tertiary)
-                    .tracking(1.5)
-                    .padding(.horizontal, 16)
-                    .padding(.top, 12)
-                    .padding(.bottom, 4)
-                SuggestionsView(
-                    suggestions: controllerState.suggestions,
-                    isGenerating: controllerState.isGeneratingSuggestions
+    /// Post-session banner. The Generate Notes offer is gone with notes
+    /// generation itself (#62); a single View button opens the review (its
+    /// Notes tab still surfaces stored notes on legacy meetings).
+    @ViewBuilder
+    private func postSessionBanner(state: LiveSessionState) -> some View {
+        if let lastSession = state.lastEndedSession, lastSession.utteranceCount > 0 {
+            HStack(spacing: 12) {
+                Text("Session ended \u{00B7} \(lastSession.utteranceCount) utterances")
+                    .font(XMOTheme.Typography.secondary)
+                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .accessibilityIdentifier("app.sessionEndedBanner")
+                Spacer()
+                pillButton("View meeting") {
+                    shell.showMeetingsReview()
+                }
+                .accessibilityIdentifier("app.viewMeetingButton")
+            }
+            .xmoBanner()
+        }
+    }
+
+    /// 12.5/600 pill: `tint` fill + white text, or neutral white .06 fill.
+    private func pillButton(
+        _ title: String,
+        tint: Color? = nil,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Text(title)
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(tint == nil ? XMOTheme.TextColor.primary : .white)
+                .padding(.vertical, 7)
+                .padding(.horizontal, 13)
+                .background(
+                    tint ?? Color.white.opacity(0.06),
+                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                )
+        }
+        .buttonStyle(XMOPressButtonStyle())
+    }
+
+    // MARK: - Transcript pane (MREC-11/12/13)
+
+    @ViewBuilder
+    private func transcriptPane(state: LiveSessionState, startedAt: Date?) -> some View {
+        if state.showLiveTranscript {
+            TranscriptView(
+                utterances: state.liveTranscript,
+                volatileYouText: state.volatileYouText,
+                volatileThemText: state.volatileThemText,
+                startedAt: startedAt
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        } else if startedAt != nil {
+            // Live display off (MREC-13): recording still runs; the
+            // transcript appears after processing.
+            Text("Live transcription is off \u{2014} the transcript appears after the recording stops.")
+                .font(XMOTheme.Typography.secondary)
+                .foregroundStyle(XMOTheme.TextColor.muted)
+                .multilineTextAlignment(.center)
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+                .padding(24)
+        } else {
+            Color.clear
+                .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+    }
+
+    // MARK: - Rail (MREC-20/21)
+
+    /// 344px right rail, left hairline: MEETING STATS on top and Ask XMO
+    /// (MREC-30, Stage G) filling the rest — visible only while recording;
+    /// chat history clears when a new recording starts.
+    private func rail(state: LiveSessionState, startedAt: Date) -> some View {
+        VStack(spacing: 0) {
+            statsSection(state: state, startedAt: startedAt)
+            XMODivider()
+            AskXMOSection(
+                model: askXMO,
+                utterances: state.liveTranscript,
+                apiKey: settings.openaiApiKey
+            )
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+        }
+        .frame(width: 344)
+        .frame(maxHeight: .infinity)
+        .overlay(alignment: .leading) {
+            XMOTheme.Surface.line.frame(width: 1)
+        }
+    }
+
+    private func statsSection(state: LiveSessionState, startedAt: Date) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            XMOSectionLabel(text: "Meeting stats", size: 11)
+                .padding(.bottom, 12)
+            HStack(spacing: 10) {
+                statCard(
+                    value: Text(startedAt, style: .timer),
+                    label: "duration"
+                )
+                statCard(
+                    value: Text("\(state.liveTranscript.count)"),
+                    label: "utterances"
                 )
             }
-
-            Divider()
-
-            // Collapsible transcript (hidden when live transcript is disabled)
-            if controllerState.showLiveTranscript {
-                DisclosureGroup(isExpanded: $isTranscriptExpanded) {
-                    TranscriptView(
-                        utterances: controllerState.liveTranscript,
-                        volatileYouText: controllerState.volatileYouText,
-                        volatileThemText: controllerState.volatileThemText
-                    )
-                    .frame(height: 150)
-                } label: {
-                    HStack(spacing: 6) {
-                        Text("Transcript")
-                            .font(.system(size: 12, weight: .medium))
-                        if !controllerState.liveTranscript.isEmpty {
-                            Text("(\(controllerState.liveTranscript.count))")
-                                .font(.system(size: 11))
-                                .foregroundStyle(.tertiary)
-                        }
-                        Spacer()
-                        if isTranscriptExpanded && !controllerState.liveTranscript.isEmpty {
-                            Button {
-                                openWindow(id: "transcript")
-                            } label: {
-                                Image(systemName: "arrow.up.left.and.arrow.down.right")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                    .padding(4)
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                            }
-                            .buttonStyle(.plain)
-                            .help("Open transcript in separate window")
-
-                            Button {
-                                copyTranscript()
-                            } label: {
-                                Image(systemName: "doc.on.doc")
-                                    .font(.system(size: 11))
-                                    .foregroundStyle(.secondary)
-                                    .padding(4)
-                                    .clipShape(RoundedRectangle(cornerRadius: 4))
-                            }
-                            .buttonStyle(.plain)
-                            .help("Copy transcript")
-                        }
-                    }
-                }
-                .padding(.horizontal, 16)
-                .padding(.vertical, 8)
+            .padding(.bottom, 14)
+            // Both speakers at zero words → rows hidden rather than a
+            // fake 50/50: no data is more honest than invented parity.
+            if let split = talkSplit(state.liveTranscript) {
+                talkSplitRow(
+                    label: "You \(split.you)%",
+                    percent: split.you,
+                    labelColor: XMOTheme.Accent.blue,
+                    fill: XMOTheme.Accent.blue
+                )
+                .padding(.bottom, 7)
+                talkSplitRow(
+                    label: "Them \(split.them)%",
+                    percent: split.them,
+                    labelColor: XMOTheme.TextColor.muted,
+                    fill: Color.white.opacity(0.32)
+                )
             }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.init(top: 15, leading: 18, bottom: 15, trailing: 18))
+    }
 
-            Divider()
+    /// `.stat` card: card-2 fill, 6px radius, mono 15/600 value, 11px label.
+    private func statCard(value: Text, label: String) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            value
+                .font(XMOTheme.Typography.mono(15, weight: .semibold))
+                .foregroundStyle(XMOTheme.TextColor.primary)
+            Text(label)
+                .font(XMOTheme.Typography.meta)
+                .foregroundStyle(XMOTheme.TextColor.muted)
+        }
+        .padding(.init(top: 9, leading: 11, bottom: 9, trailing: 11))
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(
+            XMOTheme.Surface.card2,
+            in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+        )
+    }
 
-            // Bottom bar: live indicator + model
-            ControlBar(
-                isRunning: controllerState.isRunning,
-                audioLevel: controllerState.audioLevel,
-                isMicMuted: controllerState.isMicMuted,
-                modelDisplayName: controllerState.modelDisplayName,
-                transcriptionPrompt: controllerState.transcriptionPrompt,
-                statusMessage: controllerState.statusMessage,
-                errorMessage: controllerState.errorMessage,
-                needsDownload: controllerState.needsDownload,
-                downloadProgress: controllerState.downloadProgress,
-                onToggle: {
-                    pendingControlBarAction = .toggle
-                },
-                onMuteToggle: {
-                    liveSessionController?.toggleMicMute()
-                },
-                onConfirmDownload: {
-                    pendingControlBarAction = .confirmDownload
+    /// Talk-split proxy (MREC-21): utterances carry no audio durations, so
+    /// the split uses per-speaker word counts of finalized utterances as a
+    /// first-order approximation of talk time. Rounded; forced to sum to 100
+    /// (them = 100 − you). Returns nil until the first words arrive.
+    private func talkSplit(_ utterances: [Utterance]) -> (you: Int, them: Int)? {
+        var youWords = 0
+        var themWords = 0
+        for utterance in utterances {
+            let words = utterance.displayText
+                .split(whereSeparator: \.isWhitespace).count
+            if utterance.speaker.isRemote {
+                themWords += words
+            } else {
+                youWords += words
+            }
+        }
+        let total = youWords + themWords
+        guard total > 0 else { return nil }
+        let you = Int((Double(youWords) / Double(total) * 100).rounded())
+        return (you: you, them: 100 - you)
+    }
+
+    /// 64px "You NN%"/"Them NN%" label + 7px rounded bar on a white .1 track.
+    private func talkSplitRow(
+        label: String,
+        percent: Int,
+        labelColor: Color,
+        fill: Color
+    ) -> some View {
+        HStack(spacing: 8) {
+            Text(label)
+                .font(.system(size: 12, weight: .semibold))
+                .foregroundStyle(labelColor)
+                .frame(width: 64, alignment: .leading)
+                .lineLimit(1)
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(Color.white.opacity(0.1))
+                    RoundedRectangle(cornerRadius: 5)
+                        .fill(fill)
+                        .frame(width: geo.size.width * CGFloat(percent) / 100)
                 }
-            )
+            }
+            .frame(height: 7)
         }
     }
 
     private var bodyWithModifiers: some View {
-        contentWithEventHandlers
+        contentWithLifecycle
     }
 
     private var sizedRootContent: some View {
         rootContent
-            .frame(minWidth: 360, maxWidth: 600, minHeight: 400)
-            .background(.ultraThinMaterial)
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
     private var contentWithOverlay: some View {
@@ -275,54 +420,88 @@ struct ContentView: View {
     private var contentWithLifecycle: some View {
         contentWithOverlay
         .onChange(of: showOnboarding) { _, isShowing in
-            if !isShowing {
+            if isShowing {
+                // The overlay renders inside this (possibly hidden) section —
+                // bring it on screen; a gate must never block invisibly.
+                shell.pinMeetingsLive()
+            } else {
                 hasCompletedOnboarding = true
+                // Gate dismissed without a recording — back to the review layout.
+                if !coordinator.isRecording {
+                    shell.meetingsPinnedLive = false
+                }
             }
         }
         .onChange(of: showConsentSheet) { _, isShowing in
+            if isShowing {
+                shell.pinMeetingsLive()
+            }
             if !isShowing && settings.hasAcknowledgedRecordingConsent
                 && !(liveSessionController?.state.isRunning ?? false) {
                 liveSessionController?.startSession(settings: settings)
+            }
+            if !isShowing && !settings.hasAcknowledgedRecordingConsent {
+                // Consent declined — no recording will start; show review again.
+                shell.meetingsPinnedLive = false
             }
         }
         .task {
             if !hasCompletedOnboarding {
                 showOnboarding = true
             }
-            if coordinator.knowledgeBase == nil {
-                container.ensureServicesInitialized(settings: settings, coordinator: coordinator)
-            }
+            // Idempotent: AppContainer guards with its own
+            // didInitializeServices flag, so re-runs are no-ops.
+            container.ensureServicesInitialized(settings: settings, coordinator: coordinator)
 
             // Create and wire the controller
             let controller = LiveSessionController(coordinator: coordinator, container: container)
-            controller.onRunningStateChanged = { [weak miniBarManager] isRunning in
-                if isRunning {
-                    miniBarManager?.state.onTap = {
-                        if let window = NSApp.windows.first(where: { $0.identifier?.rawValue == LoreRootApp.mainWindowID }) {
-                            window.makeKeyAndOrderFront(nil)
-                            NSApp.activate(ignoringOtherApps: true)
-                        }
-                    }
-                    showMiniBar(controller: controller, miniBarManager: miniBarManager)
-                } else {
-                    miniBarManager?.hide()
+            controller.showPastMeetings = {
+                shell.showMeetingsReview()
+            }
+
+            // The review header's "Start recording" button (Stage E) reuses
+            // the existing consent-gated start flow. The live view is pinned
+            // only when a gate (consent, model download) needs to render
+            // there — otherwise the recording state itself brings it up, and
+            // a request that starts nothing leaves no stale pin behind.
+            shell.requestMeetingRecordingStart = {
+                guard let controller = liveSessionController else { return }
+                // Boundary reset at dispatch: covers the narrow case where
+                // the review flip is still true from a previous recording
+                // whose end MeetingsDestination never observed (destination
+                // unmounted at the time) and this start is ungated (#43).
+                shell.resetMeetingsForRecordingBoundary()
+                if !settings.hasAcknowledgedRecordingConsent
+                    || controller.state.needsDownload {
+                    shell.pinMeetingsLive()
                 }
+                startSession()
             }
-            controller.openNotesWindow = {
-                openWindow(id: "notes")
+            shell.requestMeetingRecordingStop = {
+                stopSession()
             }
-            controller.onMiniBarContentUpdate = { [weak controller, weak miniBarManager] in
-                showMiniBar(controller: controller, miniBarManager: miniBarManager)
-            }
+
             coordinator.liveSessionController = controller
             liveSessionController = controller
 
-            overlayManager.defaults = container.defaults
-            miniBarManager.defaults = container.defaults
+            // Ask Lore persistence (#60): write-through per successful
+            // exchange so the chat survives crashes and stop. If the answer
+            // lands in the narrow stop→finalize window, the just-ended
+            // session is still the right target.
+            askXMO.onExchange = { [weak controller, weak coordinator] question, answer in
+                guard let coordinator else { return }
+                guard let sessionID = controller?.activeSessionID
+                        ?? coordinator.lastEndedSession?.id else { return }
+                let repo = coordinator.sessionRepository
+                let exchange = ChatExchange(question: question, answer: answer)
+                Task {
+                    await repo.appendChatExchange(sessionID: sessionID, exchange: exchange)
+                }
+            }
+
             await container.seedIfNeeded(coordinator: coordinator)
-            controller.indexKBIfNeeded(settings: settings)
             controller.handlePendingExternalCommandIfPossible(settings: settings) {
-                openWindow(id: "notes")
+                shell.showMeetingsReview()
             }
 
             await controller.performInitialSetup()
@@ -336,6 +515,16 @@ struct ContentView: View {
             // Start the 100ms polling loop (runs until task cancelled)
             await controller.runPollingLoop(settings: settings)
         }
+        // Ask XMO lifecycle (Stage G): chat is per recording session — clear
+        // when a new one starts (any start path: manual, detection, external
+        // command). The clear also bumps the generation guard, so responses
+        // from the previous session are dropped; the section itself unmounts
+        // at stop, so no explicit end handling is needed.
+        .onChange(of: recordingStartedAt) { _, new in
+            if new != nil {
+                askXMO.startNewSession()
+            }
+        }
         .onChange(of: settings.meetingAutoDetectEnabled) {
             if settings.meetingAutoDetectEnabled {
                 container.enableDetection(settings: settings, coordinator: coordinator)
@@ -345,19 +534,6 @@ struct ContentView: View {
             } else {
                 container.disableDetection(coordinator: coordinator)
             }
-        }
-    }
-
-    private var contentWithEventHandlers: some View {
-        contentWithLifecycle
-        .onKeyPress(.escape) {
-            overlayManager.hide()
-            return .handled
-        }
-        .onChange(of: pendingControlBarAction) {
-            guard let action = pendingControlBarAction else { return }
-            pendingControlBarAction = nil
-            handleControlBarAction(action)
         }
     }
 
@@ -377,26 +553,6 @@ struct ContentView: View {
         liveSessionController?.stopSession(settings: settings)
     }
 
-    private func showMiniBar(controller: LiveSessionController?, miniBarManager: MiniBarManager?) {
-        guard let controller, let miniBarManager else { return }
-        miniBarManager.update(
-            audioLevel: controller.state.audioLevel,
-            suggestions: controller.state.suggestions,
-            isGenerating: controller.state.isGeneratingSuggestions
-        )
-        miniBarManager.show()
-    }
-
-    private func toggleOverlay() {
-        guard let controller = liveSessionController else { return }
-        let content = OverlayContent(
-            suggestions: controller.state.suggestions,
-            isGenerating: controller.state.isGeneratingSuggestions,
-            volatileThemText: controller.state.volatileThemText
-        )
-        overlayManager.toggle(content: content)
-    }
-
     private func copyTranscript() {
         guard let controller = liveSessionController else { return }
         let timeFmt = DateFormatter()
@@ -408,23 +564,37 @@ struct ContentView: View {
         NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)
     }
 
-    @MainActor
-    private func handleControlBarAction(_ action: ControlBarAction) {
-        switch action {
-        case .toggle:
-            if liveSessionController?.state.isRunning ?? false {
-                stopSession()
-            } else {
-                startSession()
+    private func confirmDownload() {
+        guard settings.hasAcknowledgedRecordingConsent else {
+            withAnimation(.easeInOut(duration: 0.25)) {
+                showConsentSheet = true
             }
-        case .confirmDownload:
-            guard settings.hasAcknowledgedRecordingConsent else {
-                withAnimation(.easeInOut(duration: 0.25)) {
-                    showConsentSheet = true
-                }
-                return
-            }
-            liveSessionController?.confirmDownloadAndStart(settings: settings)
+            return
         }
+        liveSessionController?.confirmDownloadAndStart(settings: settings)
+    }
+}
+
+// MARK: - Banner chrome
+
+private extension View {
+    /// Full-width banner under the header: 8×16 inner padding, 7px-radius
+    /// card, 1px border, 26px horizontal inset. `tint` (the recording red)
+    /// colors fill (.09) and border (.32); default is card-2 + line.
+    func xmoBanner(tint: Color? = nil) -> some View {
+        padding(.init(top: 8, leading: 16, bottom: 8, trailing: 16))
+            .background(
+                tint?.opacity(0.09) ?? XMOTheme.Surface.card2,
+                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.card)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: XMOTheme.Radius.card)
+                    .strokeBorder(
+                        tint?.opacity(0.32) ?? XMOTheme.Surface.line,
+                        lineWidth: 1
+                    )
+            )
+            .padding(.horizontal, 26)
+            .padding(.bottom, 13)
     }
 }

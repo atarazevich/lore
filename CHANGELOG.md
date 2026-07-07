@@ -1,5 +1,31 @@
 # Changelog
 
+## v1.18.0 — 2026-07-07
+
+XMO Stage 1 — the whole app redesigned into one window, plus a rebuilt meeting-detection stack. Large early-adoption release: every feature has landed and been reviewed; polish continues from here.
+
+**New shape**
+- Single dark window with a sidebar (Dictation · Meetings · Settings), a design-token system, and Ask Lore — a chat over the live meeting transcript, persisted per meeting and shown read-only in review (#44, #60, #62)
+- Meetings: live banner + transcript + stats rail; review with list rail, transcript/chat tabs, in-header rename, readable default names + duration, and timestamps relative to recording start (#57, #58, #61, #63)
+- The entire shell header strip is draggable (#71); product name is now Lore (XMO dropped from user-facing strings)
+
+**Meeting auto-detection, rebuilt**
+- Detects mic activation by meeting apps (Zoom, Meet, Teams, FaceTime, …) and offers to transcribe via a notch-anchored, Dynamic-Island-style prompt that shows even over fullscreen apps, with a floating-pill fallback on Macs without a notch (#79)
+- Fixed detection going deaf after a Bluetooth device reconnects (AirPods A2DP→HFP), a ghost-detector leak on every toggle, and false prompts during your own dictation; full [DETECT] logging for visibility (#75, #76, #77, #78)
+
+**Focus: one model, fewer dead features**
+- Parakeet v3 only — model pickers, WhisperKit, and the vocabulary-learning track removed (#53)
+- Purged the dead LLM stack (embeddings, NotesEngine) and collapsed cleanup/refinement to OpenAI only; local Ollama/MLX provider options removed (#70, #74)
+- Removed live diarization, the no-op echo-cancellation toggle, Suggestions, the transcript pop-out window, and Dictation-master/Auto-submit settings (#54, #55, #56)
+- Configurable dictation-audio retention; dictation history rewritten for scale — honest counts, smooth scroll, per-entry storage (#51, #52)
+
+**Reliability**
+- Fixed a CoreAudio HAL deadlock on quick stop→start, bus-level mic mute silencing the whole app, the lore:// deep link not starting recordings, ghost recordings from a lifecycle race, and split-brain launch states (#64, #66, #65)
+- Deterministic mic mute for dictating over a muted meeting; echo filter now catches short verbatim duplicates; imports never silently delete a session — a failure keeps the row with a retry (#66, #59, #43)
+- OpenAI key health check in Settings with visible cleanup/translate failures (#50)
+
+Signed with the free Apple Development account (paid enrollment pending). Sparkle updates install in place; a brand-new install may need right-click → Open once.
+
 ## v1.17.0 — 2026-06-09
 
 Deterministic mic selection — no more mid-recording device switching.

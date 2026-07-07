@@ -16,21 +16,6 @@ final class NotesControllerTests: XCTestCase {
         return (root, notesDirectory)
     }
 
-    private func makeSettings(notesDirectory: URL) -> AppSettings {
-        let suiteName = "com.lore.tests.notescontroller.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: suiteName) ?? .standard
-        defaults.removePersistentDomain(forName: suiteName)
-        defaults.set(notesDirectory.path, forKey: "notesFolderPath")
-        defaults.set(true, forKey: "hasAcknowledgedRecordingConsent")
-        let storage = AppSettingsStorage(
-            defaults: defaults,
-            secretStore: .ephemeral,
-            defaultNotesDirectory: notesDirectory,
-            runMigrations: false
-        )
-        return AppSettings(storage: storage)
-    }
-
     private func seedSession(
         coordinator: AppCoordinator,
         sessionID: String = "session_test_001",
@@ -61,7 +46,6 @@ final class NotesControllerTests: XCTestCase {
         let coordinator = AppCoordinator(
             sessionRepository: SessionRepository(rootDirectory: root),
             templateStore: TemplateStore(rootDirectory: root),
-            notesEngine: NotesEngine(mode: .scripted(markdown: "# Test Notes\n\n## Summary\nTest summary.")),
             transcriptStore: TranscriptStore()
         )
         let controller = NotesController(coordinator: coordinator)
@@ -85,52 +69,6 @@ final class NotesControllerTests: XCTestCase {
         XCTAssertEqual(controller.state.selectedSessionID, sessionID)
         XCTAssertEqual(controller.state.loadedTranscript.count, 3)
         XCTAssertNil(controller.state.loadedNotes, "No notes should exist before generation")
-    }
-
-    func testGenerateNotesUpdatesStatus() async {
-        let (root, notes) = makeTempDirs()
-        let (controller, coordinator) = makeController(root: root)
-        let settings = makeSettings(notesDirectory: notes)
-        let sessionID = "session_test_generate"
-
-        await seedSession(coordinator: coordinator, sessionID: sessionID)
-        controller.selectSession(sessionID)
-        try? await Task.sleep(for: .milliseconds(200))
-
-        controller.generateNotes(sessionID: sessionID, settings: settings)
-        // Scripted engine completes synchronously within Task, give it time
-        try? await Task.sleep(for: .milliseconds(500))
-
-        XCTAssertNotNil(controller.state.loadedNotes)
-        XCTAssertEqual(controller.state.notesGenerationStatus, .completed)
-        XCTAssertTrue(controller.state.loadedNotes?.markdown.contains("Test Notes") ?? false)
-    }
-
-    func testGenerateNotesSavesNotes() async {
-        let (root, notes) = makeTempDirs()
-        let (controller, coordinator) = makeController(root: root)
-        let settings = makeSettings(notesDirectory: notes)
-        let sessionID = "session_test_patch"
-
-        await seedSession(coordinator: coordinator, sessionID: sessionID)
-        controller.selectSession(sessionID)
-        try? await Task.sleep(for: .milliseconds(200))
-
-        // After generation, notes should be saved to session repository
-        controller.generateNotes(sessionID: sessionID, settings: settings)
-        try? await Task.sleep(for: .milliseconds(500))
-
-        let savedNotes = await coordinator.sessionRepository.loadNotes(sessionID: sessionID)
-        XCTAssertNotNil(savedNotes)
-        XCTAssertTrue(savedNotes?.markdown.contains("Test Notes") ?? false)
-    }
-
-    func testCleanupProgressMapsCorrectly() async {
-        let (root, _) = makeTempDirs()
-        let (controller, _) = makeController(root: root)
-
-        // When idle with no transcript, should be idle
-        XCTAssertEqual(controller.state.cleanupStatus, .idle)
     }
 
     func testRenameSessionUpdatesHistory() async {
@@ -157,11 +95,16 @@ final class NotesControllerTests: XCTestCase {
         let sessionID = "session_test_delete"
 
         await seedSession(coordinator: coordinator, sessionID: sessionID)
+        await coordinator.sessionRepository.appendChatExchange(
+            sessionID: sessionID,
+            exchange: ChatExchange(question: "Summary?", answer: "Discussed the plan.")
+        )
         await controller.loadHistory()
         XCTAssertTrue(controller.state.sessionHistory.contains { $0.id == sessionID })
 
         controller.selectSession(sessionID)
         try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(controller.state.loadedChat.count, 1)
 
         controller.deleteSession(sessionID: sessionID)
         try? await Task.sleep(for: .milliseconds(300))
@@ -170,6 +113,7 @@ final class NotesControllerTests: XCTestCase {
         XCTAssertNil(controller.state.selectedSessionID)
         XCTAssertTrue(controller.state.loadedTranscript.isEmpty)
         XCTAssertNil(controller.state.loadedNotes)
+        XCTAssertTrue(controller.state.loadedChat.isEmpty)
     }
 
     func testOpenNotesSelectsCorrectSession() async {
@@ -183,6 +127,38 @@ final class NotesControllerTests: XCTestCase {
         await controller.onAppear()
 
         XCTAssertEqual(controller.state.selectedSessionID, sessionID)
+    }
+
+    // MARK: - Import failure/preemption outcome (#43)
+
+    /// Import completion never deletes the placeholder: a failed or preempted
+    /// import keeps the session — fresh marker intact — so the row stays
+    /// visible with the failed banner instead of vanishing.
+    func testFailedImportPreservesSession() async {
+        let (root, _) = makeTempDirs()
+        let (controller, coordinator) = makeController(root: root)
+        let repo = coordinator.sessionRepository
+
+        let start = Date(timeIntervalSince1970: 1_700_000_000)
+        let sessionID = await repo.createImportedSession(
+            config: .init(
+                title: "Imported Meeting",
+                startedAt: start,
+                endedAt: start.addingTimeInterval(60),
+                language: "en-US",
+                engine: "parakeet"
+            )
+        )
+        await repo.markSessionUnviewed(sessionID: sessionID)
+
+        // The completion handler (LoreRootApp.importMeetingRecording) only
+        // logs and reloads history on non-completed statuses — the session
+        // must still be listed with everything the failed state needs.
+        await controller.loadHistory()
+        let row = controller.state.sessionHistory.first { $0.id == sessionID }
+        XCTAssertNotNil(row, "Failed import must leave the session row in place")
+        XCTAssertEqual(row?.source, SessionIndex.importedSource)
+        XCTAssertEqual(row?.unviewed, true, "Fresh marker survives the failure")
     }
 
     func testOriginalTranscriptToggle() async {

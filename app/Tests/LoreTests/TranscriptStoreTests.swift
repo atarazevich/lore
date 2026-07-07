@@ -49,73 +49,6 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertEqual(store.volatileThemText, "")
     }
 
-    func testClearResetsConversationState() {
-        let store = makeStore()
-        let state = ConversationState(
-            currentTopic: "Testing",
-            shortSummary: "A test",
-            openQuestions: [],
-            activeTensions: [],
-            recentDecisions: [],
-            themGoals: [],
-            suggestedAnglesRecentlyShown: [],
-            lastUpdatedAt: Date()
-        )
-        store.updateConversationState(state)
-        XCTAssertEqual(store.conversationState.currentTopic, "Testing")
-
-        store.clear()
-        XCTAssertEqual(store.conversationState.currentTopic, "")
-    }
-
-    // MARK: - Conversation State
-
-    func testUpdateConversationState() {
-        let store = makeStore()
-        let state = ConversationState(
-            currentTopic: "Architecture",
-            shortSummary: "Discussing system design",
-            openQuestions: ["Which DB?"],
-            activeTensions: [],
-            recentDecisions: ["Use Swift"],
-            themGoals: [],
-            suggestedAnglesRecentlyShown: [],
-            lastUpdatedAt: Date()
-        )
-        store.updateConversationState(state)
-        XCTAssertEqual(store.conversationState.currentTopic, "Architecture")
-        XCTAssertEqual(store.conversationState.shortSummary, "Discussing system design")
-        XCTAssertEqual(store.conversationState.openQuestions, ["Which DB?"])
-    }
-
-    func testNeedsStateUpdateAfterThemUtterances() {
-        let store = makeStore()
-        XCTAssertFalse(store.needsStateUpdate)
-
-        store.append(makeUtterance(text: "First thing", speaker: .them))
-        XCTAssertFalse(store.needsStateUpdate)
-
-        store.append(makeUtterance(text: "Second thing", speaker: .them))
-        XCTAssertTrue(store.needsStateUpdate)
-    }
-
-    func testNeedsStateUpdateResetsAfterUpdate() {
-        let store = makeStore()
-        store.append(makeUtterance(text: "A", speaker: .them))
-        store.append(makeUtterance(text: "B", speaker: .them))
-        XCTAssertTrue(store.needsStateUpdate)
-
-        store.updateConversationState(.empty)
-        XCTAssertFalse(store.needsStateUpdate)
-    }
-
-    func testYouUtterancesDoNotTriggerStateUpdate() {
-        let store = makeStore()
-        store.append(makeUtterance(text: "My reply", speaker: .you))
-        store.append(makeUtterance(text: "Another reply", speaker: .you))
-        XCTAssertFalse(store.needsStateUpdate)
-    }
-
     // MARK: - Last Them Utterance
 
     func testLastRemoteUtteranceReturnsCorrectOne() {
@@ -203,12 +136,66 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertEqual(store.utterances.count, 2)
     }
 
-    func testForwardEchoSkipsShortUtterances() {
+    // MARK: - Short-text strict branch (#59)
+    // Sub-threshold texts are never Jaccard/containment-scored; instead an
+    // exact-normalized-equality rule applies within a tighter 2s window.
+    // (Supersedes the old "short utterances are skipped" expectation.)
+
+    /// The observed leak: them='Orders.' then you='Orders.' 1.0s later —
+    /// a verbatim short dup must drop (forward arrival order).
+    func testForwardShortExactDupDropped() {
         let store = makeStore()
         let now = Date()
-        store.append(makeUtterance(text: "Да", speaker: .them, timestamp: now))
-        let accepted = store.append(makeUtterance(text: "Да", speaker: .you, timestamp: now.addingTimeInterval(0.5)))
-        XCTAssertTrue(accepted, "Short utterances below min word/char count should not be echo-checked")
+        store.append(makeUtterance(text: "Orders.", speaker: .them, timestamp: now))
+        let accepted = store.append(makeUtterance(text: "Orders.", speaker: .you, timestamp: now.addingTimeInterval(1.0)))
+        XCTAssertFalse(accepted, "Short verbatim dup within 2s should be suppressed")
+        XCTAssertEqual(store.utterances.count, 1)
+        XCTAssertEqual(store.utterances.first?.speaker, .them)
+    }
+
+    /// Same pair, real reverse configuration (#59 follow-up): the mic copy
+    /// finalizes with a LATER timestamp (them ts is 1.0s EARLIER) but arrives
+    /// first; the system twin lands second (isDelayed remote path). The
+    /// retroactive check sees timeDelta = −1.0 and must still remove the mic copy.
+    func testReverseShortExactDupDropped() {
+        let store = makeStore()
+        let now = Date()
+        store.append(makeUtterance(text: "Orders.", speaker: .you, timestamp: now.addingTimeInterval(1.0)))
+        store.append(makeUtterance(text: "Orders.", speaker: .them, timestamp: now))
+        XCTAssertEqual(store.utterances.count, 1)
+        XCTAssertEqual(store.utterances.first?.speaker, .them)
+    }
+
+    /// Long texts keep the asymmetric 0...window rule: a system utterance
+    /// with an EARLIER timestamp than the mic copy (negative delta) must NOT
+    /// trigger retroactive removal — loosening it risks false drops.
+    func testReverseLongTextNegativeDeltaKept() {
+        let store = makeStore()
+        let now = Date()
+        store.append(makeUtterance(text: "Нам нужен этот бандал для имплементации клиента", speaker: .you, timestamp: now.addingTimeInterval(1.0)))
+        store.append(makeUtterance(text: "Нам нужен этот бандал для имплементации клиента", speaker: .them, timestamp: now))
+        XCTAssertEqual(store.utterances.count, 2, "Long-text negative delta must not match")
+    }
+
+    /// Short but non-exact: strict equality only — no containment for
+    /// shorts ("yeah" ⊂ "yeah right" must NOT match).
+    func testShortNonExactKept() {
+        let store = makeStore()
+        let now = Date()
+        store.append(makeUtterance(text: "yeah right", speaker: .them, timestamp: now))
+        let accepted = store.append(makeUtterance(text: "Yeah.", speaker: .you, timestamp: now.addingTimeInterval(0.5)))
+        XCTAssertTrue(accepted, "Short non-exact texts should never match")
+        XCTAssertEqual(store.utterances.count, 2)
+    }
+
+    /// Exact short dup outside the 2s strict window (but inside the 4s
+    /// long-text window) is kept — likely a genuine backchannel.
+    func testShortExactDupOutsideStrictWindowKept() {
+        let store = makeStore()
+        let now = Date()
+        store.append(makeUtterance(text: "Orders.", speaker: .them, timestamp: now))
+        let accepted = store.append(makeUtterance(text: "Orders.", speaker: .you, timestamp: now.addingTimeInterval(3.0)))
+        XCTAssertTrue(accepted, "Short exact dup outside 2s should not be suppressed")
         XCTAssertEqual(store.utterances.count, 2)
     }
 

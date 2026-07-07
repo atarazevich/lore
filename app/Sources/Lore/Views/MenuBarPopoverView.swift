@@ -4,6 +4,7 @@ struct MenuBarPopoverView: View {
     let coordinator: AppCoordinator
     let settings: AppSettings
     let onShowMainWindow: () -> Void
+    let onShowMeetings: () -> Void
     let onCheckForUpdates: () -> Void
     let onQuit: () -> Void
 
@@ -34,7 +35,7 @@ struct MenuBarPopoverView: View {
 
             Button(action: onShowMainWindow) {
                 HStack {
-                    Text("Show Lore")
+                    Text("Show \(XMOTheme.wordmark)")
                     Spacer()
                 }
             }
@@ -56,7 +57,7 @@ struct MenuBarPopoverView: View {
 
             Button(action: onQuit) {
                 HStack {
-                    Text("Quit Lore")
+                    Text("Quit \(XMOTheme.wordmark)")
                     Spacer()
                 }
             }
@@ -88,7 +89,7 @@ struct MenuBarPopoverView: View {
         HStack(spacing: 6) {
             if coordinator.isRecording {
                 Circle()
-                    .fill(.red)
+                    .fill(XMOTheme.Accent.red)
                     .frame(width: 8, height: 8)
                 Text("Recording - \(formattedTime)")
                     .font(.system(size: 13, weight: .medium))
@@ -122,12 +123,12 @@ struct MenuBarPopoverView: View {
                     .frame(maxWidth: .infinity)
             }
             .buttonStyle(.borderedProminent)
-            .tint(.red)
+            .tint(XMOTheme.Accent.red)
             .controlSize(.regular)
         } else {
             Button(action: {
                 guard settings.hasAcknowledgedRecordingConsent else {
-                    onShowMainWindow()
+                    onShowMeetings()
                     return
                 }
                 coordinator.handle(.userStarted(.manual()), settings: settings)
