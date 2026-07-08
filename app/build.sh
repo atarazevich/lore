@@ -34,15 +34,26 @@ mkdir -p "$MACOS" "$RESOURCES" "$FRAMEWORKS"
 # Copy binary
 cp "$BUILD_DIR/Lore" "$MACOS/Lore"
 
-# Copy Info.plist and inject build version from git commit count
+# Copy Info.plist and stamp the machine-facing build version.
+# CFBundleShortVersionString (marketing) is left exactly as Info.plist declares it.
+# CFBundleVersion (Sparkle's ordering key) = <major.minor of marketing>.<git commit count>,
+# so it is monotonic and maps any build back to an exact commit.
 cp "Sources/Lore/Info.plist" "$CONTENTS/Info.plist"
-COMMIT_COUNT=$(git rev-list --count HEAD 2>/dev/null || echo "0")
-BASE_VERSION=$(defaults read "$PWD/$CONTENTS/Info.plist" CFBundleShortVersionString 2>/dev/null | sed 's/\.[0-9]*$//')
-DEV_VERSION="${BASE_VERSION}.${COMMIT_COUNT}"
-defaults write "$PWD/$CONTENTS/Info.plist" CFBundleShortVersionString "$DEV_VERSION"
-defaults write "$PWD/$CONTENTS/Info.plist" CFBundleVersion "$DEV_VERSION"
+
+# No silent fallback: a build outside a git checkout cannot produce a version that
+# maps back to a commit, and shipping one would break "the machine is the record".
+if ! COMMIT_COUNT=$(git rev-list --count HEAD 2>/dev/null); then
+    echo "Error: not a git checkout — cannot derive CFBundleVersion from the commit count." >&2
+    exit 1
+fi
+
+# Read with plutil, not `defaults read`: cfprefsd caches by path and can hand back a
+# stale value after release.sh rewrites the plist out of band.
+MARKETING_VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "Sources/Lore/Info.plist")
+BUILD_VERSION="$(echo "$MARKETING_VERSION" | cut -d. -f1,2).${COMMIT_COUNT}"
+defaults write "$PWD/$CONTENTS/Info.plist" CFBundleVersion "$BUILD_VERSION"
 plutil -convert xml1 "$CONTENTS/Info.plist"
-echo "Version: $DEV_VERSION (commit #$COMMIT_COUNT)"
+echo "Version: $MARKETING_VERSION (build $BUILD_VERSION, commit #$COMMIT_COUNT)"
 
 # Copy app icon
 if [ -f "Sources/Lore/Assets/AppIcon.icns" ]; then
