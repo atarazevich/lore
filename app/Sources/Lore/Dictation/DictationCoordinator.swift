@@ -3,14 +3,6 @@ import AppKit
 import CoreAudio
 import os
 
-enum DictationState: Sendable, Equatable {
-    case idle
-    case recording
-    case loadingModel
-    case processing
-    case done
-}
-
 enum UpgradeAction: Sendable {
     case cleanup
     case translate
