@@ -64,15 +64,90 @@ final class HealthProberTests: XCTestCase {
         )
     }
 
-    /// The same invariant, observed through the remedy layer: exactly the
-    /// expensive probes carry a `Test now` action for their own id.
+    /// The same invariant, observed through the remedy layer: the expensive
+    /// probes carry a `Test now` action for their own id — except `.systemAudio`,
+    /// which is observable only during a real meeting recording (there is no
+    /// on-demand test for it, #88), so it stays `.expensive` in cost yet carries
+    /// no button. This guards issue 2 against regression.
     func testOnlyExpensiveProbesCarryTheirOwnTestNowRemedy() {
         for id in HealthProbeID.allCases {
             let item = HealthCatalog.describe(HealthResult(id: id, status: .warning))
             let hasOwnTestNow = item.remedy?.actions.contains(.testNow(id)) ?? false
-            XCTAssertEqual(hasOwnTestNow, id.cost == .expensive,
-                           "\(id.rawValue): own Test-now action ⟺ expensive")
+            let expectsTestNow = id.cost == .expensive && id != .systemAudio
+            XCTAssertEqual(hasOwnTestNow, expectsTestNow,
+                           "\(id.rawValue): own Test-now action ⟺ expensive and not systemAudio")
         }
+    }
+
+    /// Issue 2 (#88), pinned directly: systemAudio carries NO Test-now action in
+    /// any state (a button that can't run is not honest), while the other three
+    /// expensive probes always do.
+    func testSystemAudioHasNoTestNowButOtherExpensiveProbesDo() {
+        let systemAudio = HealthCatalog.describe(HealthResult(id: .systemAudio, status: .warning))
+        XCTAssertFalse(systemAudio.remedy?.actions.contains(.testNow(.systemAudio)) ?? false,
+                       "systemAudio must not offer a Test-now it can't run")
+        for id in [HealthProbeID.micCapture, .modelWarmup, .openAILiveness] {
+            let item = HealthCatalog.describe(HealthResult(id: id, status: .warning))
+            XCTAssertEqual(try! XCTUnwrap(item.remedy).actions, [.testNow(id)],
+                           "\(id.rawValue) keeps its on-demand Test now")
+        }
+    }
+
+    /// Issue 1 (#88): the panel's spinner is driven by `monitor.testing`, which
+    /// must contain a probe's id for the whole duration of its `testNow` and drop
+    /// it only after it finishes. A gated injected closure lets us observe the
+    /// membership mid-flight deterministically, without racing a sleep.
+    func testTestingFlagIsHeldDuringTheTestAndClearedAfter() async {
+        let monitor = HealthMonitor(prober: prober(alive: true, stalled: false))
+        XCTAssertFalse(monitor.testing.contains(.micCapture))
+
+        var resume: (() -> Void)?
+        monitor.runMicCaptureTest = {
+            await withCheckedContinuation { cont in resume = { cont.resume() } }
+        }
+
+        let task = Task { await monitor.testNow(.micCapture) }
+        // Yield until testNow has inserted the id and suspended inside the closure.
+        while resume == nil { await Task.yield() }
+        XCTAssertTrue(monitor.testing.contains(.micCapture), "in-flight flag set while the test runs")
+
+        resume?()
+        await task.value
+        XCTAssertFalse(monitor.testing.contains(.micCapture), "in-flight flag cleared after the test completes")
+    }
+
+    /// Two rows' tests can overlap: each id must track independently so neither
+    /// clears the other (the single-`id?` bug where a second test flipped the
+    /// first row's spinner off and the first to finish cleared both).
+    func testTwoConcurrentTestsTrackIndependently() async {
+        let monitor = HealthMonitor(prober: prober(alive: true, stalled: false))
+
+        var resumeMic: (() -> Void)?
+        monitor.runMicCaptureTest = {
+            await withCheckedContinuation { cont in resumeMic = { cont.resume() } }
+        }
+        var resumeAPI: (() -> Void)?
+        monitor.runOpenAITest = {
+            await withCheckedContinuation { cont in resumeAPI = { cont.resume() } }
+        }
+
+        let micTask = Task { await monitor.testNow(.micCapture) }
+        while resumeMic == nil { await Task.yield() }
+        let apiTask = Task { await monitor.testNow(.openAILiveness) }
+        while resumeAPI == nil { await Task.yield() }
+
+        XCTAssertEqual(monitor.testing, [.micCapture, .openAILiveness],
+                       "both overlapping tests are in flight")
+
+        resumeMic?()
+        await micTask.value
+        XCTAssertFalse(monitor.testing.contains(.micCapture), "the finished test drops its own id")
+        XCTAssertTrue(monitor.testing.contains(.openAILiveness),
+                      "the still-running test keeps its flag")
+
+        resumeAPI?()
+        await apiTask.value
+        XCTAssertTrue(monitor.testing.isEmpty, "both flags cleared once both finish")
     }
 
     /// End to end: a stalled-tap verdict drives the monitor to summon the notch.

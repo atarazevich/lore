@@ -48,6 +48,12 @@ final class HealthMonitor {
     private(set) var snapshot: HealthSnapshot
     private(set) var items: [HealthItem]
 
+    /// The probes whose expensive Test-now is running right now, so each row can
+    /// show a spinner and disable its own button for the ~2s the test takes. A
+    /// set, not a single id, because two rows' tests can overlap — each inserts
+    /// its id before the await and removes it after, so neither clears the other.
+    private(set) var testing: Set<HealthProbeID> = []
+
     var summary: HealthSummary { HealthSummary(snapshot) }
 
     @ObservationIgnored private let prober: HealthProber
@@ -102,8 +108,12 @@ final class HealthMonitor {
     }
 
     /// Perform an expensive probe on the user's explicit request, then refresh
-    /// so its fresh last-attempt shows.
+    /// so its fresh last-attempt shows. `testing` is held for the row's spinner
+    /// across the whole await and cleared only after `refresh()` has published the
+    /// just-run outcome, so the panel never shows an idle button over stale copy.
     func testNow(_ id: HealthProbeID) async {
+        testing.insert(id)
+        defer { testing.remove(id) }
         switch id {
         case .micCapture:
             await runMicCaptureTest()

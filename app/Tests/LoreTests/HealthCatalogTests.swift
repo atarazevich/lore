@@ -118,6 +118,13 @@ final class HealthCatalogTests: XCTestCase {
         XCTAssertEqual(HealthCatalog.relativeAge(172_800), "2 d ago")
     }
 
+    /// Issue 1 (#88): "just now" spans the whole first minute so a re-test within
+    /// a minute reads as distinct from the prior "1 min ago".
+    func testRelativeAgeIsJustNowUnderOneMinute() {
+        XCTAssertEqual(HealthCatalog.relativeAge(59), "just now")
+        XCTAssertEqual(HealthCatalog.relativeAge(60), "1 min ago")
+    }
+
     // MARK: - Settings panes deep-link to the documented scheme
 
     func testSettingsPanesResolveToSystemSettingsURLs() {
