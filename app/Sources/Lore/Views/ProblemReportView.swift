@@ -5,23 +5,19 @@ import SwiftUI
 /// what is and isn't attached, and a two-tab preview — *What this means* (the
 /// snapshot in plain sentences) and *Raw data* (the exact bytes to be sent). The
 /// diagnostic payload is mandatory, not a toggle: the checkmarks state facts.
+///
+/// All build/send logic lives in `ProblemReportComposer`, which freezes the
+/// diagnostics once so the previewed bytes are byte-for-byte the posted bytes.
 /// Dark-only, XMOTheme tokens (D-031). Presented as a sheet from the health
 /// panel and from Settings.
 struct ProblemReportView: View {
-    let healthMonitor: HealthMonitor
-    var uploader = ReportUploader()
+    @State private var composer: ProblemReportComposer
+    @State private var showPreview = false
     var onClose: () -> Void
 
-    @State private var message = ""
-    @State private var showPreview = false
-    @State private var phase: Phase = .editing
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
-
-    private enum Phase: Equatable {
-        case editing
-        case sending
-        case sent(id: String)
-        case failed(message: String)
+    init(healthMonitor: HealthMonitor, uploader: ReportUploader = ReportUploader(), onClose: @escaping () -> Void) {
+        _composer = State(initialValue: ProblemReportComposer(healthMonitor: healthMonitor, uploader: uploader))
+        self.onClose = onClose
     }
 
     /// The manifest, stated once (design §7). These are the checkmarks the
@@ -37,12 +33,13 @@ struct ProblemReportView: View {
     ]
 
     var body: some View {
-        VStack(spacing: 0) {
+        @Bindable var composer = composer
+        return VStack(spacing: 0) {
             header
             XMODivider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
-                    prompt
+                    prompt(text: $composer.message)
                     manifest
                     footerStatus
                 }
@@ -55,8 +52,10 @@ struct ProblemReportView: View {
         .background(XMOTheme.Surface.window)
         .background(.ultraThinMaterial)
         .preferredColorScheme(.dark)
+        // Freeze the diagnostics once, as the flow opens — the single probe.
+        .onAppear { composer.prepare() }
         .sheet(isPresented: $showPreview) {
-            ProblemReportPreview(report: buildReport(), onClose: { showPreview = false })
+            ProblemReportPreview(report: composer.report(), onClose: { showPreview = false })
         }
     }
 
@@ -81,11 +80,11 @@ struct ProblemReportView: View {
 
     // MARK: - Prompt
 
-    private var prompt: some View {
+    private func prompt(text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 8) {
             XMOSectionLabel(text: "What happened?")
             ZStack(alignment: .topLeading) {
-                if message.isEmpty {
+                if text.wrappedValue.isEmpty {
                     Text("Describe what went wrong — e.g. the Fn key stopped inserting text after a meeting.")
                         .font(XMOTheme.Typography.body)
                         .foregroundStyle(XMOTheme.TextColor.faint)
@@ -93,7 +92,7 @@ struct ProblemReportView: View {
                         .padding(.leading, 5)
                         .allowsHitTesting(false)
                 }
-                TextEditor(text: $message)
+                TextEditor(text: text)
                     .font(XMOTheme.Typography.body)
                     .foregroundStyle(XMOTheme.TextColor.primary)
                     .scrollContentBackground(.hidden)
@@ -101,7 +100,7 @@ struct ProblemReportView: View {
                     .padding(4)
             }
             .background(XMOTheme.Surface.card3, in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
-            .disabled(isSending)
+            .disabled(composer.phase == .sending)
         }
     }
 
@@ -150,7 +149,7 @@ struct ProblemReportView: View {
 
     @ViewBuilder
     private var footerStatus: some View {
-        switch phase {
+        switch composer.phase {
         case .sent(let id):
             HStack(spacing: 8) {
                 Image(systemName: "checkmark.circle.fill")
@@ -193,16 +192,16 @@ struct ProblemReportView: View {
     private var actions: some View {
         HStack(spacing: 10) {
             Spacer()
-            if case .sent = phase {
+            if case .sent = composer.phase {
                 Button("Done", action: onClose)
                     .buttonStyle(ProblemReportButtonStyle(filled: true))
             } else {
                 Button("Cancel", action: onClose)
                     .buttonStyle(ProblemReportButtonStyle(filled: false))
-                    .disabled(isSending)
-                Button(sendLabel) { send() }
+                    .disabled(composer.phase == .sending)
+                Button(sendLabel) { Task { await composer.send() } }
                     .buttonStyle(ProblemReportButtonStyle(filled: true))
-                    .disabled(!canSend)
+                    .disabled(!composer.canSend)
             }
         }
         .padding(.horizontal, 20)
@@ -210,44 +209,10 @@ struct ProblemReportView: View {
     }
 
     private var sendLabel: String {
-        switch phase {
+        switch composer.phase {
         case .sending: return "Sending…"
         case .failed: return "Try again"
         default: return "Send report"
-        }
-    }
-
-    private var isSending: Bool { phase == .sending }
-
-    private var canSend: Bool {
-        !isSending && !message.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
-    }
-
-    // MARK: - Build & send
-
-    /// A fresh report: re-probe the cheap chain, then serialize the current
-    /// message with that snapshot and the recent events. This is the same value
-    /// the preview renders and the uploader posts.
-    private func buildReport() -> ProblemReport {
-        healthMonitor.refresh()
-        return ProblemReport.build(
-            message: message.trimmingCharacters(in: .whitespacesAndNewlines),
-            health: healthMonitor.snapshot
-        )
-    }
-
-    private func send() {
-        let report = buildReport()
-        phase = .sending
-        Task {
-            do {
-                let id = try await uploader.upload(report)
-                withAnimation(reduceMotion ? nil : .easeOut(duration: 0.2)) { phase = .sent(id: id) }
-            } catch let error as ReportUploader.UploadError {
-                phase = .failed(message: error.errorDescription ?? "Couldn't send the report. Please try again.")
-            } catch {
-                phase = .failed(message: "Couldn't send the report. Please try again.")
-            }
         }
     }
 }
@@ -256,8 +221,8 @@ struct ProblemReportView: View {
 
 /// The two-tab preview (design §7). *What this means* is the plain-language
 /// summary; *Raw data* is the literal serialized payload — the exact bytes the
-/// uploader posts, not a mock. Showing the real bytes is the promise that earns
-/// the right to collect logs.
+/// uploader posts, not a mock. It renders the same frozen `report` instance the
+/// uploader receives, so the tab and the POST cannot disagree.
 private struct ProblemReportPreview: View {
     let report: ProblemReport
     var onClose: () -> Void
@@ -337,7 +302,8 @@ private struct ProblemReportPreview: View {
             .padding(16)
     }
 
-    /// The literal bytes the uploader would post, rendered as text. Same encoder.
+    /// The literal bytes the uploader would post, rendered as text. Same encoder,
+    /// same frozen `report` instance the uploader receives.
     private var rawJSON: String {
         guard let data = try? report.encoded() else { return "Could not serialize the report." }
         return String(decoding: data, as: UTF8.self)
@@ -346,14 +312,14 @@ private struct ProblemReportPreview: View {
 
 // MARK: - Button style
 
-/// Filled (Send/Done) or plain (Cancel) action button, matching the sheet chrome.
+/// Filled (Send/Done) or plain (Cancel) action button. The press scale/animation
+/// is `XMOPressButtonStyle`'s job — this only adds the filled/plain background.
 private struct ProblemReportButtonStyle: ButtonStyle {
     let filled: Bool
     @Environment(\.isEnabled) private var isEnabled
-    @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
-        configuration.label
+        XMOPressButtonStyle().makeBody(configuration: configuration)
             .font(XMOTheme.Typography.control)
             .foregroundStyle(filled ? Color.white : XMOTheme.TextColor.primary)
             .padding(.horizontal, 14)
@@ -363,8 +329,5 @@ private struct ProblemReportButtonStyle: ButtonStyle {
                 in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
             )
             .opacity(isEnabled ? 1 : 0.4)
-            .scaleEffect(configuration.isPressed && !reduceMotion ? XMOTheme.Motion.pressScale : 1)
-            .animation(reduceMotion ? nil : .easeOut(duration: XMOTheme.Motion.hoverDuration),
-                       value: configuration.isPressed)
     }
 }
