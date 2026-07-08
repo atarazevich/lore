@@ -203,11 +203,13 @@ struct HealthProber {
 
     // MARK: - Static cheap reads
 
-    static var marketingVersion: String {
+    /// `nonisolated` so the PII-free `ProblemReport.Environment` (#84) can read
+    /// the same value off the main actor — one bundle-version reader, not two.
+    nonisolated static var marketingVersion: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "0.0"
     }
 
-    static var build: String {
+    nonisolated static var build: String {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
     }
 

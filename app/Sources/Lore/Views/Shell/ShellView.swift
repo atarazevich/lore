@@ -11,6 +11,7 @@ struct ShellView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(ShellModel.self) private var shell
     @State private var showHealthPanel = false
+    @State private var showProblemReport = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -46,8 +47,19 @@ struct ShellView: View {
                         showHealthPanel = false
                         shell.destination = .settings
                     },
+                    onReportProblem: {
+                        showHealthPanel = false
+                        // Next runloop: presenting one sheet as another dismisses
+                        // conflicts on macOS.
+                        DispatchQueue.main.async { showProblemReport = true }
+                    },
                     onClose: { showHealthPanel = false }
                 )
+            }
+        }
+        .sheet(isPresented: $showProblemReport) {
+            if let monitor = coordinator.healthMonitor {
+                ProblemReportView(healthMonitor: monitor, onClose: { showProblemReport = false })
             }
         }
     }
