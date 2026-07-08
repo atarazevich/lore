@@ -14,6 +14,22 @@ if [[ "${1:-}" == "--release" ]]; then
     SWIFT_FLAGS="-c release"
 fi
 
+# Inject the report-receiver write token into the source just for this build, then
+# restore the placeholder on exit so it never lands in the working tree (mirrors the
+# Info.plist modify-then-restore dance). The token is public by design (§8) — a bot
+# filter that ships in every copy of the app — but it lives in the shell env, not the
+# repo, per the secrets rule. A dev build without it simply can't upload reports.
+TOKEN_FILE="Sources/Lore/Diagnostics/ReportUploader.swift"
+if [ -n "${LORE_REPORT_TOKEN:-}" ]; then
+    # Restore by swapping the token back to the placeholder (not `git checkout`, which
+    # would also discard any unrelated uncommitted edits to this file).
+    trap 'sed -i "" "s|${LORE_REPORT_TOKEN}|LORE_REPORT_TOKEN_PLACEHOLDER|" "$TOKEN_FILE" 2>/dev/null || true' EXIT
+    sed -i '' "s|LORE_REPORT_TOKEN_PLACEHOLDER|${LORE_REPORT_TOKEN}|" "$TOKEN_FILE"
+    echo "Report token injected for this build."
+else
+    echo "Note: LORE_REPORT_TOKEN not set — building with placeholder (problem reports won't upload)."
+fi
+
 echo "Building Lore ($CONFIG)..."
 swift build $SWIFT_FLAGS
 
