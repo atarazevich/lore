@@ -42,13 +42,14 @@ struct SettingsView: View {
     /// probe — replaced wholesale so stale results never land.
     @State private var keyHealth: KeyHealthStatus?
     @State private var keyProbeTask: Task<Void, Never>?
-    /// Formatted size of the dictation-audio folder (#52), nil until the
-    /// first off-main enumeration lands. Refreshed on each Settings
-    /// activation and after an immediate prune. `diskUsageTask` is the
-    /// in-flight measurement — replaced wholesale (same pattern as
-    /// `keyProbeTask`) so a stale pre-prune size never lands after a
-    /// fresher post-prune one.
-    @State private var audioDiskUsage: String?
+    /// Present state of the dictation-audio folder (#52/#89): how many audio
+    /// recordings are on disk right now and the bytes they occupy, from one
+    /// enumeration pass. Nil until the first off-main measurement lands.
+    /// Refreshed on each Settings activation and after an immediate prune.
+    /// `diskUsageTask` is the in-flight measurement — replaced wholesale (same
+    /// pattern as `keyProbeTask`) so a stale pre-prune result never lands after
+    /// a fresher post-prune one.
+    @State private var audioUsage: (count: Int, bytes: Int64)?
     @State private var diskUsageTask: Task<Void, Never>?
 
     init(settings: AppSettings, updater: SPUUpdater, isActiveInShell: Bool = true) {
@@ -303,11 +304,24 @@ struct SettingsView: View {
     }
 
     private var keepAudioSub: String {
-        let disk = audioDiskUsage.map { " \u{2014} \($0) on disk" } ?? ""
-        let count = settings.dictationAudioRetentionCount
-        return count == 0
-            ? "All recordings kept for Retry\(disk)"
-            : "Last \(count) recordings kept for Retry\(disk)"
+        Self.keepAudioSubtitle(cap: settings.dictationAudioRetentionCount, usage: audioUsage)
+    }
+
+    /// Present-tense subtitle for the Keep-audio row (#89). Once the folder is
+    /// measured, states current reality — how many recordings are on disk right
+    /// now and the space they occupy — so nothing reads as a projection of the
+    /// cap (the cap is the value button's job). Before the first measurement
+    /// lands (`usage` nil), falls back to the retention policy alone, never a
+    /// fabricated count. `cap` is the retention limit (0 = unlimited).
+    static func keepAudioSubtitle(cap: Int, usage: (count: Int, bytes: Int64)?) -> String {
+        guard let usage else {
+            return cap == 0
+                ? "Keeping every recording for Retry"
+                : "Keeping up to \(cap) recordings for Retry"
+        }
+        let size = ByteCountFormatter.string(fromByteCount: usage.bytes, countStyle: .file)
+        let noun = usage.count == 1 ? "recording" : "recordings"
+        return "\(usage.count) \(noun) on disk now \u{00B7} \(size)"
     }
 
     private func cycleAudioRetention() {
@@ -331,29 +345,41 @@ struct SettingsView: View {
     }
 
     /// Directory enumeration happens on a detached task — never on the main
-    /// actor (the folder can hold ~1000 files); only the formatted string
-    /// hops back to update `audioDiskUsage`. Cancel-and-replace: a re-entry
+    /// actor (the folder can hold ~1000 files); only the (count, bytes) result
+    /// hops back to update `audioUsage`. Cancel-and-replace: a re-entry
     /// (e.g. prune right after activation) invalidates the older measurement.
     private func refreshAudioDiskUsage() {
         diskUsageTask?.cancel()
         let directory = coordinator.dictationCoordinator.history.audioDirectory
         diskUsageTask = Task { @MainActor in
             let usage = await Task.detached(priority: .utility) {
-                Self.formattedFolderSize(at: directory)
+                Self.measureAudioFolder(at: directory)
             }.value
             guard !Task.isCancelled else { return }
-            audioDiskUsage = usage
+            audioUsage = usage
         }
     }
 
-    private nonisolated static func formattedFolderSize(at directory: URL) -> String? {
+    /// One directory pass yields both the recording count and the total bytes
+    /// (one source of truth for the present-state subtitle, #89). Counts only
+    /// the `.raw` audio files `saveAudio` writes, so a stray file (e.g.
+    /// `.DS_Store`) never inflates the count or size. Nil when the folder can't
+    /// be read.
+    nonisolated static func measureAudioFolder(at directory: URL) -> (count: Int, bytes: Int64)? {
         guard let files = try? FileManager.default.contentsOfDirectory(
             at: directory, includingPropertiesForKeys: [.fileSizeKey]
         ) else { return nil }
-        let bytes = files.reduce(Int64(0)) { total, url in
+        // The on-disk `.raw` set, deliberately — this is what "N recordings on
+        // disk now" claims. It's not strictly the in-memory
+        // `entries where audioFilename != nil` set the cap prunes against; the
+        // two can diverge on an orphaned file (a crash between saveAudio and
+        // the entry add) or one removed outside the app. The subtitle reports
+        // physical reality, so the on-disk count is the honest number here.
+        let audio = files.filter { $0.pathExtension == "raw" }
+        let bytes = audio.reduce(Int64(0)) { total, url in
             total + Int64((try? url.resourceValues(forKeys: [.fileSizeKey]))?.fileSize ?? 0)
         }
-        return ByteCountFormatter.string(fromByteCount: bytes, countStyle: .file)
+        return (count: audio.count, bytes: bytes)
     }
 
     // MARK: - MODIFIERS (DSET-04…07)
