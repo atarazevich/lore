@@ -101,7 +101,7 @@ struct HealthPanelView: View {
                     VStack(spacing: 0) {
                         ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                             if index > 0 { XMODivider() }
-                            HealthRowView(item: item, perform: perform)
+                            HealthRowView(item: item, isTesting: monitor.testing.contains(item.id), perform: perform)
                         }
                     }
                 }
@@ -131,6 +131,9 @@ struct HealthPanelView: View {
 /// Failing → expands with the detail, the remedy instruction, and its buttons.
 private struct HealthRowView: View {
     let item: HealthItem
+    /// This probe's expensive Test-now is running: show a spinner + "Testing…"
+    /// and disable its button for the ~2s the test takes (#88).
+    let isTesting: Bool
     let perform: (HealthRemedyAction) -> Void
 
     var body: some View {
@@ -158,6 +161,14 @@ private struct HealthRowView: View {
                         ForEach(Array(remedy.actions.enumerated()), id: \.offset) { _, action in
                             Button(action.buttonLabel) { perform(action) }
                                 .buttonStyle(HealthActionButtonStyle())
+                                .disabled(isTesting)
+                        }
+                        if isTesting {
+                            ProgressView()
+                                .controlSize(.small)
+                            Text("Testing…")
+                                .font(XMOTheme.Typography.meta)
+                                .foregroundStyle(XMOTheme.TextColor.muted)
                         }
                     }
                 }
@@ -198,6 +209,7 @@ extension HealthStatus {
 /// Small filled button matching the notch prompt's action style.
 private struct HealthActionButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
+    @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
@@ -206,6 +218,7 @@ private struct HealthActionButtonStyle: ButtonStyle {
             .padding(.horizontal, 10)
             .padding(.vertical, 5)
             .background(XMOTheme.Surface.card3, in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button))
+            .opacity(isEnabled ? 1 : 0.45)
             .scaleEffect(configuration.isPressed && !reduceMotion ? XMOTheme.Motion.pressScale : 1)
             .animation(reduceMotion ? nil : .easeOut(duration: XMOTheme.Motion.hoverDuration),
                        value: configuration.isPressed)

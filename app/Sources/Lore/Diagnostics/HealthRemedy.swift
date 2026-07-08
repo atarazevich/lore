@@ -241,15 +241,17 @@ enum HealthCatalog {
         case .modelWarmup:
             return .init(title: "Model warm-up", okDetail: "Last load succeeded",
                          failDetail: "Last load failed", warnDetail: "Not warmed up yet.",
-                         sideEffect: "loads ~1 GB, takes seconds")
+                         sideEffect: "loads the model (~1 GB) if it isn't already in memory — instant if already warm")
         case .openAILiveness:
             return .init(title: "OpenAI reachability", okDetail: "Key accepted",
                          failDetail: "Key rejected (HTTP 401)", warnDetail: "Not checked yet.",
                          sideEffect: "makes a network request")
         case .systemAudio:
+            // sideEffect is unused for systemAudio — it has no on-demand test, so
+            // its card never renders a Test-now instruction (see expensiveCopy).
             return .init(title: "System-audio capture", okDetail: "Last capture succeeded",
                          failDetail: "Last capture failed", warnDetail: "No meeting recorded yet.",
-                         sideEffect: "requires a meeting recording")
+                         sideEffect: "observable only during a meeting recording")
         case .signing, .urlScheme, .diskSpace, .accessibility, .inputMonitoring,
              .tap, .secureInput, .microphone, .asrModel, .vadModel, .openAIKey:
             preconditionFailure("cheap probe \(id.rawValue) has no expensive labels")
@@ -258,32 +260,37 @@ enum HealthCatalog {
 
     /// Shared shape for the expensive probes: the panel shows the last real
     /// outcome from the event stream plus a "Test now" that warns about the side
-    /// effect. Every expensive item keeps a Test-now button so the user can
-    /// re-check on demand.
+    /// effect. systemAudio is the one exception — it is observable only during a
+    /// real meeting recording (`HealthMonitor.testNow` has no case for it), so its
+    /// card shows the last real outcome with NO button; a button that can't run is
+    /// not honest. It stays `.expensive` in cost — the cost split (#83) is
+    /// unchanged; it simply lacks an on-demand test.
     private static func expensiveCopy(_ result: HealthResult) -> (String, String, Remedy?) {
         let labels = expensiveLabels(result.id)
-        let testNow = HealthRemedyAction.testNow(result.id)
+        let testable = result.id != .systemAudio
+        func remedy(_ lead: String) -> Remedy? {
+            testable ? Remedy(instruction: "\(lead) — \(labels.sideEffect).",
+                              actions: [.testNow(result.id)]) : nil
+        }
         guard let last = result.lastAttempt else {
-            return (labels.title, labels.warnDetail,
-                    Remedy(instruction: "Test now — \(labels.sideEffect).", actions: [testNow]))
+            return (labels.title, labels.warnDetail, remedy("Test now"))
         }
         let age = relativeAge(last.ageSeconds)
         switch last.outcome {
         case .ok:
-            return (labels.title, "\(labels.okDetail) \(age).",
-                    Remedy(instruction: "Re-test — \(labels.sideEffect).", actions: [testNow]))
+            return (labels.title, "\(labels.okDetail) \(age).", remedy("Re-test"))
         case .unknown:
-            return (labels.title, "Inconclusive \(age) — no verdict.",
-                    Remedy(instruction: "Test now — \(labels.sideEffect).", actions: [testNow]))
+            return (labels.title, "Inconclusive \(age) — no verdict.", remedy("Test now"))
         case .failed:
-            return (labels.title, "\(labels.failDetail) \(age).",
-                    Remedy(instruction: "Test now to re-check — \(labels.sideEffect).", actions: [testNow]))
+            return (labels.title, "\(labels.failDetail) \(age).", remedy("Test now to re-check"))
         }
     }
 
-    /// "4 min ago" / "just now" — coarse, no personal data.
+    /// "4 min ago" / "just now" — coarse, no personal data. "just now" spans the
+    /// whole first minute so a successful re-test reads as distinct from the prior
+    /// "1 min ago" (#88).
     static func relativeAge(_ seconds: Int) -> String {
-        if seconds < 45 { return "just now" }
+        if seconds < 60 { return "just now" }
         if seconds < 3600 { return "\(max(1, seconds / 60)) min ago" }
         if seconds < 86400 { return "\(seconds / 3600) h ago" }
         return "\(seconds / 86400) d ago"
