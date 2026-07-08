@@ -1,5 +1,22 @@
 # Changelog
 
+## v2.1.0 — 2026-07-08 (draft — pending release)
+
+Diagnostics: the app can now see and report its own health, so a problem on a machine we can't reach becomes something the user can show us in one click. The version line also moves to 2.x.
+
+**See what's wrong, and fix it**
+- A health panel (sidebar footer → click) shows the readiness chain — permissions, the Fn key listener, microphone, model, key, meetings — each failing item with a specific remedy and buttons that perform it. Cheap checks re-run on open; expensive ones (mic, model warm-up, OpenAI liveness) show the last real result behind an explicit "Test now" (#83)
+- A failing critical check summons itself through the notch prompt instead of waiting to be found; when the Fn key is starved by another app holding secure input, the panel names that app rather than blaming a permission (#83)
+
+**Report a problem**
+- "Report a problem" (in the health panel and Settings) sends a short note plus a health snapshot and recent diagnostics to us — with a two-tab preview showing the exact bytes that will leave the machine. No transcripts, recordings, file names, device names, account, or keys, guaranteed by construction (#84)
+
+**Privacy of the diagnostic log itself**
+- Replaced the old world-readable `/tmp/lore.log` — which carried dictated text, meeting utterances, and device names — with a typed event stream where personal data cannot fit by construction, plus OS-redacted developer logging. The insecure log file is gone (#82)
+
+**Under the hood**
+- The backend a user hits first is warmed at launch; the version now separates the human-facing number from the build identity Sparkle uses to order updates (#81, #85)
+
 ## v1.18.0 — 2026-07-07
 
 XMO Stage 1 — the whole app redesigned into one window, plus a rebuilt meeting-detection stack. Large early-adoption release: every feature has landed and been reviewed; polish continues from here.
