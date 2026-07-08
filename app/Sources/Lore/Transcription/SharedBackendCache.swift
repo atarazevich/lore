@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+import os
+
+private let cacheLog = Logger(subsystem: "com.lore.app", category: "SharedBackendCache")
 
 /// Shared cache for the transcription backend. Both DictationCoordinator and
 /// TranscriptionEngine draw from here so only one instance exists in memory.
@@ -34,16 +37,18 @@ final class SharedBackendCache {
         onProgress: @escaping @Sendable (Double) -> Void = { _ in }
     ) async throws {
         if backend != nil {
-            diagLog("[BACKEND-CACHE] already cached")
+            DiagStore.record(.modelLoad(model: .asr, outcome: .ok, seconds: 0, fromCache: true))
+            cacheLog.debug("already cached")
             return
         }
         if let loadTask {
-            diagLog("[BACKEND-CACHE] awaiting in-flight load")
+            cacheLog.debug("awaiting in-flight load")
             _ = try await loadTask.value
             return
         }
 
-        diagLog("[BACKEND-CACHE] loading backend...")
+        cacheLog.debug("loading backend")
+        let startedAt = Date()
         let make = makeBackend
         let task = Task { () throws -> any TranscriptionBackend in
             let newBackend = make()
@@ -52,7 +57,23 @@ final class SharedBackendCache {
         }
         loadTask = task
         defer { loadTask = nil }
-        backend = try await task.value
-        diagLog("[BACKEND-CACHE] backend ready")
+        do {
+            backend = try await task.value
+        } catch {
+            DiagStore.record(.modelLoad(
+                model: .asr,
+                outcome: .failed,
+                seconds: Date().timeIntervalSince(startedAt),
+                fromCache: false
+            ))
+            cacheLog.error("backend load failed: \(error.localizedDescription, privacy: .private)")
+            throw error
+        }
+        DiagStore.record(.modelLoad(
+            model: .asr,
+            outcome: .ok,
+            seconds: Date().timeIntervalSince(startedAt),
+            fromCache: false
+        ))
     }
 }

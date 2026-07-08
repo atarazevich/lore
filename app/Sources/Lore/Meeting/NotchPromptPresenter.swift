@@ -1,7 +1,10 @@
 import AppKit
 import Combine
 import DynamicNotchKit
+import os
 import SwiftUI
+
+private let notchLog = Logger(subsystem: "com.lore.app", category: "NotchPrompt")
 
 /// Notch-anchored Dynamic-Island-style prompt for meeting detection (#79).
 ///
@@ -95,12 +98,12 @@ final class NotchPromptPresenter {
         let window = makeWindow(content)
         self.window = window
         Task { await window.present() }
-        diagLog("[DETECT] notch prompt shown (\(appName ?? "unknown app"))")
+        notchLog.debug("notch prompt shown (\(appName ?? "unknown app", privacy: .private))")
 
         timeoutTask = Task { [weak self, timeout] in
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled, let self else { return }
-            diagLog("[DETECT] notch prompt timed out (60s, no user action)")
+            notchLog.debug("notch prompt timed out (60s, no user action)")
             self.dismissWindow()
             self.onTimeout?()
         }
@@ -120,7 +123,7 @@ final class NotchPromptPresenter {
         timeoutTask?.cancel()
         timeoutTask = nil
         dismissWindow()
-        diagLog("[DETECT] notch prompt action: \(action)")
+        notchLog.debug("notch prompt action: \(action, privacy: .public)")
         callback?()
     }
 

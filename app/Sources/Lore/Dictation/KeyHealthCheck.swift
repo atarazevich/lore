@@ -9,6 +9,16 @@ enum KeyHealthStatus: Equatable, Sendable {
     /// Inconclusive (network error, timeout, 5xx, rate limit) — no verdict,
     /// the UI must not alarm the user over a flaky connection.
     case unknown
+
+    /// The diagnostic event carries the same three-way verdict this type exists
+    /// to express; a two-state `ok`/`failed` would erase the distinction (#82).
+    var diagOutcome: DiagEvent.Outcome {
+        switch self {
+        case .ok: .ok
+        case .invalid: .failed
+        case .unknown: .unknown
+        }
+    }
 }
 
 /// Lightweight OpenAI key liveness check: `GET /v1/models` with the bearer
@@ -32,11 +42,24 @@ enum KeyHealthCheck {
     static func probe(apiKey: String) async -> KeyHealthStatus {
         var request = URLRequest(url: endpoint, timeoutInterval: 10)
         request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
-        do {
-            let (_, response) = try await URLSession.shared.data(for: request)
-            return classify(statusCode: (response as? HTTPURLResponse)?.statusCode)
-        } catch {
-            return .unknown // network error/timeout — no verdict
+        let startedAt = Date()
+
+        // A thrown request (network error, timeout) leaves no status; so does a 5xx
+        // leave no verdict. Both land on `.unknown` through `classify`.
+        var statusCode: Int?
+        if let (_, response) = try? await URLSession.shared.data(for: request) {
+            statusCode = (response as? HTTPURLResponse)?.statusCode
         }
+        let verdict = classify(statusCode: statusCode)
+
+        // The verdict passes through intact: collapsing `.unknown` into `.failed` would
+        // make a flaky connection read as a dead API key in the report (#50).
+        DiagStore.record(.apiCall(
+            endpoint: .keyHealth,
+            outcome: verdict.diagOutcome,
+            httpStatus: statusCode,
+            ms: Int(Date().timeIntervalSince(startedAt) * 1000)
+        ))
+        return verdict
     }
 }

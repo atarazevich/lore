@@ -38,6 +38,12 @@ final class AppContainer {
     }
 
     static func bootstrap() -> AppLaunchContext {
+        // Decode the persisted event ring here, on main, before AudioBus or the
+        // hotkey tap exist. Otherwise the first `DiagStore.record()` — which can
+        // come from halQueue or a CoreAudio listener queue — would be the thread
+        // that pays for the file read.
+        DiagStore.prepare()
+
         let environment = ProcessInfo.processInfo.environment
         let mode = runtimeMode(from: environment)
 

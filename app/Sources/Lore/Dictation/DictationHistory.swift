@@ -1,5 +1,8 @@
 import Foundation
 import Observation
+import os
+
+private let historyLog = Logger(subsystem: "com.lore.app", category: "DictationHistory")
 
 enum DictationEntryStatus: String, Codable {
     case audioSaved
@@ -177,7 +180,8 @@ final class DictationHistory {
             try data.write(to: url)
             return filename
         } catch {
-            diagLog("[HISTORY] failed to save audio: \(error)")
+            DiagStore.record(.historyWriteFailed)
+            historyLog.error("failed to save audio: \(error.localizedDescription, privacy: .private)")
             return nil
         }
     }
@@ -240,7 +244,8 @@ final class DictationHistory {
     @discardableResult
     private func writeEntryFile(_ entry: DictationHistoryEntry) -> Bool {
         guard let data = try? JSONEncoder().encode(entry) else {
-            diagLog("[HISTORY] failed to encode entry \(entry.id)")
+            DiagStore.record(.historyWriteFailed)
+            historyLog.error("failed to encode entry")
             lastSaveError = "Couldn't save history"
             return false
         }
@@ -249,7 +254,8 @@ final class DictationHistory {
             lastSaveError = nil
             return true
         } catch {
-            diagLog("[HISTORY] failed to write entry file: \(error)")
+            DiagStore.record(.historyWriteFailed)
+            historyLog.error("failed to write entry file: \(error.localizedDescription, privacy: .private)")
             lastSaveError = "Couldn't save history"
             return false
         }
@@ -265,7 +271,8 @@ final class DictationHistory {
                    let entry = try? JSONDecoder().decode(DictationHistoryEntry.self, from: data) {
                     loaded.append(entry)
                 } else {
-                    diagLog("[HISTORY] skipping unreadable entry file: \(url.lastPathComponent)")
+                    DiagStore.record(.corruptFileAside(artifact: .historyEntry))
+                    historyLog.error("skipping unreadable entry file: \(url.lastPathComponent, privacy: .private)")
                 }
             }
         }
@@ -298,16 +305,18 @@ final class DictationHistory {
     private func migrateFromDefaultsIfNeeded() {
         guard let data = defaults.data(forKey: Self.legacyStorageKey) else { return }
         guard let decoded = try? JSONDecoder().decode([DictationHistoryEntry].self, from: data) else {
-            diagLog("[HISTORY] migration: legacy blob undecodable — left in place")
+            DiagStore.record(.corruptFileAside(artifact: .legacyHistoryBlob))
+            historyLog.error("migration: legacy blob undecodable — left in place")
             return
         }
         let written = decoded.filter { writeEntryFile($0) }.count
         guard written == decoded.count else {
-            diagLog("[HISTORY] migration incomplete (\(written)/\(decoded.count) written) — legacy blob kept, retrying next launch")
+            DiagStore.record(.historyMigrated(entries: decoded.count, written: written))
+            historyLog.error("migration incomplete — legacy blob kept, retrying next launch")
             return
         }
         defaults.set(data, forKey: Self.legacyBackupKey)
         defaults.removeObject(forKey: Self.legacyStorageKey)
-        diagLog("[HISTORY] migrated \(decoded.count) entries to per-entry files")
+        DiagStore.record(.historyMigrated(entries: decoded.count, written: written))
     }
 }

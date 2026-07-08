@@ -4,23 +4,7 @@ import FluidAudio
 import Observation
 import os
 
-/// Simple file logger for diagnostics — writes to /tmp/lore.log.
-/// O_APPEND + a single write(2) per line: the kernel makes each append atomic
-/// with respect to the file offset, so concurrent writers (MainActor, actors,
-/// the CoreAudio listener queue) cannot interleave mid-line.
-/// Under XCTest the destination is /tmp/lore-tests.log so test runs never
-/// pollute the production log (#68). Same XCTest detection as KeychainHelper.
-private let diagLogPath =
-    NSClassFromString("XCTestCase") == nil ? "/tmp/lore.log" : "/tmp/lore-tests.log"
-
-func diagLog(_ msg: String) {
-    let line = "\(Date()): \(msg)\n"
-    let fd = open(diagLogPath, O_WRONLY | O_APPEND | O_CREAT, 0o644)
-    guard fd >= 0 else { return }
-    let bytes = Array(line.utf8)
-    _ = bytes.withUnsafeBytes { write(fd, $0.baseAddress, $0.count) }
-    close(fd)
-}
+private let engineLog = Logger(subsystem: "com.lore.app", category: "TranscriptionEngine")
 
 enum TranscriptionEngineError: LocalizedError {
     case transcriberNotInitialized
@@ -183,7 +167,7 @@ final class TranscriptionEngine {
     }
 
     func start() async {
-        diagLog("[ENGINE-0] start() called, isRunning=\(isRunning)")
+        engineLog.debug("start() called, isRunning=\(self.isRunning, privacy: .public)")
         guard !isRunning else { return }
         lastError = nil
         refreshModelAvailability()
@@ -215,9 +199,11 @@ final class TranscriptionEngine {
 
         // 1. Load transcription models via backend protocol
         let canReuseCache = cachedMicBackend != nil && cachedSystemBackend != nil
+        let modelLoadStart = Date()
+        var usedSharedCacheBackend = false
 
         if canReuseCache {
-            diagLog("[ENGINE-1] reusing cached backends")
+            engineLog.debug("reusing cached backends")
             self.micBackend = cachedMicBackend
             self.systemBackend = cachedSystemBackend
             assetStatus = "Models ready"
@@ -229,15 +215,22 @@ final class TranscriptionEngine {
                 ? "Downloading Parakeet TDT v3..."
                 : "Loading Parakeet TDT v3..."
             if isDownloading { downloadProgress = 0 }
-            diagLog("[ENGINE-1] loading transcription model...")
+            engineLog.debug("loading transcription model")
         }
+
+        // Which model the `do` block is currently loading, so a failure is attributed
+        // to the model that actually failed. VAD lives inside the same `do`, and used
+        // to be reported as an ASR failure.
+        var loadingModel: DiagEvent.ModelKind = .asr
+        var phaseStart = modelLoadStart
 
         do {
             if !canReuseCache {
                 // Try shared cache first — reuse the preloaded dictation backend as mic backend
                 if let sharedBackend = sharedBackendCache?.backend {
                     self.micBackend = sharedBackend
-                    diagLog("[ENGINE-1] reusing shared cache backend for mic")
+                    usedSharedCacheBackend = true
+                    engineLog.debug("reusing shared cache backend for mic")
                 } else {
                     let mic = ParakeetBackend()
                     try await mic.prepare(
@@ -270,21 +263,44 @@ final class TranscriptionEngine {
                 cachedSystemBackend = self.systemBackend
             }
 
+            // The ASR backend is up. A cache hit did no loading, so its duration is 0
+            // rather than a stopwatch reading of a few skipped `if`s.
+            let fromCache = canReuseCache || usedSharedCacheBackend
+            DiagStore.record(.modelLoad(
+                model: .asr,
+                outcome: .ok,
+                seconds: fromCache ? 0 : Date().timeIntervalSince(modelLoadStart),
+                fromCache: fromCache
+            ))
+
             if self.vadManager == nil {
                 assetStatus = "Loading VAD model..."
-                diagLog("[ENGINE-1b] loading VAD model...")
+                loadingModel = .vad
+                phaseStart = Date()
                 let vad = try await VadManager()
                 self.vadManager = vad
+                DiagStore.record(.modelLoad(
+                    model: .vad,
+                    outcome: .ok,
+                    seconds: Date().timeIntervalSince(phaseStart),
+                    fromCache: false
+                ))
             }
 
             needsModelDownload = false
             downloadConfirmed = false
             downloadProgress = nil
             assetStatus = "Models ready"
-            diagLog("[ENGINE-2] transcription model loaded")
         } catch {
             let msg = "Failed to load models: \(error.localizedDescription)"
-            diagLog("[ENGINE-2-FAIL] \(msg)")
+            DiagStore.record(.modelLoad(
+                model: loadingModel,
+                outcome: .failed,
+                seconds: Date().timeIntervalSince(phaseStart),
+                fromCache: loadingModel == .asr && (canReuseCache || usedSharedCacheBackend)
+            ))
+            // The underlying error can name model cache paths — private.
+            engineLog.error("failed to load models: \(error.localizedDescription, privacy: .private)")
             lastError = msg
             assetStatus = "Ready"
             isRunning = false
@@ -292,7 +308,7 @@ final class TranscriptionEngine {
             // Clear corrupt cache so the next attempt triggers a fresh download
             invalidateBackendCache()
             ParakeetBackend().clearModelCache()
-            diagLog("[ENGINE-2-FAIL] cleared model cache")
+            DiagStore.record(.modelCacheCleared)
             needsModelDownload = true
             downloadConfirmed = false
             return
@@ -306,7 +322,7 @@ final class TranscriptionEngine {
         userSelectedDeviceID = settings.inputDeviceID
         guard let targetMicID = await resolvedMicDeviceID(for: settings.inputDeviceID) else {
             let msg = Self.unavailableMicMessage
-            diagLog("[ENGINE-3-FAIL] \(msg)")
+            engineLog.error("no usable mic device")
             lastError = msg
             assetStatus = "Ready"
             isRunning = false
@@ -315,19 +331,20 @@ final class TranscriptionEngine {
         // stop() may have run while resolution was in flight — don't subscribe a mic
         // stream for a session that is already torn down (#64 review).
         guard isRunning else {
-            diagLog("[ENGINE-3] stopped during device resolution — aborting start")
+            engineLog.debug("stopped during device resolution — aborting start")
             return
         }
         currentMicDeviceID = targetMicID
-        diagLog("[ENGINE-3] starting mic capture, targetMicID=\(String(describing: targetMicID))")
+        engineLog.debug("starting mic capture, targetMicID=\(targetMicID, privacy: .public)")
         startMicStream(
             vadManager: vadManager,
             deviceID: targetMicID
         )
 
-        // Check for immediate mic capture failure
+        // Check for immediate mic capture failure. AudioBus already recorded the
+        // typed captureFailed event; this only surfaces the message to the UI.
         if let micError = audioBus.captureError {
-            diagLog("[ENGINE-3-FAIL] mic capture error: \(micError)")
+            engineLog.error("mic capture error: \(micError, privacy: .private)")
             lastError = micError
         }
 
@@ -337,7 +354,7 @@ final class TranscriptionEngine {
             try? await Task.sleep(for: .seconds(5))
             guard let self, self.isRunning else { return }
             if !self.audioBus.hasCapturedFrames && self.audioBus.captureError == nil {
-                diagLog("[ENGINE-HEALTH] no mic audio after 5s")
+                engineLog.error("no mic audio after 5s")
                 self.lastError = MicrophonePermission.noAudioMessage
             }
         }
@@ -349,7 +366,6 @@ final class TranscriptionEngine {
         // line was one of four simultaneous recording indicators (#57) — the
         // red banner is the one live indicator.
         assetStatus = "Ready"
-        diagLog("[ENGINE-6] all transcription tasks started")
 
         // Install CoreAudio listener for output device changes (system audio restart)
         installDefaultOutputDeviceListener()
@@ -372,7 +388,7 @@ final class TranscriptionEngine {
         // start() is still wiring the first mic stream — defer; the tail of start()
         // drains pendingMicDeviceID once the initial subscription exists (#64 review).
         guard !isStarting else {
-            diagLog("[ENGINE-MIC-SWAP] deferred until start completes (device \(inputDeviceID))")
+            engineLog.debug("mic swap deferred until start completes (device \(inputDeviceID, privacy: .public))")
             return
         }
         startMicRestartLoopIfNeeded()
@@ -380,7 +396,7 @@ final class TranscriptionEngine {
 
     private func startMicRestartLoopIfNeeded() {
         if micRestartTask != nil {
-            diagLog("[ENGINE-MIC-SWAP] queued restart for device \(String(describing: pendingMicDeviceID))")
+            engineLog.debug("mic swap queued restart")
             return
         }
 
@@ -555,7 +571,7 @@ final class TranscriptionEngine {
 
         guard let targetMicID = await resolvedMicDeviceID(for: inputDeviceID) else {
             let msg = Self.unavailableMicMessage
-            diagLog("[ENGINE-MIC-SWAP-FAIL] \(msg)")
+            engineLog.error("mic swap failed: no usable mic device")
             lastError = msg
             return
         }
@@ -563,11 +579,11 @@ final class TranscriptionEngine {
         guard isRunning else { return }
 
         if !force, targetMicID == currentMicDeviceID {
-            diagLog("[ENGINE-MIC-SWAP] same device \(targetMicID), skipping")
+            engineLog.debug("mic swap: same device \(targetMicID, privacy: .public), skipping")
             return
         }
 
-        diagLog("[ENGINE-MIC-SWAP] switching mic from \(currentMicDeviceID) to \(targetMicID)")
+        engineLog.debug("mic swap: \(self.currentMicDeviceID, privacy: .public) -> \(targetMicID, privacy: .public)")
 
         // Unsubscribe old stream, switch device on AudioBus, re-subscribe
         if let id = micConsumerID {
@@ -589,7 +605,7 @@ final class TranscriptionEngine {
         currentMicDeviceID = targetMicID
         lastError = nil
 
-        diagLog("[ENGINE-MIC-SWAP] mic restarted on device \(targetMicID)")
+        engineLog.debug("mic restarted on device \(targetMicID, privacy: .public)")
     }
 
     private func restartSystemAudio() {
@@ -597,7 +613,7 @@ final class TranscriptionEngine {
         pendingSystemAudioRestart = true
 
         if sysRestartTask != nil {
-            diagLog("[ENGINE-SYS-SWAP] queued restart")
+            engineLog.debug("system audio swap queued")
             return
         }
 
@@ -615,7 +631,7 @@ final class TranscriptionEngine {
     private func performSystemAudioRestart() async {
         guard isRunning, let vadManager else { return }
 
-        diagLog("[ENGINE-SYS-SWAP] restarting system audio stream")
+        engineLog.debug("restarting system audio stream")
 
         systemCapture.finishStream()
         await sysTask?.value
@@ -628,7 +644,7 @@ final class TranscriptionEngine {
         await systemCapture.stop()
         await startSystemAudioStream(vadManager: vadManager)
 
-        diagLog("[ENGINE-SYS-SWAP] system audio stream restarted")
+        engineLog.debug("system audio stream restarted")
     }
 
     private func startMicStream(
@@ -672,16 +688,20 @@ final class TranscriptionEngine {
     private func startSystemAudioStream(
         vadManager: VadManager
     ) async {
-        diagLog("[ENGINE-4] starting system audio capture...")
+        engineLog.debug("starting system audio capture")
 
         let sysStreams: SystemAudioCapture.CaptureStreams
         do {
             sysStreams = try await systemCapture.bufferStream()
-            diagLog("[ENGINE-5] system audio capture started OK")
+            DiagStore.record(.systemAudioCapture(outcome: .ok, osStatus: nil))
             clearSystemAudioErrorIfPresent()
         } catch {
             let msg = "Failed to start system audio: \(error.localizedDescription)"
-            diagLog("[ENGINE-5-FAIL] \(msg)")
+            DiagStore.record(.systemAudioCapture(
+                outcome: .failed,
+                osStatus: (error as? SystemAudioCapture.CaptureError)?.osStatus
+            ))
+            engineLog.error("failed to start system audio: \(error.localizedDescription, privacy: .private)")
             lastError = msg
             return
         }
@@ -724,7 +744,7 @@ final class TranscriptionEngine {
     ) -> StreamingTranscriber? {
         let backend = speaker == .you ? micBackend : systemBackend
         guard let backend else {
-            diagLog("[ENGINE] makeTranscriber called without initialized backend for \(speaker.storageKey)")
+            engineLog.error("makeTranscriber called without initialized backend for \(speaker.storageKey, privacy: .public)")
             return nil
         }
         return StreamingTranscriber(
@@ -824,13 +844,13 @@ final class TranscriptionEngine {
     private func clearMicMuteForSessionEnd() {
         guard _micMuted.value else { return }
         _micMuted.value = false
-        diagLog("[ENGINE] mic mute -> off (session ended)")
+        engineLog.debug("mic mute -> off (session ended)")
     }
 
     /// Discard cached backends so the next start() creates fresh ones.
     private func invalidateBackendCache() {
         cachedMicBackend = nil
         cachedSystemBackend = nil
-        diagLog("[ENGINE-CACHE] backend cache invalidated")
+        engineLog.debug("backend cache invalidated")
     }
 }

@@ -436,14 +436,9 @@ actor SessionRepository {
             if let decoded = try? decoder.decode([ChatExchange].self, from: data) {
                 exchanges = decoded
             } else {
-                var aside = url.appendingPathExtension("corrupt")
-                var suffix = 1
-                while FileManager.default.fileExists(atPath: aside.path) {
-                    aside = URL(fileURLWithPath: url.path + ".corrupt.\(suffix)")
-                    suffix += 1
-                }
-                diagLog("[CHAT] corrupt chat.json for \(sessionID) — moving aside to \(aside.lastPathComponent)")
-                try? FileManager.default.moveItem(at: url, to: aside)
+                DiagStore.record(.corruptFileAside(artifact: .chatJSON))
+                repoLog.error("corrupt chat.json for \(sessionID, privacy: .private) — moving aside")
+                FileAside.move(url)
             }
         }
 
@@ -476,7 +471,8 @@ actor SessionRepository {
         } catch {
             // Non-fatal: the import proceeds from the source URL; only
             // retry/playback lose the session copy.
-            diagLog("[IMPORT] audio copy into \(sessionID) failed: \(error.localizedDescription)")
+            DiagStore.record(.sessionImportFailed)
+            repoLog.error("audio copy into session failed: \(error.localizedDescription, privacy: .private)")
         }
     }
 
@@ -505,7 +501,7 @@ actor SessionRepository {
             }
             try fm.moveItem(at: tempURL, to: finalURL)
         } catch {
-            repoLog.error("Failed to write final transcript: \(error.localizedDescription, privacy: .public)")
+            repoLog.error("Failed to write final transcript: \(error.localizedDescription, privacy: .private)")
         }
 
         // Mirror to notesFolderPath
@@ -1056,7 +1052,7 @@ actor SessionRepository {
             try data.write(to: url, options: .atomic)
             try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         } catch {
-            repoLog.error("Failed to write session.json: \(error.localizedDescription, privacy: .public)")
+            repoLog.error("Failed to write session.json: \(error.localizedDescription, privacy: .private)")
         }
     }
 
@@ -1076,8 +1072,11 @@ actor SessionRepository {
             }
     }
 
+    /// `message` is caller-constructed and every caller interpolates an
+    /// `error.localizedDescription` into it — which embeds the file path, which
+    /// embeds the session id. `.private`, like every other write error (#82).
     private func reportWriteError(_ message: String) {
-        repoLog.error("\(message, privacy: .public)")
+        repoLog.error("\(message, privacy: .private)")
         guard !hasReportedWriteError else { return }
         hasReportedWriteError = true
         onWriteError?(message)
@@ -1223,7 +1222,7 @@ actor SessionRepository {
                 try? fm.removeItem(at: micLegacy)
                 try? fm.removeItem(at: sysLegacy)
                 try? fm.removeItem(at: item.appendingPathComponent("batch-meta.json"))
-                repoLog.info("Cleaned up orphaned batch audio in \(name, privacy: .public)")
+                repoLog.info("Cleaned up orphaned batch audio in \(name, privacy: .private)")
             }
         }
     }

@@ -57,7 +57,7 @@ enum KeychainHelper {
     /// (debug builds only) if any test path forgets.
     private static func assertNotRunningUnitTests() {
         assert(
-            NSClassFromString("XCTestCase") == nil,
+            !RuntimeEnvironment.isRunningUnitTests,
             "KeychainHelper used from a unit test — inject AppSecretStore.ephemeral instead"
         )
     }

@@ -4,10 +4,10 @@ import os
 
 @MainActor
 final class HotkeyManager {
-    private let log = Logger(subsystem: "com.lore.app", category: "HotkeyManager")
-    private let hkLog = Logger(subsystem: "com.lore.app", category: "hotkey")
-    /// Static logger for use inside the CGEvent tap C callback where instance properties are inaccessible.
-    private static let hkLogStatic = Logger(subsystem: "com.lore.app", category: "hotkey")
+    /// One logger, one category. Three of these existed (two sharing a category),
+    /// so `log stream --predicate 'category == "Hotkey"'` missed half the file.
+    /// Static so the CGEvent tap's C callback, where `self` is inaccessible, uses it too.
+    private static let hkLog = Logger(subsystem: "com.lore.app", category: "Hotkey")
     private weak var coordinator: DictationCoordinator?
     private weak var settings: AppSettings?
 
@@ -38,10 +38,13 @@ final class HotkeyManager {
     private var healthMonitorTask: Task<Void, Never>?
     /// Timestamp of last received modifier event (for liveness tracking)
     private var lastEventTime = Date()
-    /// Tracks previous permission state to log only on transitions
-    private var lastPermissionOK = true
+    /// Previous permission state, tracked per permission so each carries its own edge
+    private var lastAccessibilityOK = true
+    private var lastInputMonitoringOK = true
     /// Tracks previous SecureInput state to log only on transitions
     private var lastSecureInputActive = false
+    /// Tracks previous event-liveness state to record only on transitions
+    private var lastEventsStalled = false
 
     /// CGEvent tap for consuming Space/Esc when external apps are focused
     private var eventTap: CFMachPort?
@@ -96,7 +99,7 @@ final class HotkeyManager {
                 else if chars == "t" { action = .translate }
                 if let action {
                     Task { @MainActor in
-                        diagLog("[HOTKEY] \(action) key → apply upgrade")
+                        HotkeyManager.hkLog.debug("[HOTKEY] \(String(describing: action), privacy: .public) key → apply upgrade")
                         await self.coordinator?.applyUpgradeByKey(action)
                     }
                     return nil
@@ -107,7 +110,7 @@ final class HotkeyManager {
             if event.keyCode == 53, self.isUpgradeShowingFlag {
                 Task { @MainActor in
                     self.coordinator?.dismissUpgrades()
-                    diagLog("[HOTKEY] Esc → dismiss upgrades")
+                    HotkeyManager.hkLog.debug("[HOTKEY] Esc → dismiss upgrades")
                 }
                 return nil
             }
@@ -148,7 +151,7 @@ final class HotkeyManager {
             }
         }
 
-        log.info("Hotkey manager installed")
+        HotkeyManager.hkLog.info("Hotkey manager installed")
     }
 
     func uninstall() {
@@ -172,7 +175,7 @@ final class HotkeyManager {
         fnReleaseDebounce = nil
         coordinator = nil
         settings = nil
-        log.info("Hotkey manager uninstalled")
+        HotkeyManager.hkLog.info("Hotkey manager uninstalled")
     }
 
     /// Update the upgrade-showing flag for the CGEvent tap (called from polling loop).
@@ -200,21 +203,19 @@ final class HotkeyManager {
         let hotkeyPressed = hotkeyKey.matchesPress(event)
 
         let flags = event.modifierFlags.rawValue
-        hkLog.info("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(self.fnDown) locked=\(self.isLocked) hold=\(self.isHoldMode)")
-        diagLog("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(fnDown) locked=\(isLocked) hold=\(isHoldMode)")
+        HotkeyManager.hkLog.info("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(self.fnDown) locked=\(self.isLocked) hold=\(self.isHoldMode)")
 
         if hotkeyPressed && !fnDown {
             fnDown = true
             fnReleaseDebounce?.cancel() // Cancel any pending debounced release
 
             if coordinator == nil {
-                hkLog.error("[HK] coordinator is nil in handleFlagsChanged — events being dropped")
-                diagLog("[HK] coordinator is nil in handleFlagsChanged")
+                HotkeyManager.hkLog.error("[HK] coordinator is nil in handleFlagsChanged — events being dropped")
             }
 
             if isLocked {
                 // Don't stop yet — V/T chord may follow. Stop happens on Fn release.
-                diagLog("[HOTKEY] hotkey pressed while locked → waiting for chord or release")
+                HotkeyManager.hkLog.debug("[HOTKEY] hotkey pressed while locked → waiting for chord or release")
                 return
             }
 
@@ -229,7 +230,7 @@ final class HotkeyManager {
                 self.isHoldMode = true
                 self.isRecordingFlag = true
                 self.isPreBufferingFlag = false
-                diagLog("[HOTKEY] hold confirmed (150ms) → recording")
+                HotkeyManager.hkLog.debug("[HOTKEY] hold confirmed (150ms) → recording")
                 self.coordinator?.confirmRecording()
             }
         } else if !hotkeyPressed && fnDown {
@@ -244,7 +245,7 @@ final class HotkeyManager {
                     // is showing). The `.sticky` hide path leaves autoHideTask nil, so without
                     // this an error reached through this branch would never clear.
                     fnHeldAtLock = false
-                    diagLog("[HOTKEY] hotkey released after lock → continues (initial release)")
+                    HotkeyManager.hkLog.debug("[HOTKEY] hotkey released after lock → continues (initial release)")
                     coordinator?.dismissMicErrorAfterRelease()
                     return
                 }
@@ -256,7 +257,7 @@ final class HotkeyManager {
                     self.isLocked = false
                     self.isLockedFlag = false
                     self.isRecordingFlag = false
-                    diagLog("[HOTKEY] hotkey released while locked → stop + paste")
+                    HotkeyManager.hkLog.debug("[HOTKEY] hotkey released while locked → stop + paste")
                     // Genuine release (past the 30ms flag-flicker debounce): if a sticky
                     // mic error is showing, begin its grace hide; otherwise stop normally.
                     self.coordinator?.dismissMicErrorAfterRelease()
@@ -273,7 +274,7 @@ final class HotkeyManager {
                     guard !Task.isCancelled, let self, !self.fnDown else { return }
                     self.isHoldMode = false
                     self.isRecordingFlag = false
-                    diagLog("[HOTKEY] hold mode release → stop + paste")
+                    HotkeyManager.hkLog.debug("[HOTKEY] hold mode release → stop + paste")
                     // Genuine release (past the 30ms flag-flicker debounce): if a sticky
                     // mic error is showing, begin its grace hide; otherwise stop normally.
                     self.coordinator?.dismissMicErrorAfterRelease()
@@ -294,8 +295,7 @@ final class HotkeyManager {
     private func handleKeyDown(_ event: NSEvent) {
         lastEventTime = Date()
         guard let coordinator else {
-            hkLog.error("[HK] coordinator is nil in handleKeyDown — events being dropped")
-            diagLog("[HK] coordinator is nil in handleKeyDown")
+            HotkeyManager.hkLog.error("[HK] coordinator is nil in handleKeyDown — events being dropped")
             return
         }
 
@@ -305,12 +305,12 @@ final class HotkeyManager {
             if event.keyCode == 9, modifierOn({ $0.modifierCleanupEnabled }) { // V
                 coordinator.setPendingMode(.cleanup)
                 if isLocked { fnHeldAtLock = true }
-                diagLog("[HOTKEY] Fn+V → pending cleanup")
+                HotkeyManager.hkLog.debug("[HOTKEY] Fn+V → pending cleanup")
                 return
             } else if event.keyCode == 17, modifierOn({ $0.modifierTranslateEnabled }) { // T
                 coordinator.setPendingMode(.translate)
                 if isLocked { fnHeldAtLock = true }
-                diagLog("[HOTKEY] Fn+T → pending translate")
+                HotkeyManager.hkLog.debug("[HOTKEY] Fn+T → pending translate")
                 return
             }
         }
@@ -318,7 +318,7 @@ final class HotkeyManager {
         // Esc while upgrade panel showing → dismiss
         if event.keyCode == 53, coordinator.isUpgradePanelVisible {
             coordinator.dismissUpgrades()
-            diagLog("[HOTKEY] Esc → dismiss upgrades")
+            HotkeyManager.hkLog.debug("[HOTKEY] Esc → dismiss upgrades")
             return
         }
 
@@ -336,7 +336,7 @@ final class HotkeyManager {
             isLocked = true
             isLockedFlag = true
             isRecordingFlag = true
-            diagLog("[HOTKEY] Space → confirm + locked")
+            HotkeyManager.hkLog.debug("[HOTKEY] Space → confirm + locked")
             return
         }
 
@@ -345,7 +345,7 @@ final class HotkeyManager {
             isLocked = false
             isLockedFlag = false
             isRecordingFlag = false
-            diagLog("[HOTKEY] Esc while locked → discard")
+            HotkeyManager.hkLog.debug("[HOTKEY] Esc while locked → discard")
             coordinator.discardRecording()
             return
         }
@@ -376,8 +376,8 @@ final class HotkeyManager {
             callback: { _, type, event, refcon -> Unmanaged<CGEvent>? in
                 // If the tap is disabled by the system, re-enable it
                 if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
-                    HotkeyManager.hkLogStatic.error("[HK] CGEvent tap was disabled, re-enabling")
-                    diagLog("[HK] CGEvent tap was disabled, re-enabling")
+                    DiagStore.record(.tapDisabledByOS)
+                    HotkeyManager.hkLog.error("[HK] CGEvent tap was disabled, re-enabling")
                     if let refcon {
                         let mgr = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
                         if let tap = mgr.eventTap {
@@ -401,14 +401,14 @@ final class HotkeyManager {
                         Task { @MainActor in
                             manager.coordinator?.setPendingMode(.cleanup)
                             if manager.isLocked { manager.fnHeldAtLock = true }
-                            diagLog("[HOTKEY] Fn+V (CGEvent) → pending cleanup")
+                            HotkeyManager.hkLog.debug("[HOTKEY] Fn+V (CGEvent) → pending cleanup")
                         }
                         return nil
                     } else if keyCode == 17, manager.modifierOn({ $0.modifierTranslateEnabled }) { // T
                         Task { @MainActor in
                             manager.coordinator?.setPendingMode(.translate)
                             if manager.isLocked { manager.fnHeldAtLock = true }
-                            diagLog("[HOTKEY] Fn+T (CGEvent) → pending translate")
+                            HotkeyManager.hkLog.debug("[HOTKEY] Fn+T (CGEvent) → pending translate")
                         }
                         return nil
                     }
@@ -425,7 +425,7 @@ final class HotkeyManager {
                         else if chars == "t" { action = .translate }
                         if let action {
                             Task { @MainActor in
-                                diagLog("[HOTKEY] \(action) key (CGEvent tap) → apply upgrade")
+                                HotkeyManager.hkLog.debug("[HOTKEY] \(String(describing: action), privacy: .public) key (CGEvent tap) → apply upgrade")
                                 await manager.coordinator?.applyUpgradeByKey(action)
                             }
                             return nil
@@ -437,7 +437,7 @@ final class HotkeyManager {
                 if keyCode == 53 && manager.isUpgradeShowingFlag {
                     Task { @MainActor in
                         manager.coordinator?.dismissUpgrades()
-                        diagLog("[HOTKEY] Esc (CGEvent tap) → dismiss upgrades")
+                        HotkeyManager.hkLog.debug("[HOTKEY] Esc (CGEvent tap) → dismiss upgrades")
                     }
                     return nil
                 }
@@ -466,7 +466,7 @@ final class HotkeyManager {
                             manager.fnTimer?.cancel()
                             manager.fnTimer = nil
                             manager.isHoldMode = false
-                            diagLog("[HOTKEY] Space (CGEvent tap) → confirm + locked")
+                            HotkeyManager.hkLog.debug("[HOTKEY] Space (CGEvent tap) → confirm + locked")
                         }
                         return nil
                     }
@@ -479,7 +479,7 @@ final class HotkeyManager {
                     Task { @MainActor in
                         manager.isLocked = false
                         manager.coordinator?.discardRecording()
-                        diagLog("[HOTKEY] Esc (CGEvent tap) → discard")
+                        HotkeyManager.hkLog.debug("[HOTKEY] Esc (CGEvent tap) → discard")
                     }
                     return nil
                 }
@@ -493,10 +493,12 @@ final class HotkeyManager {
             runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
             CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
             CGEvent.tapEnable(tap: eventTap, enable: true)
-            hkLog.info("[HK] CGEvent tap installed")
+            DiagStore.record(.tapCreate(outcome: .ok, osStatus: nil))
+            HotkeyManager.hkLog.info("[HK] CGEvent tap installed")
         } else {
-            hkLog.error("[HK] Failed to create CGEvent tap")
-            diagLog("[HK] Failed to create CGEvent tap")
+            // CGEvent.tapCreate reports no OSStatus — the nil is the honest answer.
+            DiagStore.record(.tapCreate(outcome: .failed, osStatus: nil))
+            HotkeyManager.hkLog.error("[HK] Failed to create CGEvent tap")
         }
     }
 
@@ -514,13 +516,12 @@ final class HotkeyManager {
 
     /// Tear down and recreate the CGEvent tap from scratch.
     private func reinstallEventTap() {
-        hkLog.error("[HK] Reinstalling CGEvent tap")
-        diagLog("[HK] Reinstalling CGEvent tap")
+        HotkeyManager.hkLog.error("[HK] Reinstalling CGEvent tap")
 
         // If a recording was in progress, the tap death means we lost Fn tracking.
         // Stop the recording so it doesn't get orphaned.
         if fnDown || isHoldMode || isLocked {
-            diagLog("[HK] tap died mid-recording, stopping")
+            DiagStore.record(.tapDiedDuringRecording)
             fnDown = false
             isHoldMode = false
             isLocked = false
@@ -536,6 +537,9 @@ final class HotkeyManager {
 
         teardownEventTap()
         installEventTap()
+        // installEventTap() already recorded the tapCreate attempt; this records
+        // whether the *reinstall* as a whole left us with a live tap.
+        DiagStore.record(.tapReinstall(outcome: .init(success: eventTap != nil)))
     }
 
     // MARK: - Health Monitor
@@ -544,67 +548,94 @@ final class HotkeyManager {
         // 1. Tap alive check
         if let tap = eventTap {
             if !CGEvent.tapIsEnabled(tap: tap) {
-                hkLog.error("[HK] Health: event tap found disabled, attempting re-enable")
-                diagLog("[HK] Health: event tap found disabled, attempting re-enable")
+                DiagStore.record(.tapDisabledByOS)
+                HotkeyManager.hkLog.error("[HK] Health: event tap found disabled, attempting re-enable")
                 CGEvent.tapEnable(tap: tap, enable: true)
                 // Verify re-enable stuck
                 if !CGEvent.tapIsEnabled(tap: tap) {
-                    hkLog.error("[HK] Health: re-enable failed, reinstalling tap")
-                    diagLog("[HK] Health: re-enable failed, reinstalling tap")
+                    HotkeyManager.hkLog.error("[HK] Health: re-enable failed, reinstalling tap")
                     reinstallEventTap()
                 }
             }
         } else {
-            hkLog.error("[HK] Health: event tap is nil, reinstalling")
-            diagLog("[HK] Health: event tap is nil, reinstalling")
+            HotkeyManager.hkLog.error("[HK] Health: event tap is nil, reinstalling")
             reinstallEventTap()
         }
 
-        // 2. Permissions check (log only on transitions to avoid spam)
+        // 2. Permissions check. Each permission carries its own edge: a combined
+        //    `permOK` flag reported both as restored when only one had dropped, and
+        //    went deaf to the second one dropping while the first was already down.
         let axOK = AXIsProcessTrusted()
         let inputOK = CGPreflightListenEventAccess()
-        let permOK = axOK && inputOK
-        if !permOK && lastPermissionOK {
-            if !axOK {
-                hkLog.error("[HK] Health: Accessibility permission lost (AXIsProcessTrusted = false)")
-                diagLog("[HK] Health: Accessibility permission lost")
+        if axOK != lastAccessibilityOK {
+            DiagStore.record(.permissionTransition(permission: .accessibility, granted: axOK))
+            if axOK {
+                HotkeyManager.hkLog.info("[HK] Health: Accessibility permission restored")
+            } else {
+                HotkeyManager.hkLog.error("[HK] Health: Accessibility permission lost (AXIsProcessTrusted = false)")
             }
-            if !inputOK {
-                hkLog.error("[HK] Health: Input Monitoring permission lost (CGPreflightListenEventAccess = false)")
-                diagLog("[HK] Health: Input Monitoring permission lost")
-            }
-        } else if permOK && !lastPermissionOK {
-            hkLog.info("[HK] Health: permissions restored")
-            diagLog("[HK] Health: permissions restored")
+            lastAccessibilityOK = axOK
         }
-        lastPermissionOK = permOK
+        if inputOK != lastInputMonitoringOK {
+            DiagStore.record(.permissionTransition(permission: .inputMonitoring, granted: inputOK))
+            if inputOK {
+                HotkeyManager.hkLog.info("[HK] Health: Input Monitoring permission restored")
+            } else {
+                HotkeyManager.hkLog.error("[HK] Health: Input Monitoring permission lost (CGPreflightListenEventAccess = false)")
+            }
+            lastInputMonitoringOK = inputOK
+        }
 
-        // 3. SecureInput check (log only on transitions to avoid spam)
+        // 3. SecureInput check (record only on transitions to avoid spam)
         let secureInput = checkSecureInput()
         if secureInput.active, let pid = secureInput.pid {
             if !lastSecureInputActive {
+                DiagStore.record(.secureInputChanged(active: true, holderPID: pid))
+                // The holder's *name* identifies software the user runs — os.Logger only.
                 let processName: String
                 if let app = NSRunningApplication(processIdentifier: pid) {
                     processName = app.localizedName ?? app.bundleIdentifier ?? "PID \(pid)"
                 } else {
                     processName = "PID \(pid)"
                 }
-                hkLog.error("[HK] Health: SecureInput active — held by \(processName) (pid \(pid))")
-                diagLog("[HK] Health: SecureInput active — held by \(processName) (pid \(pid))")
+                HotkeyManager.hkLog.error("[HK] Health: SecureInput active — held by \(processName, privacy: .private) (pid \(pid, privacy: .public))")
             }
             lastSecureInputActive = true
         } else if lastSecureInputActive {
-            hkLog.info("[HK] Health: SecureInput cleared")
-            diagLog("[HK] Health: SecureInput cleared")
+            DiagStore.record(.secureInputChanged(active: false, holderPID: nil))
+            HotkeyManager.hkLog.info("[HK] Health: SecureInput cleared")
             lastSecureInputActive = false
         }
 
-        // 4. Event liveness — warning only
+        // 4. Event liveness. "We saw no key events for 30s" is not a fault — the user
+        //    was reading. The fault is "the OS delivered key events to everyone else
+        //    and not to us", so the edge is gated on machine input, not on our silence.
+        //    The health loop ticks every 5s; only the transitions are recorded.
         let elapsed = Date().timeIntervalSince(lastEventTime)
-        if elapsed > 30 {
-            hkLog.warning("[HK] Health: no modifier events for \(Int(elapsed))s")
-            diagLog("[HK] Health: no events received for \(Int(elapsed))s")
+        let tapLooksDead = elapsed > 30 && Self.secondsSinceSystemKeyInput() < 30
+        if tapLooksDead {
+            if !lastEventsStalled {
+                lastEventsStalled = true
+                DiagStore.record(.tapEventsStalled(seconds: Int(elapsed)))
+            }
+            HotkeyManager.hkLog.error("[HK] Health: OS saw key input but our tap did not, for \(Int(elapsed))s")
+        } else if lastEventsStalled {
+            lastEventsStalled = false
+            DiagStore.record(.tapEventsResumed)
         }
+    }
+
+    /// Seconds since the *system* last saw a key-down or modifier change, from any
+    /// process. Compared against our own last event, this separates "the user is idle"
+    /// from "our tap is dead" — the two states the old 30-second warning conflated.
+    private static func secondsSinceSystemKeyInput() -> CFTimeInterval {
+        let sinceKeyDown = CGEventSource.secondsSinceLastEventType(
+            .combinedSessionState, eventType: .keyDown
+        )
+        let sinceFlagsChanged = CGEventSource.secondsSinceLastEventType(
+            .combinedSessionState, eventType: .flagsChanged
+        )
+        return min(sinceKeyDown, sinceFlagsChanged)
     }
 
     /// Check if SecureInput is active via IOKit registry.

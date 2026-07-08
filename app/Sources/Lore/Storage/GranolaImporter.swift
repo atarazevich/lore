@@ -174,7 +174,7 @@ actor GranolaImporter {
                 try await importSingleNote(fullNote, sessionRepository: sessionRepository)
                 imported += 1
             } catch {
-                log.error("Failed to import note \(noteSummary.id): \(error.localizedDescription, privacy: .public)")
+                log.error("Failed to import note \(noteSummary.id, privacy: .private): \(error.localizedDescription, privacy: .private)")
                 // Continue with remaining notes
             }
 

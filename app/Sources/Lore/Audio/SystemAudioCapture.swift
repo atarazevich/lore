@@ -357,5 +357,21 @@ final class SystemAudioCapture: @unchecked Sendable {
                 return "Unable to start system audio capture (OSStatus \(status))."
             }
         }
+
+        /// The HAL status behind this failure, for `DiagEvent.systemAudioCapture` (#82).
+        /// `nil` where the failure carries no OSStatus of its own.
+        var osStatus: OSStatus? {
+            switch self {
+            case .noOutputDevice, .invalidTapFormat:
+                return nil
+            case .outputDeviceUIDUnavailable(let status),
+                 .tapCreationFailed(let status),
+                 .aggregateDeviceCreationFailed(let status),
+                 .tapFormatUnavailable(let status),
+                 .ioProcCreationFailed(let status),
+                 .startFailed(let status):
+                return status
+            }
+        }
     }
 }

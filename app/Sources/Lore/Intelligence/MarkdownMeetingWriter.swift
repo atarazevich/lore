@@ -70,10 +70,13 @@ enum MarkdownMeetingWriter {
         do {
             try content.write(to: fileURL, atomically: true, encoding: .utf8)
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
-            writerLogger.info("Wrote meeting markdown: \(fileURL.lastPathComponent, privacy: .public)")
+            // The file name is built from the meeting title — user content, not a
+            // constant. `.public` here published it to the unified log (#82).
+            writerLogger.info("Wrote meeting markdown: \(fileURL.lastPathComponent, privacy: .private)")
             return fileURL
         } catch {
-            writerLogger.error("Failed to write markdown: \(error.localizedDescription, privacy: .public)")
+            // A write error embeds the path, and the path embeds the title.
+            writerLogger.error("Failed to write markdown: \(error.localizedDescription, privacy: .private)")
             return nil
         }
     }

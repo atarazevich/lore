@@ -99,7 +99,7 @@ final class DictationCoordinator {
         guard !isPreBuffering else { return }
         guard state == .idle || state == .done else { return }
         guard let settings else {
-            diagLog("[DICTATION] WARNING: settings not wired — dictation disabled")
+            log.error("settings not wired — dictation disabled")
             return
         }
 
@@ -133,7 +133,7 @@ final class DictationCoordinator {
                 sound.volume = 0.4
                 sound.play()
             }
-            diagLog("[DICTATION] pre-buffering started")
+            log.debug("pre-buffering started")
         case .denied, .restricted:
             failPreBufferWithMicUnavailableMessage()
         case .notDetermined:
@@ -224,7 +224,7 @@ final class DictationCoordinator {
         guard isPreBuffering else { return }
         isPreBuffering = false
         state = .recording
-        diagLog("[DICTATION] recording confirmed (pre-buffer kept)")
+        log.debug("recording confirmed (pre-buffer kept)")
     }
 
     /// Cancel pre-buffer (user tapped instead of holding).
@@ -233,7 +233,7 @@ final class DictationCoordinator {
         isPreBuffering = false
         stopMicCapture()
         accumulatedSamples.removeAll()
-        diagLog("[DICTATION] pre-buffer discarded (tap)")
+        log.debug("pre-buffer discarded (tap)")
     }
 
     func stopRecording() async {
@@ -251,7 +251,10 @@ final class DictationCoordinator {
         accumulatedSamples.removeAll()
 
         let durationSeconds = Double(samples.count) / 16000.0
-        diagLog("[DICTATION] recording stopped, samples=\(samples.count), duration=\(String(format: "%.1f", durationSeconds))s")
+        DiagStore.record(.dictationRecorded(
+            samples: samples.count,
+            durationMs: Int(durationSeconds * 1000)
+        ))
 
         // Zero frames captured = mic failure (e.g. the macOS 27 HAL stall), not a
         // brief utterance. Surface it instead of silently going idle, and don't save
@@ -262,7 +265,9 @@ final class DictationCoordinator {
             // unified message. Fn is already released here (stop came from the release
             // path), so use the grace hide directly.
             let message = if let lastError { lastError } else { await micUnavailableMessage() }
-            diagLog("[DICTATION] zero frames captured — mic failure: \(message)")
+            DiagStore.record(.dictationZeroFrames)
+            // The message can name the resolved input device.
+            log.error("zero frames captured — mic failure: \(message, privacy: .private)")
             surfaceMicError(message, hide: .grace)
             return
         }
@@ -287,7 +292,7 @@ final class DictationCoordinator {
         var entry = DictationHistoryEntry(durationSeconds: durationSeconds, audioFilename: audioFilename)
         history.add(entry)
         currentEntryID = entry.id
-        diagLog("[DICTATION] audio saved: \(audioFilename ?? "FAILED")")
+        log.debug("audio saved: \(audioFilename ?? "FAILED", privacy: .private)")
 
         // STEP 2: Transcribe
         await transcribeEntry(&entry, samples: samples)
@@ -326,7 +331,9 @@ final class DictationCoordinator {
         if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
             TextInserter.paste(text)
-            diagLog("[DICTATION] pasted: \(text.prefix(80))")
+            // The pasted text is exactly what the user dictated and is already
+            // visible in the app's own history UI — only its length is recorded.
+            DiagStore.record(.dictationPasted(characters: text.count, cleaned: didCleanup))
         }
 
         history.update(entry)
@@ -389,7 +396,7 @@ final class DictationCoordinator {
         guard let entryID = currentEntryID,
               var entry = history.entries.first(where: { $0.id == entryID }),
               let rawText = entry.rawText else {
-            diagLog("[DICTATION] upgrade failed: no entry or raw text")
+            log.error("upgrade failed: no entry or raw text")
             scheduleAutoHide()
             return
         }
@@ -397,7 +404,7 @@ final class DictationCoordinator {
         state = .processing
         // A retry must not carry a stale failure row into a success (#50).
         lastError = nil
-        diagLog("[DICTATION] applying upgrade: \(action)")
+        log.debug("applying upgrade: \(String(describing: action), privacy: .public)")
 
         // Meta is written only on success: a failed upgrade keeps the
         // previous cleaned text and whatever meta truthfully described it
@@ -408,7 +415,7 @@ final class DictationCoordinator {
         if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
             TextInserter.undoAndPaste(text)
-            diagLog("[DICTATION] upgrade pasted (undo+paste): \(text.prefix(80))")
+            log.debug("upgrade pasted (undo+paste): \(text, privacy: .private)")
         }
 
         history.update(entry)
@@ -454,7 +461,7 @@ final class DictationCoordinator {
             return
         }
         guard state == .recording || state == .loadingModel || state == .processing else { return }
-        diagLog("[DICTATION] discarded from state: \(state)")
+        DiagStore.record(.dictationDiscarded(state: state))
         stopMicCapture()
         accumulatedSamples.removeAll()
         pendingCleanupMode = nil
@@ -470,7 +477,7 @@ final class DictationCoordinator {
 
     private func startMicCapture() {
         guard audioBus != nil else {
-            diagLog("[DICTATION] WARNING: audioBus not wired")
+            log.error("audioBus not wired")
             return
         }
 
@@ -505,7 +512,7 @@ final class DictationCoordinator {
         // this check can't observe the new subscription's outcome — the new capture's
         // immediate stall is the watchdog's job below.
         if let micError = bus.captureError {
-            diagLog("[DICTATION] mic capture error: \(micError)")
+            log.error("mic capture error: \(micError, privacy: .private)")
             lastError = micError
         }
 
@@ -520,7 +527,7 @@ final class DictationCoordinator {
             guard let self, let bus else { return }
             guard self.isPreBuffering || self.state == .recording else { return }
             if self.accumulatedSamples.isEmpty && bus.captureError == nil {
-                diagLog("[DICTATION] no mic audio after 5s")
+                log.error("no mic audio after 5s")
                 self.lastError = await self.micUnavailableMessage()
             }
         }
@@ -584,7 +591,7 @@ final class DictationCoordinator {
         } else {
             pendingCleanupMode = action
         }
-        diagLog("[DICTATION] pending mode: \(pendingCleanupMode.map { "\($0)" } ?? "none")")
+        log.debug("pending mode: \(self.pendingCleanupMode.map { "\($0)" } ?? "none", privacy: .public)")
     }
 
     func pasteLastTranscript() {
@@ -601,7 +608,7 @@ final class DictationCoordinator {
         guard var entry = history.entries.first(where: { $0.id == entryID }),
               let filename = entry.audioFilename,
               let samples = history.loadAudio(filename: filename) else {
-            diagLog("[DICTATION] retry failed: no audio for entry")
+            log.error("retry failed: no audio for entry")
             return
         }
 
@@ -616,7 +623,7 @@ final class DictationCoordinator {
         await transcribeEntry(&entry, samples: samples)
 
         if entry.status == .transcribed, let text = entry.rawText {
-            await cleanupEntry(&entry, rawText: text)
+            await cleanupEntry(&entry, rawText: text, endpoint: .cleanup)
         }
 
         history.update(entry)
@@ -645,7 +652,7 @@ final class DictationCoordinator {
         if let ownBackend { return ownBackend }
         if let ownBackendTask { return try await ownBackendTask.value }
 
-        diagLog("[DICTATION] creating private backend")
+        log.debug("creating private backend")
         let cache = backendCache
         let task = Task { () throws -> any TranscriptionBackend in
             // Download the model once through the shared cache (its dedup token
@@ -679,7 +686,7 @@ final class DictationCoordinator {
                 return
             }
         } else {
-            diagLog("[DICTATION] backendCache nil — dictation setup may not have run")
+            log.error("backendCache nil — dictation setup may not have run")
         }
 
         // Use a private backend instance to avoid sharing mutable decoder state
@@ -711,29 +718,42 @@ final class DictationCoordinator {
             }
         }
 
-        diagLog("[DICTATION] transcribing \(chunks.count) chunk(s), total \(samples.count) samples")
+        let transcribeStart = Date()
         var segments: [String] = []
+        var failedChunks = 0
 
         for (i, chunk) in chunks.enumerated() {
             do {
                 let segment = try await backend.transcribe(chunk, previousContext: nil)
                 if !segment.isEmpty {
                     segments.append(segment)
-                    diagLog("[DICTATION] chunk \(i+1)/\(chunks.count): \(segment.prefix(60))")
                 }
             } catch {
-                diagLog("[DICTATION] chunk \(i+1)/\(chunks.count) failed: \(error), skipping")
+                failedChunks += 1
+                log.error("""
+                    chunk \(i + 1, privacy: .public)/\(chunks.count, privacy: .public) failed, skipping: \
+                    \(error.localizedDescription, privacy: .private)
+                    """)
             }
         }
 
         let text = segments.joined(separator: " ")
+        // The transcript itself is the user's speech — it reaches the history UI and
+        // os.Logger's private tier, never a diagnostic event. Only its length does.
+        DiagStore.record(.transcribed(
+            chunks: chunks.count,
+            failedChunks: failedChunks,
+            samples: samples.count,
+            characters: text.count,
+            ms: Int(Date().timeIntervalSince(transcribeStart) * 1000)
+        ))
         if text.isEmpty {
             entry.status = .failed
             entry.errorMessage = "Transcription produced empty result"
         } else {
             entry.status = .transcribed
             entry.rawText = text
-            diagLog("[DICTATION] raw transcription: \(text)")
+            log.debug("raw transcription: \(text, privacy: .private)")
         }
     }
 
@@ -754,22 +774,27 @@ final class DictationCoordinator {
         let modeName: String
         let translatedTo: String?
         let failureMessage: String
+        let endpoint: DiagEvent.Endpoint
         switch action {
         case .cleanup:
             prompt = basePrompt
             modeName = "Cleanup"
             translatedTo = nil
             failureMessage = kept ? Self.cleanupFailedKeptText : Self.cleanupFailedPastedRaw
+            endpoint = .cleanup
         case .translate:
             prompt = basePrompt + CleanupMode.translateSuffix()
             modeName = "Translate"
             translatedTo = TranslationLanguage.english.key
             failureMessage = kept ? Self.translateFailedKeptText : Self.translateFailedPastedRaw
+            endpoint = .translate
         }
 
-        guard await cleanupEntry(
-            &entry, rawText: rawText, prompt: prompt, failureMessage: failureMessage
-        ) else { return false }
+        let succeeded = await cleanupEntry(
+            &entry, rawText: rawText, prompt: prompt, failureMessage: failureMessage, endpoint: endpoint
+        )
+        DiagStore.record(.dictationUpgrade(endpoint: endpoint, outcome: .init(success: succeeded)))
+        guard succeeded else { return false }
 
         entry.cleanupModeName = modeName
         entry.cleanupMethodName = nil
@@ -791,7 +816,8 @@ final class DictationCoordinator {
         _ entry: inout DictationHistoryEntry,
         rawText: String,
         prompt: String? = nil,
-        failureMessage: String? = nil
+        failureMessage: String? = nil,
+        endpoint: DiagEvent.Endpoint
     ) async -> Bool {
         guard let settings, !settings.openaiApiKey.isEmpty else { return false }
 
@@ -804,23 +830,44 @@ final class DictationCoordinator {
             return false
         }
 
-        diagLog("[DICTATION] calling cleanup API...")
         let apiKey = settings.openaiApiKey
+        let startedAt = Date()
 
         do {
             let cleaned = try await cleanupClient.cleanup(rawText: rawText, prompt: effectivePrompt, apiKey: apiKey)
             entry.cleanedText = cleaned
             entry.status = .cleaned
             entry.activeVersion = .cleaned
-            diagLog("[DICTATION] cleaned: \(cleaned.prefix(80))")
+            // `CleanupProviding` reports success as a String, not a status code —
+            // nil is the honest answer, and `.ok` already carries the verdict.
+            DiagStore.record(.apiCall(
+                endpoint: endpoint,
+                outcome: .ok,
+                httpStatus: nil,
+                ms: Int(Date().timeIntervalSince(startedAt) * 1000)
+            ))
             return true
         } catch {
-            diagLog("[DICTATION] cleanup failed: \(error), using raw text")
+            // The cleaned/raw texts are the user's words — they live in the history
+            // UI, never in a diagnostic artifact (#82).
+            DiagStore.record(.apiCall(
+                endpoint: endpoint,
+                outcome: .failed,
+                httpStatus: Self.httpStatus(from: error),
+                ms: Int(Date().timeIntervalSince(startedAt) * 1000)
+            ))
+            log.error("cleanup failed, using raw text: \(error.localizedDescription, privacy: .private)")
             if let failureMessage {
                 lastError = failureMessage
             }
             return false
         }
+    }
+
+    /// HTTP status behind a cleanup failure, when the error carries one.
+    private static func httpStatus(from error: any Error) -> Int? {
+        if case CleanupClient.CleanupError.apiError(let code) = error { return code }
+        return nil
     }
 
     // MARK: - Retroactive Row Transforms (history popovers, DIC-35/36)
@@ -864,12 +911,16 @@ final class DictationCoordinator {
     ) async -> Bool {
         guard var entry = history.entries.first(where: { $0.id == entryID }),
               let text = entry.rawText else {
-            diagLog("[DICTATION] retroactive cleanup: no raw text for entry")
+            log.error("retroactive cleanup: no raw text for entry")
             return false
         }
         guard !prompt.isEmpty else { return false }
 
-        guard await cleanupEntry(&entry, rawText: text, prompt: prompt) else { return false }
+        // A row transform with a target language is a translation, not a cleanup —
+        // the default argument this used to take silently mislabelled every
+        // retroactive translate as `apiCall(endpoint: .cleanup)`.
+        let endpoint: DiagEvent.Endpoint = languageKey == nil ? .cleanup : .translate
+        guard await cleanupEntry(&entry, rawText: text, prompt: prompt, endpoint: endpoint) else { return false }
         entry.cleanupMethodName = methodKey
         entry.translatedToLanguage = languageKey
         history.update(entry)
