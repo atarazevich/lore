@@ -1,6 +1,10 @@
 import AppKit
 import CoreAudio
 import Foundation
+import os
+
+// Same category as MeetingDetectionController: one subsystem, one Console filter.
+private let detectorLog = Logger(subsystem: "com.lore.app", category: "MeetingDetection")
 
 // MARK: - Audio Signal Source Protocol
 
@@ -84,7 +88,7 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
             let described = self.deviceIDs
                 .map { "\(Self.deviceName($0)) (\($0))" }
                 .joined(separator: ", ")
-            diagLog("[DETECT] signal source installed, monitoring \(self.deviceIDs.count) input device(s): \(described)")
+            detectorLog.debug("signal source installed, monitoring \(self.deviceIDs.count, privacy: .public) input device(s): \(described, privacy: .private)")
         }
     }
 
@@ -163,7 +167,12 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
 
             let addedDesc = added.map { "\(Self.deviceName($0)) (\($0))" }.joined(separator: ", ")
             let removedDesc = removed.map(String.init).joined(separator: ", ")
-            diagLog("[DETECT] device list changed: added [\(addedDesc)], removed IDs [\(removedDesc)], monitoring \(latest.count) input device(s)")
+            DiagStore.record(.detectionDeviceListChanged(
+                added: added.count,
+                removed: removed.count,
+                monitored: latest.count
+            ))
+            detectorLog.debug("device list changed: added [\(addedDesc, privacy: .private)], removed IDs [\(removedDesc, privacy: .public)]")
 
             // A newly appeared device may already be running (AirPods re-created
             // in HFP mode with the mic already hot) — re-evaluate immediately.
@@ -178,7 +187,8 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
         if status != kAudioHardwareNoError {
             // A silently failed add on a newly appeared device reproduces the
             // exact deafness #75 fixes — make it visible.
-            diagLog("[DETECT] add listener FAILED for device \(deviceID), OSStatus \(status)")
+            DiagStore.record(.detectionListenerFailed(osStatus: status))
+            detectorLog.error("add listener failed for device \(deviceID, privacy: .public), OSStatus \(status, privacy: .public)")
         }
     }
 
@@ -235,7 +245,7 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
             let anyRunning = self.deviceIDs.contains { Self.isDeviceRunning($0) }
             if anyRunning != self.lastEmittedValue {
                 self.lastEmittedValue = anyRunning
-                diagLog("[DETECT] mic signal -> \(anyRunning ? "active" : "inactive")")
+                DiagStore.record(.detectionSignal(active: anyRunning))
                 self.continuation?.yield(anyRunning)
             }
         }
@@ -406,7 +416,7 @@ actor MeetingDetector {
         if micIsActive {
             if micActiveAt == nil {
                 micActiveAt = Date()
-                diagLog("[DETECT] mic active, debouncing \(debounceSeconds)s")
+                detectorLog.debug("mic active, debouncing \(self.debounceSeconds, privacy: .public)s")
             }
 
             // Wait for debounce period
@@ -419,7 +429,8 @@ actor MeetingDetector {
 
             // Scan for meeting app
             let app = await scanForMeetingApp()
-            diagLog("[DETECT] debounce confirmed, app scan: \(app.map { "\($0.name) (\($0.bundleID))" } ?? "no meeting app found")")
+            DiagStore.record(.detectionAppScan(found: app != nil))
+            detectorLog.debug("debounce confirmed, app scan: \(app.map { "\($0.name) (\($0.bundleID))" } ?? "no meeting app found", privacy: .private)")
 
             if !isActive {
                 isActive = true
@@ -431,7 +442,7 @@ actor MeetingDetector {
             if isActive {
                 isActive = false
                 detectedApp = nil
-                diagLog("[DETECT] mic inactive, detection ended")
+                detectorLog.debug("mic inactive, detection ended")
                 eventContinuation.yield(.ended)
             }
         }

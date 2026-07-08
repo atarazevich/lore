@@ -1,5 +1,8 @@
 import Foundation
+import os
 import UserNotifications
+
+private let notifyLog = Logger(subsystem: "com.lore.app", category: "NotificationService")
 
 /// Manages macOS notification delivery for meeting detection prompts.
 @MainActor
@@ -79,9 +82,12 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
         do {
             let granted = try await UNUserNotificationCenter.current()
                 .requestAuthorization(options: [.alert, .sound])
+            DiagStore.record(.notificationAuthorization(outcome: .init(success: granted)))
+            DiagStore.record(.permissionTransition(permission: .notifications, granted: granted))
             return granted
         } catch {
-            diagLog("[DETECT] notification authorization request failed: \(error.localizedDescription)")
+            DiagStore.record(.notificationAuthorization(outcome: .failed))
+            notifyLog.error("notification authorization request failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
     }
@@ -105,7 +111,10 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
     /// Returns false if permission was denied.
     func postMeetingDetected(appName: String?) async -> Bool {
         guard await ensurePermission() else {
-            diagLog("[DETECT] notification NOT posted, authorization missing (auth=\(await authorizationStatusDescription()))")
+            DiagStore.record(.notificationPosted(outcome: .failed))
+            // Logger interpolation is an autoclosure — the await must be hoisted out.
+            let authStatus = await authorizationStatusDescription()
+            notifyLog.error("notification NOT posted, authorization missing (auth=\(authStatus, privacy: .public))")
             return false
         }
 
@@ -137,9 +146,10 @@ final class NotificationService: NSObject, UNUserNotificationCenterDelegate {
 
         do {
             try await UNUserNotificationCenter.current().add(request)
-            diagLog("[DETECT] notification posted")
+            DiagStore.record(.notificationPosted(outcome: .ok))
         } catch {
-            diagLog("[DETECT] notification post FAILED: \(error.localizedDescription)")
+            DiagStore.record(.notificationPosted(outcome: .failed))
+            notifyLog.error("notification post failed: \(error.localizedDescription, privacy: .public)")
             return false
         }
 

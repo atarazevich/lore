@@ -13,7 +13,9 @@ enum MicrophonePermission {
 
     /// Show the system prompt (only meaningful when status is `.notDetermined`).
     static func request() async -> Bool {
-        await AVCaptureDevice.requestAccess(for: .audio)
+        let granted = await AVCaptureDevice.requestAccess(for: .audio)
+        DiagStore.record(.permissionTransition(permission: .microphone, granted: granted))
+        return granted
     }
 
     /// Shown after the user declines the just-presented system prompt.

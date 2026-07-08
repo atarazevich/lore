@@ -277,4 +277,67 @@ final class TranscriptStoreTests: XCTestCase {
         XCTAssertEqual(store.volatileYouText, "partial you input")
         XCTAssertEqual(store.volatileThemText, "partial them input")
     }
+
+    // MARK: - Diagnostics: echo summary at the session boundary, not per utterance (#82)
+
+    private func echoSummaries(path: DiagEvent.EchoPath) -> [(count: Int, meanJaccard: Double)] {
+        DiagStore.shared.recent(DiagStore.capacity).compactMap {
+            if case .echoSuppressed(let p, let count, let mean) = $0.event, p == path {
+                return (count, mean)
+            }
+            return nil
+        }
+    }
+
+    /// Many suppressed utterances, one event — and only when the session ends.
+    /// Per-utterance events would evict the launch/permission history in a long
+    /// echoey meeting, which is exactly the history a report needs.
+    func testLiveEchoSuppressionSummarisesOncePerSession() {
+        let store = makeStore()
+        let before = echoSummaries(path: .liveForward).count
+        let base = Date()
+
+        for i in 0..<10 {
+            let text = "this is an echoed sentence number \(i) with several words in it"
+            store.append(makeUtterance(text: text, speaker: .them, timestamp: base.addingTimeInterval(Double(i))))
+            store.append(makeUtterance(text: text, speaker: .you, timestamp: base.addingTimeInterval(Double(i) + 0.5)))
+        }
+
+        // Nothing recorded yet — the session has not ended.
+        XCTAssertEqual(echoSummaries(path: .liveForward).count, before, "no event before the session boundary")
+
+        store.clear()
+
+        let summaries = echoSummaries(path: .liveForward)
+        XCTAssertEqual(summaries.count - before, 1, "exactly one summary per session")
+        XCTAssertEqual(summaries.last?.count, 10, "the summary counts every suppressed utterance")
+    }
+
+    /// A session with no echoes records nothing at all.
+    func testSessionWithoutEchoesRecordsNoSummary() {
+        let store = makeStore()
+        let before = echoSummaries(path: .liveForward).count
+
+        store.append(makeUtterance(text: "one distinct sentence entirely", speaker: .them))
+        store.append(makeUtterance(text: "a totally unrelated remark here", speaker: .you))
+        store.clear()
+
+        XCTAssertEqual(echoSummaries(path: .liveForward).count, before)
+    }
+
+    /// The tally resets, so a second session does not inherit the first one's count.
+    func testEchoTallyResetsBetweenSessions() {
+        let store = makeStore()
+        let base = Date()
+        let text = "an echoed sentence with quite a few words present"
+
+        store.append(makeUtterance(text: text, speaker: .them, timestamp: base))
+        store.append(makeUtterance(text: text, speaker: .you, timestamp: base.addingTimeInterval(0.5)))
+        store.clear()
+        let firstCount = echoSummaries(path: .liveForward).last?.count
+
+        store.clear() // empty session — must not re-emit
+        XCTAssertEqual(echoSummaries(path: .liveForward).last?.count, firstCount, "no duplicate summary")
+    }
+
 }

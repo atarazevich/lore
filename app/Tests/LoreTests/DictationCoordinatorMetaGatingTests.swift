@@ -119,7 +119,8 @@ final class DictationCoordinatorMetaGatingTests: XCTestCase {
 
         let ok = await coordinator.cleanupEntry(
             &entry, rawText: "hello world", prompt: "clean it up",
-            failureMessage: DictationCoordinator.cleanupFailedPastedRaw
+            failureMessage: DictationCoordinator.cleanupFailedPastedRaw,
+            endpoint: .cleanup
         )
 
         XCTAssertFalse(ok)

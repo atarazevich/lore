@@ -21,12 +21,16 @@ actor ChatCompletionsClient {
     }
 
     /// Non-streaming completion against `openAIEndpoint`.
+    ///
+    /// `endpoint` names the *caller's* purpose for the diagnostic event (#82) —
+    /// the prompt and the completion never leave this function.
     func complete(
         apiKey: String,
         model: String,
         messages: [Message],
         maxTokens: Int = 512,
-        timeout: TimeInterval? = nil
+        timeout: TimeInterval? = nil,
+        endpoint: DiagEvent.Endpoint
     ) async throws -> String {
         let request = ChatRequest(
             model: model,
@@ -44,13 +48,35 @@ actor ChatCompletionsClient {
         urlRequest.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
         urlRequest.httpBody = try JSONEncoder().encode(request)
 
-        let (data, response) = try await URLSession.shared.data(for: urlRequest)
+        let startedAt = Date()
+        let data: Data
+        let response: URLResponse
+        do {
+            (data, response) = try await URLSession.shared.data(for: urlRequest)
+        } catch {
+            // Transport failure — no HTTP status exists.
+            DiagStore.record(.apiCall(
+                endpoint: endpoint,
+                outcome: .failed,
+                httpStatus: nil,
+                ms: Int(Date().timeIntervalSince(startedAt) * 1000)
+            ))
+            throw error
+        }
 
+        let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
         guard let httpResponse = response as? HTTPURLResponse,
               (200...299).contains(httpResponse.statusCode) else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            DiagStore.record(.apiCall(endpoint: endpoint, outcome: .failed, httpStatus: statusCode, ms: ms))
             throw ChatCompletionsError.httpError(statusCode)
         }
+        DiagStore.record(.apiCall(
+            endpoint: endpoint,
+            outcome: .ok,
+            httpStatus: httpResponse.statusCode,
+            ms: ms
+        ))
 
         let completionResponse = try JSONDecoder().decode(CompletionResponse.self, from: data)
         return completionResponse.choices.first?.message.content ?? ""

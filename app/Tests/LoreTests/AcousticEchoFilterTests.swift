@@ -72,4 +72,85 @@ final class AcousticEchoFilterTests: XCTestCase {
         XCTAssertFalse(AcousticEchoFilter.matches(normalizedYou: short, normalizedThem: long, timeDelta: 1.0))
         XCTAssertFalse(AcousticEchoFilter.matches(normalizedYou: long, normalizedThem: short, timeDelta: 1.0))
     }
+
+    // MARK: - Diagnostics: one summary per pass, never per utterance (#82)
+
+    /// Counts `echoSuppressed` events currently in the shared ring.
+    private func echoSummaryCount(_ store: DiagStore, path: DiagEvent.EchoPath) -> Int {
+        store.recent(DiagStore.capacity).filter {
+            if case .echoSuppressed(let p, _, _) = $0.event { return p == path }
+            return false
+        }.count
+    }
+
+    /// Ring flooding: a batch pass that suppresses many utterances must leave exactly
+    /// ONE event behind. Per-utterance events would evict the launch/permission history
+    /// the ring exists to keep.
+    func testBatchSuppressionEmitsOneSummaryRegardlessOfCount() {
+        let store = DiagStore.shared
+        let before = echoSummaryCount(store, path: .batch)
+
+        let base = Date()
+        var mic: [SessionRecord] = []
+        var sys: [SessionRecord] = []
+        for i in 0..<25 {
+            let text = "this is echoed utterance number \(i) with plenty of words"
+            sys.append(SessionRecord(speaker: .them, text: text, timestamp: base.addingTimeInterval(Double(i))))
+            mic.append(SessionRecord(speaker: .you, text: text, timestamp: base.addingTimeInterval(Double(i) + 0.5)))
+        }
+
+        AcousticEchoFilter.suppress(micRecords: &mic, against: sys)
+
+        XCTAssertTrue(mic.isEmpty, "all 25 mic records were echoes")
+        XCTAssertEqual(
+            echoSummaryCount(store, path: .batch) - before, 1,
+            "25 suppressed utterances must produce exactly one summary event"
+        )
+    }
+
+    /// A pass that suppresses nothing records nothing.
+    func testBatchSuppressionEmitsNoEventWhenNothingSuppressed() {
+        let store = DiagStore.shared
+        let before = echoSummaryCount(store, path: .batch)
+
+        var mic = [SessionRecord(speaker: .you, text: "completely different words here entirely", timestamp: Date())]
+        let sys = [SessionRecord(speaker: .them, text: "nothing alike in this sentence at all", timestamp: Date())]
+        AcousticEchoFilter.suppress(micRecords: &mic, against: sys)
+
+        XCTAssertEqual(mic.count, 1)
+        XCTAssertEqual(echoSummaryCount(store, path: .batch) - before, 0)
+    }
+
+    // MARK: - echoScore returns the score the diagnostic needs (#82)
+
+    /// The score is produced by the decision itself, so no caller recomputes Jaccard
+    /// just to populate an event.
+    func testEchoScoreReturnsJaccardForEligibleMatch() {
+        let a = TextSimilarity.normalizedText("the quick brown fox jumps over the lazy dog")
+        let score = AcousticEchoFilter.echoScore(normalizedYou: a, normalizedThem: a, timeDelta: 1.0)
+        XCTAssertEqual(try XCTUnwrap(score), TextSimilarity.jaccard(a, a), accuracy: 1e-9)
+    }
+
+    /// Exact normalized equality is a Jaccard of 1 by definition — asserted, not recomputed.
+    func testEchoScoreReturnsOneForShortStrictMatch() {
+        let short = TextSimilarity.normalizedText("Orders.")
+        XCTAssertEqual(try XCTUnwrap(AcousticEchoFilter.echoScore(
+            normalizedYou: short, normalizedThem: short, timeDelta: 1.0
+        )), 1.0, accuracy: 1e-9)
+    }
+
+    func testEchoScoreIsNilWhenNotAnEcho() {
+        let you = TextSimilarity.normalizedText("completely different words here entirely")
+        let them = TextSimilarity.normalizedText("nothing alike in this sentence at all")
+        XCTAssertNil(AcousticEchoFilter.echoScore(normalizedYou: you, normalizedThem: them, timeDelta: 1.0))
+    }
+
+    /// `matches` stays the Bool view of the same decision.
+    func testMatchesAgreesWithEchoScore() {
+        let a = TextSimilarity.normalizedText("the quick brown fox jumps over the lazy dog")
+        let b = TextSimilarity.normalizedText("nothing alike in this sentence at all")
+        XCTAssertTrue(AcousticEchoFilter.matches(normalizedYou: a, normalizedThem: a, timeDelta: 1.0))
+        XCTAssertFalse(AcousticEchoFilter.matches(normalizedYou: a, normalizedThem: b, timeDelta: 1.0))
+    }
+
 }

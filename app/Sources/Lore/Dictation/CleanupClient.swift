@@ -32,8 +32,12 @@ struct CleanupClient: CleanupProviding, Sendable {
 
         guard let http = response as? HTTPURLResponse, (200...299).contains(http.statusCode) else {
             let statusCode = (response as? HTTPURLResponse)?.statusCode ?? -1
+            // The error body can echo the prompt, which carries the dictated text.
             let responseBody = String(data: data, encoding: .utf8) ?? ""
-            Self.log.error("OpenAI API error HTTP \(statusCode): \(responseBody.prefix(200))")
+            Self.log.error("""
+                OpenAI API error HTTP \(statusCode, privacy: .public): \
+                \(responseBody.prefix(200), privacy: .private)
+                """)
             throw CleanupError.apiError(statusCode)
         }
 
@@ -42,7 +46,8 @@ struct CleanupClient: CleanupProviding, Sendable {
         let message = choices?.first?["message"] as? [String: Any]
         let content = message?["content"] as? String ?? ""
 
-        Self.log.info("Cleanup: \(rawText.prefix(30)) → \(content.prefix(30))")
+        // Both sides of this arrow are the user's dictated words (#82).
+        Self.log.debug("Cleanup: \(rawText, privacy: .private) → \(content, privacy: .private)")
         return content
     }
 

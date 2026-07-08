@@ -101,7 +101,8 @@ actor TranscriptRefinementEngine {
                 apiKey: apiKey,
                 model: ChatCompletionsClient.defaultOpenAIModel,
                 messages: messages,
-                maxTokens: 512
+                maxTokens: 512,
+                endpoint: .refinement
             )
 
             let trimmed = refined.trimmingCharacters(in: .whitespacesAndNewlines)

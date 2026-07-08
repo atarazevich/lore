@@ -1,7 +1,10 @@
 import Foundation
+import os
 import Observation
 import CoreAudio
 import AppKit
+
+private let liveLog = Logger(subsystem: "com.lore.app", category: "LiveSession")
 
 /// Published state for the live session, projected by ContentView.
 struct LiveSessionState {
@@ -135,7 +138,7 @@ final class LiveSessionController {
     func toggleMicMute() {
         guard let engine = coordinator.transcriptionEngine, engine.isRunning else { return }
         engine.isMicMuted.toggle()
-        diagLog("[ENGINE] mic mute -> \(engine.isMicMuted ? "on" : "off")")
+        liveLog.debug("mic mute -> \(engine.isMicMuted ? "on" : "off", privacy: .public)")
     }
 
     // MARK: - External Commands

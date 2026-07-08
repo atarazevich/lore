@@ -68,6 +68,11 @@ final class AudioBus: @unchecked Sendable {
     private var noFrameRecoveryAttempts = 0
     private static let maxNoFrameRecoveries = 2
 
+    /// Whether the mic is currently in the "no frames for >5s" state (halQueue only).
+    /// The health timer ticks every 5s; this makes the store see one `micStalled` on
+    /// the way in and one `micRecovered` on the way out, never a periodic repeat.
+    private var isStalled = false
+
     /// Consumer continuations. The IOProc callback reads a snapshot under the unfair lock.
     /// OSAllocatedUnfairLock is real-time safe on Darwin (no priority inversion).
     private let consumers = OSAllocatedUnfairLock<[UUID: AsyncStream<AVAudioPCMBuffer>.Continuation]>(
@@ -145,11 +150,11 @@ final class AudioBus: @unchecked Sendable {
                 self.noFrameRecoveryAttempts = 0
                 self.startCaptureLocked(deviceID: requestedDevice)
             case .joinPinnedDevice:
-                diagLog("[AUDIO-BUS] joining pinned device \(self.currentDeviceID) (requested \(requestedDevice.map(String.init) ?? "nil"))")
+                busLog.debug("joining pinned device \(self.currentDeviceID, privacy: .public)")
             }
         }
 
-        diagLog("[AUDIO-BUS] subscribe id=\(id.uuidString.prefix(8)), consumers=\(consumerCount)")
+        busLog.debug("subscribe, consumers=\(self.consumerCount, privacy: .public)")
         return (id: id, stream: stream)
     }
 
@@ -176,13 +181,13 @@ final class AudioBus: @unchecked Sendable {
                 // and that subscribe's own block will then correctly join the running capture.
                 let stillEmpty = self.consumers.withLock { $0.isEmpty }
                 guard stillEmpty else {
-                    diagLog("[AUDIO-BUS] idle stop skipped — new consumer arrived")
+                    busLog.debug("idle stop skipped — new consumer arrived")
                     return
                 }
                 self.stopIdleCaptureLocked()
             }
         }
-        diagLog("[AUDIO-BUS] unsubscribe id=\(id.uuidString.prefix(8)), consumers=\(consumerCount)")
+        busLog.debug("unsubscribe, consumers=\(self.consumerCount, privacy: .public)")
     }
 
     /// What `subscribe` does with capture, as a pure decision (#66). While capture is
@@ -218,6 +223,8 @@ final class AudioBus: @unchecked Sendable {
     private func startCaptureLocked(deviceID: AudioDeviceID?) {
         dispatchPrecondition(condition: .onQueue(halQueue))
 
+        let startedAt = Date()
+
         // Clean up any prior IOProc and listeners.
         teardownCaptureLocked()
 
@@ -228,29 +235,34 @@ final class AudioBus: @unchecked Sendable {
         } else {
             guard let def = Self.defaultInputDeviceID(), def > 0 else {
                 let msg = "No default input device"
-                diagLog("[AUDIO-BUS] FAIL: \(msg)")
+                DiagStore.record(.captureFailed(stage: .noDefaultDevice, osStatus: nil))
+                busLog.error("capture failed: no default input device")
                 _error.value = msg
                 scheduleStartRetryLocked(deviceID: deviceID)
                 return
             }
             resolved = def
-            diagLog("[AUDIO-BUS] resolved system default device once — pinned for this capture")
+            busLog.debug("resolved system default device once — pinned for this capture")
         }
 
         currentDeviceID = resolved
-        diagLog("[AUDIO-BUS] start on device=\(resolved)")
 
         // Query stream format (input scope) and build AVAudioFormat.
         guard let format = resolveStreamFormatLocked(for: resolved) else {
             let msg = "Invalid audio format for device \(resolved)"
-            diagLog("[AUDIO-BUS] FAIL: \(msg)")
+            DiagStore.record(.captureFailed(stage: .invalidFormat, osStatus: nil))
+            busLog.error("capture failed: invalid audio format")
             _error.value = msg
             scheduleStartRetryLocked(deviceID: deviceID)
             return
         }
         _currentFormat.withLock { $0 = format }
 
-        diagLog("[AUDIO-BUS] format: sr=\(format.sampleRate) ch=\(format.channelCount) interleaved=\(format.isInterleaved)")
+        busLog.debug("""
+            format: sr=\(format.sampleRate, privacy: .public) \
+            ch=\(format.channelCount, privacy: .public) \
+            interleaved=\(format.isInterleaved, privacy: .public)
+            """)
 
         // Create IOProc. The block is invoked by CoreAudio's IO thread as a *synchronous*
         // dispatch onto ioQueue — never onto halQueue (see ioQueue docs, #64).
@@ -264,7 +276,8 @@ final class AudioBus: @unchecked Sendable {
         }
         guard status == noErr, let newIOProcID else {
             let msg = "AudioDeviceCreateIOProcIDWithBlock failed (OSStatus \(status))"
-            diagLog("[AUDIO-BUS] FAIL: \(msg)")
+            DiagStore.record(.captureFailed(stage: .createIOProc, osStatus: status))
+            busLog.error("capture failed: create IOProc (OSStatus \(status, privacy: .public))")
             _error.value = msg
             scheduleStartRetryLocked(deviceID: deviceID)
             return
@@ -280,7 +293,8 @@ final class AudioBus: @unchecked Sendable {
         let startStatus = AudioDeviceStart(resolved, newIOProcID)
         guard startStatus == noErr else {
             let msg = "AudioDeviceStart failed (OSStatus \(startStatus))"
-            diagLog("[AUDIO-BUS] FAIL: \(msg)")
+            DiagStore.record(.captureFailed(stage: .startDevice, osStatus: startStatus))
+            busLog.error("capture failed: start device (OSStatus \(startStatus, privacy: .public))")
             _error.value = msg
             // Clean up the IOProc we just created before retrying.
             _ = AudioDeviceDestroyIOProcID(resolved, newIOProcID)
@@ -295,7 +309,15 @@ final class AudioBus: @unchecked Sendable {
         _error.value = nil
         startRetryAttempt = 0
         captureStartDate = Date()
-        diagLog("[AUDIO-BUS] capture started on device=\(resolved)")
+        // `isStalled` is deliberately NOT cleared here. A stall is closed by frames
+        // arriving again (checkHealthLocked's `else if isStalled` branch), not by the
+        // restart that reconfigureLocked performs on the way to recovery — clearing it
+        // here made `micRecovered` unreachable and left #83 reading a permanent stall.
+        DiagStore.record(.captureStart(
+            deviceKind: DiagEvent.DeviceKind(transport: Self.transportType(for: resolved)),
+            ms: Int(Date().timeIntervalSince(startedAt) * 1000)
+        ))
+        busLog.debug("capture started on device=\(resolved, privacy: .public)")
     }
 
     /// Stop + destroy current IOProc and detach listeners. Called on halQueue.
@@ -330,13 +352,15 @@ final class AudioBus: @unchecked Sendable {
     private func stopIdleCaptureLocked() {
         dispatchPrecondition(condition: .onQueue(halQueue))
 
-        diagLog("[AUDIO-BUS] last consumer left — stopping capture (device=\(currentDeviceID))")
+        DiagStore.record(.captureStopped(reason: .lastConsumerLeft))
+        busLog.debug("last consumer left — stopping capture")
 
         pendingRetryItem?.cancel()
         pendingRetryItem = nil
         startRetryAttempt = 0
         noFrameRecoveryAttempts = 0
         captureStartDate = nil
+        isStalled = false
 
         teardownCaptureLocked()
 
@@ -350,7 +374,7 @@ final class AudioBus: @unchecked Sendable {
 
     /// Reconfigure capture in response to a route / format change.
     /// Settles 300ms for hardware transitions before rebuilding the IOProc.
-    private func reconfigureLocked() {
+    private func reconfigureLocked(reason: DiagEvent.ReconfigureReason) {
         dispatchPrecondition(condition: .onQueue(halQueue))
 
         // An idle teardown (#30) may have stopped capture while this reconfigure was
@@ -359,20 +383,21 @@ final class AudioBus: @unchecked Sendable {
         // Safe for live reconfigures: _running stays true throughout reconfigure
         // (stopCaptureLocked doesn't clear it; only teardown paths do).
         guard _running.value else {
-            diagLog("[AUDIO-BUS] reconfigure skipped — capture not running")
+            busLog.debug("reconfigure skipped — capture not running")
             return
         }
 
         guard !isReconfiguring else {
-            diagLog("[AUDIO-BUS] reconfigure already in progress, skipping")
+            busLog.debug("reconfigure already in progress, skipping")
             return
         }
         isReconfiguring = true
         defer { isReconfiguring = false }
 
-        diagLog("[AUDIO-BUS] reconfigure begin (device=\(currentDeviceID))")
-
-        // 1-4. Stop + destroy old IOProc, remove format listener.
+        // 1-4. Stop + destroy old IOProc, remove format listener. "Capture stopped
+        //      because the route changed under it" is exactly what a remote report
+        //      needs to see between the stall and the restart.
+        DiagStore.record(.captureStopped(reason: .reconfigure))
         stopCaptureLocked()
 
         // 5. Settle 300ms for hardware to quiesce after a route change.
@@ -383,13 +408,11 @@ final class AudioBus: @unchecked Sendable {
         //      the device chosen at capture start stays pinned (#39).
         startCaptureLocked(deviceID: currentDeviceID)
 
-        diagLog("[AUDIO-BUS] reconfigure end (running=\(_running.value))")
+        DiagStore.record(.captureReconfigured(reason: reason, running: _running.value))
     }
 
     private func performSwitchDeviceLocked(_ deviceID: AudioDeviceID?) {
         dispatchPrecondition(condition: .onQueue(halQueue))
-
-        diagLog("[AUDIO-BUS] switching device to \(String(describing: deviceID))")
 
         // Intentional device change — reset retry state.
         startRetryAttempt = 0
@@ -397,10 +420,15 @@ final class AudioBus: @unchecked Sendable {
         pendingRetryItem?.cancel()
         pendingRetryItem = nil
 
+        DiagStore.record(.captureStopped(reason: .deviceSwitch))
         teardownCaptureLocked()
         startCaptureLocked(deviceID: deviceID)
 
-        diagLog("[AUDIO-BUS] device switch complete (running=\(_running.value))")
+        // `currentDeviceID` is what startCaptureLocked actually pinned — a nil request
+        // resolves to the system default, so the parameter alone would not name it.
+        DiagStore.record(.deviceSwitched(
+            kind: DiagEvent.DeviceKind(transport: Self.transportType(for: currentDeviceID))
+        ))
     }
 
     /// Bounded retry with backoff: 1s, 2s, 3s. After maxStartRetries, give up loudly.
@@ -412,14 +440,18 @@ final class AudioBus: @unchecked Sendable {
 
         guard startRetryAttempt < Self.maxStartRetries else {
             let msg = "Audio capture failed after \(Self.maxStartRetries) attempts"
-            diagLog("[AUDIO-BUS] \(msg) — giving up")
+            DiagStore.record(.captureGaveUp(attempts: Self.maxStartRetries))
+            busLog.error("capture gave up after \(Self.maxStartRetries, privacy: .public) attempts")
             _error.value = msg
             return
         }
 
         startRetryAttempt += 1
         let delay = Double(startRetryAttempt) // 1s, 2s, 3s
-        diagLog("[AUDIO-BUS] retry start in \(delay)s (attempt \(startRetryAttempt)/\(Self.maxStartRetries))")
+        DiagStore.record(.captureRetryScheduled(
+            attempt: startRetryAttempt,
+            maxAttempts: Self.maxStartRetries
+        ))
 
         let item = DispatchWorkItem { [weak self] in
             guard let self else { return }
@@ -449,9 +481,10 @@ final class AudioBus: @unchecked Sendable {
                 return f
             }
             // ASBD didn't map to a supported AVAudioFormat — fall through to standard format.
-            diagLog("[AUDIO-BUS] AVAudioFormat(streamDescription:) failed, using standard format")
+            busLog.debug("AVAudioFormat(streamDescription:) failed, using standard format")
         } else {
-            diagLog("[AUDIO-BUS] kAudioDevicePropertyStreamFormat query failed (OSStatus \(status))")
+            DiagStore.record(.captureFailed(stage: .queryStreamFormat, osStatus: status))
+            busLog.error("stream format query failed (OSStatus \(status, privacy: .public))")
         }
 
         let rate = asbd.mSampleRate > 0 ? asbd.mSampleRate
@@ -469,9 +502,9 @@ final class AudioBus: @unchecked Sendable {
     /// real route-change shock absorber.
     private lazy var formatListenerBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
         guard let self else { return }
-        diagLog("[AUDIO-BUS] stream format changed")
+        busLog.debug("stream format changed")
         self.halQueue.async { [weak self] in
-            self?.reconfigureLocked()
+            self?.reconfigureLocked(reason: .streamFormatChanged)
         }
     }
 
@@ -493,7 +526,8 @@ final class AudioBus: @unchecked Sendable {
         if status == noErr {
             formatListenerDeviceID = deviceID
         } else {
-            diagLog("[AUDIO-BUS] install format listener failed (OSStatus \(status))")
+            DiagStore.record(.captureFailed(stage: .installFormatListener, osStatus: status))
+            busLog.error("install format listener failed (OSStatus \(status, privacy: .public))")
         }
     }
 
@@ -591,9 +625,22 @@ final class AudioBus: @unchecked Sendable {
 
         // If we've received frames and the last one is older than 5s, reconfigure.
         if let lastFrame = _lastFrameTime.value {
-            if Date().timeIntervalSince(lastFrame) > 5.0 {
-                diagLog("[AUDIO-BUS-HEALTH] silent for >5s, reconfiguring")
-                reconfigureLocked()
+            let silence = Date().timeIntervalSince(lastFrame)
+            if silence > 5.0 {
+                // Record the edge into the stall, not one event per 5s tick. The flag
+                // also covers the case reconfigureLocked bails out (already reconfiguring)
+                // and leaves `_lastFrameTime` stale, which would otherwise re-fire.
+                if !isStalled {
+                    isStalled = true
+                    DiagStore.record(.micStalled(seconds: Int(silence)))
+                }
+                busLog.error("silent for >5s, reconfiguring")
+                reconfigureLocked(reason: .silentTooLong)
+            } else if isStalled {
+                // Frames are flowing again — the stall's closing edge. Reachable only
+                // because startCaptureLocked no longer clears `isStalled`.
+                isStalled = false
+                DiagStore.record(.micRecovered)
             }
             return
         }
@@ -605,11 +652,15 @@ final class AudioBus: @unchecked Sendable {
         guard let started = captureStartDate, Date().timeIntervalSince(started) > 10 else { return }
         if noFrameRecoveryAttempts < Self.maxNoFrameRecoveries {
             noFrameRecoveryAttempts += 1
-            diagLog("[AUDIO-BUS-HEALTH] no frames since capture start, rebuilding IOProc (attempt \(noFrameRecoveryAttempts)/\(Self.maxNoFrameRecoveries))")
-            reconfigureLocked()
+            DiagStore.record(.noFramesRecovery(
+                attempt: noFrameRecoveryAttempts,
+                maxAttempts: Self.maxNoFrameRecoveries
+            ))
+            reconfigureLocked(reason: .noFramesEver)
         } else if _error.value == nil {
             _error.value = "Microphone is not delivering audio"
-            diagLog("[AUDIO-BUS-HEALTH] no frames after \(Self.maxNoFrameRecoveries) rebuilds — giving up")
+            DiagStore.record(.captureGaveUp(attempts: Self.maxNoFrameRecoveries))
+            busLog.error("no frames after \(Self.maxNoFrameRecoveries, privacy: .public) rebuilds — giving up")
         }
     }
 
@@ -819,16 +870,9 @@ final class AudioBus: @unchecked Sendable {
         return status == noErr ? transportType : nil
     }
 
-    /// Transports allowed for recording: built-in and wired. Anything else (Bluetooth,
-    /// Continuity/iPhone, AirPlay, virtual) is wireless or unreliable and gets redirected.
-    /// Allowlist, not Bluetooth-blocklist, so Continuity devices cannot slip through (#39).
-    private static let allowedTransports: Set<UInt32> = [
-        kAudioDeviceTransportTypeBuiltIn,
-        kAudioDeviceTransportTypeUSB,
-        kAudioDeviceTransportTypeThunderbolt,
-        kAudioDeviceTransportTypeFireWire,
-        kAudioDeviceTransportTypePCI,
-    ]
+    /// Transports allowed for recording (#39). One table, defined in `AudioTransport`
+    /// alongside the `DeviceKind` classifier that must agree with it.
+    static let allowedTransports = AudioTransport.allowedForRecording
 
     /// Canonical UID of the real built-in microphone. Continuity iPhone phantoms have been
     /// observed reporting the built-in transport type with session-unstable device IDs
@@ -854,7 +898,18 @@ final class AudioBus: @unchecked Sendable {
         let probes = availableInputDevicesLocked().map {
             InputDeviceProbe(id: $0.id, name: $0.name, transport: transportType(for: $0.id), uid: deviceUID(for: $0.id))
         }
-        return selectInputDevice(from: probes, requested: requested, systemDefault: defaultInputDeviceID())
+        let selection = selectInputDevice(from: probes, requested: requested, systemDefault: defaultInputDeviceID())
+
+        // Recorded here, not inside `selectInputDevice`: that function is pure and
+        // unit-tested (#64), and it stays that way.
+        if let selection {
+            let transport = probes.first(where: { $0.id == selection.deviceID })?.transport
+            DiagStore.record(.inputDeviceSelected(
+                kind: DiagEvent.DeviceKind(transport: transport),
+                redirectedToBuiltIn: selection.redirectedToBuiltIn
+            ))
+        }
+        return selection
     }
 
     /// Pure allowlist selection over pre-probed devices — no HAL calls, any thread.
@@ -868,7 +923,7 @@ final class AudioBus: @unchecked Sendable {
         systemDefault: AudioDeviceID?
     ) -> (deviceID: AudioDeviceID, redirectedToBuiltIn: Bool)? {
         guard !devices.isEmpty else {
-            diagLog("[AUDIO-BUS] select input: no input devices available")
+            busLog.error("select input: no input devices available")
             return nil
         }
 
@@ -898,7 +953,7 @@ final class AudioBus: @unchecked Sendable {
         }
 
         if candidate > 0, let candidateProbe = probe(candidate), isAllowed(candidateProbe) {
-            diagLog("[AUDIO-BUS] selected input device=\(candidate) (\(name(candidate)))")
+            busLog.debug("selected input device=\(candidate, privacy: .public) (\(name(candidate), privacy: .private))")
             return (candidate, false)
         }
 
@@ -912,18 +967,21 @@ final class AudioBus: @unchecked Sendable {
             // the transport was unreadable or the device merely failed the built-in UID check.
             let candidateTransport = candidate > 0 ? probe(candidate)?.transport : nil
             let redirectedFromWireless = candidateTransport.map { !allowedTransports.contains($0) } ?? false
-            diagLog("[AUDIO-BUS] wireless/unavailable input (\(candidate > 0 ? name(candidate) : "none")), selected built-in device=\(builtIn.id) (\(builtIn.name))")
+            busLog.debug("""
+                wireless/unavailable input (\(candidate > 0 ? name(candidate) : "none", privacy: .private)), \
+                selected built-in device=\(builtIn.id, privacy: .public) (\(builtIn.name, privacy: .private))
+                """)
             return (builtIn.id, redirectedFromWireless)
         }
         if let wired = devices.first(where: { isAllowed($0) }) {
-            diagLog("[AUDIO-BUS] no built-in mic, selected wired device=\(wired.id) (\(wired.name))")
+            busLog.debug("no built-in mic, selected wired device=\(wired.id, privacy: .public) (\(wired.name, privacy: .private))")
             return (wired.id, false)
         }
         guard candidate > 0 else {
-            diagLog("[AUDIO-BUS] select input: no usable input device")
+            busLog.error("select input: no usable input device")
             return nil
         }
-        diagLog("[AUDIO-BUS] no built-in or wired mic, keeping device=\(candidate) (\(name(candidate)))")
+        busLog.debug("no built-in or wired mic, keeping device=\(candidate, privacy: .public) (\(name(candidate), privacy: .private))")
         return (candidate, false)
     }
 

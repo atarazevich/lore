@@ -15,13 +15,12 @@ enum TextInserter {
 
     static func paste(_ text: String) {
         let granted = isAccessibilityGranted
-        diagLog("[PASTE] paste called, accessibility=\(granted)")
 
         // Even if AXIsProcessTrusted returns false, try the paste anyway —
         // macOS sometimes caches the result and requires a restart to update.
         // The clipboard will still be set, so at worst the user can Cmd+V manually.
         if !granted {
-            diagLog("[PASTE] accessibility reports false — attempting paste anyway")
+            log.error("accessibility reports false — attempting paste anyway")
         }
 
         let pasteboard = NSPasteboard.general
@@ -32,18 +31,25 @@ enum TextInserter {
         // Set our text
         pasteboard.clearContents()
         pasteboard.setString(text, forType: .string)
-        diagLog("[PASTE] clipboard set, posting Cmd+V")
 
         // Small delay to let clipboard settle, then simulate Cmd+V
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            postCmdV()
-            diagLog("[PASTE] Cmd+V posted")
+            // `postCmdV` reports only whether the CGEvents could be *created*.
+            // `CGEvent.post` returns nothing, so whether the paste reached an app is
+            // unobservable from here — an `Outcome.ok` would have read "fine" in
+            // precisely the incident this feature exists to diagnose.
+            let eventsCreated = postCmdV()
+            DiagStore.record(.pasteAttempt(
+                kind: .paste,
+                eventsCreated: eventsCreated,
+                accessibilityTrusted: granted
+            ))
 
             // Restore clipboard after target app processes the paste
             Task { @MainActor in
                 try? await Task.sleep(for: .milliseconds(800))
                 restorePasteboard(NSPasteboard.general, items: savedItems)
-                diagLog("[PASTE] clipboard restored")
+                log.debug("clipboard restored")
             }
         }
     }
@@ -52,10 +58,9 @@ enum TextInserter {
     /// Used by the upgrade flow to replace previously pasted text.
     static func undoAndPaste(_ text: String) {
         let granted = isAccessibilityGranted
-        diagLog("[PASTE] undoAndPaste called, accessibility=\(granted)")
 
         if !granted {
-            diagLog("[PASTE] accessibility reports false — attempting anyway")
+            log.error("accessibility reports false — attempting undo+paste anyway")
         }
 
         let pasteboard = NSPasteboard.general
@@ -67,46 +72,55 @@ enum TextInserter {
 
         // Cmd+Z to undo previous paste, then Cmd+V to paste new text
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            postCmdZ()
-            diagLog("[PASTE] Cmd+Z posted (undo previous)")
+            let undone = postCmdZ()
 
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                postCmdV()
-                diagLog("[PASTE] Cmd+V posted (upgrade paste)")
+                let eventsCreated = undone && postCmdV()
+                DiagStore.record(.pasteAttempt(
+                    kind: .undoAndPaste,
+                    eventsCreated: eventsCreated,
+                    accessibilityTrusted: granted
+                ))
 
                 Task { @MainActor in
                     try? await Task.sleep(for: .milliseconds(800))
                     restorePasteboard(NSPasteboard.general, items: savedItems)
-                    diagLog("[PASTE] clipboard restored")
+                    log.debug("clipboard restored")
                 }
             }
         }
     }
 
-    private static func postCmdZ() {
+    /// Returns whether the synthetic key events could be *created*. Posting is
+    /// fire-and-forget: `CGEvent.post` has no return value and no delivery receipt.
+    @discardableResult
+    private static func postCmdZ() -> Bool {
         let source = CGEventSource(stateID: .hidSystemState)
         // keyCode 6 = 'Z'
         guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x06, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x06, keyDown: false) else {
-            diagLog("[PASTE] ERROR: failed to create CGEvent for Cmd+Z")
-            return
+            log.error("Failed to create CGEvent for Cmd+Z")
+            return false
         }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
         keyDown.post(tap: .cghidEventTap)
         usleep(20_000)
         keyUp.post(tap: .cghidEventTap)
+        return true
     }
 
-    private static func postCmdV() {
+    /// Returns whether the synthetic key events could be *created*. Posting is
+    /// fire-and-forget: `CGEvent.post` has no return value and no delivery receipt.
+    @discardableResult
+    private static func postCmdV() -> Bool {
         let source = CGEventSource(stateID: .hidSystemState)
 
         // keyCode 9 = 'V'
         guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
             log.error("Failed to create CGEvent")
-            diagLog("[PASTE] ERROR: failed to create CGEvent")
-            return
+            return false
         }
 
         keyDown.flags = .maskCommand
@@ -118,6 +132,7 @@ enum TextInserter {
         keyDown.post(tap: .cghidEventTap)
         usleep(20_000) // 20ms between key down and up for reliable delivery
         keyUp.post(tap: .cghidEventTap)
+        return true
     }
 
     // MARK: - Clipboard save/restore

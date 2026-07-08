@@ -118,7 +118,8 @@ struct AskXMOClient: Sendable {
                 isLive: isLive
             ),
             maxTokens: 1024,
-            timeout: Self.timeout
+            timeout: Self.timeout,
+            endpoint: .askLore
         )
     }
 }

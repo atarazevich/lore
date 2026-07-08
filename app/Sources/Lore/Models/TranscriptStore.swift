@@ -36,7 +36,17 @@ final class TranscriptStore {
         utterances[index] = utterances[index].withRefinement(text: refinedText, status: status)
     }
 
+    /// Echo suppression is summarised once per session, never per utterance (#82):
+    /// an echoey meeting fires hundreds of times and would evict the launch,
+    /// permission and identity history the diagnostic ring exists to keep.
+    @ObservationIgnored private var liveForwardEchoes = AcousticEchoFilter.EchoTally()
+    @ObservationIgnored private var retroactiveEchoes = AcousticEchoFilter.EchoTally()
+
+    /// `clear()` is the session boundary (LiveSessionController calls it at start and
+    /// at stop), so it is where the pass summaries are emitted and the tallies reset.
     func clear() {
+        liveForwardEchoes.recordSummary(path: .liveForward)
+        retroactiveEchoes.recordSummary(path: .retroactive)
         utterances.removeAll()
         volatileYouText = ""
         volatileThemText = ""
@@ -81,17 +91,13 @@ final class TranscriptStore {
             let timeDelta = utterance.timestamp.timeIntervalSince(existing.timestamp)
 
             let normalizedExisting = TextSimilarity.normalizedText(existing.text)
-            guard AcousticEchoFilter.matches(
+            guard let jaccard = AcousticEchoFilter.echoScore(
                 normalizedYou: normalizedExisting,
                 normalizedThem: normalizedIncoming,
                 timeDelta: timeDelta
             ) else { continue }
 
-            diagLog(
-                "[TRANSCRIPT-ECHO] removing mic echo retroactively " +
-                "dt=\(String(format: "%.2f", timeDelta)) " +
-                "you='\(existing.text.prefix(80))' them='\(utterance.text.prefix(80))'"
-            )
+            retroactiveEchoes.add(jaccard: jaccard)
             indicesToRemove.append(i)
         }
 
@@ -112,17 +118,13 @@ final class TranscriptStore {
             guard timeDelta <= AcousticEchoFilter.window else { break }
 
             let normalizedThemText = TextSimilarity.normalizedText(candidate.text)
-            guard AcousticEchoFilter.matches(
+            guard let jaccard = AcousticEchoFilter.echoScore(
                 normalizedYou: normalizedYouText,
                 normalizedThem: normalizedThemText,
                 timeDelta: timeDelta
             ) else { continue }
 
-            diagLog(
-                "[TRANSCRIPT-ECHO] dropped mic utterance as system-audio echo " +
-                "dt=\(String(format: "%.2f", timeDelta)) " +
-                "you='\(utterance.text.prefix(80))' them='\(candidate.text.prefix(80))'"
-            )
+            liveForwardEchoes.add(jaccard: jaccard)
             return true
         }
 

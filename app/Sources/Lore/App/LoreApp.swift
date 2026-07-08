@@ -1,9 +1,12 @@
 import SwiftUI
 import AppKit
 import AVFoundation
+import os
 import Sparkle
 import UniformTypeIdentifiers
 import UserNotifications
+
+private let appLog = Logger(subsystem: "com.lore.app", category: "LoreApp")
 
 public struct LoreRootApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
@@ -247,9 +250,13 @@ extension LoreRootApp {
             // #43: import completion never deletes — failure/preemption keep the row with retry.
             let status = await batchEngine.status
             if case .failed(let message, _) = status {
-                diagLog("[IMPORT] did not complete for \(sessionID): \(message) — keeping session for retry")
+                DiagStore.record(.sessionImportFailed)
+                appLog.error("import did not complete for \(sessionID, privacy: .private): \(message, privacy: .private) — keeping session for retry")
             } else if case .cancelled = status {
-                diagLog("[IMPORT] preempted (recording started) — keeping session \(sessionID) for retry")
+                // Preemption by a recording start is the designed path (#43), not a
+                // failure. Recording it as one would put a red line in every report
+                // from a user who records back-to-back meetings.
+                appLog.debug("import preempted (recording started) — keeping session for retry")
             }
             await coordinator.loadHistory()
         }
@@ -259,20 +266,20 @@ extension LoreRootApp {
         NSApp.setActivationPolicy(.regular)
         NSApp.activate(ignoringOtherApps: true)
         if let window = Self.mainWindow {
-            diagLog("[WINDOW] showMainWindow: found-window")
+            appLog.debug("showMainWindow: found-window")
             window.makeKeyAndOrderFront(nil)
         } else {
-            diagLog("[WINDOW] showMainWindow: openWindow-fallback")
+            appLog.debug("showMainWindow: openWindow-fallback")
             openWindow(id: Self.mainWindowID)
             // openWindow(id:) no-ops when SwiftUI already considers the scene
             // open (NSWindow exists but was never ordered in — the launch
             // race, #65 B). Front whatever exists one runloop turn later.
             DispatchQueue.main.async {
                 if let window = Self.mainWindow {
-                    diagLog("[WINDOW] showMainWindow: retry-present")
+                    appLog.debug("showMainWindow: retry-present")
                     window.makeKeyAndOrderFront(nil)
                 } else {
-                    diagLog("[WINDOW] showMainWindow: retry-none")
+                    appLog.debug("showMainWindow: retry-none")
                 }
             }
         }
@@ -343,7 +350,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var localHotkeyMonitor: Any?
     private var didSetupDictation = false
 
+    /// The last second of events is exactly the interesting second when the user
+    /// quits to escape a wedged state. `record()` coalesces disk writes at 1s, so
+    /// without this the tail is lost. (A crash still loses it — nothing to do there.)
+    func applicationWillTerminate(_ notification: Notification) {
+        DiagStore.shared.flush()
+    }
+
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // First event of every run: the persisted ring is loaded here, so the
+        // timeline shows where one launch ends and the next begins — which is
+        // exactly the question "did they restart after granting the permission?".
+        // CFBundleVersion is MAJOR.MINOR.<git commit count>; the last component
+        // is the monotonic build that maps to an exact commit.
+        let bundleVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+        DiagStore.record(.appLaunched(
+            build: Int(bundleVersion.split(separator: ".").last ?? "") ?? 0
+        ))
+
         if !isUITest {
             NSApp.setActivationPolicy(.regular)
             appNapActivity = ProcessInfo.processInfo.beginActivity(
@@ -404,9 +428,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// delivery is: works at launch and while running, window open or closed.
     func application(_ application: NSApplication, open urls: [URL]) {
         for url in urls {
-            diagLog("[DEEPLINK] \(url.absoluteString)")
+            appLog.debug("deep link: \(url.absoluteString, privacy: .private)")
             guard let command = LoreDeepLink.parse(url) else {
-                diagLog("[DEEPLINK] unrecognized URL, skipping")
+                appLog.error("unrecognized deep link URL, skipping")
                 continue
             }
             if NSApp.activationPolicy() == .accessory {
@@ -435,7 +459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private func flushPendingDeepLinkCommand() {
         guard let coordinator, let command = pendingDeepLinkCommand else { return }
         pendingDeepLinkCommand = nil
-        diagLog("[DEEPLINK] flushing deep link queued before coordinator wire: \(command)")
+        appLog.debug("flushing deep link queued before coordinator wire: \(String(describing: command), privacy: .private)")
         coordinator.queueExternalCommand(command)
     }
 

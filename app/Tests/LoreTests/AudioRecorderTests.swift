@@ -228,4 +228,85 @@ final class AudioRecorderTests: XCTestCase {
         let m4aFiles = files?.filter { $0.pathExtension == "m4a" } ?? []
         XCTAssertEqual(m4aFiles.count, 0, "Discarded recording should not produce output")
     }
+
+    // MARK: - recordingSaved is latched, once per recording (#82)
+
+    private func recordingSavedCount() -> Int {
+        DiagStore.shared.recent(DiagStore.capacity).filter { $0.event.caseName == "recordingSaved" }.count
+    }
+
+    /// Block the temp CAF paths so `AVAudioFile(forWriting:)` throws, driving the
+    /// per-buffer failure branch. Both the current and next minute are blocked, since
+    /// `sessionTimestamp` has minute resolution and the test may straddle a boundary.
+    private func blockTempCAFPaths() -> [URL] {
+        let fmt = DateFormatter()
+        fmt.dateFormat = "yyyy-MM-dd_HH-mm"
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
+        var blocked: [URL] = []
+        for offset in [0.0, 60.0] {
+            let stamp = fmt.string(from: Date().addingTimeInterval(offset))
+            for prefix in ["lore_mic_", "lore_sys_"] {
+                let url = tmp.appendingPathComponent("\(prefix)\(stamp).caf")
+                try? FileManager.default.removeItem(at: url)
+                // A directory where a file is expected makes AVAudioFile throw.
+                try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
+                blocked.append(url)
+            }
+        }
+        return blocked
+    }
+
+    /// The real R1 regression: the failure site sits inside
+    /// `if micFile == nil { … } catch { record; return }`, which the buffer path
+    /// re-enters on EVERY audio callback. Unlatched, 40 buffers = 40 events, and a
+    /// real recording delivers them at buffer rate — evicting the whole 2000-event
+    /// ring within seconds.
+    func testPerBufferFileCreationFailureRecordsExactlyOneEvent() {
+        let blocked = blockTempCAFPaths()
+        defer { blocked.forEach { try? FileManager.default.removeItem(at: $0) } }
+
+        let recorder = AudioRecorder(outputDirectory: outputDir)
+        recorder.startSession()
+        let before = recordingSavedCount()
+
+        let buffer = makeSineBuffer(sampleRate: 48_000, frameCount: 512)
+        for _ in 0..<40 {
+            recorder.writeMicBuffer(buffer)
+        }
+
+        let delta = recordingSavedCount() - before
+        XCTAssertEqual(delta, 1, "40 failing buffers must record exactly one recordingSaved, got \(delta)")
+    }
+
+    /// The failure sites live inside `if micFile == nil { … } catch { record; return }`,
+    /// which the buffer path re-enters on every audio callback. Unlatched, one dead
+    /// output file would evict all 2000 prior events within seconds. `finalizeRecording`
+    /// on an empty session drives the same latched helper end to end.
+    func testRecordingSavedIsEmittedAtMostOncePerSession() async {
+        let recorder = AudioRecorder(outputDirectory: outputDir)
+        let before = recordingSavedCount()
+
+        recorder.startSession()
+        await recorder.finalizeRecording()
+        let afterFirst = recordingSavedCount()
+        XCTAssertEqual(afterFirst - before, 1, "an empty session records exactly one outcome")
+
+        // Second finalize on the sealed session must add nothing.
+        await recorder.finalizeRecording()
+        XCTAssertEqual(recordingSavedCount(), afterFirst, "a sealed session records no further outcome")
+    }
+
+    /// `startSession` re-arms the latch, so the next recording gets its own event.
+    func testLatchResetsPerSession() async {
+        let recorder = AudioRecorder(outputDirectory: outputDir)
+        let before = recordingSavedCount()
+
+        recorder.startSession()
+        await recorder.finalizeRecording()
+        recorder.startSession()
+        await recorder.finalizeRecording()
+
+        XCTAssertEqual(recordingSavedCount() - before, 2, "two sessions, two outcomes")
+    }
+
 }

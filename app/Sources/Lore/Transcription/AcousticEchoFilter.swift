@@ -32,30 +32,52 @@ enum AcousticEchoFilter {
     ///   cheaper than attributing remote audio to the user.
     ///
     /// Texts must already be normalized via `TextSimilarity.normalizedText`.
+    ///
+    /// Returns the Jaccard score when the pair is an echo, `nil` when it is not.
+    /// Callers that want the score for a diagnostic take it from here rather than
+    /// recomputing it: an extra O(n) pass per suppressed utterance, purely to
+    /// populate an event, is work the product does not need.
+    static func echoScore(
+        normalizedYou: String,
+        normalizedThem: String,
+        timeDelta: TimeInterval
+    ) -> Double? {
+        if isEligible(normalizedYou) && isEligible(normalizedThem) {
+            guard timeDelta >= 0, timeDelta <= window else { return nil }
+            let similarity = TextSimilarity.jaccard(normalizedYou, normalizedThem)
+            let isEcho = similarity >= similarityThreshold
+                || normalizedYou.contains(normalizedThem)
+                || normalizedThem.contains(normalizedYou)
+            return isEcho ? similarity : nil
+        }
+
+        let strictMatch = abs(timeDelta) <= shortTextWindow
+            && !normalizedYou.isEmpty
+            && normalizedYou == normalizedThem
+        // Exact normalized equality — a Jaccard of 1 by definition, not recomputed.
+        return strictMatch ? 1.0 : nil
+    }
+
+    /// Bool-only view of `echoScore`, for callers (and tests) that only ask "is it".
     static func matches(
         normalizedYou: String,
         normalizedThem: String,
         timeDelta: TimeInterval
     ) -> Bool {
-        if isEligible(normalizedYou) && isEligible(normalizedThem) {
-            guard timeDelta >= 0, timeDelta <= window else { return false }
-            let similarity = TextSimilarity.jaccard(normalizedYou, normalizedThem)
-            return similarity >= similarityThreshold
-                || normalizedYou.contains(normalizedThem)
-                || normalizedThem.contains(normalizedYou)
-        }
-
-        return abs(timeDelta) <= shortTextWindow
-            && !normalizedYou.isEmpty
-            && normalizedYou == normalizedThem
+        echoScore(normalizedYou: normalizedYou, normalizedThem: normalizedThem, timeDelta: timeDelta) != nil
     }
 
     /// Suppress mic records that are acoustic echoes of system records.
     /// Modifies `micRecords` in place, removing entries that match.
+    ///
+    /// Emits ONE summary event for the whole pass (#82). Per-utterance events would
+    /// evict the launch, permission and identity history the ring exists to keep.
     static func suppress(
         micRecords: inout [SessionRecord],
         against sysRecords: [SessionRecord]
     ) {
+        var tally = EchoTally()
+
         micRecords.removeAll { micRecord in
             let normalizedYou = TextSimilarity.normalizedText(micRecord.text)
 
@@ -65,20 +87,44 @@ enum AcousticEchoFilter {
                 guard timeDelta <= window else { break }
 
                 let normalizedThem = TextSimilarity.normalizedText(sysRecord.text)
-                if matches(
+                if let jaccard = echoScore(
                     normalizedYou: normalizedYou,
                     normalizedThem: normalizedThem,
                     timeDelta: timeDelta
                 ) {
-                    diagLog(
-                        "[ECHO-FILTER] suppressed mic record as echo " +
-                        "dt=\(String(format: "%.2f", timeDelta)) " +
-                        "mic='\(micRecord.text.prefix(80))' sys='\(sysRecord.text.prefix(80))'"
-                    )
+                    tally.add(jaccard: jaccard)
                     return true
                 }
             }
             return false
+        }
+
+        tally.recordSummary(path: .batch)
+    }
+
+    /// Running aggregate of one echo-suppression pass. Numbers only — never the
+    /// suppressed text, which is the user's and the remote party's speech.
+    struct EchoTally {
+        private(set) var count = 0
+        private var jaccardSum: Double = 0
+
+        mutating func add(jaccard: Double) {
+            count += 1
+            jaccardSum += jaccard
+        }
+
+        mutating func reset() {
+            count = 0
+            jaccardSum = 0
+        }
+
+        var meanJaccard: Double { count == 0 ? 0 : jaccardSum / Double(count) }
+
+        /// Emit the summary if anything was suppressed, then reset.
+        mutating func recordSummary(path: DiagEvent.EchoPath) {
+            guard count > 0 else { return }
+            DiagStore.record(.echoSuppressed(path: path, count: count, meanJaccard: meanJaccard))
+            reset()
         }
     }
 
