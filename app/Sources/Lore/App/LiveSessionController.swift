@@ -2,7 +2,6 @@ import Foundation
 import os
 import Observation
 import CoreAudio
-import AppKit
 
 private let liveLog = Logger(subsystem: "com.lore.app", category: "LiveSession")
 
@@ -42,8 +41,8 @@ final class LiveSessionController {
     private var observedInputDeviceID: AudioDeviceID = 0
     private var observedPendingExternalCommandID: UUID?
     /// Tracks the session ID we last handled a batch completion for,
-    /// preventing the auto-dismiss → re-poll cycle from re-triggering the notification.
-    private var lastNotifiedBatchSessionID: String?
+    /// preventing the auto-dismiss → re-poll cycle from re-triggering the history reload.
+    private var lastHandledBatchSessionID: String?
 
     init(coordinator: AppCoordinator, container: AppContainer) {
         self.coordinator = coordinator
@@ -75,11 +74,8 @@ final class LiveSessionController {
                     coordinator.batchStatus = status
                     coordinator.batchIsImporting = importing
 
-                    if case .completed(let sid) = status, lastNotifiedBatchSessionID != sid {
-                        lastNotifiedBatchSessionID = sid
-                        if !NSApp.isActive, let notifService = container.notificationService {
-                            await notifService.postBatchCompleted(sessionID: sid)
-                        }
+                    if case .completed(let sid) = status, lastHandledBatchSessionID != sid {
+                        lastHandledBatchSessionID = sid
                         await coordinator.loadHistory()
 
                         Task { @MainActor in

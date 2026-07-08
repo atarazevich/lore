@@ -142,7 +142,6 @@ final class MeetingDetectionControllerTests: XCTestCase {
         XCTAssertFalse(controller.isMonitoringSilence)
         XCTAssertNil(controller.activeSettings)
         XCTAssertNil(controller.meetingDetector)
-        XCTAssertNil(controller.notificationService)
     }
 
     // MARK: - Teardown Clears State
@@ -189,13 +188,13 @@ final class MeetingDetectionControllerTests: XCTestCase {
         let controller = MeetingDetectionController()
         controller.isSessionActive = { true }
 
-        let prompted = await controller.handleMeetingDetected(
+        let prompted = controller.handleMeetingDetected(
             app: MeetingApp(bundleID: "us.zoom.xos", name: "Zoom")
         )
 
         XCTAssertFalse(
             prompted,
-            "No notification prompt while a session (meeting recording or dictation) is active"
+            "No notch prompt while a session (meeting recording or dictation) is active"
         )
     }
 
@@ -203,9 +202,9 @@ final class MeetingDetectionControllerTests: XCTestCase {
         let controller = MeetingDetectionController()
         controller.isSessionActive = { false }
 
-        // notificationService is nil without setup(), so no real notification
-        // is posted — the return value covers reaching the prompt path.
-        let prompted = await controller.handleMeetingDetected(
+        // notchPromptPresenter is nil without setup(), so no window is shown —
+        // the return value covers reaching the prompt path.
+        let prompted = controller.handleMeetingDetected(
             app: MeetingApp(bundleID: "us.zoom.xos", name: "Zoom")
         )
 
@@ -222,9 +221,9 @@ final class MeetingDetectionControllerTests: XCTestCase {
         let controller = MeetingDetectionController()
         let source = MockAudioSignalSource()
 
-        // Inject a started detector (setup() needs UNUserNotificationCenter,
-        // unavailable under swift test). Its monitor task now parks on the
-        // mock signal stream, holding the detector strongly.
+        // Inject a started detector (setup() starts a real CoreAudio mic
+        // listener, unavailable under swift test). Its monitor task now parks
+        // on the mock signal stream, holding the detector strongly.
         var detector: MeetingDetector? = MeetingDetector(audioSource: source)
         await detector?.start()
         controller.injectDetectorForTesting(detector!)
