@@ -1,6 +1,6 @@
 # Changelog
 
-## v2.1.0 — 2026-07-08 (draft — pending release)
+## v2.1.0 — 2026-07-08
 
 Diagnostics: the app can now see and report its own health, so a problem on a machine we can't reach becomes something the user can show us in one click. The version line also moves to 2.x.
 
