@@ -33,6 +33,7 @@ struct SettingsView: View {
     @State private var newTemplatePrompt = ""
     @FocusState private var focusedTemplateField: TemplateField?
     @State private var showAutoDetectExplanation = false
+    @State private var showProblemReport = false
     @State private var showMicPicker = false
     @State private var isTemplatesExpanded = false
     @State private var isCustomMeetingAppsExpanded = false
@@ -75,6 +76,11 @@ struct SettingsView: View {
         .accessibilityIdentifier("settings.form")
         .sheet(isPresented: $showAutoDetectExplanation) {
             autoDetectExplanationSheet
+        }
+        .sheet(isPresented: $showProblemReport) {
+            if let monitor = coordinator.healthMonitor {
+                ProblemReportView(healthMonitor: monitor, onClose: { showProblemReport = false })
+            }
         }
         .onChange(of: isActiveInShell, initial: true) { _, isActive in
             // Re-read devices, update-check toggle, and templates each time
@@ -767,6 +773,16 @@ struct SettingsView: View {
                 sub: "Parakeet TDT v3 auto-detects speech language. Use this field to set your expected meeting language for metadata and export."
             ) {
                 chipField("e.g. en-US", text: $settings.transcriptionLocale, width: 120)
+            }
+            XMODivider()
+            SettingsRow(
+                name: "Report a problem",
+                sub: "Send a diagnostic report — you'll see exactly what leaves your Mac"
+            ) {
+                XMOMonoValueButton(title: "Report\u{2026}") {
+                    showProblemReport = true
+                }
+                .accessibilityIdentifier("settings.reportProblem")
             }
         }
     }

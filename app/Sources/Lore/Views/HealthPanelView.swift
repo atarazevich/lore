@@ -12,6 +12,9 @@ struct HealthPanelView: View {
     /// Navigate the shell to its Settings destination (the `openLoreSettings`
     /// remedy — there is no System Settings URL for the in-app OpenAI key).
     var onOpenSettings: () -> Void
+    /// Open the "Report a problem" flow (#84) — the escape hatch when the chain
+    /// looks fine but something is still wrong.
+    var onReportProblem: () -> Void
     var onClose: () -> Void
 
     var body: some View {
@@ -23,6 +26,7 @@ struct HealthPanelView: View {
                     ForEach(HealthSection.allCases, id: \.self) { section in
                         sectionView(section)
                     }
+                    reportProblemRow
                 }
                 .padding(20)
             }
@@ -53,6 +57,36 @@ struct HealthPanelView: View {
         }
         .padding(.horizontal, 20)
         .frame(height: 60)
+    }
+
+    // MARK: - Report a problem (#84)
+
+    /// Bottom-of-panel escape hatch: the chain can read all-green and the app
+    /// still misbehave, so offer to send a diagnostic report rather than dead-end.
+    private var reportProblemRow: some View {
+        Button(action: onReportProblem) {
+            HStack(spacing: 8) {
+                Image(systemName: "exclamationmark.bubble")
+                    .font(.system(size: 12))
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Something still wrong?")
+                        .font(XMOTheme.Typography.control)
+                        .foregroundStyle(XMOTheme.TextColor.primary)
+                    Text("Report a problem — send a diagnostic report")
+                        .font(XMOTheme.Typography.meta)
+                        .foregroundStyle(XMOTheme.TextColor.muted)
+                }
+                Spacer(minLength: 0)
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(XMOTheme.TextColor.muted)
+            }
+            .padding(12)
+            .contentShape(Rectangle())
+            .background(XMOTheme.Surface.card, in: RoundedRectangle(cornerRadius: XMOTheme.Radius.card))
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("Something still wrong? Report a problem")
     }
 
     // MARK: - Section
