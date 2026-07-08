@@ -2,59 +2,53 @@
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-    <key>CFBundleName</key>
-    <string>Lore</string>
-    <key>CFBundleDisplayName</key>
-    <string>Lore</string>
-    <key>CFBundleIdentifier</key>
-    <string>com.lore.app</string>
-    <!-- CFBundleVersion is a placeholder that build.sh and release.sh always overwrite
-         in the bundle with <major.minor>.<git commit count>. Deliberately "0" so it can
-         never be mistaken for a real stamp: if a bundle ever reports 0, the stamp
-         didn't run. -->
-    <key>CFBundleVersion</key>
-    <string>0</string>
-    <!-- CFBundleShortVersionString is the marketing version, edited by hand:
-         each feature bumps the patch, each release bumps the minor. -->
-    <key>CFBundleShortVersionString</key>
-    <string>2.1.0</string>
-    <key>CFBundleExecutable</key>
-    <string>Lore</string>
-    <key>CFBundleIconFile</key>
-    <string>AppIcon</string>
-    <key>CFBundleURLTypes</key>
-    <array>
-        <dict>
-            <key>CFBundleURLName</key>
-            <string>com.lore.app</string>
-            <key>CFBundleURLSchemes</key>
-            <array>
-                <string>lore</string>
-            </array>
-        </dict>
-    </array>
-    <key>CFBundlePackageType</key>
-    <string>APPL</string>
-    <key>LSMinimumSystemVersion</key>
-    <string>15.0</string>
-    <key>NSMicrophoneUsageDescription</key>
-    <string>Lore needs microphone access to transcribe your voice in real-time during conversations.</string>
-    <key>NSAudioCaptureUsageDescription</key>
-    <string>Lore needs system audio recording access to transcribe other participants in real time.</string>
-    <key>LSApplicationCategoryType</key>
-    <string>public.app-category.productivity</string>
-    <key>SUFeedURL</key>
-    <string>https://updates.dev.cognition.design/appcast.xml</string>
-    <key>SUEnableAutomaticChecks</key>
-    <true/>
-    <key>SUPublicEDKey</key>
-    <string>JRchHE93Qx99A4qlbMpEFnyLhymm/Sv7G7lrMk17u4Y=</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSAppTransportSecurity</key>
-    <dict>
-        <key>NSAllowsLocalNetworking</key>
-        <true/>
-    </dict>
+	<key>CFBundleDisplayName</key>
+	<string>Lore</string>
+	<key>CFBundleExecutable</key>
+	<string>Lore</string>
+	<key>CFBundleIconFile</key>
+	<string>AppIcon</string>
+	<key>CFBundleIdentifier</key>
+	<string>com.lore.app</string>
+	<key>CFBundleName</key>
+	<string>Lore</string>
+	<key>CFBundlePackageType</key>
+	<string>APPL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>2.1.1</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>com.lore.app</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>lore</string>
+			</array>
+		</dict>
+	</array>
+	<key>CFBundleVersion</key>
+	<string>0</string>
+	<key>LSApplicationCategoryType</key>
+	<string>public.app-category.productivity</string>
+	<key>LSMinimumSystemVersion</key>
+	<string>15.0</string>
+	<key>LSUIElement</key>
+	<true/>
+	<key>NSAppTransportSecurity</key>
+	<dict>
+		<key>NSAllowsLocalNetworking</key>
+		<true/>
+	</dict>
+	<key>NSAudioCaptureUsageDescription</key>
+	<string>Lore needs system audio recording access to transcribe other participants in real time.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Lore needs microphone access to transcribe your voice in real-time during conversations.</string>
+	<key>SUEnableAutomaticChecks</key>
+	<true/>
+	<key>SUFeedURL</key>
+	<string>https://updates.dev.cognition.design/appcast.xml</string>
+	<key>SUPublicEDKey</key>
+	<string>JRchHE93Qx99A4qlbMpEFnyLhymm/Sv7G7lrMk17u4Y=</string>
 </dict>
 </plist>
