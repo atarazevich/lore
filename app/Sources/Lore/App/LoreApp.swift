@@ -4,7 +4,6 @@ import AVFoundation
 import os
 import Sparkle
 import UniformTypeIdentifiers
-import UserNotifications
 
 private let appLog = Logger(subsystem: "com.lore.app", category: "LoreApp")
 
@@ -539,36 +538,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         if isMainWindow {
             sender.orderOut(nil)
             NSApp.setActivationPolicy(.accessory)
-            showBackgroundModeHintIfNeeded()
             return false
         }
         return true
-    }
-
-    // MARK: - One-Shot Background Notification
-
-    private func showBackgroundModeHintIfNeeded() {
-        guard !defaults.bool(forKey: "hasShownBackgroundModeHint") else { return }
-        guard settings?.meetingAutoDetectEnabled == true else { return }
-
-        defaults.set(true, forKey: "hasShownBackgroundModeHint")
-
-        Task {
-            let center = UNUserNotificationCenter.current()
-            let granted = try? await center.requestAuthorization(options: [.alert])
-            guard granted == true else { return }
-
-            let content = UNMutableNotificationContent()
-            content.title = "\(XMOTheme.wordmark) is still running"
-            content.body = "Meeting detection is active. Click the menu bar icon to access controls."
-
-            let request = UNNotificationRequest(
-                identifier: "background-mode-hint",
-                content: content,
-                trigger: nil
-            )
-            try? await center.add(request)
-        }
     }
 
     // MARK: - Dictation Setup

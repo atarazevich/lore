@@ -54,20 +54,15 @@ final class MeetingDetectionController {
     private(set) var meetingDetector: MeetingDetector?
 
     #if DEBUG
-    /// Test seam: setup() can't run under swift test (NotificationService's
-    /// UNUserNotificationCenter requires a real app bundle), so tests inject
-    /// a detector with a mock signal source directly.
+    /// Test seam: setup() can't run under swift test (it starts a real
+    /// MeetingDetector on the CoreAudio mic listener), so tests inject a
+    /// detector with a mock signal source directly.
     func injectDetectorForTesting(_ detector: MeetingDetector) {
         meetingDetector = detector
     }
     #endif
 
-    /// Notification service for prompting the user. Kept as a secondary
-    /// surface: posting fails silently on dev-signed builds (no provisioning
-    /// profile → authorization denied); removal is deferred (#79).
-    private(set) var notificationService: NotificationService?
-
-    /// Notch-anchored prompt — the primary detection surface (#79).
+    /// Notch-anchored prompt — the sole detection surface (#80).
     private(set) var notchPromptPresenter: NotchPromptPresenter?
 
     /// The long-running task that listens for detection events.
@@ -128,49 +123,8 @@ final class MeetingDetectionController {
         )
         meetingDetector = detector
 
-        let service = NotificationService()
-        notificationService = service
-
-        // Wire notification callbacks to yield events
-        service.onAccept = { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                self.handleDetectionAccepted()
-            }
-        }
-
-        service.onNotAMeeting = { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                self.handleDetectionNotAMeeting()
-            }
-        }
-
-        service.onDismiss = { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                self.handleDetectionDismissed()
-            }
-        }
-
-        service.onIgnoreApp = { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                self.handleIgnoreApp()
-            }
-        }
-
-        service.onTimeout = { [weak self] in
-            guard let self else { return }
-            Task { @MainActor in
-                self.handleDetectionTimeout()
-            }
-        }
-
-        // Notch prompt: same callbacks, same handlers as the notification
-        // surface (no onDismiss — the notch has no user-driven dismiss
-        // affordance). Whichever surface resolves first wins — the handlers
-        // withdraw both.
+        // Notch prompt: the sole detection surface (#80). No onDismiss — the
+        // notch has no user-driven dismiss affordance.
         let presenter = NotchPromptPresenter()
         notchPromptPresenter = presenter
         presenter.onAccept = { [weak self] in self?.handleDetectionAccepted() }
@@ -188,7 +142,7 @@ final class MeetingDetectionController {
 
                 switch event {
                 case .detected(let app):
-                    await self.handleMeetingDetected(app: app)
+                    self.handleMeetingDetected(app: app)
                 case .ended:
                     self.handleMeetingEnded()
                 }
@@ -223,9 +177,6 @@ final class MeetingDetectionController {
                 detectLog.debug("detector stopped, listeners released")
             }
         }
-
-        notificationService?.cancelPending()
-        notificationService = nil
 
         notchPromptPresenter?.cancelPending()
         notchPromptPresenter = nil
@@ -347,16 +298,16 @@ final class MeetingDetectionController {
 
         let (micActive, app) = await detector.queryCurrentState()
         if micActive, app != nil {
-            await handleMeetingDetected(app: app)
+            handleMeetingDetected(app: app)
         }
     }
 
     // MARK: - Detection Event Handlers
 
-    /// Returns true when the prompt path was reached (notification post attempted),
+    /// Returns true when the prompt path was reached (notch prompt presented),
     /// false when suppressed. Visible for testing.
     @discardableResult
-    func handleMeetingDetected(app: MeetingApp?) async -> Bool {
+    func handleMeetingDetected(app: MeetingApp?) -> Bool {
         detectedApp = app
 
         // Don't prompt if already recording (meeting session or dictation, #77)
@@ -379,19 +330,14 @@ final class MeetingDetectionController {
         }
 
         DiagStore.record(.detectionPrompt(disposition: .shown))
-        // Primary surface: notch prompt (#79). The notification attempt stays
-        // as a secondary surface — it fails silently on dev-signed builds.
         notchPromptPresenter?.present(appName: app?.name)
-        _ = await notificationService?.postMeetingDetected(appName: app?.name)
         return true
     }
 
-    /// Withdraw both prompt surfaces. Called when either surface resolves
-    /// (accept / not-a-meeting / ignore / dismiss / timeout) so the other
-    /// doesn't linger and fire a stale 60s timeout, and when the detected
-    /// meeting ends.
+    /// Withdraw the prompt. Called when it resolves (accept / not-a-meeting /
+    /// ignore / timeout) so a stale 60s timeout can't fire, and when the
+    /// detected meeting ends.
     private func withdrawPrompts() {
-        notificationService?.cancelPending()
         notchPromptPresenter?.cancelPending()
     }
 
@@ -451,12 +397,6 @@ final class MeetingDetectionController {
                 dismissedEvents.insert(app.bundleID)
             }
         }
-    }
-
-    private func handleDetectionDismissed() {
-        DiagStore.record(.detectionPrompt(disposition: .dismissed))
-        withdrawPrompts()
-        eventContinuation.yield(.dismissed)
     }
 
     private func handleDetectionTimeout() {

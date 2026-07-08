@@ -8,12 +8,10 @@ private let notchLog = Logger(subsystem: "com.lore.app", category: "NotchPrompt"
 
 /// Notch-anchored Dynamic-Island-style prompt for meeting detection (#79).
 ///
-/// Primary delivery surface for the detection prompt: Notification Center
-/// cannot deliver on dev-signed builds (`requestAuthorization` fails without
-/// a provisioning profile), so the prompt renders as a DynamicNotchKit window
-/// under the hardware notch instead. Mirrors `NotificationService`'s callback
-/// contract exactly so `MeetingDetectionController` wires both surfaces to
-/// the same handlers.
+/// The sole delivery surface for the detection prompt (#80): Notification
+/// Center was removed because it cannot deliver on dev-signed builds (the
+/// authorization request fails without a provisioning profile). The prompt
+/// renders as a DynamicNotchKit window under the hardware notch instead.
 
 // MARK: - Prompt content
 
@@ -40,8 +38,8 @@ protocol NotchPromptWindow: AnyObject {
 
 /// Presents the meeting-detection prompt in the notch and owns its lifecycle:
 /// 60-second auto-timeout, replace-on-re-present, once-only resolution.
-/// Callback contract matches `NotificationService` (onAccept / onNotAMeeting /
-/// onIgnoreApp / onTimeout + `cancelPending()`).
+/// Callbacks: onAccept / onNotAMeeting / onIgnoreApp / onTimeout, plus
+/// `cancelPending()` to withdraw without firing.
 @MainActor
 final class NotchPromptPresenter {
     /// Called when the user clicks "Start transcribing".

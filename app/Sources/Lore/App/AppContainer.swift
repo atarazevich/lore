@@ -18,10 +18,6 @@ final class AppContainer {
     /// Created when detection is enabled; nil otherwise.
     private(set) var detectionController: MeetingDetectionController?
 
-    /// Shared notification service, accessible for batch completion notifications
-    /// even when detection is not enabled.
-    private(set) var notificationService: NotificationService?
-
     private var didSeedInitialData = false
     private var didInitializeServices = false
 
@@ -182,8 +178,6 @@ final class AppContainer {
         }
         detectionController = controller
         controller.setup(settings: settings)
-        // Expose the notification service for batch completion notifications
-        notificationService = controller.notificationService
         coordinator.activeSettings = settings
         coordinator.startDetectionEventLoop(controller)
     }
@@ -194,7 +188,6 @@ final class AppContainer {
         coordinator.activeSettings = nil
         detectionController?.teardown()
         detectionController = nil
-        // NotificationService remains accessible if already set (for batch notifications)
     }
 
     func seedIfNeeded(coordinator: AppCoordinator) async {
