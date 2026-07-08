@@ -29,6 +29,10 @@ final class MenuBarController {
         popover.contentSize = NSSize(width: 280, height: 160)
         popover.behavior = .transient
         popover.animates = true
+        // The popover content renders on XMO dark tokens; force the system chrome
+        // (arrow + material) dark so it matches instead of adapting to the OS
+        // appearance (D-031: visual redesign only).
+        popover.appearance = NSAppearance(named: .darkAqua)
 
         let popoverView = MenuBarPopoverView(
             coordinator: coordinator,
@@ -59,7 +63,8 @@ final class MenuBarController {
             button.action = #selector(togglePopover(_:))
         }
 
-        startIconObservation()
+        applyScreenShareVisibility()
+        startObservation()
     }
 
     deinit {
@@ -71,17 +76,22 @@ final class MenuBarController {
             popover.performClose(sender)
         } else if let button = statusItem.button {
             popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+            // The popover's window is created by `show`; apply the sharing type
+            // now so an open popover honors hide-from-screen-share too.
+            applyScreenShareVisibility()
         }
     }
 
-    private func startIconObservation() {
+    private func startObservation() {
         iconUpdateTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { break }
                 updateIcon()
+                applyScreenShareVisibility()
                 await withCheckedContinuation { continuation in
                     withObservationTracking {
                         _ = self.coordinator.isRecording
+                        _ = self.settings.hideFromScreenShare
                     } onChange: {
                         continuation.resume()
                     }
@@ -97,5 +107,17 @@ final class MenuBarController {
             accessibilityDescription: XMOTheme.wordmark
         )
         statusItem.button?.image?.isTemplate = true
+    }
+
+    /// The status-bar button lives in a system-owned `NSStatusBarWindow` that is
+    /// not in `NSApp.windows`, so `SettingsStore.applyScreenShareVisibility()`
+    /// never reaches it — the icon (and an open popover) would leak into a
+    /// screen share. Apply the same `sharingType` here so the menu bar affordance
+    /// honors the hide-from-screen-share setting (`.none` = excluded from capture
+    /// only; the user still sees it).
+    private func applyScreenShareVisibility() {
+        let type = settings.screenSharingType
+        statusItem.button?.window?.sharingType = type
+        popover.contentViewController?.view.window?.sharingType = type
     }
 }

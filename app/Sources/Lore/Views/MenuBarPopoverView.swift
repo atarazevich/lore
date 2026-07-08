@@ -25,49 +25,42 @@ struct MenuBarPopoverView: View {
                 .padding(.top, 14)
                 .padding(.bottom, 10)
 
-            Divider()
+            XMODivider()
 
             primaryAction
-                .padding(.horizontal, 16)
+                .padding(.horizontal, 12)
                 .padding(.vertical, 10)
 
-            Divider()
+            XMODivider()
 
-            Button(action: onShowMainWindow) {
-                HStack {
-                    Text("Show \(XMOTheme.wordmark)")
-                    Spacer()
-                }
+            VStack(spacing: 2) {
+                PopoverMenuRow(
+                    title: "Show \(XMOTheme.wordmark)",
+                    systemImage: "macwindow",
+                    action: onShowMainWindow
+                )
+                PopoverMenuRow(
+                    title: "Check for Updates…",
+                    systemImage: "arrow.triangle.2.circlepath",
+                    action: onCheckForUpdates
+                )
             }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            .padding(.horizontal, 6)
+            .padding(.vertical, 6)
 
-            Button(action: onCheckForUpdates) {
-                HStack {
-                    Text("Check for Updates…")
-                    Spacer()
-                }
-            }
-            .buttonStyle(.plain)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
+            XMODivider()
 
-            Divider()
-
-            Button(action: onQuit) {
-                HStack {
-                    Text("Quit \(XMOTheme.wordmark)")
-                    Spacer()
-                }
-            }
-            .buttonStyle(.plain)
-            .foregroundStyle(.secondary)
-            .padding(.horizontal, 16)
-            .padding(.vertical, 8)
-            .padding(.bottom, 4)
+            PopoverMenuRow(
+                title: "Quit \(XMOTheme.wordmark)",
+                systemImage: "power",
+                muted: true,
+                action: onQuit
+            )
+            .padding(.horizontal, 6)
+            .padding(.vertical, 6)
         }
         .frame(width: 280)
+        .background(XMOTheme.Surface.popover)
         .onAppear {
             if coordinator.isRecording {
                 startTimer()
@@ -86,60 +79,48 @@ struct MenuBarPopoverView: View {
     }
 
     private var statusLine: some View {
-        HStack(spacing: 6) {
+        HStack(spacing: 8) {
             if coordinator.isRecording {
                 Circle()
                     .fill(XMOTheme.Accent.red)
                     .frame(width: 8, height: 8)
-                Text("Recording - \(formattedTime)")
-                    .font(.system(size: 13, weight: .medium))
+                Text("Recording — \(formattedTime)")
+                    .font(XMOTheme.Typography.control)
+                    .foregroundStyle(XMOTheme.TextColor.primary)
             } else if settings.meetingAutoDetectEnabled {
                 Circle()
-                    .fill(.secondary)
+                    .fill(XMOTheme.TextColor.muted)
                     .frame(width: 8, height: 8)
-                Text("Listening for meetings...")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                Text("Listening for meetings…")
+                    .font(XMOTheme.Typography.secondary)
+                    .foregroundStyle(XMOTheme.TextColor.muted)
             } else {
                 Circle()
-                    .fill(.secondary.opacity(0.5))
+                    .fill(XMOTheme.TextColor.faint)
                     .frame(width: 8, height: 8)
                 Text("Idle")
-                    .font(.system(size: 13))
-                    .foregroundStyle(.secondary)
+                    .font(XMOTheme.Typography.secondary)
+                    .foregroundStyle(XMOTheme.TextColor.muted)
             }
             Spacer()
         }
     }
 
-    @ViewBuilder
     private var primaryAction: some View {
-        if coordinator.isRecording {
-            Button(action: {
+        // Canonical redesign Start/Stop control; behavior preserved (D-031):
+        // Stop while recording, otherwise gate on recording consent before Start.
+        XMOStartStopButton(isRecording: coordinator.isRecording) {
+            if coordinator.isRecording {
                 coordinator.handle(.userStopped, settings: settings)
-            }) {
-                Text("Stop Recording")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(maxWidth: .infinity)
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(XMOTheme.Accent.red)
-            .controlSize(.regular)
-        } else {
-            Button(action: {
+            } else {
                 guard settings.hasAcknowledgedRecordingConsent else {
                     onShowMeetings()
                     return
                 }
                 coordinator.handle(.userStarted(.manual()), settings: settings)
-            }) {
-                Text("Start Recording")
-                    .font(.system(size: 13, weight: .medium))
-                    .frame(maxWidth: .infinity)
             }
-            .buttonStyle(.borderedProminent)
-            .controlSize(.regular)
         }
+        .frame(maxWidth: .infinity)
     }
 
     private var formattedTime: String {
@@ -172,5 +153,35 @@ struct MenuBarPopoverView: View {
         timerTask?.cancel()
         timerTask = nil
         elapsedSeconds = 0
+    }
+}
+
+/// Full-width popover menu row: leading SF Symbol + label, XMO hover fill.
+/// `muted` renders the destructive/secondary Quit action.
+private struct PopoverMenuRow: View {
+    let title: String
+    var systemImage: String
+    var muted = false
+    let action: () -> Void
+
+    var body: some View {
+        let tint = muted ? XMOTheme.TextColor.muted : XMOTheme.TextColor.primary
+        Button(action: action) {
+            HStack(spacing: 10) {
+                Image(systemName: systemImage)
+                    .font(.system(size: 12, weight: .medium))
+                    .foregroundStyle(tint)
+                    .frame(width: 16)
+                Text(title)
+                    .font(XMOTheme.Typography.secondary)
+                    .foregroundStyle(tint)
+                Spacer(minLength: 0)
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .xmoHoverFill(cornerRadius: XMOTheme.Radius.button)
     }
 }
