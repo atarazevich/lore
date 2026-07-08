@@ -50,6 +50,25 @@ final class HotkeyManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
+    /// Read-only liveness of the existing tap, for the health panel (#83). Never
+    /// creates a tap — reports on the one this manager already owns, so the panel
+    /// reads the same tap the hotkey uses rather than installing a second.
+    ///
+    /// This is enabled/existence only — NOT event flow. A tap can be enabled yet
+    /// starved (the reported "Fn dead, all toggles on" incident); pair this with
+    /// `isEventTapStalled` for the honest verdict.
+    var isEventTapAlive: Bool {
+        guard let eventTap else { return false }
+        return CGEvent.tapIsEnabled(tap: eventTap)
+    }
+
+    /// Read-only: the enabled-but-starved verdict the 5-second monitor already
+    /// computes (`tapEventsStalled` — "the OS delivered key events to everyone
+    /// else and not to us"). `isEventTapAlive` reads such a tap as healthy, so
+    /// the health panel's critical `tap` probe must consult this too, or the
+    /// notch never summons in the one scenario it exists for (#83).
+    var isEventTapStalled: Bool { lastEventsStalled }
+
     func install(coordinator: DictationCoordinator, settings: AppSettings) {
         self.coordinator = coordinator
         self.settings = settings
@@ -638,19 +657,9 @@ final class HotkeyManager {
         return min(sinceKeyDown, sinceFlagsChanged)
     }
 
-    /// Check if SecureInput is active via IOKit registry.
+    /// Check if SecureInput is active via IOKit registry. Shares the registry
+    /// read with the health probe (`SecureInput`, #83) so there is one copy.
     private func checkSecureInput() -> (active: Bool, pid: Int32?) {
-        let root = IORegistryGetRootEntry(kIOMainPortDefault)
-        guard let prop = IORegistryEntryCreateCFProperty(
-            root, "kCGSSessionSecureInputPID" as CFString, kCFAllocatorDefault, 0
-        ) else {
-            IOObjectRelease(root)
-            return (false, nil)
-        }
-        IOObjectRelease(root)
-        if let pid = prop.takeRetainedValue() as? Int32, pid > 0 {
-            return (true, pid)
-        }
-        return (false, nil)
+        SecureInput.holder()
     }
 }
