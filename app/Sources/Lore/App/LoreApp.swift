@@ -90,6 +90,12 @@ public struct LoreRootApp: App {
                     // scene graph. If applicationDidFinishLaunching already
                     // wanted the window, wiring this presents it (didSet).
                     appDelegate.onShowMainWindow = { [self] in showMainWindow() }
+                    // Notch "Fix it" (#83) fronts the window and raises the
+                    // health panel via the shell signal.
+                    appDelegate.onShowHealthPanel = { [self] in
+                        shell.wantsHealthPanel = true
+                        showMainWindow()
+                    }
                     if case .live = container.mode {
                         appDelegate.setupMenuBarIfNeeded(
                             coordinator: coordinator,
@@ -350,6 +356,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var localHotkeyMonitor: Any?
     private var didSetupDictation = false
 
+    /// Opens the health panel (fronts the window, raises the panel via the shell
+    /// signal). Wired from the scene's onAppear, where the shell is reachable.
+    var onShowHealthPanel: (() -> Void)?
+
+    /// Notch that summons the user on a critical health failure (#83).
+    private let healthNotch = HealthNotchPresenter()
+
     /// The last second of events is exactly the interesting second when the user
     /// quits to escape a wedged state. `record()` coalesces disk writes at 1s, so
     /// without this the tail is lost. (A crash still loses it — nothing to do there.)
@@ -576,6 +589,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hotkeyManager: coordinator.hotkeyManager
         )
 
+        setupHealthMonitor(coordinator: coordinator, settings: settings)
+
         // Preload models so the first use is instant. Detached; launch never
         // blocks. Two loads cover the common warm set: the shared cache (meeting
         // mic reuses it) and dictation's private backend (its own decoder state).
@@ -588,6 +603,48 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         Task {
             await coordinator.dictationCoordinator.prewarm()
         }
+    }
+
+    /// Build and start the health monitor (#83). Runs even while the window is
+    /// closed — the "Fn dead" incident happens with no window open — so it lives
+    /// on the delegate, not a view. The prober reads the hotkey tap's existing
+    /// liveness (never installs a second tap) and the key presence; the three
+    /// expensive Test-now actions reach the real mic / model cache / network.
+    private func setupHealthMonitor(coordinator: AppCoordinator, settings: AppSettings) {
+        guard coordinator.healthMonitor == nil else { return }
+
+        let hotkeyManager = coordinator.hotkeyManager
+        let prober = HealthProber(
+            isEventTapAlive: { hotkeyManager.isEventTapAlive },
+            isEventTapStalled: { hotkeyManager.isEventTapStalled },
+            hasOpenAIKey: { !settings.openaiApiKey.isEmpty }
+        )
+        let monitor = HealthMonitor(prober: prober)
+
+        let audioBus = container?.audioBus
+        monitor.runMicCaptureTest = {
+            guard let audioBus else { return }
+            let subscription = audioBus.subscribe(deviceID: nil)
+            try? await Task.sleep(for: .seconds(2))
+            audioBus.unsubscribe(subscription.id)
+        }
+        monitor.runModelWarmupTest = { [weak coordinator] in
+            try? await coordinator?.sharedBackendCache.prepare()
+        }
+        monitor.runOpenAITest = {
+            let key = settings.openaiApiKey
+            guard !key.isEmpty else { return }
+            _ = await KeyHealthCheck.probe(apiKey: key)
+        }
+
+        monitor.onSummon = { [weak self] summon in
+            guard let self else { return }
+            self.healthNotch.onFix = { [weak self] in self?.onShowHealthPanel?() }
+            self.healthNotch.present(summon)
+        }
+
+        coordinator.healthMonitor = monitor
+        monitor.start()
     }
 
     // MARK: - Global Hotkey (Cmd+Shift+L)

@@ -10,6 +10,7 @@ struct ShellView: View {
     let updater: SPUUpdater
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(ShellModel.self) private var shell
+    @State private var showHealthPanel = false
 
     var body: some View {
         HStack(spacing: 0) {
@@ -17,7 +18,9 @@ struct ShellView: View {
                 activeDestination: shell.destination,
                 isMeetingRecording: coordinator.isRecording,
                 isDictationLocked: coordinator.dictationIndicator.model.isLocked,
-                onSelect: { shell.destination = $0 }
+                healthMonitor: coordinator.healthMonitor,
+                onSelect: { shell.destination = $0 },
+                onOpenHealth: { showHealthPanel = true }
             )
             mainPane
         }
@@ -28,6 +31,25 @@ struct ShellView: View {
         // The toolbar's "N recorded" subtitle needs the index at launch;
         // afterwards session end / batch completion keep it fresh.
         .task { await coordinator.loadHistory() }
+        // The notch self-summon (#83) raises the panel through this signal.
+        .onChange(of: shell.wantsHealthPanel) { _, wants in
+            if wants {
+                showHealthPanel = true
+                shell.wantsHealthPanel = false
+            }
+        }
+        .sheet(isPresented: $showHealthPanel) {
+            if let monitor = coordinator.healthMonitor {
+                HealthPanelView(
+                    monitor: monitor,
+                    onOpenSettings: {
+                        showHealthPanel = false
+                        shell.destination = .settings
+                    },
+                    onClose: { showHealthPanel = false }
+                )
+            }
+        }
     }
 
     // MARK: - Main pane
@@ -128,7 +150,9 @@ private struct ShellSidebar: View {
     let activeDestination: ShellDestination
     let isMeetingRecording: Bool
     let isDictationLocked: Bool
+    let healthMonitor: HealthMonitor?
     let onSelect: (ShellDestination) -> Void
+    let onOpenHealth: () -> Void
 
     var body: some View {
         VStack(spacing: 0) {
@@ -205,15 +229,22 @@ private struct ShellSidebar: View {
         }
     }
 
-    /// Mono bundle version, right-aligned (SHELL-12; the static "Online"
-    /// badge was dropped as meaningless status — #73, app-shell.md Q5).
+    /// Health readiness readout in the slot the decorative "Online" badge
+    /// vacated (#73 → #83): a status dot + "All systems ready" / "N issues —
+    /// <first issue>", click opens the panel. Falls back to the version string
+    /// when no monitor is wired (UI-test mode).
+    @ViewBuilder
     private var footer: some View {
-        Text(versionString)
-            .font(XMOTheme.Typography.monoMeta)
-            .foregroundStyle(XMOTheme.TextColor.muted)
-            .frame(maxWidth: .infinity, alignment: .trailing)
-            .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
-            .overlay(alignment: .top) { XMODivider() }
+        if let healthMonitor {
+            ShellHealthFooter(summary: healthMonitor.summary, action: onOpenHealth)
+        } else {
+            Text(versionString)
+                .font(XMOTheme.Typography.monoMeta)
+                .foregroundStyle(XMOTheme.TextColor.muted)
+                .frame(maxWidth: .infinity, alignment: .trailing)
+                .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
+                .overlay(alignment: .top) { XMODivider() }
+        }
     }
 
     private var versionString: String {
@@ -221,6 +252,31 @@ private struct ShellSidebar: View {
             forInfoDictionaryKey: "CFBundleShortVersionString"
         ) as? String
         return "v" + (version ?? "0.0")
+    }
+}
+
+/// Sidebar footer health row (SHELL-12 slot, #83): dot + summary line, whole row
+/// clickable to open the health panel.
+private struct ShellHealthFooter: View {
+    let summary: HealthSummary
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 8) {
+                HealthStatusDot(status: summary.status)
+                Text(summary.text)
+                    .font(XMOTheme.Typography.meta)
+                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+            }
+            .contentShape(Rectangle())
+            .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
+            .overlay(alignment: .top) { XMODivider() }
+        }
+        .buttonStyle(.plain)
+        .accessibilityLabel("System health: \(summary.text)")
     }
 }
 

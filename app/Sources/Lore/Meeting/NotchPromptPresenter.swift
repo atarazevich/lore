@@ -202,9 +202,7 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
     /// prompt is live), which bypasses this patch until the next state
     /// change. Accepted for v1 — a prompt lives at most 60 seconds.
     private func applyFullscreenVisibilityPatch() {
-        guard let panel = notch.windowController?.window else { return }
-        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
-        panel.orderFrontRegardless()
+        notch.windowController?.window?.applyFullscreenAuxiliaryVisibility()
     }
 
     /// DynamicNotchKit publishes hover but does not act on it: drive the

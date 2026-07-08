@@ -102,6 +102,11 @@ final class AppCoordinator {
     let hotkeyManager = HotkeyManager()
     let dictationIndicator = DictationIndicatorManager()
 
+    /// Live health readiness (#83). Set once dictation is wired (it needs the
+    /// hotkey tap's state); the shell footer and health panel read it. Nil in
+    /// UI-test mode, where the footer falls back to the version string.
+    var healthMonitor: HealthMonitor?
+
     /// The template snapshot frozen at session start (not stop).
     var sessionTemplateSnapshot: TemplateSnapshot?
 

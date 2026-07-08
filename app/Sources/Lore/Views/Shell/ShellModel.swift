@@ -40,6 +40,10 @@ final class ShellModel {
 
     var destination: ShellDestination = .dictation
 
+    /// Raised by the notch self-summon (#83) to open the health panel; the
+    /// shell consumes it and clears it. A signal, not the panel's own state.
+    var wantsHealthPanel = false
+
     /// Stage E: the Meetings destination shows the designed review layout
     /// (NotesView) while idle. This flag pins the live UI (ContentView) on
     /// screen for its gate overlays — onboarding, recording consent, model
