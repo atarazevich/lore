@@ -46,6 +46,8 @@
 	<string>Lore needs microphone access to transcribe your voice in real-time during conversations.</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
+	<key>SUScheduledCheckInterval</key>
+	<integer>21600</integer>
 	<key>SUFeedURL</key>
 	<string>https://updates.dev.cognition.design/appcast.xml</string>
 	<key>SUPublicEDKey</key>

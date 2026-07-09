@@ -399,9 +399,11 @@ final class SettingsStore {
             self._enableBatchRefinement = defaults.bool(forKey: "enableBatchRefinement")
         }
 
-        // Detection Settings — default to false until meeting mode is stable
+        // Detection Settings — default ON so the app is useful out of the box (#91).
+        // Only affects installs where the key was never set; an explicit prior
+        // choice (true or false) persists in user defaults and is honored.
         if defaults.object(forKey: "meetingAutoDetectEnabled") == nil {
-            self._meetingAutoDetectEnabled = false
+            self._meetingAutoDetectEnabled = true
         } else {
             self._meetingAutoDetectEnabled = defaults.bool(forKey: "meetingAutoDetectEnabled")
         }
