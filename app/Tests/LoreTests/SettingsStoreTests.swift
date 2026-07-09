@@ -73,15 +73,26 @@ final class SettingsStoreTests: XCTestCase {
 
     func testDefaultMeetingAutoDetect() {
         let store = makeStore()
-        // Deliberately defaults to false when key never set (d347398):
-        // auto-detect is opt-in.
-        XCTAssertFalse(store.meetingAutoDetectEnabled)
+        // Defaults to true when key never set (#91): auto-capture is on out of
+        // the box so the app is useful on a fresh install. An explicit prior
+        // choice still persists (see testMeetingAutoDetectRoundTrip).
+        XCTAssertTrue(store.meetingAutoDetectEnabled)
     }
 
-    func testMeetingAutoDetectRoundTrip() {
-        let store = makeStore()
-        store.meetingAutoDetectEnabled = false
-        XCTAssertFalse(store.meetingAutoDetectEnabled)
+    /// An explicit `false` must survive a fresh launch (#91): flipping the unset
+    /// default to `true` must not clobber a user who turned auto-capture off.
+    /// Two stores over one suite exercise the init `else` (from-persisted) branch,
+    /// which a same-instance round-trip would never reach.
+    func testMeetingAutoDetectExplicitFalseSurvivesRelaunch() {
+        let suite = makeSuite()
+        makeStore(defaults: suite).meetingAutoDetectEnabled = false
+        // Second store reads the persisted key, not the true default.
+        XCTAssertFalse(makeStore(defaults: suite).meetingAutoDetectEnabled)
+    }
+
+    /// Mirror: an unset key yields the new `true` default on a fresh store.
+    func testMeetingAutoDetectDefaultsTrueWhenUnset() {
+        XCTAssertTrue(makeStore(defaults: makeSuite()).meetingAutoDetectEnabled)
     }
 
     func testDefaultSilenceTimeoutMinutes() {

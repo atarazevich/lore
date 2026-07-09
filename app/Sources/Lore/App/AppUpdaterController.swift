@@ -26,6 +26,23 @@ final class AppUpdaterController {
             try updater.start()
         } catch {
             presentStartupError()
+            return
+        }
+
+        // Force an update check near launch so the app checks soon rather than
+        // waiting a full interval (#91). This is the SILENT path: unlike
+        // `checkForUpdatesFromMenuBar`, it does NOT flip activation policy to
+        // .regular or call NSApp.activate, so an accessory-mode launch is never
+        // yanked to the foreground. SPUStandardUserDriver surfaces UI only if an
+        // update is actually found (gentle reminder); a background check shows no
+        // "you're up to date" dialog. Guarded on `automaticallyChecksForUpdates`
+        // (default true via Info.plist SUEnableAutomaticChecks, overridable by the
+        // user) so a user who turned updates off gets no launch check either.
+        // The header recommends calling this only immediately after `start()`.
+        // Scheduled interval lives in Info.plist (SUScheduledCheckInterval) — the
+        // API-preferred place — so we never clobber the setting on launch.
+        if updater.automaticallyChecksForUpdates {
+            updater.checkForUpdatesInBackground()
         }
     }
 

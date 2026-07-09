@@ -59,6 +59,13 @@ struct SettingsView: View {
         self._updatesViewModel = StateObject(
             wrappedValue: CheckForUpdatesViewModel(updater: updater)
         )
+        // Seed the toggle from the real Sparkle setting (#91) so it reflects
+        // reality (default ON via Info.plist SUEnableAutomaticChecks) from first
+        // render, not a hardcoded false. refreshViewState re-reads it on every
+        // activation; the .onChange push writes user edits back to the updater.
+        self._automaticallyChecksForUpdates = State(
+            initialValue: updater.automaticallyChecksForUpdates
+        )
     }
 
     var body: some View {
