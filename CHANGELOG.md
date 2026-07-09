@@ -1,5 +1,25 @@
 # Changelog
 
+## v2.2.0 — 2026-07-09
+
+Polish and a privacy cleanup on top of the diagnostics release.
+
+**No more notification prompts**
+- Removed Notification Center entirely — the macOS "Lore would like to send notifications" permission prompt no longer appears on any machine. Meeting detection prompts through the notch (the Dynamic-Island-style prompt from v2.1.0) with Start transcribing / Not a meeting / Ignore this app (#80)
+
+**Clearer Keep audio setting**
+- The "Keep audio" row now states present reality — how many recordings are on disk right now and the space they use — instead of a number that read like a projection of what the retention cap would eventually hold (#89)
+
+**Health panel polish** (shipped in v2.1.0's line, refined here)
+- "Test now" shows a spinner while it runs and updates the result; the dead system-audio "Test now" button is gone; the model warm-up wording no longer implies a 1 GB load on every check (#88)
+
+**Menu bar**
+- The menu bar popover is restyled to match the app and shows live recording state (Start/Stop, Show Lore, Check for updates, Quit) (#90)
+
+**Better defaults & working auto-update**
+- Meeting auto-capture is now ON by default (a new install starts watching for meetings); an explicit choice to turn it off is preserved (#91)
+- Automatic update checks actually run now — the app checks on a schedule and does a silent check shortly after launch, so updates arrive without you asking (#91)
+
 ## v2.1.0 — 2026-07-08
 
 Diagnostics: the app can now see and report its own health, so a problem on a machine we can't reach becomes something the user can show us in one click. The version line also moves to 2.x.
