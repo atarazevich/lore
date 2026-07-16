@@ -54,11 +54,13 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
     case signing
     case urlScheme
     case diskSpace
-    // Input
+    // Input. Secure input sits above the tap: while it is on, the tap's verdict is
+    // unmeasurable and its failure is a symptom — the upper link makes the lower
+    // one meaningless, which is what this order is for (#94).
     case accessibility
     case inputMonitoring
-    case tap
     case secureInput
+    case tap
     // Audio
     case microphone
     case micCapture
@@ -75,7 +77,7 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
     var section: HealthSection {
         switch self {
         case .signing, .urlScheme, .diskSpace: return .installIdentity
-        case .accessibility, .inputMonitoring, .tap, .secureInput: return .input
+        case .accessibility, .inputMonitoring, .secureInput, .tap: return .input
         case .microphone, .micCapture: return .audio
         case .asrModel, .vadModel, .modelWarmup: return .transcription
         case .openAIKey, .openAILiveness: return .cleanup
@@ -93,9 +95,12 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
     /// A failure here means the core hold-to-talk loop is dead, so the app
     /// summons itself via the notch rather than waiting to be found (design §6).
     /// Every other failure stays silent in the panel.
+    ///
+    /// #83 excluded `.secureInput` as a curiosity; report 8763HGZT showed a
+    /// system-wide outage, so it joined the set (#94).
     var isCritical: Bool {
         switch self {
-        case .accessibility, .inputMonitoring, .tap, .microphone: return true
+        case .accessibility, .inputMonitoring, .tap, .secureInput, .microphone: return true
         default: return false
         }
     }
@@ -203,18 +208,26 @@ struct HealthSummary: Equatable {
         firstIssueShortName = issues.first?.id.shortName
     }
 
-    /// A footer issue is any `.failed`, plus a *cheap*-probe `.warning` (low
-    /// disk, an ad-hoc signature). An expensive probe's `.warning` means "not
-    /// tested yet" or "inconclusive" — it stays visible inside the panel with its
-    /// Test-now affordance, but is never counted in the always-visible footer.
-    /// Otherwise a dictation-only user, whose System audio and OpenAI liveness
-    /// are never exercised, could never reach "All systems ready" (the cry-wolf
-    /// inversion). A real recorded failure still lands as `.failed` and counts.
+    /// A footer issue is any `.failed`, plus a `.warning` that means real
+    /// degradation (low disk, an ad-hoc signature). A `.warning` meaning "no
+    /// verdict" never counts — it stays visible inside the panel, but the
+    /// always-visible footer would cry wolf. Two probes mean "no verdict":
+    ///
+    /// - Any *expensive* probe: `.warning` is "not tested yet". Otherwise a
+    ///   dictation-only user, whose System audio and OpenAI liveness are never
+    ///   exercised, could never reach "All systems ready" (the cry-wolf inversion).
+    /// - `.tap`: `tapStatus()` returns `.warning` **only** under secure input and
+    ///   never for degradation, so the pair is "no verdict" by construction (#94).
+    ///   Counting it would inflate one physical condition into "2 issues — Secure
+    ///   input", and `plainLanguageIssue` — gated on this rule — would tell the
+    ///   report's reader their Fn key is broken directly beneath the truth.
+    ///
+    /// A real recorded failure still lands as `.failed` and counts.
     static func countsInFooter(_ result: HealthResult) -> Bool {
         switch result.status {
         case .ok: return false
         case .failed: return true
-        case .warning: return result.id.cost == .cheap
+        case .warning: return result.id.cost == .cheap && result.id != .tap
         }
     }
 

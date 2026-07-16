@@ -81,9 +81,9 @@ enum HealthCatalog {
     ///   - holderName: secure-input holder process name — machine-local, shown
     ///     in the detail line, never serialized.
     ///   - teamID: signing team identifier, shown in the detail line only.
-    ///   - secureInputActive: when the `tap` probe is failing *and* secure input
-    ///     is active, that is the cause — the tap remedy points at it instead of
-    ///     offering a restart that would not help.
+    ///   - secureInputActive: secure input starves the tap, so it is the cause of
+    ///     the tap's non-ok state — which under it is `.warning`, never `.failed`
+    ///     (#94). The tap remedy points at it instead of offering a useless restart.
     static func describe(
         _ result: HealthResult,
         holderName: String? = nil,
@@ -167,8 +167,8 @@ enum HealthCatalog {
             // the cause rather than a restart that cannot help.
             if secureInputActive {
                 return ("Keyboard tap",
-                        "The Fn key isn't reaching Lore because secure input is active — see Secure input below.",
-                        Remedy(instruction: "Secure input is holding the keyboard; that is what stops the Fn key. Release it (see the Secure input item below) — restarting Lore will not help while it is on.",
+                        "The Fn key isn't reaching Lore because secure input is active — see Secure input above.",
+                        Remedy(instruction: "Secure input is holding the keyboard; that is what stops the Fn key. Release it (see the Secure input item above) — restarting Lore will not help while it is on.",
                                actions: []))
             }
             return ("Keyboard tap",
@@ -182,7 +182,12 @@ enum HealthCatalog {
             // was frontmost when secure input went on, which per rdar://48953777 is
             // often not the caller. So the copy suggests where to look; it does not
             // accuse a named app of holding the user's keyboard.
-            let hint = holderName.map {
+            // A CLI or daemon holder has no `NSRunningApplication`, so the name is
+            // nil while the pid stands — and a daemon holding the flag is the case
+            // where the user most needs the hint (we hit it live twice). Fall back
+            // to the pid rather than say nothing about a holder we know of (#92).
+            let holder = holderName ?? result.secureInputHolderPID.map { "process \($0)" }
+            let hint = holder.map {
                 ", and macOS associates it with \($0) — though it names whichever app was in front, which may not be the one responsible"
             } ?? ""
             return ("Secure input",

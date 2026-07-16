@@ -16,10 +16,14 @@ final class HealthProberTests: XCTestCase {
         return DiagStore(directory: dir)
     }
 
-    private func prober(alive: Bool, stalled: Bool) -> HealthProber {
+    /// `secureInput` drives the injected read (#94), so the tap gate is exercised
+    /// without touching this machine's actual secure-input flag — holding it for
+    /// real would starve the keyboard of whoever runs the suite.
+    private func prober(alive: Bool, stalled: Bool, secureInput: Bool = false) -> HealthProber {
         HealthProber(
             isEventTapAlive: { alive },
             isEventTapStalled: { stalled },
+            readSecureInput: { SecureInput.State(active: secureInput, pid: nil) },
             hasOpenAIKey: { true },
             store: emptyStore()
         )
@@ -47,6 +51,50 @@ final class HealthProberTests: XCTestCase {
         let snapshot = prober(alive: true, stalled: true).probe().snapshot
         XCTAssertTrue(snapshot.criticalFailures.contains(.tap),
                       "a starved tap is a critical link failure")
+    }
+
+    // MARK: - #94: under secure input the tap probe must not render a verdict
+
+    /// The 13 stall/resume flaps: under secure input the old verdict was a
+    /// function of whether the user had paused typing for 30 s, so it read `.failed`
+    /// — "Fn key not working" — to a user whose Fn key worked 28 times that session.
+    /// Now the two inputs that encode that pause cannot move the verdict at all, and
+    /// `.warning` is not `.failed`, the only status `isCritical` summons on.
+    func testUnderSecureInputTheTapVerdictIsIndependentOfTheStallHeuristic() {
+        let verdicts = [(true, true), (true, false), (false, true), (false, false)].map {
+            tapResult(prober(alive: $0.0, stalled: $0.1, secureInput: true)).status
+        }
+        XCTAssertEqual(verdicts, Array(repeating: .warning, count: 4),
+                       "a verdict we cannot measure must not depend on the user's typing pauses")
+    }
+
+    /// The contradiction the user actually hit: the banner sent them to a panel
+    /// that read "Keyboard tap: green — Live, receiving key events". The row may
+    /// not read healthy while the condition is up, and `secureInputActive` must
+    /// reach the catalog for a `.warning` tap — before #94 only `.failed` got there.
+    func testUnderSecureInputTheTapRowCannotReadGreenAndNamesTheCause() {
+        let tap = prober(alive: true, stalled: false, secureInput: true)
+            .probe().items.first { $0.id == .tap }!
+        XCTAssertNotEqual(tap.status, .ok, "the panel must not contradict the banner")
+        XCTAssertFalse(tap.detail.contains("Live"), "the green-state copy must not render")
+        XCTAssertTrue(tap.detail.contains("secure input"), "the row names the real condition")
+    }
+
+    /// `SecureInput.read()` evaluates the flag before walking the registry, so a
+    /// holder appearing between the two reads yields `active: false, pid: n` for one
+    /// tick. #92's point is that a report's reader can decode `holderPID`
+    /// unambiguously; a pid on an `ok` row is noise in exactly that way.
+    func testAnInactiveSecureInputRowCarriesNoHolderPID() {
+        let prober = HealthProber(
+            isEventTapAlive: { true },
+            isEventTapStalled: { false },
+            readSecureInput: { SecureInput.State(active: false, pid: 4242) },
+            hasOpenAIKey: { true },
+            store: emptyStore()
+        )
+        let row = prober.probe().snapshot.results.first { $0.id == .secureInput }!
+        XCTAssertEqual(row.status, .ok)
+        XCTAssertNil(row.secureInputHolderPID, "a pid on an ok row is noise to a report's reader")
     }
 
     /// The single-source-of-truth guard: `HealthProbeID.cost` is the ONE place

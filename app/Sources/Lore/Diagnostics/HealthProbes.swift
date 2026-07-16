@@ -19,6 +19,11 @@ import Foundation
 struct HealthProber {
     var isEventTapAlive: () -> Bool
     var isEventTapStalled: () -> Bool
+    /// The secure-input read, injected like the rest — the `.tap` verdict is
+    /// gated on it (#94), so it has to be drivable from a test. It returns the
+    /// whole `State`, not a bool, because the same reading feeds the tap gate as
+    /// well as the `.secureInput` row.
+    var readSecureInput: () -> SecureInput.State
     var hasOpenAIKey: () -> Bool
     var store: DiagStore
     var now: () -> Date
@@ -26,12 +31,14 @@ struct HealthProber {
     init(
         isEventTapAlive: @escaping () -> Bool,
         isEventTapStalled: @escaping () -> Bool,
+        readSecureInput: @escaping () -> SecureInput.State = SecureInput.read,
         hasOpenAIKey: @escaping () -> Bool,
         store: DiagStore = .shared,
         now: @escaping () -> Date = Date.init
     ) {
         self.isEventTapAlive = isEventTapAlive
         self.isEventTapStalled = isEventTapStalled
+        self.readSecureInput = readSecureInput
         self.hasOpenAIKey = hasOpenAIKey
         self.store = store
         self.now = now
@@ -48,7 +55,10 @@ struct HealthProber {
     /// The snapshot and the renderable items in one pass — the monitor uses this
     /// so a health cycle probes the OS once, not twice.
     func probe() -> (snapshot: HealthSnapshot, items: [HealthItem]) {
-        let readings = readings()
+        // One read per cycle, shared: the `.secureInput` row, the `.tap` gate and
+        // the tap's remedy are views of the same fact and must never disagree (#93).
+        let secureInput = readSecureInput()
+        let readings = readings(secureInput)
         let snapshot = HealthSnapshot(
             marketingVersion: Self.marketingVersion,
             build: Self.build,
@@ -56,13 +66,12 @@ struct HealthProber {
         )
         // Secure input active is the likeliest CAUSE of a starved tap, so the
         // tap item's remedy points at it rather than at a useless restart.
-        let secureInputActive = readings.first { $0.result.id == .secureInput }?.result.status == .failed
         let items = readings.map { reading in
             HealthCatalog.describe(
                 reading.result,
                 holderName: reading.holderName,
                 teamID: reading.teamID,
-                secureInputActive: reading.result.id == .tap && secureInputActive
+                secureInputActive: reading.result.id == .tap && secureInput.active
             )
         }
         return (snapshot, items)
@@ -74,9 +83,9 @@ struct HealthProber {
     /// expensive split. `countsInFooter` reads the same property, so a probe's
     /// auto-run-at-open verdict and its footer-cry-wolf exclusion cannot drift.
     /// `allCases` is declared in chain order, so this preserves the panel order.
-    private func readings() -> [Reading] {
+    private func readings(_ secureInput: SecureInput.State) -> [Reading] {
         HealthProbeID.allCases.map { id in
-            id.cost == .expensive ? expensiveReading(id) : cheapReading(id)
+            id.cost == .expensive ? expensiveReading(id) : cheapReading(id, secureInput)
         }
     }
 
@@ -84,17 +93,15 @@ struct HealthProber {
     /// not compile until it is placed here or, if `cost == .expensive`, given an
     /// extractor in `expensiveOutcome` (the `preconditionFailure` arm is
     /// unreachable because `readings()` routes expensive ids away by cost).
-    private func cheapReading(_ id: HealthProbeID) -> Reading {
+    private func cheapReading(_ id: HealthProbeID, _ secureInput: SecureInput.State) -> Reading {
         switch id {
         case .signing: return signingReading()
         case .urlScheme: return plain(id, Self.urlSchemeRegistered() ? .ok : .failed)
         case .diskSpace: return diskReading()
         case .accessibility: return plain(id, AXIsProcessTrusted() ? .ok : .failed)
         case .inputMonitoring: return plain(id, CGPreflightListenEventAccess() ? .ok : .failed)
-        // Enabled AND flowing. A tap that exists but is starved (secure input,
-        // the reported incident) is a failure, not health.
-        case .tap: return plain(id, (isEventTapAlive() && !isEventTapStalled()) ? .ok : .failed)
-        case .secureInput: return secureInputReading()
+        case .tap: return plain(id, tapStatus(secureInputActive: secureInput.active))
+        case .secureInput: return secureInputReading(secureInput)
         case .microphone: return plain(id, MicrophonePermission.status == .authorized ? .ok : .failed)
         case .asrModel: return plain(id, ParakeetBackend().checkStatus() == .ready ? .ok : .failed)
         case .vadModel: return plain(id, Self.vadModelPresent() ? .ok : .failed)
@@ -106,6 +113,23 @@ struct HealthProber {
 
     private func plain(_ id: HealthProbeID, _ status: HealthStatus) -> Reading {
         Reading(result: HealthResult(id: id, status: status))
+    }
+
+    /// Enabled AND flowing: a starved tap reads as failed, not health (#83) — but
+    /// only when we can tell the difference. Under secure input we cannot. Every
+    /// app is starved, so the starvation says nothing about our tap, and the stall
+    /// signal it would be read through (`elapsed > 30 && secondsSinceSystemKeyInput()
+    /// < 30`) degrades into a measure of whether the user paused typing for 30 s —
+    /// which is why it flapped 13 times in one session and read `ok` by the time
+    /// the user opened the panel (#94).
+    ///
+    /// `.warning` and never `.failed` suffices because `isCritical` summons on
+    /// `.failed` alone — no new state needed. It is returned *only* here, so
+    /// `.tap` + `.warning` means "no verdict" by construction, which is what
+    /// `HealthSummary.countsInFooter` reads it as.
+    private func tapStatus(secureInputActive: Bool) -> HealthStatus {
+        guard !secureInputActive else { return .warning }
+        return (isEventTapAlive() && !isEventTapStalled()) ? .ok : .failed
     }
 
     private func signingReading() -> Reading {
@@ -129,15 +153,17 @@ struct HealthProber {
         return Reading(result: HealthResult(id: .diskSpace, status: status, freeDiskGB: gb))
     }
 
-    private func secureInputReading() -> Reading {
-        // The same reader `HotkeyManager`'s monitor uses, so the panel and the
-        // event stream cannot disagree about whether input is withheld (#93).
-        let state = SecureInput.read()
-        return Reading(
+    /// The state is read once per cycle in `probe()` and passed in.
+    private func secureInputReading(_ state: SecureInput.State) -> Reading {
+        Reading(
             result: HealthResult(
                 id: .secureInput,
                 status: state.active ? .failed : .ok,
-                secureInputHolderPID: state.pid
+                // `read()` checks the flag before walking the registry, so a holder
+                // appearing between the two yields `active: false, pid: n` for one
+                // tick. A pid on an `ok` row is noise to a report's reader, who must
+                // be able to decode `holderPID` unambiguously (#92).
+                secureInputHolderPID: state.active ? state.pid : nil
             ),
             holderName: state.name
         )

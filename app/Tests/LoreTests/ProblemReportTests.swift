@@ -77,11 +77,17 @@ final class ProblemReportTests: XCTestCase {
     /// A `HealthMonitor` whose `tap` probe is driven by `stalled` — everything
     /// else reads the real (test-process) OS state, which is fine: the test only
     /// needs one probe it can flip.
+    ///
+    /// Except secure input, which is injected: the tap verdict is gated on it
+    /// (#94), so the live read would make `stalled` stop moving the verdict on any
+    /// host that happens to have secure input up — a `sudo` in a terminal, a
+    /// password prompt — and this test's lever would silently vanish.
     @MainActor
     private static func makeMonitor(stalled: StalledBox) -> HealthMonitor {
         let prober = HealthProber(
             isEventTapAlive: { true },
             isEventTapStalled: { stalled.stalled },
+            readSecureInput: { SecureInput.State(active: false, pid: nil) },
             hasOpenAIKey: { true }
         )
         return HealthMonitor(prober: prober)
@@ -210,6 +216,25 @@ final class ProblemReportTests: XCTestCase {
         let lines = ProblemReportSummary.lines(for: snapshot)
         XCTAssertEqual(lines.count, 1)
         XCTAssertTrue(lines[0].lowercased().contains("all checks pass"), "\(lines)")
+    }
+
+    /// #94, the fourth surface: the report preview's "What this means" tab is the
+    /// screen the reporting user of 8763HGZT was staring at. Under secure input the
+    /// tap reads `.warning` meaning "no verdict", so this tab must not print "The Fn
+    /// key isn't being received" directly beneath the sentence naming the real
+    /// condition — the same one-issue rule the footer applies.
+    func testSummaryUnderSecureInputNamesTheConditionAndNotTheFnKey() {
+        let snapshot = HealthSnapshot(
+            marketingVersion: "2.0.4", build: "2.0.231",
+            results: [
+                HealthResult(id: .tap, status: .warning),
+                HealthResult(id: .secureInput, status: .failed),
+            ]
+        )
+        let lines = ProblemReportSummary.lines(for: snapshot)
+        XCTAssertEqual(lines, ["Secure input is active, blocking the hotkey."], "\(lines)")
+        XCTAssertFalse(lines.contains { $0.contains("Fn key") },
+                       "no surface may tell the user their Fn key is broken for a system-wide lock")
     }
 
     func testSummaryIgnoresAnUntestedExpensiveProbe() {

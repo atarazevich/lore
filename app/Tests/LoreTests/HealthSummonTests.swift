@@ -2,8 +2,9 @@ import XCTest
 @testable import LoreKit
 
 /// The critical-vs-non-critical summon decision and its flap debounce (#83,
-/// design §6): only Accessibility, Input Monitoring, tap and microphone summon
-/// the notch, and only after the failure persists past a transient blip.
+/// design §6): only Accessibility, Input Monitoring, secure input, tap and
+/// microphone summon the notch, and only after the failure persists past a
+/// transient blip.
 final class HealthSummonTests: XCTestCase {
 
     private func snapshot(_ results: [HealthResult]) -> HealthSnapshot {
@@ -12,8 +13,11 @@ final class HealthSummonTests: XCTestCase {
 
     // MARK: - Which failures are critical
 
-    func testOnlyTheFourCriticalLinksSummon() {
-        let critical: Set<HealthProbeID> = [.accessibility, .inputMonitoring, .tap, .microphone]
+    /// `.secureInput` joined the set in #94: it withholds keystrokes from every
+    /// app, so it is an outage, not the curiosity #83 filed it as.
+    func testOnlyTheFiveCriticalLinksSummon() {
+        let critical: Set<HealthProbeID> = [.accessibility, .inputMonitoring, .secureInput,
+                                            .tap, .microphone]
         for id in HealthProbeID.allCases {
             let snap = snapshot([HealthResult(id: id, status: .failed)])
             if critical.contains(id) {
@@ -22,6 +26,18 @@ final class HealthSummonTests: XCTestCase {
                 XCTAssertTrue(snap.criticalFailures.isEmpty, "\(id.rawValue) must stay silent")
             }
         }
+    }
+
+    // MARK: - The banner's words (#94)
+
+    /// The reported bug, at its source: `"\(shortName) not working"` renders
+    /// "Fn key not working" for a starved tap and would render the nonsense
+    /// "Secure input not working" here — secure input *working* is the problem.
+    func testSecureInputBannerNamesTheSystemWideConditionNotTheFnKey() {
+        let title = HealthSummon(probe: .secureInput).title
+        XCTAssertFalse(title.contains("Fn key"), "no surface may blame the Fn key for a system-wide lock")
+        XCTAssertFalse(title.contains("not working"), "secure input working is the condition, not a fault")
+        XCTAssertTrue(title.contains("no app"), "the user's Raycast hotkey died too — say so")
     }
 
     func testCriticalFailuresAreOrderedUpstreamFirst() {

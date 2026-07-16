@@ -8,10 +8,12 @@ final class HealthCatalogTests: XCTestCase {
 
     private func item(_ id: HealthProbeID, _ status: HealthStatus,
                       holderName: String? = nil,
+                      holderPID: Int32? = nil,
                       cert: SigningCertKind? = nil,
                       lastAttempt: HealthLastAttempt? = nil) -> HealthItem {
         HealthCatalog.describe(
-            HealthResult(id: id, status: status, signingCert: cert, lastAttempt: lastAttempt),
+            HealthResult(id: id, status: status, secureInputHolderPID: holderPID,
+                         signingCert: cert, lastAttempt: lastAttempt),
             holderName: holderName
         )
     }
@@ -58,11 +60,13 @@ final class HealthCatalogTests: XCTestCase {
         XCTAssertEqual(remedy.actions.first, .restartApp)
     }
 
-    /// When the tap is dead AND secure input is active, secure input is the
-    /// cause — the tap remedy points at it and drops the useless restart button.
-    func testTapFailureWhileSecureInputActiveSurfacesTheCauseNotARestart() {
+    /// When secure input is active it starves the tap and is the cause — the tap
+    /// remedy points at it and drops the useless restart button. `.warning` is the
+    /// tap's reachable state under it: `tapStatus()` cannot return `.failed` there
+    /// (#94).
+    func testTapWarningWhileSecureInputActiveSurfacesTheCauseNotARestart() {
         let it = HealthCatalog.describe(
-            HealthResult(id: .tap, status: .failed),
+            HealthResult(id: .tap, status: .warning),
             secureInputActive: true
         )
         let remedy = try! XCTUnwrap(it.remedy)
@@ -84,6 +88,18 @@ final class HealthCatalogTests: XCTestCase {
         let encoded = try! JSONEncoder().encode(it.result)
         XCTAssertFalse(String(decoding: encoded, as: UTF8.self).contains("1Password"),
                        "holder name must not reach the Codable result")
+    }
+
+    /// `NSRunningApplication(processIdentifier:)` returns nil for a CLI or daemon
+    /// holder, so the name is nil while the pid stands — the case hit live twice,
+    /// and the one where the user most needs the hint. The row must point at the pid
+    /// rather than fall silent about a holder the report already carries (#92).
+    func testSecureInputWithAnUnnamedHolderPointsAtThePID() {
+        let it = item(.secureInput, .failed, holderPID: 4242)
+        XCTAssertTrue(it.detail.contains("4242"),
+                      "with no app to name, the pid is the only hint the panel has")
+        XCTAssertTrue(it.detail.contains("may not be the one responsible"),
+                      "the pid stays a hedged hint, not an accusation (rdar://48953777)")
     }
 
     func testAdHocSigningWarnsAboutResetPermissions() {

@@ -6,7 +6,20 @@ import Observation
 struct HealthSummon: Equatable, Sendable {
     let probe: HealthProbeID
 
-    var title: String { "\(probe.shortName) not working" }
+    /// `"<shortName> not working"` fits every critical link but one: secure input
+    /// *working* is the problem, so the template renders nonsense for it (#94). A
+    /// `switch` with a `default`, not a table — this is one exception, and there
+    /// are already three per-probe copy catalogs (`ProblemReport.swift:142-145`).
+    ///
+    /// The notch renders this line plus "Fix it" and nothing else, so it carries
+    /// the system-wide fact and hands off; the panel's `.secureInput` row carries
+    /// the remedy (and that restarting Lore will not help while it is on).
+    var title: String {
+        switch probe {
+        case .secureInput: return "Secure input is on — no app is receiving keys"
+        default: return "\(probe.shortName) not working"
+        }
+    }
 }
 
 /// Debounce for the notch self-summon: a critical failure must persist across

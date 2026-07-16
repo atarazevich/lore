@@ -47,6 +47,18 @@ final class HealthSummaryTests: XCTestCase {
         XCTAssertEqual(s.firstIssueShortName, "Accessibility")
     }
 
+    /// #94: secure input starves the tap, so it sits above it in chain order and
+    /// the footer names it — never the Fn key it starved, or the footer points the
+    /// user at the one link they cannot fix. One physical condition, one issue: the
+    /// tap's `.warning` means "no verdict" (it is returned only under secure input),
+    /// so counting it would inflate this into "2 issues".
+    func testUnderSecureInputTheFooterNamesOneIssueAndItIsTheCause() {
+        let s = summary([result(.tap, .warning), result(.secureInput, .failed)])
+        XCTAssertEqual(s.text, "1 issue — Secure input")
+        XCTAssertTrue(s.hasCriticalFailure, "a starved keyboard is not a mere warning")
+        XCTAssertEqual(s.status, .failed)
+    }
+
     func testCheapWarningIsAnIssueButNotCritical() {
         let s = summary([result(.diskSpace, .warning)])
         XCTAssertEqual(s.issueCount, 1)
