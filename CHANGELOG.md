@@ -1,5 +1,19 @@
 # Changelog
 
+## v2.4.0 — 2026-07-16
+
+v2.3.0 stopped the app blaming the Fn key **when secure input was the cause**. It turned out there are two causes, and the other one still produced the same lie. This finishes it, and puts the diagnostic in the app instead of a terminal.
+
+**The check called "Fn key" could never see the Fn key**
+- It has been named "Fn key" since v2.1.0 and it never watched the Fn key at all. Fn hold-to-talk runs on a completely separate mechanism; the check watches the part that carries Space, Esc and the upgrade keys **while another app is focused**. So a real failure of that part — Space stops locking outside the app — got reported as "Fn key not working" while Fn kept working perfectly. The user was right and the app was wrong. It's now called **Keyboard shortcuts**, which is what it actually watches (#97)
+
+**And it wasn't measuring what it claimed either**
+- The check timed how long *the Fn key listener* had been quiet and reported that as the state of the shortcut listener. Those are two different things that happen to fail together — so it was watching a second victim and calling it a diagnosis. Worse, pressing Fn reset its timer, meaning **your working Fn key was actively reassuring a check about a part that was broken.** It now times the shortcut listener itself, against whether the Mac is receiving keystrokes at all. That comparison is the only thing that can tell "we're not getting keys" from "you stopped typing for 30 seconds" — and confusing those two is what produced the phantom warnings that came and went (#97)
+
+**The app now tells you which of the two it is, and what actually fixes it**
+- When shortcuts are dead, the panel shows what it measured — whether the app is receiving keystrokes, whether the Mac is — and names the cause. Secure input on: another process has locked the keyboard system-wide, and restarting Lore won't help. Secure input off: macOS says the permissions are granted while the app receives nothing, which is a stale grant. In that case **removing Lore's entry from Accessibility and Input Monitoring entirely and adding it back is what clears it — flipping the switch off and on is not the same thing and does not work** (#97)
+- Both permission checks read APIs that are known to report granted when they aren't. The app no longer takes their word for it over the evidence of its own listener (#97)
+
 ## v2.3.0 — 2026-07-16
 
 When macOS locks the keyboard, the app now says so — and names what did it. v2.1.0 promised this and never delivered it once.
