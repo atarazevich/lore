@@ -587,8 +587,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let hotkeyManager = coordinator.hotkeyManager
         let prober = HealthProber(
-            isEventTapAlive: { hotkeyManager.isEventTapAlive },
-            isEventTapStalled: { hotkeyManager.isEventTapStalled },
+            readTapLiveness: { hotkeyManager.tapLiveness },
             hasOpenAIKey: { !settings.openaiApiKey.isEmpty }
         )
         let monitor = HealthMonitor(prober: prober)

@@ -2,7 +2,7 @@ import Foundation
 import Observation
 
 /// The notch self-summon payload: which critical link failed, and the copy the
-/// notch shows ("Fn key not working" / "Fix it").
+/// notch shows ("Keyboard shortcuts not working" / "Fix it").
 struct HealthSummon: Equatable, Sendable {
     let probe: HealthProbeID
 

@@ -85,8 +85,7 @@ final class ProblemReportTests: XCTestCase {
     @MainActor
     private static func makeMonitor(stalled: StalledBox) -> HealthMonitor {
         let prober = HealthProber(
-            isEventTapAlive: { true },
-            isEventTapStalled: { stalled.stalled },
+            readTapLiveness: { HealthProberTests.liveness(alive: true, stalled: stalled.stalled) },
             readSecureInput: { SecureInput.State(active: false, pid: nil) },
             hasOpenAIKey: { true }
         )
@@ -235,6 +234,20 @@ final class ProblemReportTests: XCTestCase {
         XCTAssertEqual(lines, ["Secure input is active, blocking the hotkey."], "\(lines)")
         XCTAssertFalse(lines.contains { $0.contains("Fn key") },
                        "no surface may tell the user their Fn key is broken for a system-wide lock")
+    }
+
+    /// The same false name, in the report's own words. A failed tap does print a
+    /// sentence here, and it may not be about the Fn key: the tap never carries it
+    /// (#97), so the one surface a reader takes at face value must say what broke —
+    /// the shortcuts Lore intercepts while another app is focused.
+    func testTheTapsPlainLanguageIssueDoesNotBlameTheFnKey() {
+        let snapshot = HealthSnapshot(
+            marketingVersion: "2.0.4", build: "2.0.231",
+            results: [HealthResult(id: .tap, status: .failed)]
+        )
+        let lines = ProblemReportSummary.lines(for: snapshot)
+        XCTAssertEqual(lines.count, 1, "a failed tap is a problem worth a sentence — \(lines)")
+        XCTAssertFalse(lines[0].contains("Fn key"), "the tap cannot answer for the Fn key")
     }
 
     func testSummaryIgnoresAnUntestedExpensiveProbe() {

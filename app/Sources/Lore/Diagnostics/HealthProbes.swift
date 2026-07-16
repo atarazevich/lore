@@ -14,11 +14,14 @@ import Foundation
 ///
 /// Dependencies are injected as closures rather than reached through singletons,
 /// so the engine is testable and so it reuses — never re-creates — the live
-/// keyboard tap (`isEventTapAlive` reads `HotkeyManager`'s existing state).
+/// keyboard tap (`readTapLiveness` reads `HotkeyManager`'s existing state).
 @MainActor
 struct HealthProber {
-    var isEventTapAlive: () -> Bool
-    var isEventTapStalled: () -> Bool
+    /// The tap's measured liveness (#97), injected like the rest. The whole value,
+    /// for the reason `readSecureInput` returns one: the verdict, the panel's
+    /// evidence line and the uploaded report are views of a single measurement and
+    /// must not be able to disagree (#93).
+    var readTapLiveness: () -> TapLiveness
     /// The secure-input read, injected like the rest — the `.tap` verdict is
     /// gated on it (#94), so it has to be drivable from a test. It returns the
     /// whole `State`, not a bool, because the same reading feeds the tap gate as
@@ -29,15 +32,13 @@ struct HealthProber {
     var now: () -> Date
 
     init(
-        isEventTapAlive: @escaping () -> Bool,
-        isEventTapStalled: @escaping () -> Bool,
+        readTapLiveness: @escaping () -> TapLiveness,
         readSecureInput: @escaping () -> SecureInput.State = SecureInput.read,
         hasOpenAIKey: @escaping () -> Bool,
         store: DiagStore = .shared,
         now: @escaping () -> Date = Date.init
     ) {
-        self.isEventTapAlive = isEventTapAlive
-        self.isEventTapStalled = isEventTapStalled
+        self.readTapLiveness = readTapLiveness
         self.readSecureInput = readSecureInput
         self.hasOpenAIKey = hasOpenAIKey
         self.store = store
@@ -100,7 +101,7 @@ struct HealthProber {
         case .diskSpace: return diskReading()
         case .accessibility: return plain(id, AXIsProcessTrusted() ? .ok : .failed)
         case .inputMonitoring: return plain(id, CGPreflightListenEventAccess() ? .ok : .failed)
-        case .tap: return plain(id, tapStatus(secureInputActive: secureInput.active))
+        case .tap: return tapReading(secureInput)
         case .secureInput: return secureInputReading(secureInput)
         case .microphone: return plain(id, MicrophonePermission.status == .authorized ? .ok : .failed)
         case .asrModel: return plain(id, ParakeetBackend().checkStatus() == .ready ? .ok : .failed)
@@ -115,21 +116,32 @@ struct HealthProber {
         Reading(result: HealthResult(id: id, status: status))
     }
 
+    /// The measurement rides along on the result, so the panel and the report show
+    /// the evidence the verdict came from, not only the conclusion (#97).
+    private func tapReading(_ secureInput: SecureInput.State) -> Reading {
+        let liveness = readTapLiveness()
+        return Reading(result: HealthResult(
+            id: .tap,
+            status: tapStatus(liveness, secureInputActive: secureInput.active),
+            tapLiveness: liveness
+        ))
+    }
+
     /// Enabled AND flowing: a starved tap reads as failed, not health (#83) — but
-    /// only when we can tell the difference. Under secure input we cannot. Every
-    /// app is starved, so the starvation says nothing about our tap, and the stall
-    /// signal it would be read through (`elapsed > 30 && secondsSinceSystemKeyInput()
-    /// < 30`) degrades into a measure of whether the user paused typing for 30 s —
-    /// which is why it flapped 13 times in one session and read `ok` by the time
-    /// the user opened the panel (#94).
+    /// only when we can tell the difference. Under secure input we cannot: every
+    /// app is starved, so the starvation says nothing about *our* tap. `.warning`
+    /// and never `.failed` suffices there because `isCritical` summons on `.failed`
+    /// alone — no new state needed. It is returned *only* here, so `.tap` +
+    /// `.warning` means "no verdict" by construction, which is what
+    /// `HealthSummary.countsInFooter` reads it as (#94).
     ///
-    /// `.warning` and never `.failed` suffices because `isCritical` summons on
-    /// `.failed` alone — no new state needed. It is returned *only* here, so
-    /// `.tap` + `.warning` means "no verdict" by construction, which is what
-    /// `HealthSummary.countsInFooter` reads it as.
-    private func tapStatus(secureInputActive: Bool) -> HealthStatus {
+    /// This gate is the last resort, not the mechanism: `TapLiveness.observe` will
+    /// not draw a starvation under secure input in the first place (#97), so the
+    /// `.warning` here covers a starvation measured *before* it went on — which is
+    /// real, but still not attributable while every tap on the machine is starved.
+    private func tapStatus(_ liveness: TapLiveness, secureInputActive: Bool) -> HealthStatus {
         guard !secureInputActive else { return .warning }
-        return (isEventTapAlive() && !isEventTapStalled()) ? .ok : .failed
+        return (liveness.isAlive && !liveness.isStarved) ? .ok : .failed
     }
 
     private func signingReading() -> Reading {

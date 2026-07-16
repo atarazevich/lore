@@ -162,17 +162,37 @@ enum HealthCatalog {
                            actions: [.openSettings(.inputMonitoring), .restartApp]))
 
         case .tap:
-            if ok { return ("Keyboard tap", "Live — receiving key events.", nil) }
+            let title = "Keyboard shortcuts"
+            if ok {
+                let age = result.tapLiveness.map { "last key event \(relativeAge($0.tapSilentSeconds))" }
+                    ?? "receiving key events"
+                return (title, "Live — \(age).", nil)
+            }
             // Secure input starves the tap: fixing that unstarves it, so surface
             // the cause rather than a restart that cannot help.
             if secureInputActive {
-                return ("Keyboard tap",
-                        "The Fn key isn't reaching Lore because secure input is active — see Secure input above.",
-                        Remedy(instruction: "Secure input is holding the keyboard; that is what stops the Fn key. Release it (see the Secure input item above) — restarting Lore will not help while it is on.",
+                return (title,
+                        "Lore isn't receiving keys because secure input is active — see Secure input above.",
+                        Remedy(instruction: "Secure input is holding the keyboard; that is what stops Lore's shortcuts. Release it (see the Secure input item above) — restarting Lore will not help while it is on.",
                                actions: []))
             }
-            return ("Keyboard tap",
-                    "The keyboard event tap exists but no key events are flowing.",
+            // A live tap that is starved is the *only* case a restart cannot fix:
+            // the session is being given key-downs and we are not. That is a
+            // permissions problem *whatever* AXIsProcessTrusted() and
+            // CGPreflightListenEventAccess() claim — both read `ok` on the affected
+            // machine throughout the incident, which is why the `.accessibility` /
+            // `.inputMonitoring` rows above stay green and this row must not defer
+            // to them (#97). A tap that is gone (`!isAlive`) takes the arm below
+            // even if a starvation was measured too — it is genuinely not
+            // installed, and reinstalling it is what a restart does.
+            if let liveness = result.tapLiveness, liveness.isStarved, liveness.isAlive {
+                return (title,
+                        "Lore's tap has been silent for \(silence(liveness.tapSilentSeconds)); the Mac last received a keystroke \(silence(liveness.sessionSilentSeconds)) ago.",
+                        Remedy(instruction: "macOS reports Accessibility and Input Monitoring as granted, yet no keystroke is reaching Lore — that is what a stale permission grant looks like, and toggling the switch off and on does not clear it. Remove Lore from Privacy & Security → Accessibility with the “−” button, do the same under Input Monitoring, quit Lore, then add it back to both and open it again.",
+                               actions: [.openSettings(.accessibility), .openSettings(.inputMonitoring)]))
+            }
+            return (title,
+                    "Lore's keyboard tap isn't installed.",
                     Remedy(instruction: "Restart Lore to reinstall the keyboard tap. If it keeps failing, check Input Monitoring above.",
                            actions: [.restartApp, .openSettings(.inputMonitoring)]))
 
@@ -295,6 +315,18 @@ enum HealthCatalog {
         case .failed:
             return (labels.title, "\(labels.failDetail) \(age).", remedy("Test now to re-check"))
         }
+    }
+
+    /// "34s" / "2 min" — a duration, second-accurate under a minute. The tap row's
+    /// evidence lives in the gap between two silences, and the first tick that can
+    /// latch a starvation sits at 30–35 s: `relativeAge` would render both sides of
+    /// it as "just now" (its whole first minute is one bucket, #88), so the row
+    /// would refute itself for the ~30 s in which the user reads it.
+    static func silence(_ seconds: Int) -> String {
+        if seconds < 60 { return "\(seconds)s" }
+        if seconds < 3600 { return "\(seconds / 60) min" }
+        if seconds < 86400 { return "\(seconds / 3600) h" }
+        return "\(seconds / 86400) d"
     }
 
     /// "4 min ago" / "just now" — coarse, no personal data. "just now" spans the

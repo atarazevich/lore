@@ -6,7 +6,7 @@ import SwiftUI
 private let healthNotchLog = Logger(subsystem: "com.lore.app", category: "HealthNotch")
 
 /// Raises the notch to summon the user when a critical health link fails (#83,
-/// design §6) — "Fn key not working / Fix it" — rather than waiting for the
+/// design §6) — "Keyboard shortcuts not working / Fix it" — rather than waiting for the
 /// panel to be found. A deliberately simpler surface than the meeting prompt
 /// (`NotchPromptPresenter`): a single alert with one action and an auto-timeout,
 /// always expanded (no compact/hover island), so it does not reuse that

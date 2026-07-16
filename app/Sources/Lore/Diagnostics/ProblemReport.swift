@@ -151,7 +151,7 @@ extension HealthResult {
         case .diskSpace: return "Free disk space is low."
         case .accessibility: return "Accessibility permission isn't granted — the Fn key can't insert text."
         case .inputMonitoring: return "Input Monitoring permission isn't granted — the hotkey can't be seen."
-        case .tap: return "The Fn key isn't being received (the event tap is dead or starved)."
+        case .tap: return "Lore's shortcuts aren't reaching it while other apps are focused (the event tap is dead or starved)."
         case .secureInput: return "Secure input is active, blocking the hotkey."
         case .microphone: return "Microphone permission isn't granted."
         case .micCapture: return "The last microphone capture failed."

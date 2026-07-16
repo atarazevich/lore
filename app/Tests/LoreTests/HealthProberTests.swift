@@ -21,12 +21,26 @@ final class HealthProberTests: XCTestCase {
     /// real would starve the keyboard of whoever runs the suite.
     private func prober(alive: Bool, stalled: Bool, secureInput: Bool = false) -> HealthProber {
         HealthProber(
-            isEventTapAlive: { alive },
-            isEventTapStalled: { stalled },
+            readTapLiveness: { Self.liveness(alive: alive, stalled: stalled) },
             readSecureInput: { SecureInput.State(active: secureInput, pid: nil) },
             hasOpenAIKey: { true },
             store: emptyStore()
         )
+    }
+
+    /// `stalled` is driven through the real measurement rather than asserted into
+    /// the value: starved *is* "our tap silent past the threshold while the session
+    /// was fed key-downs", which is the pair #97 made the verdict a function of.
+    /// The silence is the *first* tick that can latch one — the health loop ticks
+    /// every 5 s against a 30 s threshold — because that is the value the row is
+    /// read at: the banner goes up on this tick and the user opens the panel next.
+    static func liveness(alive: Bool, stalled: Bool) -> TapLiveness {
+        var liveness = TapLiveness()
+        _ = liveness.observe(isAlive: alive,
+                            tapSilent: stalled ? TapLiveness.threshold + 1 : 0,
+                            sessionSilent: 0,
+                            secureInputActive: false)
+        return liveness
     }
 
     private func tapResult(_ prober: HealthProber) -> HealthResult {
@@ -51,6 +65,30 @@ final class HealthProberTests: XCTestCase {
         let snapshot = prober(alive: true, stalled: true).probe().snapshot
         XCTAssertTrue(snapshot.criticalFailures.contains(.tap),
                       "a starved tap is a critical link failure")
+    }
+
+    /// The remedy has to match the fault, and a starvation can be measured on a tap
+    /// that then dies (`reinstallEventTap` failing leaves exactly this). The tap
+    /// object is genuinely gone, a restart genuinely reinstalls it, and the
+    /// stale-grant copy — which offers no restart — would send the user to strip
+    /// Lore's permissions instead.
+    func testADeadTapIsOfferedARestartEvenIfAStarvationWasMeasuredToo() {
+        let tap = prober(alive: false, stalled: true).probe().items.first { $0.id == .tap }!
+        let remedy = try! XCTUnwrap(tap.remedy)
+        XCTAssertTrue(remedy.actions.contains(.restartApp), "a tap that is gone is reinstalled by a restart")
+    }
+
+    /// The health loop sleeps before its first tick, so a panel opened in the first
+    /// 5 s renders whatever a never-measured liveness says. Green there is a claim
+    /// about a tap that may have failed to install — there is no health without
+    /// evidence, so the unmeasured value is not alive.
+    func testATapThatWasNeverMeasuredDoesNotReadHealthy() {
+        let prober = HealthProber(
+            readTapLiveness: { TapLiveness() },
+            hasOpenAIKey: { true },
+            store: emptyStore()
+        )
+        XCTAssertNotEqual(tapResult(prober).status, .ok)
     }
 
     // MARK: - #94: under secure input the tap probe must not render a verdict
@@ -80,14 +118,33 @@ final class HealthProberTests: XCTestCase {
         XCTAssertTrue(tap.detail.contains("secure input"), "the row names the real condition")
     }
 
+    /// The whole round-trip of the false banner, inverted: a password is typed, the
+    /// field closes, and the panel is opened. Under secure input our tap starves
+    /// while the session is fed — the exact shape of a starvation — and the #94 gate
+    /// above hides it only while the condition is up. If that verdict were drawn it
+    /// would latch, and `.failed` is what summons the notch, so the user would be
+    /// told their keyboard is broken for having entered a password (#97).
+    func testAStarvationTheSecureInputWindowWouldHaveProducedNeverSurvivesIt() {
+        var measured = TapLiveness()
+        _ = measured.observe(isAlive: true, tapSilent: TapLiveness.threshold + 1, sessionSilent: 0,
+                             secureInputActive: true)
+        let prober = HealthProber(
+            readTapLiveness: { measured },
+            readSecureInput: { SecureInput.State(active: false, pid: nil) },
+            hasOpenAIKey: { true },
+            store: emptyStore()
+        )
+        XCTAssertEqual(tapResult(prober).status, .ok,
+                       "secure input clearing must not reveal a verdict it was never possible to measure")
+    }
+
     /// `SecureInput.read()` evaluates the flag before walking the registry, so a
     /// holder appearing between the two reads yields `active: false, pid: n` for one
     /// tick. #92's point is that a report's reader can decode `holderPID`
     /// unambiguously; a pid on an `ok` row is noise in exactly that way.
     func testAnInactiveSecureInputRowCarriesNoHolderPID() {
         let prober = HealthProber(
-            isEventTapAlive: { true },
-            isEventTapStalled: { false },
+            readTapLiveness: { TapLiveness() },
             readSecureInput: { SecureInput.State(active: false, pid: 4242) },
             hasOpenAIKey: { true },
             store: emptyStore()
@@ -196,6 +253,43 @@ final class HealthProberTests: XCTestCase {
         resumeAPI?()
         await apiTask.value
         XCTAssertTrue(monitor.testing.isEmpty, "both flags cleared once both finish")
+    }
+
+    // MARK: - #97: the verdict is measured, and the measurement is readable
+
+    /// The user on the affected machine will not run a script on their work machine
+    /// — a reasonable boundary, and it makes the app the only instrument that can
+    /// reach the failure. So the row shows what was measured on both sides, not
+    /// just the conclusion: our tap's silence, and the session's key-downs meanwhile.
+    /// At the first tick that can latch, both sides fall inside `relativeAge`'s
+    /// "just now" bucket (#88) — the row would have refuted itself for the whole
+    /// window in which the banner is read, so the evidence renders as durations.
+    func testAStarvedTapRowShowsTheMeasurementItsVerdictCameFrom() {
+        let tap = prober(alive: true, stalled: true).probe().items.first { $0.id == .tap }!
+        XCTAssertEqual(tap.status, .failed)
+        XCTAssertTrue(tap.detail.contains("silent for 31s"),
+                      "the row states how long our tap has gone without a keystroke")
+        XCTAssertTrue(tap.detail.contains("keystroke 0s ago"),
+                      "beside the session's, so the gap the verdict came from is legible")
+        XCTAssertFalse(tap.detail.contains("just now"),
+                       "a 31 s silence rendered as “just now” is the row refuting itself")
+    }
+
+    /// Secure input off and the tap starved: the cause is that Lore is not being
+    /// given keystrokes at all. Both permission probes above read `ok` on the
+    /// affected machine throughout the incident, so this row may not defer to them
+    /// — and the remedy has to be the one that actually clears a stale grant.
+    func testAStarvedTapWithoutSecureInputBlamesPermissionsAndSaysHowToClearThem() {
+        let tap = prober(alive: true, stalled: true).probe().items.first { $0.id == .tap }!
+        let remedy = try! XCTUnwrap(tap.remedy)
+        XCTAssertTrue(remedy.actions.contains(.openSettings(.accessibility)))
+        XCTAssertTrue(remedy.actions.contains(.openSettings(.inputMonitoring)))
+        XCTAssertFalse(remedy.actions.contains(.restartApp),
+                       "a restart does not clear a stale grant")
+        XCTAssertTrue(remedy.instruction.localizedCaseInsensitiveContains("remove"),
+                      "removing the entry is the step that works")
+        XCTAssertTrue(remedy.instruction.localizedCaseInsensitiveContains("does not clear it"),
+                      "and toggling — what the user will try first — is called out as not working")
     }
 
     /// End to end: a stalled-tap verdict drives the monitor to summon the notch.

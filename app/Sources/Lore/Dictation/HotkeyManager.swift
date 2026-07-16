@@ -35,38 +35,34 @@ final class HotkeyManager {
 
     /// Health monitor: periodic check of event tap, permissions, SecureInput
     private var healthMonitorTask: Task<Void, Never>?
-    /// Timestamp of last received modifier event (for liveness tracking)
-    private var lastEventTime = Date()
+    /// When our tap's own callback last received a key-down. Stamped **there and
+    /// nowhere else** — that is the whole of #97 (see `runHealthCheck` step 4).
+    private var lastTapKeyDown = Date()
     /// Previous permission state, tracked per permission so each carries its own edge
     private var lastAccessibilityOK = true
     private var lastInputMonitoringOK = true
     /// Tracks previous SecureInput state to log only on transitions
     private var lastSecureInputActive = false
-    /// Tracks previous event-liveness state to record only on transitions
-    private var lastEventsStalled = false
 
     /// CGEvent tap for consuming Space/Esc when external apps are focused
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
-    /// Read-only liveness of the existing tap, for the health panel (#83). Never
-    /// creates a tap — reports on the one this manager already owns, so the panel
-    /// reads the same tap the hotkey uses rather than installing a second.
+    /// Read-only liveness of the existing tap, for the health panel (#83, #97).
+    /// Never creates a tap — reports on the one this manager already owns, so the
+    /// panel reads the same tap the hotkey uses rather than installing a second.
     ///
-    /// This is enabled/existence only — NOT event flow. A tap can be enabled yet
-    /// starved (the reported "Fn dead, all toggles on" incident); pair this with
-    /// `isEventTapStalled` for the honest verdict.
-    var isEventTapAlive: Bool {
+    /// Updated by `runHealthCheck` every 5 s. Carries both the enabled/existence
+    /// fact and the measured starvation, because they are different questions: a
+    /// tap can be enabled yet starved (the reported "Fn dead, all toggles on"
+    /// incident), and only the pair is an honest verdict.
+    private(set) var tapLiveness = TapLiveness()
+
+    /// Enabled/existence only — NOT event flow. Feeds `TapLiveness.isAlive`.
+    private var isEventTapAlive: Bool {
         guard let eventTap else { return false }
         return CGEvent.tapIsEnabled(tap: eventTap)
     }
-
-    /// Read-only: the enabled-but-starved verdict the 5-second monitor already
-    /// computes (`tapEventsStalled` — "the OS delivered key events to everyone
-    /// else and not to us"). `isEventTapAlive` reads such a tap as healthy, so
-    /// the health panel's critical `tap` probe must consult this too, or the
-    /// notch never summons in the one scenario it exists for (#83).
-    var isEventTapStalled: Bool { lastEventsStalled }
 
     func install(coordinator: DictationCoordinator, settings: AppSettings) {
         self.coordinator = coordinator
@@ -216,7 +212,6 @@ final class HotkeyManager {
     }
 
     private func handleFlagsChanged(_ event: NSEvent) {
-        lastEventTime = Date()
         let hotkeyKey = settings?.hotkeyKey ?? .fn
         let hotkeyPressed = hotkeyKey.matchesPress(event)
 
@@ -311,7 +306,6 @@ final class HotkeyManager {
     }
 
     private func handleKeyDown(_ event: NSEvent) {
-        lastEventTime = Date()
         guard let coordinator else {
             HotkeyManager.hkLog.error("[HK] coordinator is nil in handleKeyDown — events being dropped")
             return
@@ -407,6 +401,16 @@ final class HotkeyManager {
 
                 guard let refcon else { return Unmanaged.passRetained(event) }
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
+
+                // The one place `lastTapKeyDown` is stamped (#97). `eventsOfInterest`
+                // is key-down only and the tap-disabled control events returned above,
+                // so reaching here *is* "our tap received a key-down" — the fact the
+                // health check exists to measure and never did.
+                //
+                // The tap's source is on CFRunLoopGetMain (see below), so this runs on
+                // the main thread: the same assumption `modifierOn` and the Space path
+                // already make, and why no `nonisolated(unsafe)` mirror is needed.
+                MainActor.assumeIsolated { manager.lastTapKeyDown = Date() }
 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 let flags = event.flags
@@ -518,6 +522,9 @@ final class HotkeyManager {
             DiagStore.record(.tapCreate(outcome: .failed, osStatus: nil))
             HotkeyManager.hkLog.error("[HK] Failed to create CGEvent tap")
         }
+        // The health loop sleeps before its first tick, so without this the panel
+        // could be opened in the first 5 s and read the default rather than a tap.
+        tapLiveness.isAlive = isEventTapAlive
     }
 
     /// Remove the CGEvent tap from the run loop and release resources.
@@ -622,34 +629,35 @@ final class HotkeyManager {
             lastSecureInputActive = false
         }
 
-        // 4. Event liveness. "We saw no key events for 30s" is not a fault — the user
-        //    was reading. The fault is "the OS delivered key events to everyone else
-        //    and not to us", so the edge is gated on machine input, not on our silence.
-        //    The health loop ticks every 5s; only the transitions are recorded.
-        let elapsed = Date().timeIntervalSince(lastEventTime)
-        let tapLooksDead = elapsed > 30 && Self.secondsSinceSystemKeyInput() < 30
-        if tapLooksDead {
-            if !lastEventsStalled {
-                lastEventsStalled = true
-                DiagStore.record(.tapEventsStalled(seconds: Int(elapsed)))
-            }
-            HotkeyManager.hkLog.error("[HK] Health: OS saw key input but our tap did not, for \(Int(elapsed))s")
-        } else if lastEventsStalled {
-            lastEventsStalled = false
+        // 4. Tap liveness. "We saw no key events for 30s" is not a fault — the user
+        //    was reading. The fault is "the session received key-downs and our tap
+        //    did not", and both halves of that are now measured from the same
+        //    vantage: `lastTapKeyDown` is stamped by the tap's own callback, against
+        //    the session's key-downs *alone*. Neither held before (#97) — our side
+        //    was stamped by the NSEvent monitors, which starve alongside the tap and
+        //    are reset by Fn, and the session side min'd in flagsChanged, an event
+        //    type `eventsOfInterest` (`installEventTap`) never asks for, so it could
+        //    never have a counterpart on our side and could only ever fabricate
+        //    starvation. Secure input, read at step 3, makes that comparison
+        //    unmeasurable rather than false — see `TapLiveness.observe`.
+        //    Only the transitions are recorded; the verdict latches in `TapLiveness`.
+        let edge = tapLiveness.observe(
+            isAlive: isEventTapAlive,
+            tapSilent: Date().timeIntervalSince(lastTapKeyDown),
+            sessionSilent: CGEventSource.secondsSinceLastEventType(
+                .combinedSessionState, eventType: .keyDown
+            ),
+            secureInputActive: secureInput.active
+        )
+        switch edge {
+        case .stalled:
+            DiagStore.record(.tapEventsStalled(seconds: tapLiveness.tapSilentSeconds))
+            HotkeyManager.hkLog.error("[HK] Health: the session received key-downs and our tap did not, for \(self.tapLiveness.tapSilentSeconds)s")
+        case .resumed:
             DiagStore.record(.tapEventsResumed)
+            HotkeyManager.hkLog.info("[HK] Health: our tap is receiving key-downs again")
+        case nil:
+            break
         }
-    }
-
-    /// Seconds since the *system* last saw a key-down or modifier change, from any
-    /// process. Compared against our own last event, this separates "the user is idle"
-    /// from "our tap is dead" — the two states the old 30-second warning conflated.
-    private static func secondsSinceSystemKeyInput() -> CFTimeInterval {
-        let sinceKeyDown = CGEventSource.secondsSinceLastEventType(
-            .combinedSessionState, eventType: .keyDown
-        )
-        let sinceFlagsChanged = CGEventSource.secondsSinceLastEventType(
-            .combinedSessionState, eventType: .flagsChanged
-        )
-        return min(sinceKeyDown, sinceFlagsChanged)
     }
 }

@@ -30,9 +30,20 @@ final class HealthSummonTests: XCTestCase {
 
     // MARK: - The banner's words (#94)
 
-    /// The reported bug, at its source: `"\(shortName) not working"` renders
-    /// "Fn key not working" for a starved tap and would render the nonsense
-    /// "Secure input not working" here — secure input *working* is the problem.
+    /// The name at the root of the whole complaint (#97). No surface may raise a
+    /// banner about the Fn key on the tap's behalf: Fn hold-to-talk runs entirely
+    /// on the NSEvent monitors and never reaches the tap, which carries only the
+    /// keys Lore intercepts while another app is focused. A probe that cannot
+    /// observe the Fn key told a user, in its own name, that theirs was broken —
+    /// and every fix before this one plumbed around that name instead of fixing it.
+    func testNoBannerBlamesTheFnKeyForTheTapWhichCannotObserveIt() {
+        let title = HealthSummon(probe: .tap).title
+        XCTAssertFalse(title.contains("Fn"), "the tap probe cannot answer for the Fn key")
+        XCTAssertTrue(title.contains("Keyboard shortcuts"), "it answers for the keys it carries")
+    }
+
+    /// `"\(shortName) not working"` would render the nonsense "Secure input not
+    /// working" — secure input *working* is the problem (#94).
     func testSecureInputBannerNamesTheSystemWideConditionNotTheFnKey() {
         let title = HealthSummon(probe: .secureInput).title
         XCTAssertFalse(title.contains("Fn key"), "no surface may blame the Fn key for a system-wide lock")

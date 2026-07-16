@@ -106,6 +106,14 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
     }
 
     /// Short label for the footer's "1 issue — <name>" and the notch message.
+    ///
+    /// `.tap` was "Fn key" until #97, which is the lie at the root of the whole
+    /// complaint: Fn hold-to-talk runs entirely on the NSEvent monitors, and the
+    /// tap carries only the keys Lore intercepts while another app is focused
+    /// (Space to lock, Esc to discard, Fn+V/T — `HotkeyManager.installEventTap`).
+    /// The probe could never answer for the Fn key, yet spoke in its name — so it
+    /// told a user whose Fn key demonstrably worked that it did not. Every fix
+    /// before this one plumbed around the name instead of correcting it.
     var shortName: String {
         switch self {
         case .signing: return "Signing"
@@ -113,7 +121,7 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
         case .diskSpace: return "Disk space"
         case .accessibility: return "Accessibility"
         case .inputMonitoring: return "Input Monitoring"
-        case .tap: return "Fn key"
+        case .tap: return "Keyboard shortcuts"
         case .secureInput: return "Secure input"
         case .microphone: return "Microphone"
         case .micCapture: return "Mic capture"
@@ -158,6 +166,10 @@ struct HealthResult: Codable, Sendable, Equatable {
     var signingCert: SigningCertKind? = nil
     var freeDiskGB: Int? = nil
     var lastAttempt: HealthLastAttempt? = nil
+    /// `.tap` only: the evidence its verdict was derived from, so a report's reader
+    /// can re-derive the conclusion instead of trusting it (#97). Bools and counts,
+    /// so the guarantee above holds unchanged.
+    var tapLiveness: TapLiveness? = nil
 }
 
 /// The whole chain plus the machine's identity. This is exactly what #84's
@@ -220,7 +232,7 @@ struct HealthSummary: Equatable {
     ///   never for degradation, so the pair is "no verdict" by construction (#94).
     ///   Counting it would inflate one physical condition into "2 issues — Secure
     ///   input", and `plainLanguageIssue` — gated on this rule — would tell the
-    ///   report's reader their Fn key is broken directly beneath the truth.
+    ///   report's reader Lore's shortcuts are broken directly beneath the truth.
     ///
     /// A real recorded failure still lands as `.failed` and counts.
     static func countsInFooter(_ result: HealthResult) -> Bool {

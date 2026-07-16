@@ -23,6 +23,16 @@ final class HealthSnapshotPrivacyTests: XCTestCase {
         .map(String.init)
         .filter { $0.count >= 4 && $0.contains(where: \.isLetter) }
 
+    /// The tap's measurement (#97) at its most-revealing legal value. It is Bools
+    /// and counts, so it contributes no strings to the wire at all — which is the
+    /// property `testEveryStringInEncodedSnapshotIsFromTheClosedVocabulary` checks.
+    private static var worstCaseLiveness: TapLiveness {
+        var liveness = TapLiveness()
+        _ = liveness.observe(isAlive: false, tapSilent: .greatestFiniteMagnitude, sessionSilent: 0,
+                             secureInputActive: false)
+        return liveness
+    }
+
     /// The worst case: every probe present, every optional field populated with
     /// its most-revealing legal value. Because no field is free-form text, the
     /// worst case is still only enums and numbers.
@@ -37,7 +47,8 @@ final class HealthSnapshotPrivacyTests: XCTestCase {
                     secureInputHolderPID: .max,
                     signingCert: .adHoc,
                     freeDiskGB: 0,
-                    lastAttempt: HealthLastAttempt(outcome: .failed, ageSeconds: .max)
+                    lastAttempt: HealthLastAttempt(outcome: .failed, ageSeconds: .max),
+                    tapLiveness: Self.worstCaseLiveness
                 )
             }
         )
