@@ -1,5 +1,20 @@
 # Changelog
 
+## v2.3.0 — 2026-07-16
+
+When macOS locks the keyboard, the app now says so — and names what did it. v2.1.0 promised this and never delivered it once.
+
+**"Fn key not working" was a lie, and the truth was buried**
+- When another process turns on macOS Secure Input, no app receives keystrokes — not Lore, not Raycast, not anything. Fn hold-to-talk keeps working (it rides a different kind of event), so the failure looks like "Space and the upgrade keys are broken" rather than "the keyboard is locked". The app used to respond by flashing **"Fn key not working"** while the health panel simultaneously showed the Fn key as healthy — because the stall detector's verdict depended on whether you'd paused typing for 30 seconds, not on anything about the Fn key. The banner now names the real condition: **"Secure input is on — no app is receiving keys"**, and says restarting Lore won't help, because it won't (#94)
+- The health panel and the banner can no longer contradict each other, and the report's "What this means" tab no longer blames the Fn key either (#94)
+
+**Naming the culprit — the feature v2.1.0 said it shipped**
+- v2.1.0's changelog claimed "the panel names that app rather than blaming a permission". It never did, on any machine. The lookup read the holder's process ID from the wrong place in the system registry — a level above where macOS actually stores it — so it came back empty every single time, on every version of macOS, since the day it shipped. It now reads the right place and names the holder (#92)
+- The process ID macOS reports can point at the wrong app — an Apple bug open since 2019, which we reproduced twice during this fix, once with it blaming Lore for starving Lore's own keyboard. So the app presents the holder as a lead to check, not an accusation. When the holder has no app name (a background daemon), it shows the process ID rather than staying silent (#92)
+
+**The diagnostic that never fired**
+- Secure input turning on or off was supposed to be recorded in the event stream since v2.1.0. It never was — not once, on any machine, because it was gated behind the broken lookup above. A problem report therefore couldn't distinguish "the keyboard has been locked for four hours" from "it locked ten seconds ago". It records now, so the next report answers when it started and how long it lasted (#93)
+
 ## v2.2.0 — 2026-07-09
 
 Polish and a privacy cleanup on top of the diagnostics release.
