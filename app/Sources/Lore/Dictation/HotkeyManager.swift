@@ -1,5 +1,4 @@
 import AppKit
-import IOKit
 import os
 
 @MainActor
@@ -605,19 +604,16 @@ final class HotkeyManager {
             lastInputMonitoringOK = inputOK
         }
 
-        // 3. SecureInput check (record only on transitions to avoid spam)
-        let secureInput = checkSecureInput()
-        if secureInput.active, let pid = secureInput.pid {
+        // 3. SecureInput check (record only on transitions to avoid spam). The
+        //    flag alone decides the edge: a holder pid is decoration the registry
+        //    often cannot supply, and gating on it is what kept this event from
+        //    ever firing (#93).
+        let secureInput = SecureInput.read()
+        if secureInput.active {
             if !lastSecureInputActive {
-                DiagStore.record(.secureInputChanged(active: true, holderPID: pid))
+                DiagStore.record(.secureInputChanged(active: true, holderPID: secureInput.pid))
                 // The holder's *name* identifies software the user runs — os.Logger only.
-                let processName: String
-                if let app = NSRunningApplication(processIdentifier: pid) {
-                    processName = app.localizedName ?? app.bundleIdentifier ?? "PID \(pid)"
-                } else {
-                    processName = "PID \(pid)"
-                }
-                HotkeyManager.hkLog.error("[HK] Health: SecureInput active — held by \(processName, privacy: .private) (pid \(pid, privacy: .public))")
+                HotkeyManager.hkLog.error("[HK] Health: SecureInput active — associated with \(secureInput.name ?? "an unnamed process", privacy: .private) (pid \(secureInput.pid.map(String.init) ?? "none", privacy: .public))")
             }
             lastSecureInputActive = true
         } else if lastSecureInputActive {
@@ -655,11 +651,5 @@ final class HotkeyManager {
             .combinedSessionState, eventType: .flagsChanged
         )
         return min(sinceKeyDown, sinceFlagsChanged)
-    }
-
-    /// Check if SecureInput is active via IOKit registry. Shares the registry
-    /// read with the health probe (`SecureInput`, #83) so there is one copy.
-    private func checkSecureInput() -> (active: Bool, pid: Int32?) {
-        SecureInput.holder()
     }
 }

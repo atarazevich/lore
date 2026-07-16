@@ -178,10 +178,16 @@ enum HealthCatalog {
 
         case .secureInput:
             if ok { return ("Secure input", "Inactive — the Fn key isn't being starved.", nil) }
-            let holder = holderName.map { " held by \($0)" } ?? ""
+            // The pid is a hint, not an identification: macOS records whichever app
+            // was frontmost when secure input went on, which per rdar://48953777 is
+            // often not the caller. So the copy suggests where to look; it does not
+            // accuse a named app of holding the user's keyboard.
+            let hint = holderName.map {
+                ", and macOS associates it with \($0) — though it names whichever app was in front, which may not be the one responsible"
+            } ?? ""
             return ("Secure input",
-                    "Secure input is active\(holder). While on, no app — including Lore — receives keystrokes.",
-                    Remedy(instruction: "A password field or app has locked keyboard input\(holder). Close it (or click out of the password field) to release the Fn key.",
+                    "Secure input is active\(hint). While on, no app — including Lore — receives keystrokes.",
+                    Remedy(instruction: "A password field or app has locked keyboard input. Close it (or click out of the password field) to release the Fn key.",
                            actions: []))
 
         // MARK: Audio

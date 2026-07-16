@@ -130,18 +130,16 @@ struct HealthProber {
     }
 
     private func secureInputReading() -> Reading {
-        // Two independent reads: the boolean flag and the holding pid. Either
-        // one being positive means input is being withheld.
-        let holder = SecureInput.holder()
-        let active = SecureInput.isEnabled() || holder.active
-        let name = holder.pid.flatMap { SecureInput.holderName(pid: $0) }
+        // The same reader `HotkeyManager`'s monitor uses, so the panel and the
+        // event stream cannot disagree about whether input is withheld (#93).
+        let state = SecureInput.read()
         return Reading(
             result: HealthResult(
                 id: .secureInput,
-                status: active ? .failed : .ok,
-                secureInputHolderPID: holder.pid
+                status: state.active ? .failed : .ok,
+                secureInputHolderPID: state.pid
             ),
-            holderName: name
+            holderName: state.name
         )
     }
 
