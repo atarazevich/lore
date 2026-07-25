@@ -71,13 +71,47 @@ final class SecureInputTests: XCTestCase {
         XCTAssertTrue(SecureInput.holderPIDs(in: [session(pid: nil)]).isEmpty)
     }
 
-    /// SecurityAgent holding the keyboard *is* the password prompt working. It is
-    /// recognized rather than blamed: no name for the panel to accuse, while the
-    /// pid still reaches the report unambiguously and `read()` still reports
-    /// secure input active off the flag.
-    func testSecurityAgentIsRecognizedRatherThanBlamedButItsPIDStillReports() {
-        XCTAssertNil(SecureInput.holderName(pid: 77, lookup: { _ in ("com.apple.SecurityAgent", "SecurityAgent") }))
-        XCTAssertEqual(SecureInput.holderName(pid: 88, lookup: { _ in ("com.1password.1password", "1Password") }), "1Password")
-        XCTAssertEqual(SecureInput.holderPIDs(in: [session(pid: 77)]), [77])
+    // MARK: - #98: who may be named as the holder
+
+    /// loginwindow and SecurityAgent are the misattribution sinks
+    /// (rdar://48953777; #98, canonical account in design §6): never presented
+    /// as the holder, while their pids still reach the report, where the
+    /// operator needs the raw truth.
+    func testTheMisattributionSinksAreNeverPresentedAsTheHolder() {
+        XCTAssertEqual(SecureInput.attribution(
+            pid: 422, identity: ("com.apple.loginwindow", "loginwindow", nil)
+        ), .misattributed)
+        XCTAssertEqual(SecureInput.attribution(
+            pid: 77, identity: ("com.apple.SecurityAgent", "SecurityAgent", nil)
+        ), .misattributed)
+        XCTAssertEqual(SecureInput.holderPIDs(in: [session(pid: 422)]), [422],
+                       "suppression is a display rule — the pid still reaches the report path")
+    }
+
+    /// loginwindow can lack an `NSRunningApplication` (the field holder was from
+    /// boot, ppid 1), so the executable path is the fallback identity.
+    func testLoginwindowIsRecognizedByExecutablePathWhenUnnamed() {
+        XCTAssertEqual(SecureInput.attribution(
+            pid: 422,
+            identity: (nil, nil, "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow")
+        ), .misattributed)
+    }
+
+    /// A real app stays a (hedged) hint — current behavior, unchanged by #98.
+    func testARealAppIsNamedAsAHint() {
+        XCTAssertEqual(SecureInput.attribution(
+            pid: 88, identity: ("com.1password.1password", "1Password", "/Applications/1Password.app/Contents/MacOS/1Password")
+        ), .app("1Password"))
+    }
+
+    /// A CLI or daemon holder has no app to name; the pid itself is the hint (#92).
+    func testADaemonHolderFallsBackToItsPID() {
+        XCTAssertEqual(SecureInput.attribution(
+            pid: 4242, identity: (nil, nil, "/usr/libexec/somethingd")
+        ), .process(4242))
+    }
+
+    func testNoPIDMeansNobody() {
+        XCTAssertEqual(SecureInput.attribution(pid: nil, identity: nil), .nobody)
     }
 }

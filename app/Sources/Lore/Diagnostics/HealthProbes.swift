@@ -45,11 +45,11 @@ struct HealthProber {
         self.now = now
     }
 
-    /// A probe result plus the machine-local notes (holder name, signing team)
-    /// that render in the panel but must never enter the serialized snapshot.
+    /// A probe result plus the machine-local notes (holder attribution, signing
+    /// team) that render in the panel but must never enter the serialized snapshot.
     private struct Reading {
         let result: HealthResult
-        var holderName: String?
+        var holder: SecureInput.Attribution?
         var teamID: String?
     }
 
@@ -66,13 +66,16 @@ struct HealthProber {
             results: readings.map(\.result)
         )
         // Secure input active is the likeliest CAUSE of a starved tap, so the
-        // tap item's remedy points at it rather than at a useless restart.
+        // tap item's remedy points at it rather than at a useless restart. The
+        // `.secureInput` row needs the same fact: it can read `.ok` while the
+        // flag is up (benign behind a locked console, #98), and the ok copy must
+        // not claim "Inactive" then.
         let items = readings.map { reading in
             HealthCatalog.describe(
                 reading.result,
-                holderName: reading.holderName,
+                secureInputHolder: reading.holder,
                 teamID: reading.teamID,
-                secureInputActive: reading.result.id == .tap && secureInput.active
+                secureInputActive: [.tap, .secureInput].contains(reading.result.id) && secureInput.active
             )
         }
         return (snapshot, items)
@@ -168,17 +171,26 @@ struct HealthProber {
 
     /// The state is read once per cycle in `probe()` and passed in.
     private func secureInputReading(_ state: SecureInput.State) -> Reading {
-        Reading(
+        // Secure input behind a locked console is the lock screen doing its job —
+        // working as designed whoever the registry credits (an attribution
+        // rdar://48953777 makes unreliable anyway), and the panel is unreadable
+        // there, so nothing is surfaced and no notch summons at every lock
+        // screen (#98). A genuinely stuck flag resurfaces on the first tick
+        // after unlock: the lock state is re-read every cycle.
+        let problem = state.active && !state.consoleLocked
+        return Reading(
             result: HealthResult(
                 id: .secureInput,
-                status: state.active ? .failed : .ok,
-                // `read()` checks the flag before walking the registry, so a holder
-                // appearing between the two yields `active: false, pid: n` for one
-                // tick. A pid on an `ok` row is noise to a report's reader, who must
-                // be able to decode `holderPID` unambiguously (#92).
-                secureInputHolderPID: state.active ? state.pid : nil
+                status: problem ? .failed : .ok,
+                // The pid rides iff the row is a problem, so a report's reader can
+                // decode `holderPID` unambiguously (#92) — `read()` checks the flag
+                // before walking the registry, so a holder appearing between the
+                // two yields `active: false, pid: n` for one tick, and a pid on an
+                // `ok` row would be noise. It rides for a misattributed holder too:
+                // suppression is a display rule, and the report keeps the truth.
+                secureInputHolderPID: problem ? state.pid : nil
             ),
-            holderName: state.name
+            holder: problem ? state.attribution : nil
         )
     }
 

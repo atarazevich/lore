@@ -12,10 +12,13 @@ import IOKit
 /// `kCGSSessionSecureInputPID` lives *inside* the per-session dicts of that
 /// array (Apple's `IOKitKeysPrivate.h` lists the two under disjoint headings).
 /// Reading the pid key off the root returns nil unconditionally (#92).
+/// `IOConsoleLocked` is a sibling root property, read off the same fetch (#98).
 ///
-/// The pid is a **hint, not an identification**: per rdar://48953777 an app that
-/// enables secure input while inactive is recorded as whichever app happened to
-/// be frontmost. Copy that names the holder must hedge accordingly.
+/// The pid is a **hint, not an identification**: per rdar://48953777 the
+/// registry records whichever app was frontmost when secure input went on,
+/// which may not be the caller. Copy that names the holder must hedge
+/// accordingly — and for the two processes most likely to be frontmost at grab
+/// time, must not name them at all (`Attribution.misattributed`).
 enum SecureInput {
     /// One reading. `active` may be true with no pid — the flag is set but no
     /// on-console session dict attributes it to a live process. That is a real,
@@ -23,20 +26,58 @@ enum SecureInput {
     struct State {
         let active: Bool
 
-        /// The pid the registry attributes secure input to, reported verbatim —
-        /// SecurityAgent's included, so `holderPID: null` in a report keeps one
-        /// meaning: the registry named nobody.
+        /// The pid the registry attributes secure input to, reported verbatim.
+        /// Suppression of a misattributed holder is a *display* rule: the raw
+        /// pid still reaches the report, where the operator needs the truth.
         let pid: Int32?
 
-        /// The holder's display name. It identifies software the user runs, so
-        /// it is machine-local: panel and `os.Logger` only, never a snapshot.
-        var name: String? { pid.flatMap { holderName(pid: $0) } }
+        /// `IOConsoleLocked`: the console is at the lock screen. loginwindow
+        /// holding secure input while this is true is the lock screen protecting
+        /// the password field — working as designed, not a problem (#98).
+        let consoleLocked: Bool
+
+        /// Who the surfaces may say holds it — resolved once at `read()` so the
+        /// panel, the remedy and the tests all apply one rule.
+        let attribution: Attribution
+
+        /// The raw holder name from the lookup, regardless of attribution — for
+        /// the `privacy: .private` os.Logger line only, the one surface where
+        /// naming a misattribution sink is safe (and how the field case was
+        /// diagnosed). Every user-facing surface renders `attribution` instead;
+        /// never a snapshot.
+        let name: String?
+    }
+
+    /// What the user-facing surfaces may say about the holder (#98).
+    enum Attribution: Equatable, Sendable {
+        /// A real app to point at — as a hedged hint, per rdar://48953777.
+        case app(String)
+        /// No app owns the pid (a CLI or daemon holder has no
+        /// `NSRunningApplication`) — the pid itself is the hint, and the case
+        /// where the user most needs one (#92).
+        case process(Int32)
+        /// loginwindow or SecurityAgent: the registry blames whichever process
+        /// was frontmost at grab time, and these two are what is frontmost when
+        /// a background process grabs the flag — so neither name nor pid is
+        /// shown (#98; canonical account in design §6).
+        case misattributed
+        /// The registry named nobody.
+        case nobody
     }
 
     /// The single reading both consumers use (#93), so the panel and the event
     /// stream cannot disagree about whether input is withheld.
     static func read() -> State {
-        State(active: isEnabled(), pid: holderPIDs(in: consoleUsers()).first)
+        let console = consoleState()
+        let pid = holderPIDs(in: console.sessions).first
+        let identity = pid.map(processIdentity)
+        return State(
+            active: isEnabled(),
+            pid: pid,
+            consoleLocked: console.locked,
+            attribution: attribution(pid: pid, identity: identity),
+            name: identity.flatMap { $0.name ?? $0.bundleID }
+        )
     }
 
     /// The system-wide secure-input flag, and the authority on `active`: it is
@@ -60,32 +101,55 @@ enum SecureInput {
             .filter { $0 > 0 }
     }
 
-    /// The live read. `IOConsoleUsers` hangs off the registry root; the pid is
-    /// one level down, inside the dicts.
-    private static func consoleUsers() -> [[String: Any]] {
+    /// The live read, one registry-root fetch for both facts: `IOConsoleUsers`
+    /// hangs off the root (the pid is one level down, inside the dicts), and
+    /// `IOConsoleLocked` is its sibling.
+    private static func consoleState() -> (sessions: [[String: Any]], locked: Bool) {
         let root = IORegistryGetRootEntry(kIOMainPortDefault)
         defer { IOObjectRelease(root) }
-        guard let prop = IORegistryEntryCreateCFProperty(
+        let sessions = IORegistryEntryCreateCFProperty(
             root, "IOConsoleUsers" as CFString, kCFAllocatorDefault, 0
-        ) else { return [] }
-        return prop.takeRetainedValue() as? [[String: Any]] ?? []
+        )?.takeRetainedValue() as? [[String: Any]] ?? []
+        let locked = IORegistryEntryCreateCFProperty(
+            root, "IOConsoleLocked" as CFString, kCFAllocatorDefault, 0
+        )?.takeRetainedValue() as? Bool ?? false
+        return (sessions, locked)
     }
 
-    /// The holder's display name — machine-local, never persisted into a snapshot.
-    ///
-    /// `nil` for `com.apple.SecurityAgent`: the system's own password prompt doing
-    /// exactly its job is recognized rather than offered up as a culprit. Only the
-    /// blame is withheld — `active` still stands and the pid still reaches the
-    /// report.
-    static func holderName(
-        pid: Int32,
-        lookup: (Int32) -> (bundleID: String?, localizedName: String?) = {
-            let app = NSRunningApplication(processIdentifier: $0)
-            return (app?.bundleIdentifier, app?.localizedName)
+    /// What the OS knows about a pid — read once per cycle in `read()` and fed
+    /// to both `attribution` and the log-only `name`.
+    typealias Identity = (bundleID: String?, name: String?, path: String?)
+
+    private static func processIdentity(_ pid: Int32) -> Identity {
+        let app = NSRunningApplication(processIdentifier: pid)
+        return (app?.bundleIdentifier, app?.localizedName,
+                app?.executableURL?.path ?? executablePath(pid))
+    }
+
+    /// The one rule for who may be named. Pure over literal identities, same
+    /// doctrine as `holderPIDs(in:)`.
+    static func attribution(pid: Int32?, identity: Identity?) -> Attribution {
+        guard let pid else { return .nobody }
+        if isMisattributionSink(bundleID: identity?.bundleID, path: identity?.path) {
+            return .misattributed
         }
-    ) -> String? {
-        let app = lookup(pid)
-        guard app.bundleID != "com.apple.SecurityAgent" else { return nil }
-        return app.localizedName ?? app.bundleID
+        if let name = identity?.name ?? identity?.bundleID { return .app(name) }
+        return .process(pid)
+    }
+
+    /// loginwindow may lack an `NSRunningApplication` (the field holder was from
+    /// boot, ppid 1), so the executable path is the fallback identity.
+    private static func isMisattributionSink(bundleID: String?, path: String?) -> Bool {
+        if bundleID == "com.apple.loginwindow" || bundleID == "com.apple.SecurityAgent" {
+            return true
+        }
+        return path == "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"
+    }
+
+    private static func executablePath(_ pid: Int32) -> String? {
+        var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
+        let length = proc_pidpath(pid, &buffer, UInt32(buffer.count))
+        guard length > 0 else { return nil }
+        return String(decoding: buffer[..<Int(length)].map(UInt8.init(bitPattern:)), as: UTF8.self)
     }
 }

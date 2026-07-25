@@ -22,10 +22,20 @@ final class HealthProberTests: XCTestCase {
     private func prober(alive: Bool, stalled: Bool, secureInput: Bool = false) -> HealthProber {
         HealthProber(
             readTapLiveness: { Self.liveness(alive: alive, stalled: stalled) },
-            readSecureInput: { SecureInput.State(active: secureInput, pid: nil) },
+            readSecureInput: { Self.secureInputState(active: secureInput) },
             hasOpenAIKey: { true },
             store: emptyStore()
         )
+    }
+
+    /// A literal secure-input reading, per the `holderPIDs(in:)` doctrine of
+    /// testing the decision logic off values rather than the live registry.
+    static func secureInputState(
+        active: Bool, pid: Int32? = nil, consoleLocked: Bool = false,
+        attribution: SecureInput.Attribution = .nobody
+    ) -> SecureInput.State {
+        SecureInput.State(active: active, pid: pid, consoleLocked: consoleLocked,
+                          attribution: attribution, name: nil)
     }
 
     /// `stalled` is driven through the real measurement rather than asserted into
@@ -130,7 +140,7 @@ final class HealthProberTests: XCTestCase {
                              secureInputActive: true)
         let prober = HealthProber(
             readTapLiveness: { measured },
-            readSecureInput: { SecureInput.State(active: false, pid: nil) },
+            readSecureInput: { Self.secureInputState(active: false) },
             hasOpenAIKey: { true },
             store: emptyStore()
         )
@@ -145,13 +155,74 @@ final class HealthProberTests: XCTestCase {
     func testAnInactiveSecureInputRowCarriesNoHolderPID() {
         let prober = HealthProber(
             readTapLiveness: { TapLiveness() },
-            readSecureInput: { SecureInput.State(active: false, pid: 4242) },
+            readSecureInput: { Self.secureInputState(active: false, pid: 4242, attribution: .process(4242)) },
             hasOpenAIKey: { true },
             store: emptyStore()
         )
         let row = prober.probe().snapshot.results.first { $0.id == .secureInput }!
         XCTAssertEqual(row.status, .ok)
         XCTAssertNil(row.secureInputHolderPID, "a pid on an ok row is noise to a report's reader")
+    }
+
+    // MARK: - #98: the lock state separates "working as designed" from "stuck"
+
+    private func secureInputProbe(_ state: SecureInput.State) -> (row: HealthResult, item: HealthItem) {
+        let prober = HealthProber(
+            readTapLiveness: { TapLiveness() },
+            readSecureInput: { state },
+            hasOpenAIKey: { true },
+            store: emptyStore()
+        )
+        let (snapshot, items) = prober.probe()
+        return (snapshot.results.first { $0.id == .secureInput }!,
+                items.first { $0.id == .secureInput }!)
+    }
+
+    /// loginwindow holding secure input behind a locked console is the lock
+    /// screen protecting the password field — nothing is wrong, nothing surfaces,
+    /// and no notch summons at every lock screen.
+    func testTheLockScreenHoldingSecureInputIsNotAProblem() {
+        let (row, item) = secureInputProbe(Self.secureInputState(
+            active: true, pid: 422, consoleLocked: true, attribution: .misattributed))
+        XCTAssertEqual(row.status, .ok, "the lock screen doing its job is not an issue")
+        XCTAssertNil(row.secureInputHolderPID, "a pid appears iff the row is a problem (#92)")
+        XCTAssertNil(item.remedy)
+        // The flag IS up, and the tap row (gated on the raw flag) says so — this
+        // row's ok copy must not contradict it by claiming "Inactive".
+        XCTAssertFalse(item.detail.contains("Inactive"),
+                       "ok-while-active must not render the inactive copy")
+        XCTAssertTrue(item.detail.contains("lock screen"))
+    }
+
+    /// The same holder with the console unlocked is the field bug (#98): name
+    /// AND pid suppressed on the panel, while the report keeps the raw pid —
+    /// suppression is a display rule, mirroring #92's SecurityAgent decision.
+    func testAMisattributedHolderOnAnUnlockedConsoleIsAProblemTheReportKeepsAndThePanelDoesNotBlame() {
+        let (row, item) = secureInputProbe(Self.secureInputState(
+            active: true, pid: 422, consoleLocked: false, attribution: .misattributed))
+        XCTAssertEqual(row.status, .failed)
+        XCTAssertEqual(row.secureInputHolderPID, 422, "the report keeps the raw pid")
+        XCTAssertTrue(item.detail.contains("won't name"), "an honest unknown beats a confident wrong answer")
+        XCTAssertFalse(item.detail.contains("422"), "the pid is a misattribution sink's — not shown")
+        XCTAssertFalse(item.detail.contains("loginwindow"), "and neither is the name")
+    }
+
+    /// The locked console exonerates regardless of attribution: `.nobody` is the
+    /// case that matters — the registry can attribute the flag to no one at the
+    /// lock screen, and a `.failed` there would summon the notch at every lock
+    /// screen, exactly what the exoneration exists to prevent. A stuck flag
+    /// resurfaces on the first tick after unlock (lock state is re-read each
+    /// cycle), which is also when the panel becomes readable again.
+    func testALockedConsoleExoneratesRegardlessOfAttribution() {
+        for attribution in [SecureInput.Attribution.nobody, .app("1Password")] {
+            let (row, _) = secureInputProbe(Self.secureInputState(
+                active: true, pid: nil, consoleLocked: true, attribution: attribution))
+            XCTAssertEqual(row.status, .ok, "\(attribution): locked console is by design")
+        }
+        // Unlock is what reveals a stuck flag.
+        let (row, _) = secureInputProbe(Self.secureInputState(
+            active: true, pid: nil, consoleLocked: false, attribution: .nobody))
+        XCTAssertEqual(row.status, .failed)
     }
 
     /// The single-source-of-truth guard: `HealthProbeID.cost` is the ONE place

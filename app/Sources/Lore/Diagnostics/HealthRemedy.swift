@@ -78,27 +78,29 @@ enum HealthCatalog {
 
     /// - Parameters:
     ///   - result: the PII-free probe result.
-    ///   - holderName: secure-input holder process name — machine-local, shown
-    ///     in the detail line, never serialized.
+    ///   - secureInputHolder: who the panel may say holds secure input —
+    ///     machine-local, shown in the detail line, never serialized (#98).
     ///   - teamID: signing team identifier, shown in the detail line only.
     ///   - secureInputActive: secure input starves the tap, so it is the cause of
     ///     the tap's non-ok state — which under it is `.warning`, never `.failed`
-    ///     (#94). The tap remedy points at it instead of offering a useless restart.
+    ///     (#94). The tap remedy points at it instead of offering a useless
+    ///     restart. Also set for the `.secureInput` row itself, whose ok copy must
+    ///     not read "Inactive" while the flag is up (benign locked console, #98).
     static func describe(
         _ result: HealthResult,
-        holderName: String? = nil,
+        secureInputHolder: SecureInput.Attribution? = nil,
         teamID: String? = nil,
         secureInputActive: Bool = false
     ) -> HealthItem {
         let (title, detail, remedy) = copy(
-            for: result, holderName: holderName, teamID: teamID, secureInputActive: secureInputActive
+            for: result, holder: secureInputHolder, teamID: teamID, secureInputActive: secureInputActive
         )
         return HealthItem(result: result, title: title, detail: detail, remedy: remedy)
     }
 
     private static func copy(
         for result: HealthResult,
-        holderName: String?,
+        holder: SecureInput.Attribution?,
         teamID: String?,
         secureInputActive: Bool
     ) -> (title: String, detail: String, remedy: Remedy?) {
@@ -202,17 +204,37 @@ enum HealthCatalog {
                            actions: [.restartApp, .openSettings(.inputMonitoring)]))
 
         case .secureInput:
-            if ok { return ("Secure input", "Inactive — the Fn key isn't being starved.", nil) }
+            if ok {
+                // `.ok` while the flag is up is the benign locked-console case
+                // (#98); claiming "Inactive" there would contradict the tap row,
+                // which is gated on the raw flag and says secure input is on.
+                return secureInputActive
+                    ? ("Secure input", "Active, held by the lock screen — normal while the console is locked.", nil)
+                    : ("Secure input", "Inactive — the Fn key isn't being starved.", nil)
+            }
+            // A misattributed holder gets no name, no pid, and a procedure instead
+            // of a target (#98). The panel itself is the bisection instrument:
+            // the health loop re-probes every few seconds, so the row clears
+            // almost immediately when the real holder quits.
+            if holder == .misattributed {
+                return ("Secure input",
+                        "Secure input is active, held by a process macOS won't name — the recorded holder is a system process that was merely in front when the flag was grabbed. While on, no app — including Lore — receives keystrokes.",
+                        Remedy(instruction: "Quit likely holders one at a time while watching this panel — this row clears within about 5 seconds of quitting the right one. Prime suspects: Electron and Chromium apps, password managers, and Terminal or iTerm with Secure Keyboard Entry enabled. If nothing clears it, log out or restart the Mac; locking and unlocking the screen does not release it.",
+                               actions: []))
+            }
             // The pid is a hint, not an identification: macOS records whichever app
             // was frontmost when secure input went on, which per rdar://48953777 is
             // often not the caller. So the copy suggests where to look; it does not
-            // accuse a named app of holding the user's keyboard.
-            // A CLI or daemon holder has no `NSRunningApplication`, so the name is
-            // nil while the pid stands — and a daemon holding the flag is the case
-            // where the user most needs the hint (we hit it live twice). Fall back
-            // to the pid rather than say nothing about a holder we know of (#92).
-            let holder = holderName ?? result.secureInputHolderPID.map { "process \($0)" }
-            let hint = holder.map {
+            // accuse a named app of holding the user's keyboard. A CLI or daemon
+            // holder has no `NSRunningApplication`, so the pid stands in — and a
+            // daemon holding the flag is the case where the user most needs the
+            // hint (we hit it live twice) (#92).
+            let hintTarget: String? = switch holder {
+            case .app(let name): name
+            case .process(let pid): "process \(pid)"
+            case .misattributed, .nobody, nil: nil
+            }
+            let hint = hintTarget.map {
                 ", and macOS associates it with \($0) — though it names whichever app was in front, which may not be the one responsible"
             } ?? ""
             return ("Secure input",

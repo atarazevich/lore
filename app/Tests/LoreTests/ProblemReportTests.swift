@@ -86,7 +86,7 @@ final class ProblemReportTests: XCTestCase {
     private static func makeMonitor(stalled: StalledBox) -> HealthMonitor {
         let prober = HealthProber(
             readTapLiveness: { HealthProberTests.liveness(alive: true, stalled: stalled.stalled) },
-            readSecureInput: { SecureInput.State(active: false, pid: nil) },
+            readSecureInput: { HealthProberTests.secureInputState(active: false) },
             hasOpenAIKey: { true }
         )
         return HealthMonitor(prober: prober)

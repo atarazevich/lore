@@ -7,14 +7,14 @@ import XCTest
 final class HealthCatalogTests: XCTestCase {
 
     private func item(_ id: HealthProbeID, _ status: HealthStatus,
-                      holderName: String? = nil,
+                      holder: SecureInput.Attribution? = nil,
                       holderPID: Int32? = nil,
                       cert: SigningCertKind? = nil,
                       lastAttempt: HealthLastAttempt? = nil) -> HealthItem {
         HealthCatalog.describe(
             HealthResult(id: id, status: status, secureInputHolderPID: holderPID,
                          signingCert: cert, lastAttempt: lastAttempt),
-            holderName: holderName
+            secureInputHolder: holder
         )
     }
 
@@ -85,7 +85,7 @@ final class HealthCatalogTests: XCTestCase {
     }
 
     func testSecureInputFailureNamesTheHolderInTheDetailButNotTheSnapshot() {
-        let it = item(.secureInput, .failed, holderName: "1Password")
+        let it = item(.secureInput, .failed, holder: .app("1Password"))
         XCTAssertTrue(it.detail.contains("1Password"), "the panel names the holder")
         XCTAssertNotNil(it.remedy)
         // The holder name is machine-local: it lives on the item, never the result.
@@ -99,11 +99,24 @@ final class HealthCatalogTests: XCTestCase {
     /// and the one where the user most needs the hint. The row must point at the pid
     /// rather than fall silent about a holder the report already carries (#92).
     func testSecureInputWithAnUnnamedHolderPointsAtThePID() {
-        let it = item(.secureInput, .failed, holderPID: 4242)
+        let it = item(.secureInput, .failed, holder: .process(4242), holderPID: 4242)
         XCTAssertTrue(it.detail.contains("4242"),
                       "with no app to name, the pid is the only hint the panel has")
         XCTAssertTrue(it.detail.contains("may not be the one responsible"),
                       "the pid stays a hedged hint, not an accusation (rdar://48953777)")
+    }
+
+    /// #98: a misattributed holder gets a bisection procedure, not a target
+    /// (canonical account in design §6). Only the mutation-relevant pins — the
+    /// exact wording is the copy's business, not this test's.
+    func testAMisattributedHolderGetsTheBisectionProcedureNotATarget() {
+        let it = item(.secureInput, .failed, holder: .misattributed, holderPID: 422)
+        XCTAssertTrue(it.detail.contains("won't name"))
+        XCTAssertFalse(it.detail.contains("422"), "no pid to chase")
+        let remedy = try! XCTUnwrap(it.remedy)
+        XCTAssertTrue(remedy.instruction.contains("one at a time"), "bisection, not a target")
+        XCTAssertFalse(remedy.instruction.localizedCaseInsensitiveContains("kill"))
+        XCTAssertEqual(remedy.actions, [], "no button — there is no single target to act on")
     }
 
     func testAdHocSigningWarnsAboutResetPermissions() {
