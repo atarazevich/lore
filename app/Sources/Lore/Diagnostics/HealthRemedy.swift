@@ -168,11 +168,14 @@ enum HealthCatalog {
                     ?? "receiving key events"
                 return (title, "Live — \(age).", nil)
             }
-            // Secure input starves the tap: fixing that unstarves it, so surface
-            // the cause rather than a restart that cannot help.
+            // Secure input starves every tap on the machine by design, so whether
+            // *ours* is otherwise healthy cannot be measured while it is on —
+            // `TapLiveness.observe` deliberately draws no verdict there (#97). The
+            // row says so instead of asserting a conclusion it never drew (#99),
+            // and surfaces the cause rather than a restart that cannot help.
             if secureInputActive {
                 return (title,
-                        "Lore isn't receiving keys because secure input is active — see Secure input above.",
+                        "Can't be measured while secure input is on — it starves every app's keyboard tap by design. See Secure input above.",
                         Remedy(instruction: "Secure input is holding the keyboard; that is what stops Lore's shortcuts. Release it (see the Secure input item above) — restarting Lore will not help while it is on.",
                                actions: []))
             }
@@ -185,9 +188,11 @@ enum HealthCatalog {
             // to them (#97). A tap that is gone (`!isAlive`) takes the arm below
             // even if a starvation was measured too — it is genuinely not
             // installed, and reinstalling it is what a restart does.
-            if let liveness = result.tapLiveness, liveness.isStarved, liveness.isAlive {
+            // The evidence line states the direction, not two numbers whose
+            // subtraction the reader can get sign-wrong (#99).
+            if let liveness = result.tapLiveness, liveness.isStarved == true, liveness.isAlive {
                 return (title,
-                        "Lore's tap has been silent for \(silence(liveness.tapSilentSeconds)); the Mac last received a keystroke \(silence(liveness.sessionSilentSeconds)) ago.",
+                        "Keystrokes are reaching the Mac but not Lore — the Mac's last keystroke was \(silence(liveness.sessionSilentSeconds)) ago, while Lore's tap has been silent for \(silence(liveness.tapSilentSeconds)).",
                         Remedy(instruction: "macOS reports Accessibility and Input Monitoring as granted, yet no keystroke is reaching Lore — that is what a stale permission grant looks like, and toggling the switch off and on does not clear it. Remove Lore from Privacy & Security → Accessibility with the “−” button, do the same under Input Monitoring, quit Lore, then add it back to both and open it again.",
                                actions: [.openSettings(.accessibility), .openSettings(.inputMonitoring)]))
             }

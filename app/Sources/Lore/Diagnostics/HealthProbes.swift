@@ -141,7 +141,8 @@ struct HealthProber {
     /// real, but still not attributable while every tap on the machine is starved.
     private func tapStatus(_ liveness: TapLiveness, secureInputActive: Bool) -> HealthStatus {
         guard !secureInputActive else { return .warning }
-        return (liveness.isAlive && !liveness.isStarved) ? .ok : .failed
+        // `isStarved` is tri-state (#99); "no verdict drawn" is not a failure.
+        return (liveness.isAlive && liveness.isStarved != true) ? .ok : .failed
     }
 
     private func signingReading() -> Reading {

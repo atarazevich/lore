@@ -73,6 +73,10 @@ final class HealthCatalogTests: XCTestCase {
         XCTAssertTrue(remedy.instruction.localizedCaseInsensitiveContains("secure input"))
         XCTAssertFalse(remedy.actions.contains(.restartApp),
                        "restart cannot fix a starved tap while secure input is on")
+        // #99: `observe` is designed never to conclude here, so the row says the
+        // measurement is unavailable rather than asserting a verdict it never drew.
+        XCTAssertTrue(it.detail.localizedCaseInsensitiveContains("can't be measured"),
+                      "no verdict exists under secure input, and the row must say so")
     }
 
     func testMicrophoneFailureDeepLinksToMicrophonePane() {

@@ -27,9 +27,13 @@ struct TapLiveness: Codable, Sendable, Equatable {
     /// Seconds since the **session** last received a key-down, from any process.
     var sessionSilentSeconds = 0
 
-    /// The session is receiving key-downs and our tap is not. Latched — see
-    /// `observe`. Stored rather than computed so `observe` is its one definition.
-    private(set) var isStarved = false
+    /// The session is receiving key-downs and our tap is not — or `nil` while no
+    /// verdict has been drawn. Tri-state on the wire too: the synthesized Codable
+    /// omits the key when `nil`, so no report carries a foregone `false` to be
+    /// misread as "measured fed" (#99; canonical account in design §6).
+    /// Latched — see `observe`. Stored rather than computed so `observe` is its
+    /// one definition.
+    private(set) var isStarved: Bool? = nil
 
     /// A transition worth recording. Maps 1:1 onto `DiagEvent.tapEventsStalled` /
     /// `.tapEventsResumed`, whose names now describe what they measure.
@@ -69,7 +73,10 @@ struct TapLiveness: Codable, Sendable, Equatable {
             isStarved = true
         }
         guard isStarved != was else { return nil }
-        return isStarved ? .stalled : .resumed
+        if isStarved == true { return .stalled }
+        // The first fed verdict ever drawn (`nil` → `false`) is not a recovery:
+        // nothing was stalled, so nothing resumed and no event is recorded.
+        return was == true ? .resumed : nil
     }
 
     /// An interval as a whole-second count, floored at 0 and capped: the value

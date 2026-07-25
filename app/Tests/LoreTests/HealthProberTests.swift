@@ -264,12 +264,15 @@ final class HealthProberTests: XCTestCase {
     /// At the first tick that can latch, both sides fall inside `relativeAge`'s
     /// "just now" bucket (#88) — the row would have refuted itself for the whole
     /// window in which the banner is read, so the evidence renders as durations.
+    /// And the line states the *direction*, not two numbers to subtract (#99).
     func testAStarvedTapRowShowsTheMeasurementItsVerdictCameFrom() {
         let tap = prober(alive: true, stalled: true).probe().items.first { $0.id == .tap }!
         XCTAssertEqual(tap.status, .failed)
+        XCTAssertTrue(tap.detail.contains("reaching the Mac but not Lore"),
+                      "the row states what the gap means, not arithmetic for the reader to get wrong")
         XCTAssertTrue(tap.detail.contains("silent for 31s"),
                       "the row states how long our tap has gone without a keystroke")
-        XCTAssertTrue(tap.detail.contains("keystroke 0s ago"),
+        XCTAssertTrue(tap.detail.contains("keystroke was 0s ago"),
                       "beside the session's, so the gap the verdict came from is legible")
         XCTAssertFalse(tap.detail.contains("just now"),
                        "a 31 s silence rendered as “just now” is the row refuting itself")
