@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.5.0 — 2026-07-25
+
+Six fixes from the field: reliability retries, an "Ignore" button that actually ignored nothing, a Space that could leak into your document, and the last honesty gaps in the secure-input diagnostics.
+
+**Flaky network no longer costs you a dictation**
+- A transient failure — a timeout, a dropped connection, a momentary 5xx from OpenAI — used to fail the whole dictation on the first try. Transcription now retries each failed chunk up to 3 times, and cleanup/translation retries up to 3 times with a short backoff, but only on errors that retrying can actually fix. A real error (bad key, no quota) still fails immediately and honestly (#103)
+
+**"Ignore this app" now works for apps we don't recognize**
+- When a meeting was detected by microphone signal alone — GeForce NOW, a game, any app not on the known meeting-app list — the prompt showed no app name and "Ignore this app" silently did nothing, so the same prompt came back every time. The detection is now attributed to the app in front of you: the prompt names it, and Ignore actually persists (#101)
+- A related race: if the microphone flickered between the prompt appearing and you clicking, the buttons could act on a *different* app than the one the prompt named. All three buttons now act on exactly what you saw (#102)
+
+**Space could type a space while locking the recording**
+- Pressing Space to lock a recording while another app was focused could both lock *and* type a space into that app, because a second listener that cannot swallow keystrokes was also watching Space. That listener now watches only Ctrl+Cmd+V (re-paste), its one real job; Space is handled solely by the mechanism that can consume it (#95)
+
+**The health panel stops guessing**
+- macOS sometimes blames the lock screen for holding secure input when the real holder is some background process — an Apple bug. The panel no longer repeats that wrong name. At the lock screen, secure input is simply normal. Unlocked with no honest name available, it says so and gives the procedure that actually finds the culprit: quit apps one at a time and watch the panel clear (#98)
+- Under secure input the shortcut-starvation check physically cannot measure anything — and used to render that as a green "healthy". "No verdict" now looks different from "measured healthy", because confusing the two is what fooled us during the July investigation (#99)
+
 ## v2.4.0 — 2026-07-16
 
 v2.3.0 stopped the app blaming the Fn key **when secure input was the cause**. It turned out there are two causes, and the other one still produced the same lie. This finishes it, and puts the diagnostic in the app instead of a terminal.
