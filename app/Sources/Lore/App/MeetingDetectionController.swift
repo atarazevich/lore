@@ -56,9 +56,11 @@ final class MeetingDetectionController {
     #if DEBUG
     /// Test seam: setup() can't run under swift test (it starts a real
     /// MeetingDetector on the CoreAudio mic listener), so tests inject a
-    /// detector with a mock signal source directly.
-    func injectDetectorForTesting(_ detector: MeetingDetector) {
+    /// detector with a mock signal source directly. `settings` covers the
+    /// handlers that persist to `activeSettings` (#101).
+    func injectDetectorForTesting(_ detector: MeetingDetector, settings: AppSettings? = nil) {
         meetingDetector = detector
+        if let settings { activeSettings = settings }
     }
     #endif
 
@@ -329,7 +331,7 @@ final class MeetingDetectionController {
             return false
         }
 
-        DiagStore.record(.detectionPrompt(disposition: .shown))
+        DiagStore.record(.detectionPrompt(disposition: app == nil ? .shownUnattributed : .shown))
         notchPromptPresenter?.present(appName: app?.name)
         return true
     }
@@ -373,30 +375,31 @@ final class MeetingDetectionController {
         }
     }
 
-    private func handleDetectionNotAMeeting() {
-        DiagStore.record(.detectionPrompt(disposition: .notAMeeting))
+    // The two dismiss handlers act on the controller's own `detectedApp` —
+    // the app the prompt named on screen — never the detector's live copy,
+    // which a mic flap can null between present and click (#101). They record
+    // their diagnostic only after the deed: an unattributed detection persists
+    // nothing, so recording a disposition would claim a suppression that
+    // never happened.
+
+    func handleDetectionNotAMeeting() {
         withdrawPrompts()
-        Task {
-            if let app = await meetingDetector?.detectedApp {
-                dismissedEvents.insert(app.bundleID)
-                eventContinuation.yield(.notAMeeting(bundleID: app.bundleID))
-            }
-        }
+        guard let app = detectedApp else { return }
+        dismissedEvents.insert(app.bundleID)
+        DiagStore.record(.detectionPrompt(disposition: .notAMeeting))
+        eventContinuation.yield(.notAMeeting(bundleID: app.bundleID))
     }
 
-    private func handleIgnoreApp() {
-        DiagStore.record(.detectionPrompt(disposition: .appIgnoredPermanently))
+    func handleIgnoreApp() {
         withdrawPrompts()
-        Task {
-            if let app = await meetingDetector?.detectedApp, let settings = activeSettings {
-                var ignored = settings.ignoredAppBundleIDs
-                if !ignored.contains(app.bundleID) {
-                    ignored.append(app.bundleID)
-                    settings.ignoredAppBundleIDs = ignored
-                }
-                dismissedEvents.insert(app.bundleID)
-            }
+        guard let app = detectedApp, let settings = activeSettings else { return }
+        var ignored = settings.ignoredAppBundleIDs
+        if !ignored.contains(app.bundleID) {
+            ignored.append(app.bundleID)
+            settings.ignoredAppBundleIDs = ignored
         }
+        dismissedEvents.insert(app.bundleID)
+        DiagStore.record(.detectionPrompt(disposition: .appIgnoredPermanently))
     }
 
     private func handleDetectionTimeout() {

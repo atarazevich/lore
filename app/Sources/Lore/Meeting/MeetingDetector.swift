@@ -321,6 +321,10 @@ actor MeetingDetector {
     private let selfBundleID: String
     private let knownBundleIDs: Set<String>
 
+    /// Frontmost-app read for fallback attribution (#101). A closure, not a
+    /// protocol — the repo's test-seam doctrine (HealthProbes.swift).
+    private let frontmostApp: @Sendable () async -> MeetingApp?
+
     /// Set to true once the debounce expires and we have confirmed detection.
     private(set) var isActive = false
 
@@ -344,11 +348,19 @@ actor MeetingDetector {
 
     init(
         audioSource: (any AudioSignalSource)? = nil,
-        customBundleIDs: [String] = []
+        customBundleIDs: [String] = [],
+        frontmostApp: (@Sendable () async -> MeetingApp?)? = nil
     ) {
         self.audioSource = audioSource ?? CoreAudioSignalSource()
         self.customBundleIDs = customBundleIDs
         self.selfBundleID = Bundle.main.bundleIdentifier ?? "com.lore.app"
+        self.frontmostApp = frontmostApp ?? {
+            await MainActor.run { () -> MeetingApp? in
+                guard let app = NSWorkspace.shared.frontmostApplication,
+                      let bundleID = app.bundleIdentifier else { return nil }
+                return MeetingApp(bundleID: bundleID, name: app.localizedName ?? bundleID)
+            }
+        }
 
         // Known meeting apps (embedded to avoid Bundle.module issues in
         // manually-constructed .app bundles)
@@ -427,10 +439,17 @@ actor MeetingDetector {
             // Verify mic is still considered active (debounce passed)
             guard micActiveAt == activeSince else { return }
 
-            // Scan for meeting app
-            let app = await scanForMeetingApp()
-            DiagStore.record(.detectionAppScan(found: app != nil))
-            detectorLog.debug("debounce confirmed, app scan: \(app.map { "\($0.name) (\($0.bundleID))" } ?? "no meeting app found", privacy: .private)")
+            // Scan for meeting app; a signal-only hit falls back to the
+            // frontmost app so the prompt can name it and Ignore /
+            // Not-a-meeting have a real bundle ID to key on (#101).
+            let scanned = await scanForMeetingApp()
+            DiagStore.record(.detectionAppScan(found: scanned != nil))
+            let app = Self.attributedApp(
+                scanned: scanned,
+                frontmost: scanned == nil ? await frontmostApp() : nil,
+                selfBundleID: selfBundleID
+            )
+            detectorLog.debug("debounce confirmed, detected: \(app.map { "\($0.name) (\($0.bundleID))" } ?? "unattributed", privacy: .private)")
 
             if !isActive {
                 isActive = true
@@ -446,6 +465,22 @@ actor MeetingDetector {
                 eventContinuation.yield(.ended)
             }
         }
+    }
+
+    // MARK: - Attribution (#101)
+
+    /// A known meeting app wins; a signal-only detection is attributed to the
+    /// frontmost app — never Lore itself. Attribution can be wrong (a
+    /// background app may hold the mic); that is accepted because the prompt
+    /// shows the name and an accidental ignore is reversible in Settings.
+    static func attributedApp(
+        scanned: MeetingApp?,
+        frontmost: MeetingApp?,
+        selfBundleID: String
+    ) -> MeetingApp? {
+        if let scanned { return scanned }
+        guard let frontmost, frontmost.bundleID != selfBundleID else { return nil }
+        return frontmost
     }
 
     // MARK: - Process Scanning

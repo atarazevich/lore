@@ -267,7 +267,11 @@ struct NotchPromptExpandedView: View {
                     action: content.onAccept
                 )
                 NotchPromptButton(title: "Not a meeting", action: content.onNotAMeeting)
-                NotchPromptButton(title: "Ignore this app", action: content.onIgnoreApp)
+                // No attribution — nothing "this app" could refer to, and
+                // ignoring would be a guaranteed no-op (#101).
+                if content.appName != nil {
+                    NotchPromptButton(title: "Ignore this app", action: content.onIgnoreApp)
+                }
             }
         }
         .padding(.vertical, 4)

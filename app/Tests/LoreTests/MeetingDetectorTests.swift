@@ -254,6 +254,26 @@ final class MeetingDetectorTests: XCTestCase {
         await fulfillment(of: [streamFinished], timeout: 2.0)
     }
 
+    // MARK: - Attribution (#101)
+
+    private let lore = "com.lore.app"
+    private let geforce = MeetingApp(bundleID: "com.nvidia.gfnpc", name: "GeForce NOW")
+
+    func testAttributionKnownAppWinsOverFrontmost() {
+        let zoom = MeetingApp(bundleID: "us.zoom.xos", name: "Zoom")
+        XCTAssertEqual(
+            MeetingDetector.attributedApp(scanned: zoom, frontmost: geforce, selfBundleID: lore),
+            zoom
+        )
+    }
+
+    func testAttributionNeverLoreItself() {
+        let loreApp = MeetingApp(bundleID: lore, name: "Lore")
+        XCTAssertNil(
+            MeetingDetector.attributedApp(scanned: nil, frontmost: loreApp, selfBundleID: lore)
+        )
+    }
+
     // MARK: - Resource Loading Tests
 
     func testBundledMeetingAppsContainZoom() {

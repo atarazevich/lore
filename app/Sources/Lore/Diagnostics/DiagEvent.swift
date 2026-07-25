@@ -118,6 +118,11 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// Why a detection prompt did or did not reach the user.
     enum PromptDisposition: String, Codable, Sendable, CaseIterable {
         case shown
+        /// Shown with no attributed app (#101): the known-list scan missed and
+        /// the frontmost fallback was Lore or nil, so the dismiss buttons have
+        /// no bundle ID to key on. Distinguished from `.shown` so a report can
+        /// tell an actionable prompt from one whose suppression cannot persist.
+        case shownUnattributed
         case accepted
         case dismissed
         case notAMeeting

@@ -4,6 +4,20 @@ import XCTest
 @MainActor
 final class MeetingDetectionControllerTests: XCTestCase {
 
+    /// Isolated settings (ephemeral suite + secret store) — never `.live()`.
+    private func makeSettings() -> AppSettings {
+        let suiteName = "MeetingDetectionControllerTests-\(UUID().uuidString)"
+        let suite = UserDefaults(suiteName: suiteName)!
+        suite.removePersistentDomain(forName: suiteName)
+        return AppSettings(storage: AppSettingsStorage(
+            defaults: suite,
+            secretStore: .ephemeral,
+            defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
+                .appendingPathComponent(suiteName),
+            runMigrations: false
+        ))
+    }
+
     // MARK: - Event Stream: accepted metadata flows through
 
     func testAcceptedEventFlowsMetadata() async throws {
@@ -236,6 +250,84 @@ final class MeetingDetectionControllerTests: XCTestCase {
         // Once stop() runs, nothing holds the detector and it deallocates.
         let released = await waitUntil { oldDetector == nil }
         XCTAssertTrue(released, "old detector must deallocate after teardown")
+    }
+
+    // MARK: - Signal-Only Ignore (#101)
+
+    /// Field report WQ55J3PP: a mic-using app outside the known list. The
+    /// detection is attributed to the frontmost app, Ignore persists its
+    /// bundle ID — even after a mic flap nulls the detector's live copy —
+    /// and the next detection with the same attribution is suppressed.
+    func testIgnoreOnSignalOnlyDetectionPersistsAndSuppresses() async throws {
+        let controller = MeetingDetectionController()
+        let settings = makeSettings()
+        let source = MockAudioSignalSource()
+        let geforce = MeetingApp(bundleID: "com.nvidia.gfnpc", name: "GeForce NOW")
+        let detector = MeetingDetector(audioSource: source, frontmostApp: { geforce })
+        await detector.start()
+        controller.injectDetectorForTesting(detector, settings: settings)
+
+        // Signal-only detection: mic active, no known meeting app running.
+        source.emit(true)
+        try await Task.sleep(for: .seconds(5.5))
+        let attributed = await detector.detectedApp
+        XCTAssertEqual(attributed, geforce, "signal-only detection must be attributed to frontmost")
+
+        // The prompt goes up naming GeForce NOW...
+        XCTAssertTrue(controller.handleMeetingDetected(app: attributed))
+
+        // ...then the mic flaps, nulling the detector's live copy. Ignore
+        // must still act on what the prompt named, not the detector's now.
+        source.emit(false)
+        let actorCleared = await pollUntilNil { await detector.detectedApp }
+        XCTAssertTrue(actorCleared, "flap must clear the detector's copy for this test to bite")
+
+        controller.handleIgnoreApp()
+        XCTAssertTrue(
+            settings.ignoredAppBundleIDs.contains(geforce.bundleID),
+            "Ignore must persist the bundle ID the prompt named, flap or no flap"
+        )
+
+        let prompted = controller.handleMeetingDetected(app: geforce)
+        XCTAssertFalse(prompted, "next detection with the same attribution must be suppressed")
+
+        await detector.stop()
+        source.finish()
+    }
+
+    /// Polls an actor-isolated optional until it goes nil (waitUntil takes a
+    /// synchronous closure, so it can't await the detector).
+    private func pollUntilNil(_ read: () async -> MeetingApp?) async -> Bool {
+        for _ in 0..<40 {
+            if await read() == nil { return true }
+            try? await Task.sleep(for: .milliseconds(50))
+        }
+        return await read() == nil
+    }
+
+    /// Ignore on an unattributed detection (frontmost was Lore or nil):
+    /// nothing is persisted, so no `appIgnoredPermanently` diagnostic may be
+    /// recorded — the pre-#101 stream claimed the button worked while the
+    /// list stayed untouched. The shown prompt itself records
+    /// `.shownUnattributed` so the stream can tell the two apart.
+    func testIgnoreOnUnattributedDetectionRecordsNoDiagnostic() {
+        let controller = MeetingDetectionController()
+
+        func ignoredDiagCount() -> Int {
+            DiagStore.shared.recent(DiagStore.capacity).filter {
+                $0.event == .detectionPrompt(disposition: .appIgnoredPermanently)
+            }.count
+        }
+        let before = ignoredDiagCount()
+
+        controller.handleMeetingDetected(app: nil)
+        XCTAssertEqual(
+            DiagStore.shared.recent(1).first?.event,
+            .detectionPrompt(disposition: .shownUnattributed)
+        )
+
+        controller.handleIgnoreApp()
+        XCTAssertEqual(ignoredDiagCount(), before, "no persist happened, so no diagnostic may claim it did")
     }
 
     // MARK: - App Exit Monitoring
