@@ -84,13 +84,16 @@ final class DictationCoordinator {
 
     /// `history` is injectable so tests can back it with an ephemeral
     /// UserDefaults suite instead of the user's real dictation history;
-    /// `cleanupClient` so tests can force LLM failures without the network.
+    /// `cleanupClient` so tests can force LLM failures without the network;
+    /// `backend` so tests can drive the chunk loop without the local model.
     init(
         history: DictationHistory = DictationHistory(),
-        cleanupClient: any CleanupProviding = CleanupClient()
+        cleanupClient: any CleanupProviding = CleanupClient(),
+        backend: (any TranscriptionBackend)? = nil
     ) {
         self.history = history
         self.cleanupClient = cleanupClient
+        self.ownBackend = backend
     }
 
     /// Start capturing audio silently before hold is confirmed (pre-buffer phase).
@@ -722,17 +725,29 @@ final class DictationCoordinator {
         var segments: [String] = []
         var failedChunks = 0
 
+        // Only a *thrown* attempt is retried — an empty success is silence into
+        // the mic, not a failure (#103). `failedChunks` = chunks lost after retries.
         for (i, chunk) in chunks.enumerated() {
             do {
-                let segment = try await backend.transcribe(chunk, previousContext: nil)
+                let segment = try await Self.withRetries(attempts: Self.retryAttempts) {
+                    do {
+                        return try await backend.transcribe(chunk, previousContext: nil)
+                    } catch {
+                        log.error("""
+                            chunk \(i + 1, privacy: .public)/\(chunks.count, privacy: .public) attempt failed: \
+                            \(error.localizedDescription, privacy: .private)
+                            """)
+                        throw error
+                    }
+                }
                 if !segment.isEmpty {
                     segments.append(segment)
                 }
             } catch {
                 failedChunks += 1
                 log.error("""
-                    chunk \(i + 1, privacy: .public)/\(chunks.count, privacy: .public) failed, skipping: \
-                    \(error.localizedDescription, privacy: .private)
+                    chunk \(i + 1, privacy: .public)/\(chunks.count, privacy: .public) lost after \
+                    \(Self.retryAttempts, privacy: .public) attempts, skipping
                     """)
             }
         }
@@ -831,31 +846,46 @@ final class DictationCoordinator {
         }
 
         let apiKey = settings.openaiApiKey
-        let startedAt = Date()
 
         do {
-            let cleaned = try await cleanupClient.cleanup(rawText: rawText, prompt: effectivePrompt, apiKey: apiKey)
+            // One `apiCall` event per attempt, wrapping the HTTP call itself —
+            // retries show in the stream as failed→ok sequences (#103).
+            let cleaned = try await Self.withRetries(
+                attempts: Self.retryAttempts,
+                backoff: [.milliseconds(500), .seconds(1)],
+                isTransient: Self.isTransientCleanupError
+            ) {
+                let startedAt = Date()
+                do {
+                    let cleaned = try await cleanupClient.cleanup(
+                        rawText: rawText, prompt: effectivePrompt, apiKey: apiKey
+                    )
+                    // `CleanupProviding` reports success as a String, not a status code —
+                    // nil is the honest answer, and `.ok` already carries the verdict.
+                    DiagStore.record(.apiCall(
+                        endpoint: endpoint,
+                        outcome: .ok,
+                        httpStatus: nil,
+                        ms: Int(Date().timeIntervalSince(startedAt) * 1000)
+                    ))
+                    return cleaned
+                } catch {
+                    DiagStore.record(.apiCall(
+                        endpoint: endpoint,
+                        outcome: .failed,
+                        httpStatus: Self.httpStatus(from: error),
+                        ms: Int(Date().timeIntervalSince(startedAt) * 1000)
+                    ))
+                    throw error
+                }
+            }
             entry.cleanedText = cleaned
             entry.status = .cleaned
             entry.activeVersion = .cleaned
-            // `CleanupProviding` reports success as a String, not a status code —
-            // nil is the honest answer, and `.ok` already carries the verdict.
-            DiagStore.record(.apiCall(
-                endpoint: endpoint,
-                outcome: .ok,
-                httpStatus: nil,
-                ms: Int(Date().timeIntervalSince(startedAt) * 1000)
-            ))
             return true
         } catch {
             // The cleaned/raw texts are the user's words — they live in the history
             // UI, never in a diagnostic artifact (#82).
-            DiagStore.record(.apiCall(
-                endpoint: endpoint,
-                outcome: .failed,
-                httpStatus: Self.httpStatus(from: error),
-                ms: Int(Date().timeIntervalSince(startedAt) * 1000)
-            ))
             log.error("cleanup failed, using raw text: \(error.localizedDescription, privacy: .private)")
             if let failureMessage {
                 lastError = failureMessage
@@ -868,6 +898,59 @@ final class DictationCoordinator {
     private static func httpStatus(from error: any Error) -> Int? {
         if case CleanupClient.CleanupError.apiError(let code) = error { return code }
         return nil
+    }
+
+    // MARK: - Retry (#103)
+
+    /// Retry budget shared by the two retried sites (chunk transcription,
+    /// LLM cleanup/translate). Field report 3NZRFM57: failures are transient
+    /// by demonstration — the same input succeeds on a manual re-run.
+    static let retryAttempts = 3
+
+    /// Run `operation` up to `attempts` times, retrying only thrown errors
+    /// that `isTransient` accepts, sleeping `backoff[i]` before retry i+1.
+    /// Cancellation is never transient, regardless of the predicate — retrying
+    /// would resurrect work the caller already abandoned — and it propagates
+    /// out of a backoff sleep instead of firing another attempt.
+    /// Internal so tests can exercise the helper directly.
+    static func withRetries<T>(
+        attempts: Int,
+        backoff: [Duration] = [],
+        isTransient: (any Error) -> Bool = { _ in true },
+        _ operation: () async throws -> T
+    ) async throws -> T {
+        for attempt in 1..<max(attempts, 1) {
+            do {
+                return try await operation()
+            } catch {
+                guard !(error is CancellationError), isTransient(error) else { throw error }
+                try Task.checkCancellation()
+                if backoff.indices.contains(attempt - 1) {
+                    try await Task.sleep(for: backoff[attempt - 1])
+                }
+            }
+        }
+        return try await operation()
+    }
+
+    /// Which `URLError`s are network-shaped enough to retry. An allowlist:
+    /// `.cancelled` must not resurrect abandoned work, and `.badURL` or
+    /// `.userAuthenticationRequired` won't heal on a second try.
+    private static let transientURLErrorCodes: Set<URLError.Code> = [
+        .timedOut, .networkConnectionLost, .notConnectedToInternet,
+        .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
+    ]
+
+    /// Transient = worth retrying: network-shaped `URLError`s, HTTP 429 and
+    /// 5xx. Anything else (bad key, bad request) goes straight to the fallback.
+    static func isTransientCleanupError(_ error: any Error) -> Bool {
+        if let urlError = error as? URLError {
+            return transientURLErrorCodes.contains(urlError.code)
+        }
+        if case CleanupClient.CleanupError.apiError(let code) = error {
+            return code == 429 || (500...599).contains(code)
+        }
+        return false
     }
 
     // MARK: - Retroactive Row Transforms (history popovers, DIC-35/36)
