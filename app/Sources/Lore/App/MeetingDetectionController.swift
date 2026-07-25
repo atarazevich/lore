@@ -353,26 +353,29 @@ final class MeetingDetectionController {
         eventContinuation.yield(.meetingAppExited)
     }
 
-    private func handleDetectionAccepted() {
+    /// Acts on the controller's own `detectedApp` — the app the prompt named
+    /// on screen — never the detector's live copy, which a mic flap can null
+    /// between present and click (#102, same doctrine as the dismiss handlers
+    /// below): a raced Accept must start the named session the prompt
+    /// promised, not an unattributed one.
+    func handleDetectionAccepted() {
         DiagStore.record(.detectionPrompt(disposition: .accepted))
         withdrawPrompts()
-        Task {
-            let app = await meetingDetector?.detectedApp
-            let context = DetectionContext(
-                signal: app.map { .appLaunched($0) } ?? .audioActivity,
-                detectedAt: Date(),
-                meetingApp: app,
-                calendarEvent: nil
-            )
-            let metadata = MeetingMetadata(
-                detectionContext: context,
-                calendarEvent: nil,
-                title: app?.name,
-                startedAt: Date(),
-                endedAt: nil
-            )
-            self.eventContinuation.yield(.accepted(metadata))
-        }
+        let app = detectedApp
+        let context = DetectionContext(
+            signal: app.map { .appLaunched($0) } ?? .audioActivity,
+            detectedAt: Date(),
+            meetingApp: app,
+            calendarEvent: nil
+        )
+        let metadata = MeetingMetadata(
+            detectionContext: context,
+            calendarEvent: nil,
+            title: app?.name,
+            startedAt: Date(),
+            endedAt: nil
+        )
+        eventContinuation.yield(.accepted(metadata))
     }
 
     // The two dismiss handlers act on the controller's own `detectedApp` —

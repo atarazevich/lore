@@ -295,6 +295,64 @@ final class MeetingDetectionControllerTests: XCTestCase {
         source.finish()
     }
 
+    /// #102: Accept raced by a mic flap. The prompt named an app; the flap
+    /// nulls the detector's live copy before the click. Accept must still
+    /// start the session attributed to the named app — .appLaunched signal,
+    /// meetingApp, title — not an unattributed .audioActivity session (which
+    /// would also lose app-exit auto-stop).
+    func testAcceptAfterFlapAttributesSessionToNamedApp() async throws {
+        let controller = MeetingDetectionController()
+        let source = MockAudioSignalSource()
+        let geforce = MeetingApp(bundleID: "com.nvidia.gfnpc", name: "GeForce NOW")
+        let detector = MeetingDetector(audioSource: source, frontmostApp: { geforce })
+        await detector.start()
+        controller.injectDetectorForTesting(detector)
+
+        var receivedEvent: DetectionEvent?
+        let consumeTask = Task { @MainActor in
+            for await event in controller.events {
+                receivedEvent = event
+                break
+            }
+        }
+        try await Task.sleep(for: .milliseconds(50))
+
+        // Signal-only detection; the prompt goes up naming the attributed app.
+        source.emit(true)
+        try await Task.sleep(for: .seconds(5.5))
+        let attributed = await detector.detectedApp
+        XCTAssertEqual(attributed, geforce, "signal-only detection must be attributed to frontmost")
+        XCTAssertTrue(controller.handleMeetingDetected(app: attributed))
+
+        // The mic flaps, nulling the detector's live copy before the click.
+        source.emit(false)
+        let actorCleared = await pollUntilNil { await detector.detectedApp }
+        XCTAssertTrue(actorCleared, "flap must clear the detector's copy for this test to bite")
+
+        controller.handleDetectionAccepted()
+        try await Task.sleep(for: .milliseconds(100))
+
+        guard case .accepted(let metadata) = receivedEvent else {
+            XCTFail("Expected .accepted, got \(String(describing: receivedEvent))")
+            consumeTask.cancel()
+            await detector.stop()
+            source.finish()
+            return
+        }
+        XCTAssertEqual(metadata.detectionContext?.meetingApp, geforce,
+                       "Accept must attribute the session to the app the prompt named")
+        XCTAssertEqual(metadata.title, geforce.name)
+        if case .appLaunched(let app) = metadata.detectionContext?.signal {
+            XCTAssertEqual(app, geforce)
+        } else {
+            XCTFail("signal must be .appLaunched — .audioActivity means an unattributed session")
+        }
+
+        consumeTask.cancel()
+        await detector.stop()
+        source.finish()
+    }
+
     /// Polls an actor-isolated optional until it goes nil (waitUntil takes a
     /// synchronous closure, so it can't await the detector).
     private func pollUntilNil(_ read: () async -> MeetingApp?) async -> Bool {
