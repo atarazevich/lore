@@ -74,7 +74,17 @@ final class HotkeyManager {
             }
         }
 
+        // INVARIANT (#95): a global NSEvent monitor cannot consume — it has no
+        // return value, and by the time its closure runs the keystroke has
+        // already been delivered to the focused app. So it must never handle a
+        // key that must be consumed. Every consumable key (Space lock, Esc,
+        // Fn+V/T, C/T upgrades) is owned by the CGEvent tap, which can return
+        // nil; this monitor is narrowed to the one chord it uniquely owns and
+        // that may pass through: Ctrl+Cmd+V re-paste, which the tap does not
+        // carry. Routing all keys here once made Space lock leak a literal
+        // space into the user's document whenever the tap missed the event.
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard HotkeyManager.isRepasteChord(event) else { return }
             Task { @MainActor in
                 self?.handleKeyDown(event)
             }
@@ -305,6 +315,13 @@ final class HotkeyManager {
         }
     }
 
+    /// Callers: the local key monitor and the global monitor's Ctrl+Cmd+V chord
+    /// only — invariant at the global monitor's installation (#95). The local
+    /// monitor is meant to consume Space / Esc / Fn+V/T itself before routing
+    /// here; known exception: during pre-buffer its narrower `isRecordingFlag`
+    /// guard lets Fn+V/T fall through to its unconsuming fallthrough, so the
+    /// keystroke lands in Lore's own field while the branch below still applies
+    /// the mode.
     private func handleKeyDown(_ event: NSEvent) {
         guard let coordinator else {
             HotkeyManager.hkLog.error("[HK] coordinator is nil in handleKeyDown — events being dropped")
@@ -363,11 +380,17 @@ final class HotkeyManager {
         }
 
         // Ctrl+Cmd+V to re-paste last transcript
-        if event.keyCode == 9
-            && event.modifierFlags.contains(.control)
-            && event.modifierFlags.contains(.command) {
+        if HotkeyManager.isRepasteChord(event) {
             coordinator.pasteLastTranscript()
         }
+    }
+
+    /// Ctrl+Cmd+V exactly — a superset like Ctrl+Cmd+Shift+V is someone else's
+    /// shortcut. The one chord the global keyDown monitor may handle (see the
+    /// invariant at its installation, #95).
+    private static func isRepasteChord(_ event: NSEvent) -> Bool {
+        event.keyCode == 9
+            && event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.control, .command]
     }
 
     // MARK: - Event Tap Lifecycle
