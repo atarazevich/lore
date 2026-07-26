@@ -79,6 +79,51 @@ final class DictationCoordinator {
     /// The current history entry being processed (needed for upgrades).
     private var currentEntryID: UUID?
 
+    /// Monotonic recording-session counter (#104), bumped when a recording is
+    /// confirmed and on discard. Mirrors `captureEpoch`, but for the session's
+    /// ownership of shared UI state (state/indicator/lastError): a pipeline
+    /// whose epoch is stale still finishes — text into history, paste — but
+    /// must not stomp the newer session's UI.
+    private var sessionEpoch = 0
+
+    /// The newest link in the transcription chain — a dictation pipeline
+    /// (stop→save→transcribe→cleanup→paste) or a history retry — paired with
+    /// the session epoch it was enqueued under (#104). Coordinator-owned so
+    /// the hotkey release-debounce Task's cancellation (the next Fn press)
+    /// cannot kill it; one pair so epoch and task cannot desynchronize. A
+    /// discard cancels it only when the epoch is the current session's own.
+    private var latestTranscription: (epoch: Int, task: Task<Void, Never>)?
+
+    /// The 300ms audio-tail sleep of the in-flight pipeline, separate from
+    /// the pipeline Task so a new Fn press can cut the tail short without
+    /// cancelling the pipeline itself (#104): `startPreBuffer` cancels it,
+    /// finalizes the capture synchronously, and parks the samples in
+    /// `cutTailSamples` for the pipeline to pick up.
+    private var tailTask: Task<Void, Never>?
+    private var cutTailSamples: [Float]?
+
+    /// Enqueue the newest transcription (#104). `work` receives the session
+    /// epoch it was enqueued under and the previous link, which it must await
+    /// before entering the shared ASR backend — the backend is never entered
+    /// by two transcriptions concurrently.
+    @discardableResult
+    private func enqueueTranscription(
+        _ work: @escaping @MainActor (_ epoch: Int, _ previous: Task<Void, Never>?) async -> Void
+    ) -> Task<Void, Never> {
+        let epoch = sessionEpoch
+        let previous = latestTranscription?.task
+        let task = Task { await work(epoch, previous) }
+        latestTranscription = (epoch: epoch, task: task)
+        return task
+    }
+
+    /// True while `epoch` still names the newest recording session, i.e. the
+    /// caller owns the shared UI state. `nil` = the caller is not
+    /// session-scoped (history-row transforms, upgrade keys): always allowed.
+    private func isCurrentSession(_ epoch: Int?) -> Bool {
+        epoch == nil || epoch == sessionEpoch
+    }
+
     let history: DictationHistory
     var settings: AppSettings?
 
@@ -100,22 +145,33 @@ final class DictationCoordinator {
     /// State stays .idle — indicator does not show yet.
     func startPreBuffer() {
         guard !isPreBuffering else { return }
-        guard state == .idle || state == .done else { return }
+        // A previous dictation may still be transcribing (.processing /
+        // .loadingModel): its pipeline keeps running in the background (#104).
+        if state == .recording {
+            // Recording state with the current session's own pipeline
+            // enqueued means the pipeline is in its 300ms audio tail: this
+            // press is a real new dictation, so cut the tail at the press —
+            // finalize the old capture synchronously (before the new one
+            // claims the bus) and park the samples for the pipeline (#104).
+            // Without a current-session pipeline suspended in its tail
+            // (`tailTask` non-nil) this is a live hold — an Fn flag flicker,
+            // not a press — and the recording is left alone. The tailTask
+            // check also guarantees the parked samples are always picked up:
+            // the pipeline is at the tail await, whose next statement reads
+            // `cutTailSamples`.
+            guard latestTranscription?.epoch == sessionEpoch, let tailTask else { return }
+            tailTask.cancel()
+            self.tailTask = nil
+            stopMicCapture()
+            cutTailSamples = accumulatedSamples
+            accumulatedSamples.removeAll()
+            state = .processing
+        }
         guard let settings else {
             log.error("settings not wired — dictation disabled")
             return
         }
 
-        autoHideTask?.cancel()
-        autoHideTask = nil
-        upgradeDismissTask?.cancel()
-        upgradeDismissTask = nil
-        isUpgradePanelVisible = false
-        upgradeCountdown = nil
-        currentEntryID = nil
-        pendingCleanupMode = nil
-
-        lastError = nil
         micErrorSticky = false
         stickyErrorInFlight = false
         pendingStickyRelease = false
@@ -226,6 +282,22 @@ final class DictationCoordinator {
     func confirmRecording() {
         guard isPreBuffering else { return }
         isPreBuffering = false
+        // The confirmed recording takes ownership of the shared UI state
+        // (#104): a pipeline still finishing an earlier dictation goes stale
+        // for state/indicator writes (history update and paste are not
+        // gated). Only now, at confirm — an unconfirmed pre-buffer (a tap)
+        // must not strip the finishing session's upgrade panel, error row,
+        // entry id, or pending auto-hide.
+        sessionEpoch += 1
+        autoHideTask?.cancel()
+        autoHideTask = nil
+        upgradeDismissTask?.cancel()
+        upgradeDismissTask = nil
+        isUpgradePanelVisible = false
+        upgradeCountdown = nil
+        currentEntryID = nil
+        pendingCleanupMode = nil
+        lastError = nil
         state = .recording
         log.debug("recording confirmed (pre-buffer kept)")
     }
@@ -239,19 +311,48 @@ final class DictationCoordinator {
         log.debug("pre-buffer discarded (tap)")
     }
 
-    func stopRecording() async {
+    /// Stop the current recording. The save→transcribe→paste pipeline runs in
+    /// a coordinator-owned Task (#104): the hotkey release-debounce Task that
+    /// calls this is cancelled first thing by the next Fn press, and when the
+    /// pipeline ran inline there, that press killed the in-flight
+    /// transcription and lost the dictation. Now the debounce only debounces.
+    func stopRecording() {
         guard state == .recording else { return }
+        enqueueTranscription { [weak self] epoch, previous in
+            await self?.runDictationPipeline(epoch: epoch, previous: previous)
+        }
+    }
 
-        // Audio tail: keep recording 300ms to capture trailing speech
-        try? await Task.sleep(for: .milliseconds(300))
+    /// The full post-recording pipeline: audio tail → stop capture → save →
+    /// transcribe → cleanup → paste. `previous` is the prior pipeline/retry,
+    /// awaited before entering the shared ASR backend so it is never used by
+    /// two transcriptions concurrently (#104). Shared-UI writes are
+    /// epoch-guarded: a pipeline that outlives its session (a newer recording
+    /// confirmed, or Esc discarded it) still lands its text in history — and
+    /// pastes it, unless deliberately cancelled — but no longer owns the
+    /// state/indicator/currentEntryID.
+    private func runDictationPipeline(epoch: Int, previous: Task<Void, Never>?) async {
+        // Audio tail: keep recording 300ms to capture trailing speech. The
+        // sleep is a separate cancellable Task so a new Fn press can cut the
+        // tail short (#104) — `startPreBuffer` finalizes the capture on this
+        // pipeline's behalf and parks the samples in `cutTailSamples`.
+        let tail = Task { () -> Void in try? await Task.sleep(for: .milliseconds(300)) }
+        tailTask = tail
+        await tail.value
+        tailTask = nil
 
-        // Re-check state — may have been discarded during the tail
-        guard state == .recording else { return }
-
-        stopMicCapture()
-
-        let samples = accumulatedSamples
-        accumulatedSamples.removeAll()
+        let samples: [Float]
+        if let cut = cutTailSamples {
+            // Tail cut by a new press — capture already finalized for us.
+            cutTailSamples = nil
+            samples = cut
+        } else {
+            // Re-check state — may have been discarded during the tail
+            guard state == .recording, isCurrentSession(epoch) else { return }
+            stopMicCapture()
+            samples = accumulatedSamples
+            accumulatedSamples.removeAll()
+        }
 
         let durationSeconds = Double(samples.count) / 16000.0
         DiagStore.record(.dictationRecorded(
@@ -271,6 +372,8 @@ final class DictationCoordinator {
             DiagStore.record(.dictationZeroFrames)
             // The message can name the resolved input device.
             log.error("zero frames captured — mic failure: \(message, privacy: .private)")
+            // The async message lookup may have lost the session to a newer press.
+            guard isCurrentSession(epoch) else { return }
             surfaceMicError(message, hide: .grace)
             return
         }
@@ -278,12 +381,14 @@ final class DictationCoordinator {
         // Audio was captured, so the recording is proceeding to save/transcribe. If a
         // transient stall set lastError (watchdog or the immediate captureError check)
         // and the mic then recovered and delivered frames, clear it now so the success
-        // path doesn't render a stale red error row at `.done`.
-        lastError = nil
+        // path doesn't render a stale red error row at `.done`. A cut-tail pipeline
+        // can resume after a newer session confirmed, so every shared-UI write from
+        // here on is epoch-gated.
+        if isCurrentSession(epoch) { lastError = nil }
 
         guard samples.count > Self.minimumSpeechSamples else {
             log.info("Too short, ignoring")
-            state = .idle
+            if isCurrentSession(epoch) { state = .idle }
             return
         }
 
@@ -294,23 +399,45 @@ final class DictationCoordinator {
         let audioFilename = history.saveAudio(samples)
         var entry = DictationHistoryEntry(durationSeconds: durationSeconds, audioFilename: audioFilename)
         history.add(entry)
-        currentEntryID = entry.id
+        if isCurrentSession(epoch) { currentEntryID = entry.id }
         log.debug("audio saved: \(audioFilename ?? "FAILED", privacy: .private)")
 
-        // STEP 2: Transcribe
-        await transcribeEntry(&entry, samples: samples)
+        // Capture the pre-paste mode now, while it is still this session's —
+        // a newer session owns `pendingCleanupMode` once confirmed, and a
+        // stale pipeline must not steal the newer session's choice.
+        let pending: UpgradeAction?
+        if isCurrentSession(epoch) {
+            pending = pendingCleanupMode
+            pendingCleanupMode = nil
+            state = .processing
+        } else {
+            pending = nil
+        }
+
+        // STEP 2: Transcribe — strictly after the previous pipeline finishes:
+        // the shared backend must never be entered by two transcriptions (#104).
+        await previous?.value
+        await transcribeEntry(&entry, samples: samples, epoch: epoch)
 
         guard entry.status == .transcribed, let rawText = entry.rawText else {
-            // Transcription failed — update history, go to done briefly
+            // Transcription failed (or was cancelled by a discard) — record it;
+            // the indicator is touched only while this is the current session.
             history.update(entry)
+            guard isCurrentSession(epoch) else { return }
             state = .done
             scheduleAutoHide()
             return
         }
 
+        // A discard that landed after the backend had already produced text:
+        // keep the text in history, but never paste a dictation the user
+        // threw away.
+        if Task.isCancelled {
+            history.update(entry)
+            return
+        }
+
         // STEP 3: Determine cleanup action (pre-paste mode > defaults) and run
-        let pending = pendingCleanupMode
-        pendingCleanupMode = nil
         let cleanupEnabled = settings?.cleanupByDefault ?? false
         let translateEnabled = settings?.translationByDefault ?? false
         let hasApiKey = !(settings?.openaiApiKey.isEmpty ?? true)
@@ -321,16 +448,25 @@ final class DictationCoordinator {
         // pasted raw text (DIC-37/48). Pre-paste mode (Fn+V/Fn+T) overrides
         // defaults; translate-by-default implies cleanup.
         if let pending, hasApiKey {
-            didCleanup = await runCleanupAction(pending, on: &entry, rawText: rawText)
+            didCleanup = await runCleanupAction(pending, on: &entry, rawText: rawText, epoch: epoch)
         } else if translateEnabled && hasApiKey {
-            didCleanup = await runCleanupAction(.translate, on: &entry, rawText: rawText)
+            didCleanup = await runCleanupAction(.translate, on: &entry, rawText: rawText, epoch: epoch)
         } else if cleanupEnabled && hasApiKey {
-            didCleanup = await runCleanupAction(.cleanup, on: &entry, rawText: rawText)
+            didCleanup = await runCleanupAction(.cleanup, on: &entry, rawText: rawText, epoch: epoch)
         } else {
             didCleanup = false
         }
 
-        // Paste immediately (always paste the best version)
+        // Re-check after the cleanup awaits: a discard that landed during
+        // cleanup must not paste either — the text stays in history only.
+        if Task.isCancelled {
+            history.update(entry)
+            return
+        }
+
+        // Paste immediately (always paste the best version) — even when a
+        // newer recording session is already underway (#104): a completed
+        // dictation still lands where the cursor is.
         if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
             TextInserter.paste(text)
@@ -340,9 +476,12 @@ final class DictationCoordinator {
         }
 
         history.update(entry)
+
+        // STEP 4: the indicator and upgrade panel belong to the newest session.
+        guard isCurrentSession(epoch) else { return }
         state = .done
 
-        // STEP 4: Show upgrade options — skip if user explicitly chose a pre-paste mode.
+        // Show upgrade options — skip if user explicitly chose a pre-paste mode.
         // A cleanup/translate failure keeps the panel up long enough to read (#50).
         if pending != nil {
             scheduleAutoHide(after: lastError == nil ? .milliseconds(800) : .seconds(4))
@@ -465,6 +604,14 @@ final class DictationCoordinator {
         }
         guard state == .recording || state == .loadingModel || state == .processing else { return }
         DiagStore.record(.dictationDiscarded(state: state))
+        // A deliberate discard cancels this session's own pipeline (#104). An
+        // older session's late pipeline (epoch mismatch) is left to finish.
+        // The cancelled Task stays referenced either way, so the next
+        // transcription still serializes behind its wind-down.
+        if let latestTranscription, latestTranscription.epoch == sessionEpoch {
+            latestTranscription.task.cancel()
+        }
+        sessionEpoch += 1
         stopMicCapture()
         accumulatedSamples.removeAll()
         pendingCleanupMode = nil
@@ -606,8 +753,17 @@ final class DictationCoordinator {
         }
     }
 
-    /// Retry transcription for a failed or audio-only entry
+    /// Retry transcription for a failed or audio-only entry. Registered in
+    /// the same chain as dictation pipelines (#104), so the shared ASR
+    /// backend is never entered by two transcriptions concurrently.
     func retryTranscription(entryID: UUID) async {
+        await enqueueTranscription { [weak self] epoch, previous in
+            await previous?.value
+            await self?.performRetry(entryID: entryID, epoch: epoch)
+        }.value
+    }
+
+    private func performRetry(entryID: UUID, epoch: Int) async {
         guard var entry = history.entries.first(where: { $0.id == entryID }),
               let filename = entry.audioFilename,
               let samples = history.loadAudio(filename: filename) else {
@@ -623,14 +779,16 @@ final class DictationCoordinator {
         entry.translatedToLanguage = nil
         history.update(entry)
 
-        await transcribeEntry(&entry, samples: samples)
+        await transcribeEntry(&entry, samples: samples, epoch: epoch)
 
         if entry.status == .transcribed, let text = entry.rawText {
-            await cleanupEntry(&entry, rawText: text, endpoint: .cleanup)
+            await cleanupEntry(&entry, rawText: text, endpoint: .cleanup, epoch: epoch)
         }
 
         history.update(entry)
 
+        // Indicator state belongs to the newest session (#104).
+        guard isCurrentSession(epoch) else { return }
         if entry.status == .transcribed || entry.status == .cleaned {
             state = .done
             scheduleAutoHide()
@@ -674,17 +832,27 @@ final class DictationCoordinator {
         return backend
     }
 
-    private func transcribeEntry(_ entry: inout DictationHistoryEntry, samples: [Float]) async {
+    private func transcribeEntry(
+        _ entry: inout DictationHistoryEntry, samples: [Float], epoch: Int
+    ) async {
         // Ensure the shared cache has downloaded model files (fast no-op if already cached)
         if let cache = backendCache {
             do {
-                try await cache.prepare { [weak self] status in
-                    Task { @MainActor in self?.state = .loadingModel }
+                try await cache.prepare { [weak self] _ in
+                    Task { @MainActor in
+                        guard let self, self.isCurrentSession(epoch) else { return }
+                        self.state = .loadingModel
+                    }
                 }
+            } catch is CancellationError {
+                // Deliberate discard (#104): quiet stop, entry stays
+                // retryable (.audioSaved) — same as the chunk loop, not a
+                // scary "Model loading failed: cancelled".
+                return
             } catch {
                 entry.status = .failed
                 entry.errorMessage = "Model loading failed: \(error.localizedDescription)"
-                lastError = entry.errorMessage
+                if isCurrentSession(epoch) { lastError = entry.errorMessage }
                 history.update(entry)
                 return
             }
@@ -699,15 +867,18 @@ final class DictationCoordinator {
         let backend: any TranscriptionBackend
         do {
             backend = try await ensureOwnBackend()
+        } catch is CancellationError {
+            // Deliberate discard (#104): quiet stop, entry stays retryable.
+            return
         } catch {
             entry.status = .failed
             entry.errorMessage = "Backend prepare failed: \(error.localizedDescription)"
-            lastError = entry.errorMessage
+            if isCurrentSession(epoch) { lastError = entry.errorMessage }
             history.update(entry)
             return
         }
 
-        state = .processing
+        if isCurrentSession(epoch) { state = .processing }
 
         // Build chunks, merging short tails into the previous chunk
         var chunks: [[Float]] = []
@@ -727,7 +898,11 @@ final class DictationCoordinator {
 
         // Only a *thrown* attempt is retried — an empty success is silence into
         // the mic, not a failure (#103). `failedChunks` = chunks lost after retries.
+        // A CancellationError is a deliberate discard (#104), not a lost chunk:
+        // stop quietly, leaving the entry as it was (.audioSaved — retryable).
+        // The discard already recorded itself in the diagnostic stream.
         for (i, chunk) in chunks.enumerated() {
+            if Task.isCancelled { return }
             do {
                 let segment = try await Self.withRetries(attempts: Self.retryAttempts) {
                     do {
@@ -743,6 +918,8 @@ final class DictationCoordinator {
                 if !segment.isEmpty {
                     segments.append(segment)
                 }
+            } catch is CancellationError {
+                return
             } catch {
                 failedChunks += 1
                 log.error("""
@@ -782,7 +959,8 @@ final class DictationCoordinator {
         _ action: UpgradeAction,
         on entry: inout DictationHistoryEntry,
         rawText: String,
-        kept: Bool = false
+        kept: Bool = false,
+        epoch: Int? = nil
     ) async -> Bool {
         let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
         let prompt: String
@@ -806,7 +984,8 @@ final class DictationCoordinator {
         }
 
         let succeeded = await cleanupEntry(
-            &entry, rawText: rawText, prompt: prompt, failureMessage: failureMessage, endpoint: endpoint
+            &entry, rawText: rawText, prompt: prompt, failureMessage: failureMessage,
+            endpoint: endpoint, epoch: epoch
         )
         DiagStore.record(.dictationUpgrade(endpoint: endpoint, outcome: .init(success: succeeded)))
         guard succeeded else { return false }
@@ -832,7 +1011,8 @@ final class DictationCoordinator {
         rawText: String,
         prompt: String? = nil,
         failureMessage: String? = nil,
-        endpoint: DiagEvent.Endpoint
+        endpoint: DiagEvent.Endpoint,
+        epoch: Int? = nil
     ) async -> Bool {
         guard let settings, !settings.openaiApiKey.isEmpty else { return false }
 
@@ -887,7 +1067,9 @@ final class DictationCoordinator {
             // The cleaned/raw texts are the user's words — they live in the history
             // UI, never in a diagnostic artifact (#82).
             log.error("cleanup failed, using raw text: \(error.localizedDescription, privacy: .private)")
-            if let failureMessage {
+            // A stale session's failure must not paint the newer session's
+            // indicator red (#104).
+            if let failureMessage, isCurrentSession(epoch) {
                 lastError = failureMessage
             }
             return false

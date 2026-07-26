@@ -9,7 +9,6 @@ final class HotkeyManager {
     private static let hkLog = Logger(subsystem: "com.lore.app", category: "Hotkey")
     private weak var coordinator: DictationCoordinator?
     private weak var settings: AppSettings?
-
     private var globalFlagsMonitor: Any?
     private var globalKeyMonitor: Any?
     private var localFlagsMonitor: Any?
@@ -283,8 +282,11 @@ final class HotkeyManager {
                     HotkeyManager.hkLog.debug("[HOTKEY] hotkey released while locked → stop + paste")
                     // Genuine release (past the 30ms flag-flicker debounce): if a sticky
                     // mic error is showing, begin its grace hide; otherwise stop normally.
+                    // stopRecording only spawns the coordinator-owned pipeline (#104):
+                    // the next Fn press cancels this debounce Task, and the in-flight
+                    // transcription must not die with it.
                     self.coordinator?.dismissMicErrorAfterRelease()
-                    await self.coordinator?.stopRecording()
+                    self.coordinator?.stopRecording()
                 }
                 return
             }
@@ -300,8 +302,9 @@ final class HotkeyManager {
                     HotkeyManager.hkLog.debug("[HOTKEY] hold mode release → stop + paste")
                     // Genuine release (past the 30ms flag-flicker debounce): if a sticky
                     // mic error is showing, begin its grace hide; otherwise stop normally.
+                    // As above, stopRecording spawns the pipeline elsewhere (#104).
                     self.coordinator?.dismissMicErrorAfterRelease()
-                    await self.coordinator?.stopRecording()
+                    self.coordinator?.stopRecording()
                 }
                 return
             }
@@ -578,9 +581,7 @@ final class HotkeyManager {
             isPreBufferingFlag = false
             fnTimer?.cancel()
             fnTimer = nil
-            Task { [weak self] in
-                await self?.coordinator?.stopRecording()
-            }
+            coordinator?.stopRecording()
         }
 
         teardownEventTap()
