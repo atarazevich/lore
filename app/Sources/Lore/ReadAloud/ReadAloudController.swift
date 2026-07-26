@@ -37,15 +37,18 @@ final class ReadAloudController {
         let chars: Int
         let chunks: [String]
         let voice: VoiceSelection
+        /// True for the clipboard fallback (#106) — the subtitle shows it.
+        let fromClipboard: Bool
         var audio: [ChunkAudio] = []
 
-        init(text: String, voice: VoiceSelection) {
+        init(text: String, voice: VoiceSelection, fromClipboard: Bool) {
             self.id = UUID()
             self.text = text
             self.snippet = ReadAloudController.snippet(of: text)
             self.chars = text.count
             self.chunks = ReadAloudController.chunk(text)
             self.voice = voice
+            self.fromClipboard = fromClipboard
         }
 
         var isFullySynthesized: Bool { audio.count >= chunks.count }
@@ -178,36 +181,42 @@ final class ReadAloudController {
     // MARK: - Hotkey entry points
 
     /// Fn+R: stop the current reading, clear the queue, read the new
-    /// selection. A failed capture leaves the current session playing —
-    /// a miss must not destroy what the user is listening to.
+    /// selection (clipboard fallback when the selection is absent or
+    /// unreadable, #106). A failed capture leaves the current session
+    /// playing — a miss must not destroy what the user is listening to.
     func readSelectionNow() async {
-        let captured = await TextInserter.copySelection()
-        let validation = validateCaptured(captured)
-        switch validation {
-        case .ok(let text):
-            startSession(with: text)
-        case .empty, .unreadable, .overLimit:
-            showNotice(Self.validationNotice(for: validation))
-        }
+        guard let (text, fromClipboard) = await captureValidated() else { return }
+        startSession(with: text, fromClipboard: fromClipboard)
     }
 
     /// Fn+Q: append the selection to the queue; identical to read-now when
     /// no session is active.
     func enqueueSelection() async {
-        let captured = await TextInserter.copySelection()
-        let validation = validateCaptured(captured)
-        switch validation {
-        case .ok(let text):
-            if isSessionActive {
-                if let queueText = admit(text) {
-                    runTexts.append(queueText)
-                    ensureSynthesisLoop()
-                }
-            } else {
-                startSession(with: text)
+        guard let (text, fromClipboard) = await captureValidated() else { return }
+        if isSessionActive {
+            if let queueText = admit(text, fromClipboard: fromClipboard) {
+                runTexts.append(queueText)
+                ensureSynthesisLoop()
             }
-        case .empty, .unreadable, .overLimit:
-            showNotice(Self.validationNotice(for: validation))
+        } else {
+            startSession(with: text, fromClipboard: fromClipboard)
+        }
+    }
+
+    /// ⌘C capture → validation → the #106 clipboard retry; shows the notice
+    /// and returns nil when nothing readable exists anywhere.
+    private func captureValidated() async -> (text: String, fromClipboard: Bool)? {
+        let resolved = Self.resolveValidation(
+            captured: await TextInserter.copySelection(),
+            clipboard: TextInserter.clipboardText(),
+            limit: settings?.readAloudCharLimit ?? Self.defaultCharLimit
+        )
+        switch resolved.validation {
+        case .ok(let text):
+            return (text, resolved.fromClipboard)
+        case .unreadable, .overLimit:
+            showNotice(Self.validationNotice(for: resolved.validation))
+            return nil
         }
     }
 
@@ -312,13 +321,13 @@ final class ReadAloudController {
 
     // MARK: - Session lifecycle
 
-    private func startSession(with text: String) {
+    private func startSession(with text: String, fromClipboard: Bool) {
         teardownSession()
         guard let settings else {
             log.error("settings not wired — read aloud disabled")
             return
         }
-        guard let queueText = admit(text) else { return }
+        guard let queueText = admit(text, fromClipboard: fromClipboard) else { return }
 
         let storedSpeed = settings.readAloudSpeed
         rate = Self.speedSteps.contains { abs($0 - storedSpeed) < 0.001 } ? storedSpeed : 1.0
@@ -334,7 +343,7 @@ final class ReadAloudController {
     /// Build a QueueText from a validated capture: chunking plus the
     /// language → voice resolution (free-first: no key means system voices),
     /// frozen at capture time.
-    private func admit(_ text: String) -> QueueText? {
+    private func admit(_ text: String, fromClipboard: Bool) -> QueueText? {
         guard let settings else { return nil }
         let voice = Self.resolveVoice(
             for: text,
@@ -345,7 +354,7 @@ final class ReadAloudController {
             single: settings.readAloudVoiceSingle,
             hasSpeechifyKey: !settings.speechifyApiKey.isEmpty
         )
-        return QueueText(text: text, voice: voice)
+        return QueueText(text: text, voice: voice, fromClipboard: fromClipboard)
     }
 
     private func teardownSession() {
@@ -591,10 +600,6 @@ final class ReadAloudController {
         }
     }
 
-    private func validateCaptured(_ captured: String?) -> TextValidation {
-        Self.validate(captured, limit: settings?.readAloudCharLimit ?? Self.defaultCharLimit)
-    }
-
     // MARK: - Language → voice (nonisolated for tests)
 
     /// Dominant-language detection over the first ~1000 chars. Russian and
@@ -713,28 +718,46 @@ final class ReadAloudController {
 
     enum TextValidation: Equatable, Sendable {
         case ok(String)
-        /// Nothing was captured at all (no selection, or ⌘C ignored).
-        case empty
-        /// Captured, but no letter or digit survives trimming — nothing to speak.
+        /// Nothing captured at all, or no letter or digit survives
+        /// trimming — nothing to speak.
         case unreadable
         /// Over the hard limit — never truncated, never sent, never billed.
         case overLimit(count: Int, limit: Int)
     }
 
     nonisolated static func validate(_ text: String?, limit: Int) -> TextValidation {
-        guard let text else { return .empty }
+        guard let text else { return .unreadable }
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard trimmed.contains(where: { $0.isLetter || $0.isNumber }) else { return .unreadable }
         guard trimmed.count <= limit else { return .overLimit(count: trimmed.count, limit: limit) }
         return .ok(trimmed)
     }
 
+    /// Validate a capture with the clipboard retry (#106): a selection that
+    /// fails as unreadable (symbols-only) must not block a readable
+    /// clipboard, so the verdict retries against the clipboard. Over-limit
+    /// never falls back — that text was deliberately selected.
+    nonisolated static func resolveValidation(
+        captured: (text: String, fromClipboard: Bool)?,
+        clipboard: String?,
+        limit: Int
+    ) -> (validation: TextValidation, fromClipboard: Bool) {
+        guard let captured else {
+            // copySelection found nothing anywhere — judge the clipboard
+            // (empty too) so the notice comes out of the same mill.
+            return (validate(clipboard, limit: limit), true)
+        }
+        let validation = validate(captured.text, limit: limit)
+        if validation == .unreadable, !captured.fromClipboard {
+            return (validate(clipboard, limit: limit), true)
+        }
+        return (validation, captured.fromClipboard)
+    }
+
     nonisolated static func validationNotice(for validation: TextValidation) -> String {
         switch validation {
         case .ok:
             return ""
-        case .empty:
-            return "No text selected"
         case .unreadable:
             return "No readable text"
         case .overLimit(let count, _):

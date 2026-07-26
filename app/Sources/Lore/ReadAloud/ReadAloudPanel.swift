@@ -93,10 +93,16 @@ struct ReadAloudPanelView: View {
             .accessibilityLabel("Voice \(controller.currentVoice?.displayName ?? "unknown")")
     }
 
-    /// "Leonid · Russian · reading"
+    /// "Leonid · Russian · reading" ("· clipboard" appended when the text
+    /// came from the clipboard fallback, #106 — a stale clipboard must
+    /// never read as a mystery).
     private var subtitle: String {
-        guard let voice = controller.currentVoice else { return statusWord }
-        return "\(voice.displayName) \u{00B7} \(voice.languageName) \u{00B7} \(statusWord)"
+        var parts = controller.currentVoice.map { [$0.displayName, $0.languageName] } ?? []
+        parts.append(statusWord)
+        if controller.currentText?.fromClipboard == true {
+            parts.append("clipboard")
+        }
+        return parts.joined(separator: " \u{00B7} ")
     }
 
     private var statusWord: String {

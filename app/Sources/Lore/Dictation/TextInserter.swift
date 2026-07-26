@@ -127,10 +127,11 @@ enum TextInserter {
     /// Capture the frontmost app's selection via synthesized ⌘C, preserving
     /// the user's clipboard. The clipboard is restored as soon as the text is
     /// read — nothing waits on a paste here, unlike the 800 ms paste flow.
-    /// Returns nil when nothing (or only whitespace) was copied: no selection,
-    /// or the app ignored the chord.
+    /// When nothing (or only whitespace) was copied — no selection, or the
+    /// app ignored the chord — falls back to the restored clipboard contents
+    /// (#106). Returns nil only when both yield nothing.
     @MainActor
-    static func copySelection() async -> String? {
+    static func copySelection() async -> (text: String, fromClipboard: Bool)? {
         let pasteboard = NSPasteboard.general
         let savedItems = savePasteboard(pasteboard)
 
@@ -157,11 +158,35 @@ enum TextInserter {
         }
         log.debug("copySelection captured \(captured?.count ?? 0, privacy: .public) chars")
 
-        guard let captured,
-              !captured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-            return nil
+        // The pasteboard now holds the user's original clipboard again —
+        // exactly what the fallback reads.
+        return resolveCapture(
+            selection: captured, clipboard: pasteboard.string(forType: .string)
+        )
+    }
+
+    /// Selection wins when present; an empty capture falls back to the
+    /// clipboard (#106). Whitespace-only counts as absent for both.
+    /// Readability and the char limit are the caller's validation.
+    nonisolated static func resolveCapture(
+        selection: String?, clipboard: String?
+    ) -> (text: String, fromClipboard: Bool)? {
+        if let selection,
+           !selection.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return (selection, false)
         }
-        return captured
+        if let clipboard,
+           !clipboard.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            return (clipboard, true)
+        }
+        return nil
+    }
+
+    /// The current clipboard string — the unreadable-selection retry (#106)
+    /// reads it after `copySelection` restored the original clipboard.
+    @MainActor
+    static func clipboardText() -> String? {
+        NSPasteboard.general.string(forType: .string)
     }
 
     // MARK: - Clipboard save/restore

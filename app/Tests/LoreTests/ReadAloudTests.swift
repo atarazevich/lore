@@ -214,6 +214,65 @@ final class ReadAloudTests: XCTestCase {
         )
     }
 
+    // MARK: - Capture resolution (clipboard fallback, #106)
+
+    func testSelectionWinsOverClipboard() throws {
+        let captured = try XCTUnwrap(
+            TextInserter.resolveCapture(selection: "выделение", clipboard: "буфер")
+        )
+        XCTAssertEqual(captured.text, "выделение")
+        XCTAssertFalse(captured.fromClipboard)
+    }
+
+    func testClipboardUsedWhenSelectionEmpty() throws {
+        let fromNil = try XCTUnwrap(
+            TextInserter.resolveCapture(selection: nil, clipboard: "буфер")
+        )
+        XCTAssertEqual(fromNil.text, "буфер")
+        XCTAssertTrue(fromNil.fromClipboard)
+        // Whitespace-only selection counts as absent, same as nil.
+        let fromWhitespace = try XCTUnwrap(
+            TextInserter.resolveCapture(selection: "  \n ", clipboard: "буфер")
+        )
+        XCTAssertEqual(fromWhitespace.text, "буфер")
+        XCTAssertTrue(fromWhitespace.fromClipboard)
+    }
+
+    func testNothingCapturedWhenBothEmpty() {
+        XCTAssertNil(TextInserter.resolveCapture(selection: nil, clipboard: nil))
+        XCTAssertNil(TextInserter.resolveCapture(selection: " ", clipboard: "\n\t"))
+        XCTAssertEqual(
+            ReadAloudController.validationNotice(for: .unreadable), "No readable text"
+        )
+    }
+
+    /// A symbols-only selection must not block a readable clipboard: the
+    /// unreadable verdict retries against the clipboard. Over-limit never
+    /// falls back — that text was deliberately selected.
+    func testUnreadableSelectionFallsBackToClipboard() {
+        let retried = ReadAloudController.resolveValidation(
+            captured: (text: "*** —…", fromClipboard: false),
+            clipboard: "буфер", limit: 100
+        )
+        XCTAssertEqual(retried.validation, .ok("буфер"))
+        XCTAssertTrue(retried.fromClipboard)
+
+        // Already clipboard-sourced — no second retry, the notice stands.
+        let clipboardUnreadable = ReadAloudController.resolveValidation(
+            captured: (text: "***", fromClipboard: true),
+            clipboard: "***", limit: 100
+        )
+        XCTAssertEqual(clipboardUnreadable.validation, .unreadable)
+
+        // Over-limit selection is an error, not a fallback.
+        let overLimit = ReadAloudController.resolveValidation(
+            captured: (text: String(repeating: "a", count: 101), fromClipboard: false),
+            clipboard: "буфер", limit: 100
+        )
+        XCTAssertEqual(overLimit.validation, .overLimit(count: 101, limit: 100))
+        XCTAssertFalse(overLimit.fromClipboard)
+    }
+
     // MARK: - Input validation
 
     func testValidateTrimsAndAccepts() {
@@ -223,8 +282,8 @@ final class ReadAloudTests: XCTestCase {
         )
     }
 
-    func testValidateNilIsEmpty() {
-        XCTAssertEqual(ReadAloudController.validate(nil, limit: 100), .empty)
+    func testValidateNilIsUnreadable() {
+        XCTAssertEqual(ReadAloudController.validate(nil, limit: 100), .unreadable)
     }
 
     func testValidateRejectsSymbolsOnly() {
