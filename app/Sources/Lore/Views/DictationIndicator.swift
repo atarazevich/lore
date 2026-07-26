@@ -282,42 +282,18 @@ private struct DictationIndicatorHost: View {
 
 @MainActor
 final class DictationIndicatorManager {
-    private var panel: OverlayPanel?
-    private var hostingView: NSHostingView<DictationIndicatorHost>?
+    private var panel: TopCenteredPanel<DictationIndicatorHost>?
     private var observationTask: Task<Void, Never>?
     /// Observable dictation state mirror; the shell reads `model.isLocked`
     /// for the Dictation nav live dot (SHELL-10).
     let model = DictationIndicatorModel()
     private var recordingStartDate: Date?
-    private var lastPanelSize: NSSize = .zero
-    private var currentScreen: NSScreen?
 
     func start(coordinator: DictationCoordinator, hotkeyManager: HotkeyManager) {
-        guard let screen = screenForMouse() else { return }
-        currentScreen = screen
-
-        // Initial off-screen rect — panel resizes to content dynamically
-        let screenOrigin = screen.frame.origin
-        let rect = NSRect(x: screenOrigin.x + screen.frame.width / 2, y: screen.visibleFrame.maxY - 50, width: 1, height: 1)
-        let p = OverlayPanel(contentRect: rect)
-        p.styleMask = [.nonactivatingPanel, .fullSizeContentView]
-        p.titlebarAppearsTransparent = true
-        p.titleVisibility = .hidden
-        p.isMovableByWindowBackground = true
-        p.backgroundColor = .clear
-        p.hasShadow = false
-        p.becomesKeyOnlyIfNeeded = true
-        p.setFrameAutosaveName("")
-
-        let hv = NSHostingView(rootView: DictationIndicatorHost(model: model))
-        if #available(macOS 13.0, *) {
-            hv.sizingOptions = .intrinsicContentSize
-        }
-        hv.appearance = NSAppearance(named: .darkAqua)
-        p.appearance = NSAppearance(named: .darkAqua)
-        p.contentView = hv
-        self.panel = p
-        self.hostingView = hv
+        guard let panel = TopCenteredPanel(
+            content: DictationIndicatorHost(model: model), topInset: 8
+        ) else { return }
+        self.panel = panel
 
         // Wire up upgrade callback
         model.onUpgrade = { [weak coordinator] action in
@@ -370,64 +346,17 @@ final class DictationIndicatorManager {
 
                 // Show/hide and resize
                 if newState == .idle {
-                    self.panel?.orderOut(nil)
-                    self.lastPanelSize = .zero
+                    self.panel?.hide()
                 } else {
-                    if self.panel?.isVisible != true {
-                        self.panel?.orderFront(nil)
-                    }
-                    self.resizePanelToContent()
+                    self.panel?.show()
                 }
             }
         }
     }
 
-    private func resizePanelToContent() {
-        guard let panel, let hostingView else { return }
-        guard let screen = screenForMouse() else { return }
-        hostingView.layoutSubtreeIfNeeded()
-        let size = hostingView.fittingSize
-        guard size.width > 10 && size.height > 5 else { return }
-
-        // Detect cross-screen move by identity, not dimensions
-        let screenChanged = screen !== currentScreen
-        if screenChanged {
-            currentScreen = screen
-        }
-
-        // Only resize when dimensions actually change (avoid 20x/sec animation calls)
-        let widthChanged = abs(size.width - lastPanelSize.width) > 1
-        let heightChanged = abs(size.height - lastPanelSize.height) > 1
-        guard widthChanged || heightChanged || screenChanged else { return }
-        lastPanelSize = size
-
-        let screenOrigin = screen.frame.origin
-        let x = screenOrigin.x + (screen.frame.width - size.width) / 2
-        let y = screen.visibleFrame.maxY - size.height - 8
-        let newFrame = NSRect(x: x, y: y, width: size.width, height: size.height)
-
-        if screenChanged {
-            // Snap instantly across screens — no sliding through the gap
-            panel.setFrame(newFrame, display: true)
-        } else {
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.15
-                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
-                panel.animator().setFrame(newFrame, display: true)
-            }
-        }
-    }
-
-    private func screenForMouse() -> NSScreen? {
-        let mouseLocation = NSEvent.mouseLocation
-        return NSScreen.screens.first { $0.frame.contains(mouseLocation) }
-            ?? NSScreen.main
-            ?? NSScreen.screens.first
-    }
-
     func stop() {
         observationTask?.cancel()
         observationTask = nil
-        panel?.orderOut(nil)
+        panel?.hide()
     }
 }

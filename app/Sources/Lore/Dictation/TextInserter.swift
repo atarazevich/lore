@@ -93,46 +93,75 @@ enum TextInserter {
 
     /// Returns whether the synthetic key events could be *created*. Posting is
     /// fire-and-forget: `CGEvent.post` has no return value and no delivery receipt.
+    ///
+    /// Uses cghidEventTap — more reliable for posting synthetic events to other apps.
+    /// cgSessionEventTap is better for *reading* events; cghidEventTap injects at the
+    /// HID level which the frontmost app reliably receives.
     @discardableResult
-    private static func postCmdZ() -> Bool {
+    private static func postCommandChord(_ virtualKey: CGKeyCode) -> Bool {
         let source = CGEventSource(stateID: .hidSystemState)
-        // keyCode 6 = 'Z'
-        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x06, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x06, keyDown: false) else {
-            log.error("Failed to create CGEvent for Cmd+Z")
+        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
+              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false) else {
+            log.error("Failed to create CGEvent for Cmd chord (key \(virtualKey))")
             return false
         }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
-        keyDown.post(tap: .cghidEventTap)
-        usleep(20_000)
-        keyUp.post(tap: .cghidEventTap)
-        return true
-    }
-
-    /// Returns whether the synthetic key events could be *created*. Posting is
-    /// fire-and-forget: `CGEvent.post` has no return value and no delivery receipt.
-    @discardableResult
-    private static func postCmdV() -> Bool {
-        let source = CGEventSource(stateID: .hidSystemState)
-
-        // keyCode 9 = 'V'
-        guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: true),
-              let keyUp = CGEvent(keyboardEventSource: source, virtualKey: 0x09, keyDown: false) else {
-            log.error("Failed to create CGEvent")
-            return false
-        }
-
-        keyDown.flags = .maskCommand
-        keyUp.flags = .maskCommand
-
-        // Use cghidEventTap — more reliable for posting synthetic events to other apps.
-        // cgSessionEventTap is better for *reading* events; cghidEventTap injects at the
-        // HID level which the frontmost app reliably receives.
         keyDown.post(tap: .cghidEventTap)
         usleep(20_000) // 20ms between key down and up for reliable delivery
         keyUp.post(tap: .cghidEventTap)
         return true
+    }
+
+    @discardableResult
+    private static func postCmdZ() -> Bool { postCommandChord(0x06) } // 6 = 'Z'
+
+    @discardableResult
+    private static func postCmdV() -> Bool { postCommandChord(0x09) } // 9 = 'V'
+
+    @discardableResult
+    private static func postCmdC() -> Bool { postCommandChord(0x08) } // 8 = 'C'
+
+    // MARK: - Selection capture (Read Aloud, #105)
+
+    /// Capture the frontmost app's selection via synthesized ⌘C, preserving
+    /// the user's clipboard. The clipboard is restored as soon as the text is
+    /// read — nothing waits on a paste here, unlike the 800 ms paste flow.
+    /// Returns nil when nothing (or only whitespace) was copied: no selection,
+    /// or the app ignored the chord.
+    @MainActor
+    static func copySelection() async -> String? {
+        let pasteboard = NSPasteboard.general
+        let savedItems = savePasteboard(pasteboard)
+
+        pasteboard.clearContents()
+        let clearedCount = pasteboard.changeCount
+        _ = postCmdC()
+
+        // Poll for the copy to land — apps take tens of ms to service ⌘C.
+        var captured: String?
+        for _ in 0..<10 {
+            try? await Task.sleep(for: .milliseconds(50))
+            if pasteboard.changeCount != clearedCount {
+                captured = pasteboard.string(forType: .string)
+                break
+            }
+        }
+
+        if savedItems.isEmpty {
+            // The clipboard was empty before the capture — "restore" means
+            // clearing it, or the captured selection would linger there.
+            pasteboard.clearContents()
+        } else {
+            restorePasteboard(pasteboard, items: savedItems)
+        }
+        log.debug("copySelection captured \(captured?.count ?? 0, privacy: .public) chars")
+
+        guard let captured,
+              !captured.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+            return nil
+        }
+        return captured
     }
 
     // MARK: - Clipboard save/restore

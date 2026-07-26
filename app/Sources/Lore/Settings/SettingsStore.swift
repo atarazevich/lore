@@ -314,6 +314,120 @@ final class SettingsStore {
         }
     }
 
+    // MARK: - Read Aloud Settings (#105)
+
+    @ObservationIgnored nonisolated(unsafe) private var _speechifyApiKey: String
+    var speechifyApiKey: String {
+        get { access(keyPath: \.speechifyApiKey); return _speechifyApiKey }
+        set {
+            withMutation(keyPath: \.speechifyApiKey) {
+                _speechifyApiKey = newValue
+                secretStore.save(key: "speechifyApiKey", value: newValue)
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _readAloudVoiceMode: ReadAloudVoiceMode
+    /// Per-language voices (default) or one multilingual Speechify voice.
+    var readAloudVoiceMode: ReadAloudVoiceMode {
+        get { access(keyPath: \.readAloudVoiceMode); return _readAloudVoiceMode }
+        set {
+            withMutation(keyPath: \.readAloudVoiceMode) {
+                _readAloudVoiceMode = newValue
+                defaults.set(newValue.rawValue, forKey: "readAloudVoiceMode")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _readAloudVoiceRu: ReadAloudVoiceChoice
+    /// Voice for texts whose dominant language is Russian. Free-first: the
+    /// fresh-install default is the system voice for every language row.
+    var readAloudVoiceRu: ReadAloudVoiceChoice {
+        get { access(keyPath: \.readAloudVoiceRu); return _readAloudVoiceRu }
+        set {
+            withMutation(keyPath: \.readAloudVoiceRu) {
+                _readAloudVoiceRu = newValue
+                defaults.set(newValue.rawValue, forKey: "readAloudVoiceRu")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _readAloudVoiceEn: ReadAloudVoiceChoice
+    /// Voice for English texts.
+    var readAloudVoiceEn: ReadAloudVoiceChoice {
+        get { access(keyPath: \.readAloudVoiceEn); return _readAloudVoiceEn }
+        set {
+            withMutation(keyPath: \.readAloudVoiceEn) {
+                _readAloudVoiceEn = newValue
+                defaults.set(newValue.rawValue, forKey: "readAloudVoiceEn")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _readAloudVoiceOther: ReadAloudVoiceChoice
+    /// Voice for every other detected language (default: system auto-pick).
+    var readAloudVoiceOther: ReadAloudVoiceChoice {
+        get { access(keyPath: \.readAloudVoiceOther); return _readAloudVoiceOther }
+        set {
+            withMutation(keyPath: \.readAloudVoiceOther) {
+                _readAloudVoiceOther = newValue
+                defaults.set(newValue.rawValue, forKey: "readAloudVoiceOther")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _readAloudVoiceSingle: ReadAloudVoiceChoice
+    /// Single-voice mode's voice (Speechify multilingual only).
+    var readAloudVoiceSingle: ReadAloudVoiceChoice {
+        get { access(keyPath: \.readAloudVoiceSingle); return _readAloudVoiceSingle }
+        set {
+            withMutation(keyPath: \.readAloudVoiceSingle) {
+                _readAloudVoiceSingle = newValue
+                defaults.set(newValue.rawValue, forKey: "readAloudVoiceSingle")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _readAloudSpeed: Double
+    /// Default playback rate for each reading; the panel's speed cycler
+    /// writes back here, so the last chosen speed persists.
+    var readAloudSpeed: Double {
+        get { access(keyPath: \.readAloudSpeed); return _readAloudSpeed }
+        set {
+            withMutation(keyPath: \.readAloudSpeed) {
+                _readAloudSpeed = newValue
+                defaults.set(newValue, forKey: "readAloudSpeed")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _readAloudCharLimit: Int
+    /// Hard cap on a captured selection — over-limit text is refused with the
+    /// count shown, never truncated, never sent to the API. Floored at 100 so
+    /// a bad stored value can never make every selection "too long".
+    var readAloudCharLimit: Int {
+        get { access(keyPath: \.readAloudCharLimit); return _readAloudCharLimit }
+        set {
+            withMutation(keyPath: \.readAloudCharLimit) {
+                _readAloudCharLimit = max(newValue, 100)
+                defaults.set(_readAloudCharLimit, forKey: "readAloudCharLimit")
+            }
+        }
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _readAloudResumeAfterDictation: Bool
+    /// Off (default): a dictation-triggered pause stays paused. On: playback
+    /// resumes when the dictation capture ends.
+    var readAloudResumeAfterDictation: Bool {
+        get { access(keyPath: \.readAloudResumeAfterDictation); return _readAloudResumeAfterDictation }
+        set {
+            withMutation(keyPath: \.readAloudResumeAfterDictation) {
+                _readAloudResumeAfterDictation = newValue
+                defaults.set(newValue, forKey: "readAloudResumeAfterDictation")
+            }
+        }
+    }
+
     // MARK: - UI Settings
 
     @ObservationIgnored nonisolated(unsafe) private var _recPillEnabled: Bool
@@ -445,6 +559,31 @@ final class SettingsStore {
         self._cleanupByDefault = defaults.bool(forKey: "dictationCleanupEnabled")
         self._translationByDefault = defaults.bool(forKey: "dictationTranslationEnabled")
         self._openaiApiKey = storage.secretStore.load(key: "openaiApiKey") ?? ""
+
+        // Read Aloud Settings (#105)
+        self._speechifyApiKey = storage.secretStore.load(key: "speechifyApiKey") ?? ""
+        self._readAloudVoiceMode = ReadAloudVoiceMode(
+            rawValue: defaults.string(forKey: "readAloudVoiceMode") ?? ""
+        ) ?? .perLanguage
+        self._readAloudVoiceRu = ReadAloudVoiceChoice(
+            rawValue: defaults.string(forKey: "readAloudVoiceRu") ?? ""
+        ) ?? .systemAuto
+        self._readAloudVoiceEn = ReadAloudVoiceChoice(
+            rawValue: defaults.string(forKey: "readAloudVoiceEn") ?? ""
+        ) ?? .systemAuto
+        self._readAloudVoiceOther = ReadAloudVoiceChoice(
+            rawValue: defaults.string(forKey: "readAloudVoiceOther") ?? ""
+        ) ?? .systemAuto
+        self._readAloudVoiceSingle = ReadAloudVoiceChoice(
+            rawValue: defaults.string(forKey: "readAloudVoiceSingle") ?? ""
+        ) ?? ReadAloudVoices.defaultSingle
+        self._readAloudSpeed = defaults.object(forKey: "readAloudSpeed") as? Double ?? 1.0
+        self._readAloudCharLimit = max(
+            defaults.object(forKey: "readAloudCharLimit") as? Int
+                ?? ReadAloudController.defaultCharLimit,
+            100
+        )
+        self._readAloudResumeAfterDictation = defaults.bool(forKey: "readAloudResumeAfterDictation")
 
         // UI Settings
         self._recPillEnabled = defaults.object(forKey: "recPillEnabled") as? Bool ?? true

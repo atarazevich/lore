@@ -2,7 +2,8 @@ import AppKit
 import SwiftUI
 
 /// A floating NSPanel that is invisible to screen sharing.
-/// Used by the dictation indicator (DictationIndicatorManager).
+/// Used by the dictation indicator and the Read Aloud player (#105), via
+/// `TopCenteredPanel`.
 final class OverlayPanel: NSPanel {
     init(contentRect: NSRect, defaults: UserDefaults = .standard) {
         super.init(
@@ -26,5 +27,104 @@ final class OverlayPanel: NSPanel {
 
         // Remember position
         setFrameAutosaveName("OverlayPanel")
+    }
+}
+
+// MARK: - Top-centered content-sized panel
+
+/// The machinery shared by the floating top-centered panels (dictation
+/// indicator, Read Aloud player): a configured non-activating `OverlayPanel`
+/// wrapping an intrinsic-size `NSHostingView`, animated resize-to-content
+/// pinned `topInset` points under the menu bar of the mouse's screen, and
+/// show/hide. Managers keep their own polling loops and call `show`/`hide`/
+/// `resizeToContent`.
+@MainActor
+final class TopCenteredPanel<Content: View> {
+    private let panel: OverlayPanel
+    private let hostingView: NSHostingView<Content>
+    private let topInset: CGFloat
+    private var lastPanelSize: NSSize = .zero
+    private var currentScreen: NSScreen?
+
+    /// Nil when no screen can be resolved for the mouse (headless edge case).
+    init?(content: Content, topInset: CGFloat) {
+        guard let screen = Self.screenForMouse() else { return nil }
+        self.topInset = topInset
+        currentScreen = screen
+
+        // Initial off-screen 1×1 rect — the panel resizes to content.
+        let rect = NSRect(
+            x: screen.frame.origin.x + screen.frame.width / 2,
+            y: screen.visibleFrame.maxY - 50, width: 1, height: 1
+        )
+        panel = OverlayPanel(contentRect: rect)
+        panel.styleMask = [.nonactivatingPanel, .fullSizeContentView]
+        panel.titlebarAppearsTransparent = true
+        panel.titleVisibility = .hidden
+        panel.isMovableByWindowBackground = true
+        panel.backgroundColor = .clear
+        panel.hasShadow = false
+        panel.becomesKeyOnlyIfNeeded = true
+        panel.setFrameAutosaveName("")
+
+        hostingView = NSHostingView(rootView: content)
+        hostingView.sizingOptions = .intrinsicContentSize
+        hostingView.appearance = NSAppearance(named: .darkAqua)
+        panel.appearance = NSAppearance(named: .darkAqua)
+        panel.contentView = hostingView
+    }
+
+    /// Order front (if hidden) and fit the frame to the content.
+    func show() {
+        if !panel.isVisible {
+            panel.orderFront(nil)
+        }
+        resizeToContent()
+    }
+
+    func hide() {
+        panel.orderOut(nil)
+        lastPanelSize = .zero
+    }
+
+    func resizeToContent() {
+        guard let screen = Self.screenForMouse() else { return }
+        hostingView.layoutSubtreeIfNeeded()
+        let size = hostingView.fittingSize
+        guard size.width > 10 && size.height > 5 else { return }
+
+        // Detect cross-screen move by identity, not dimensions
+        let screenChanged = screen !== currentScreen
+        if screenChanged {
+            currentScreen = screen
+        }
+
+        // Only resize when dimensions actually change (avoid 20x/sec animation calls)
+        let widthChanged = abs(size.width - lastPanelSize.width) > 1
+        let heightChanged = abs(size.height - lastPanelSize.height) > 1
+        guard widthChanged || heightChanged || screenChanged else { return }
+        lastPanelSize = size
+
+        let x = screen.frame.origin.x + (screen.frame.width - size.width) / 2
+        let y = screen.visibleFrame.maxY - size.height - topInset
+        let newFrame = NSRect(x: x, y: y, width: size.width, height: size.height)
+
+        if screenChanged {
+            // Snap instantly across screens — no sliding through the gap
+            panel.setFrame(newFrame, display: true)
+        } else {
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.15
+                context.timingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+                panel.animator().setFrame(newFrame, display: true)
+            }
+        }
+    }
+
+    private static func screenForMouse() -> NSScreen? {
+        let mouseLocation = NSEvent.mouseLocation
+        return NSScreen.screens.first { $0.frame.contains(mouseLocation) }
+            ?? NSScreen.main
+            ?? NSScreen.screens.first
     }
 }

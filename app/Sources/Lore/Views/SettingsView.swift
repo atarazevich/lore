@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import CoreAudio
 import LaunchAtLogin
@@ -51,6 +52,16 @@ struct SettingsView: View {
     /// a fresher post-prune one.
     @State private var audioUsage: (count: Int, bytes: Int64)?
     @State private var diskUsageTask: Task<Void, Never>?
+    /// Read Aloud voice pickers (#105): the Speechify sides of the grouped
+    /// menus, from the cached `/v1/voices` catalog; empty without a key.
+    @State private var ruSpeechifyVoices: [SpeechifyVoice] = []
+    @State private var enSpeechifyVoices: [SpeechifyVoice] = []
+    @State private var singleSpeechifyVoices: [SpeechifyVoice] = []
+    /// Holders for the ▶ voice previews (must outlive the tap).
+    @State private var voicePreviewPlayer: AVPlayer?
+    @State private var previewSynthesizer = AVSpeechSynthesizer()
+    /// Which voice row's picker popover is open, keyed by the row name.
+    @State private var openVoicePicker: String?
 
     init(settings: AppSettings, updater: SPUUpdater, isActiveInShell: Bool = true) {
         self.settings = settings
@@ -73,6 +84,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 20) {
                 generalSection
                 talkSection
+                readAloudSection
                 modifiersSection
                 meetingsSection
                 notesSection
@@ -105,6 +117,11 @@ struct SettingsView: View {
             // previous verdict is cleared because it described another key.
             keyHealth = nil
             scheduleKeyProbe(debounce: true)
+        }
+        .onChange(of: settings.speechifyApiKey) { _, _ in
+            // Progressive disclosure (#105): key present → load the Speechify
+            // voice groups; key removed → they empty, system voices remain.
+            refreshSpeechifyVoices()
         }
     }
 
@@ -286,6 +303,294 @@ struct SettingsView: View {
             }
         }
         .padding(EdgeInsets(top: 0, leading: 16, bottom: 13, trailing: 16))
+    }
+
+    // MARK: - READ ALOUD (#105)
+
+    /// Paid tier is disclosed by key presence: Speechify voice groups and the
+    /// voices-mode row appear only with a key. System voices are the free
+    /// default — Read Aloud works with no key at all.
+    private var hasSpeechifyKey: Bool { !settings.speechifyApiKey.isEmpty }
+
+    private var readAloudSection: some View {
+        SettingsSection(label: "Read aloud") {
+            SettingsRow(
+                name: "Speechify API key",
+                sub: hasSpeechifyKey
+                    ? "Paid voices enabled" : "Optional \u{2014} system voices are free"
+            ) {
+                chipField("API key", text: $settings.speechifyApiKey, isSecure: true)
+            }
+            Link("Get API key", destination: URL(string: "https://console.sws.speechify.com")!)
+                .font(.system(size: 11))
+                .foregroundStyle(XMOTheme.Accent.blue)
+                .padding(EdgeInsets(top: 0, leading: 16, bottom: 13, trailing: 16))
+            XMODivider()
+            if hasSpeechifyKey {
+                SettingsRow(
+                    name: "Voices",
+                    sub: "One voice per detected language, or one for everything"
+                ) {
+                    XMOMonoValueButton(title: settings.readAloudVoiceMode.displayName) {
+                        settings.readAloudVoiceMode = nextCase(after: settings.readAloudVoiceMode)
+                    }
+                }
+                XMODivider()
+            }
+            if hasSpeechifyKey && settings.readAloudVoiceMode == .singleVoice {
+                voiceRow(
+                    "Voice", sub: "Multilingual \u{2014} reads every language",
+                    selection: $settings.readAloudVoiceSingle,
+                    speechify: singleSpeechifyVoices,
+                    systemPrefix: nil,
+                    includeAuto: false
+                )
+            } else {
+                voiceRow(
+                    "Russian voice", sub: "For texts detected as Russian",
+                    selection: $settings.readAloudVoiceRu,
+                    speechify: ruSpeechifyVoices,
+                    systemPrefix: "ru",
+                    includeAuto: true
+                )
+                XMODivider()
+                voiceRow(
+                    "English voice", sub: "For texts detected as English",
+                    selection: $settings.readAloudVoiceEn,
+                    speechify: enSpeechifyVoices,
+                    systemPrefix: "en",
+                    includeAuto: true
+                )
+                XMODivider()
+                voiceRow(
+                    "Other languages", sub: "System voice matches the detected language",
+                    selection: $settings.readAloudVoiceOther,
+                    speechify: singleSpeechifyVoices,
+                    systemPrefix: nil,
+                    includeAuto: true
+                )
+            }
+            XMODivider()
+            SettingsRow(name: "Playback speed", sub: "Starting rate for each reading") {
+                XMOMonoValueButton(title: ReadAloudController.speedLabel(settings.readAloudSpeed)) {
+                    settings.readAloudSpeed = ReadAloudController.nextSpeed(after: settings.readAloudSpeed)
+                }
+            }
+            XMODivider()
+            SettingsRow(
+                name: "Max text length",
+                sub: "Longer selections are refused, never billed"
+            ) {
+                // Empty/invalid/≤0 input reverts to the default; the store's
+                // setter additionally floors the value at 100.
+                numberField(
+                    value: Binding(
+                        get: { settings.readAloudCharLimit },
+                        set: {
+                            settings.readAloudCharLimit =
+                                $0 > 0 ? $0 : ReadAloudController.defaultCharLimit
+                        }
+                    ),
+                    unit: "chars", width: 72
+                )
+            }
+            XMODivider()
+            toggleRow(
+                "Resume reading after dictation",
+                sub: "Continue playback when a dictation recording ends",
+                isOn: $settings.readAloudResumeAfterDictation
+            )
+            XMODivider()
+            shortcutRow(key: "fn R", name: "Read selection aloud", sub: "Replaces the current reading")
+            XMODivider()
+            shortcutRow(key: "fn Q", name: "Add selection to queue", sub: "Reads after the current text")
+        }
+    }
+
+    /// Static shortcut chip row — same `.keybtn` idiom as the Modifiers rows.
+    private func shortcutRow(key: String, name: String, sub: String) -> some View {
+        SettingsRow(name: name, sub: sub) {
+            XMOMonoValueButton(title: key, width: 64)
+        } trailing: {
+            EmptyView()
+        }
+    }
+
+    /// Voice picker row: popover list behind the mono value chip — grouped
+    /// Speechify voices above free System voices, every row with its own ▶
+    /// preview. `systemPrefix` filters installed system voices ("ru"/"en");
+    /// nil offers no per-locale system group (the auto entry covers it).
+    private func voiceRow(
+        _ name: String, sub: String?,
+        selection: Binding<ReadAloudVoiceChoice>,
+        speechify: [SpeechifyVoice],
+        systemPrefix: String?,
+        includeAuto: Bool
+    ) -> some View {
+        SettingsRow(name: name, sub: sub) {
+            XMOMonoValueButton(title: selection.wrappedValue.name) {
+                openVoicePicker = openVoicePicker == name ? nil : name
+            }
+            .popover(
+                isPresented: Binding(
+                    get: { openVoicePicker == name },
+                    set: { if !$0 { openVoicePicker = nil } }
+                ),
+                arrowEdge: .bottom
+            ) {
+                voicePickerList(
+                    selection: selection, speechify: speechify,
+                    systemPrefix: systemPrefix, includeAuto: includeAuto
+                )
+            }
+        }
+    }
+
+    /// The popover behind a voice row. Rows select on tap; each carries its
+    /// own ▶ preview (Speechify: free CDN clip; system: local sample) so
+    /// voices can be auditioned before choosing.
+    private func voicePickerList(
+        selection: Binding<ReadAloudVoiceChoice>,
+        speechify: [SpeechifyVoice],
+        systemPrefix: String?,
+        includeAuto: Bool
+    ) -> some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 0) {
+                if includeAuto {
+                    voicePickerRow(
+                        choice: .systemAuto, detail: "macOS picks per detected language",
+                        previewURL: nil, samplePrefix: systemPrefix, selection: selection
+                    )
+                }
+                if !speechify.isEmpty {
+                    voicePickerHeader("Speechify")
+                    ForEach(speechify) { voice in
+                        voicePickerRow(
+                            choice: ReadAloudVoiceChoice(
+                                engine: .speechify, id: voice.id, name: voice.name
+                            ),
+                            detail: voice.tagLabel,
+                            previewURL: voice.previewURL,
+                            samplePrefix: systemPrefix,
+                            selection: selection
+                        )
+                    }
+                }
+                if let systemPrefix {
+                    let systemChoices = ReadAloudVoices.systemVoices(languagePrefix: systemPrefix)
+                    if !systemChoices.isEmpty {
+                        voicePickerHeader("System (free)")
+                        ForEach(systemChoices, id: \.id) { choice in
+                            voicePickerRow(
+                                choice: choice, detail: nil, previewURL: nil,
+                                samplePrefix: systemPrefix, selection: selection
+                            )
+                        }
+                    }
+                }
+            }
+        }
+        .frame(width: 300)
+        .frame(maxHeight: 380)
+        .xmoPopoverChrome()
+    }
+
+    private func voicePickerHeader(_ text: String) -> some View {
+        XMOSectionLabel(text: text, size: 9, mono: true)
+            .padding(EdgeInsets(top: 8, leading: 9, bottom: 4, trailing: 9))
+    }
+
+    private func voicePickerRow(
+        choice: ReadAloudVoiceChoice,
+        detail: String?,
+        previewURL: URL?,
+        samplePrefix: String?,
+        selection: Binding<ReadAloudVoiceChoice>
+    ) -> some View {
+        HStack(spacing: 6) {
+            Button {
+                selection.wrappedValue = choice
+                openVoicePicker = nil
+            } label: {
+                HStack(spacing: 8) {
+                    VStack(alignment: .leading, spacing: 1) {
+                        Text(choice.name)
+                            .font(.system(size: 12.5, weight: .medium))
+                            .foregroundStyle(XMOTheme.TextColor.primary)
+                            .lineLimit(1)
+                        if let detail {
+                            Text(detail)
+                                .font(.system(size: 10))
+                                .foregroundStyle(XMOTheme.TextColor.faint)
+                                .lineLimit(1)
+                        }
+                    }
+                    Spacer(minLength: 0)
+                    if selection.wrappedValue == choice {
+                        Text("\u{2713}")
+                            .font(.system(size: 12))
+                            .foregroundStyle(XMOTheme.Accent.amber)
+                    }
+                }
+                .padding(EdgeInsets(top: 6, leading: 9, bottom: 6, trailing: 0))
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            XMOIconButton(systemName: "play.fill", label: "Preview \(choice.name)") {
+                previewVoice(choice, previewURL: previewURL, samplePrefix: samplePrefix)
+            }
+            .padding(.trailing, 6)
+        }
+        .xmoHoverFill(cornerRadius: XMOTheme.Radius.chip)
+    }
+
+    /// ▶ preview on a picker row: Speechify voices play their CDN preview
+    /// clip; system voices speak a short local sample in the row's language.
+    private func previewVoice(
+        _ choice: ReadAloudVoiceChoice, previewURL: URL?, samplePrefix: String?
+    ) {
+        switch choice.engine {
+        case .speechify:
+            guard let previewURL else { return }
+            previewSynthesizer.stopSpeaking(at: .immediate)
+            let player = AVPlayer(url: previewURL)
+            voicePreviewPlayer = player
+            player.play()
+        case .system:
+            let sample = samplePrefix == "ru"
+                ? "Привет! Так звучит этот голос."
+                : "Hi! This is how this voice sounds."
+            let utterance = AVSpeechUtterance(string: sample)
+            utterance.voice = SystemSpeechSynthesizer.resolveVoice(
+                id: choice.id, languageCode: samplePrefix ?? "en"
+            )
+            voicePreviewPlayer?.pause()
+            previewSynthesizer.stopSpeaking(at: .immediate)
+            previewSynthesizer.speak(utterance)
+        }
+    }
+
+    /// Refresh the Speechify sides of the voice pickers from the cached
+    /// catalog. No key → empty groups (system voices remain).
+    private func refreshSpeechifyVoices() {
+        let key = settings.speechifyApiKey
+        guard !key.isEmpty else {
+            ruSpeechifyVoices = []
+            enSpeechifyVoices = []
+            singleSpeechifyVoices = []
+            return
+        }
+        Task {
+            let catalog = SpeechifyVoiceCatalog.shared
+            ruSpeechifyVoices = await catalog.voices(localePrefixes: ["ru"], apiKey: key)
+            enSpeechifyVoices = await catalog.voices(localePrefixes: ["en"], apiKey: key)
+            // Single-voice / other-languages list: multilingual-capable
+            // voices of the ru + en locales.
+            singleSpeechifyVoices = await catalog.voices(
+                localePrefixes: ["ru", "en"], model: "simba-multilingual", apiKey: key
+            )
+        }
     }
 
     // MARK: - Keep audio (#52)
@@ -474,22 +779,7 @@ struct SettingsView: View {
                     name: "Silence timeout",
                     sub: "Auto-detected sessions stop after this much silence"
                 ) {
-                    HStack(spacing: 6) {
-                        TextField("", value: $settings.silenceTimeoutMinutes, format: .number)
-                            .font(XMOTheme.Typography.mono(12))
-                            .textFieldStyle(.plain)
-                            .multilineTextAlignment(.trailing)
-                            .padding(.vertical, 6)
-                            .padding(.horizontal, 10)
-                            .frame(width: 56)
-                            .background(
-                                Color.white.opacity(0.06),
-                                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
-                            )
-                        Text("min")
-                            .font(.system(size: 12))
-                            .foregroundStyle(XMOTheme.TextColor.muted)
-                    }
+                    numberField(value: $settings.silenceTimeoutMinutes, unit: "min", width: 56)
                 }
                 XMODivider()
                 customMeetingAppsRows
@@ -886,6 +1176,27 @@ struct SettingsView: View {
         )
     }
 
+    /// Chip-styled trailing-aligned integer field with a unit label — shared
+    /// by the silence-timeout and Read Aloud max-length rows.
+    private func numberField(value: Binding<Int>, unit: String, width: CGFloat) -> some View {
+        HStack(spacing: 6) {
+            TextField("", value: value, format: .number)
+                .font(XMOTheme.Typography.mono(12))
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.trailing)
+                .padding(.vertical, 6)
+                .padding(.horizontal, 10)
+                .frame(width: width)
+                .background(
+                    Color.white.opacity(0.06),
+                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                )
+            Text(unit)
+                .font(.system(size: 12))
+                .foregroundStyle(XMOTheme.TextColor.muted)
+        }
+    }
+
     /// Bordered TextEditor with a faint placeholder — shared by the template
     /// prompt and custom meeting apps editors.
     private func placeholderTextEditor(
@@ -922,6 +1233,7 @@ struct SettingsView: View {
         // since the last visit must not keep showing a stale "Key OK".
         scheduleKeyProbe(debounce: false)
         refreshAudioDiskUsage()
+        refreshSpeechifyVoices()
         Task { @MainActor in
             automaticallyChecksForUpdates = updater.automaticallyChecksForUpdates
             templates = coordinator.templateStore.templates

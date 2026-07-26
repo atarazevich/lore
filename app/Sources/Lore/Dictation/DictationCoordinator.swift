@@ -64,6 +64,18 @@ final class DictationCoordinator {
     /// Shared audio bus — set by AppDelegate during dictation setup.
     var audioBus: AudioBus?
 
+    /// Read Aloud interplay (#105), wired by the dictation setup. Capture
+    /// started (pre-buffer, before the mic opens) → pause playback so zero
+    /// TTS output enters the buffer; capture ended (`stopMicCapture`, the one
+    /// chokepoint every stop path crosses) → maybe auto-resume. `cancelled`
+    /// is true when the gesture never became a recording (a sub-150 ms tap):
+    /// not a dictation, so the listener resumes unconditionally.
+    var onCaptureStarted: (() -> Void)?
+    var onCaptureEnded: ((_ cancelled: Bool) -> Void)?
+    /// Whether the current capture gesture was confirmed as a recording —
+    /// distinguishes a cancelled tap from a real dictation for `onCaptureEnded`.
+    private var captureConfirmed = false
+
     /// Shared backend cache — set by AppDelegate during dictation setup.
     var backendCache: SharedBackendCache?
 
@@ -184,6 +196,10 @@ final class DictationCoordinator {
         // dictation hits the async .notDetermined branch.
         switch MicrophonePermission.status {
         case .authorized:
+            captureConfirmed = false
+            // Pause Read Aloud before the mic opens — not at hold-confirm,
+            // by which point TTS output would already be in the buffer (#105).
+            onCaptureStarted?()
             startMicCapture()
             // "Sound on start" (DSET-16, default off): chime at the point
             // capture actually begins (mic live), not on key-down — the
@@ -298,6 +314,7 @@ final class DictationCoordinator {
         currentEntryID = nil
         pendingCleanupMode = nil
         lastError = nil
+        captureConfirmed = true
         state = .recording
         log.debug("recording confirmed (pre-buffer kept)")
     }
@@ -730,6 +747,7 @@ final class DictationCoordinator {
         recordingTask = nil
         bluetoothMicRedirected = false
         noSignal = false
+        onCaptureEnded?(!captureConfirmed)
     }
 
     /// Toggle pre-paste cleanup mode during recording.
@@ -1118,7 +1136,8 @@ final class DictationCoordinator {
     /// Which `URLError`s are network-shaped enough to retry. An allowlist:
     /// `.cancelled` must not resurrect abandoned work, and `.badURL` or
     /// `.userAuthenticationRequired` won't heal on a second try.
-    private static let transientURLErrorCodes: Set<URLError.Code> = [
+    /// Internal: `SpeechifyClient.isTransient` (#105) shares this table.
+    nonisolated static let transientURLErrorCodes: Set<URLError.Code> = [
         .timedOut, .networkConnectionLost, .notConnectedToInternet,
         .cannotConnectToHost, .cannotFindHost, .dnsLookupFailed,
     ]

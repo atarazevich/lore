@@ -65,7 +65,7 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case notifications
     }
 
-    /// Which LLM call was made — never the prompt, never the response. Also
+    /// Which API call was made — never the prompt, never the response. Also
     /// names which dictation upgrade ran (`.cleanup` / `.translate`): an
     /// upgrade *is* one of these calls, so it needs no parallel enum.
     enum Endpoint: String, Codable, Sendable, CaseIterable {
@@ -74,6 +74,8 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case askLore
         case refinement
         case keyHealth
+        /// Speechify TTS synthesis (#105) — never the selected text.
+        case readAloud
     }
 
     enum ModelKind: String, Codable, Sendable, CaseIterable {

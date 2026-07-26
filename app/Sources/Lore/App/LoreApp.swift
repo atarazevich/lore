@@ -561,6 +561,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hotkeyManager: coordinator.hotkeyManager
         )
 
+        // Read Aloud (#105): Fn+R / Fn+Q chords, floating player panel, and
+        // the dictation interplay (capture start pauses playback before the
+        // mic opens; capture end may auto-resume — a cancelled tap always,
+        // a real dictation only when the setting opts in).
+        let readAloud = coordinator.readAloudController
+        readAloud.settings = settings
+        coordinator.hotkeyManager.readAloudController = readAloud
+        coordinator.readAloudPanel.start(controller: readAloud)
+        coordinator.dictationCoordinator.onCaptureStarted = { [weak readAloud] in
+            readAloud?.pauseForDictation()
+        }
+        coordinator.dictationCoordinator.onCaptureEnded = { [weak readAloud] cancelled in
+            readAloud?.dictationEnded(cancelled: cancelled)
+        }
+
         setupHealthMonitor(coordinator: coordinator, settings: settings)
 
         // Preload models so the first use is instant. Detached; launch never

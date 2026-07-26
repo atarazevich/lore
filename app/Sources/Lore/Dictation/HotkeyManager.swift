@@ -9,6 +9,10 @@ final class HotkeyManager {
     private static let hkLog = Logger(subsystem: "com.lore.app", category: "Hotkey")
     private weak var coordinator: DictationCoordinator?
     private weak var settings: AppSettings?
+    /// Read Aloud (#105): Fn+R reads the selection, Fn+Q enqueues it. Set by
+    /// the dictation setup alongside `install`; nil simply disables the chords.
+    weak var readAloudController: ReadAloudController?
+
     private var globalFlagsMonitor: Any?
     private var globalKeyMonitor: Any?
     private var localFlagsMonitor: Any?
@@ -99,6 +103,20 @@ final class HotkeyManager {
         // Local key monitor — return nil to consume events we handle
         localKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self else { return event }
+
+            // Fn+R (read aloud) / Fn+Q (enqueue) → consume (#105). Mirror of
+            // the CGEvent tap branch for when the tap is dead and Lore itself
+            // is focused; when both are live the tap consumes first. With no
+            // controller wired the chord is fully inert — not even consumed.
+            if event.modifierFlags.contains(.function),
+               event.keyCode == 15 || event.keyCode == 12,
+               self.readAloudController != nil {
+                let enqueue = event.keyCode == 12
+                Task { @MainActor in
+                    self.handleReadAloudChord(enqueue: enqueue)
+                }
+                return nil
+            }
 
             // Fn+V/T while recording → consume (use event's own Fn flag, not tracked flag)
             if event.modifierFlags.contains(.function) && self.isRecordingFlag {
@@ -388,6 +406,40 @@ final class HotkeyManager {
         }
     }
 
+    /// Fn+R (read now) / Fn+Q (enqueue) — Read Aloud (#105). Reading and
+    /// recording are mutually exclusive gestures on the same modifier, so any
+    /// dictation gesture in flight (pre-buffer, hold, locked) aborts before
+    /// the selection capture runs; unlike Fn+V/T nothing "pending" is set.
+    /// The subsequent Fn release then falls through the tap path as a no-op
+    /// (timer cancelled, flags cleared here).
+    private func handleReadAloudChord(enqueue: Bool) {
+        // No controller wired → fully inert: no gesture teardown, no discard.
+        guard let readAloudController else { return }
+        HotkeyManager.hkLog.debug("[HOTKEY] Fn+\(enqueue ? "Q" : "R", privacy: .public) → read aloud")
+        fnTimer?.cancel()
+        fnTimer = nil
+        fnReleaseDebounce?.cancel()
+        fnReleaseDebounce = nil
+        isHoldMode = false
+        fnHeldAtLock = false
+        isLocked = false
+        isLockedFlag = false
+        isRecordingFlag = false
+        isPreBufferingFlag = false
+        // Abort only a live capture gesture — never a `.processing` transcription
+        // of an earlier dictation, which discardRecording would also kill.
+        if let coordinator, coordinator.isPreBuffering || coordinator.state == .recording {
+            coordinator.discardRecording()
+        }
+        Task { @MainActor in
+            if enqueue {
+                await readAloudController.enqueueSelection()
+            } else {
+                await readAloudController.readSelectionNow()
+            }
+        }
+    }
+
     /// Ctrl+Cmd+V exactly — a superset like Ctrl+Cmd+Shift+V is someone else's
     /// shortcut. The one chord the global keyDown monitor may handle (see the
     /// invariant at its installation, #95).
@@ -479,6 +531,25 @@ final class HotkeyManager {
                             return nil
                         }
                     }
+                }
+
+                // Fn+R (read aloud) / Fn+Q (enqueue) → consume (#105). Unlike
+                // Fn+V/T these fire regardless of recording state — the chord
+                // handler aborts any dictation gesture itself (reading and
+                // recording are mutually exclusive on the same modifier).
+                // With no controller wired the chord passes through untouched.
+                // The tap source is on CFRunLoopGetMain (see `lastTapKeyDown`
+                // above), so assumeIsolated is valid here.
+                if fnHeld && (keyCode == 15 || keyCode == 12),
+                   MainActor.assumeIsolated({ manager.readAloudController != nil }) {
+                    let enqueue = keyCode == 12
+                    manager.isRecordingFlag = false
+                    manager.isPreBufferingFlag = false
+                    manager.isLockedFlag = false
+                    Task { @MainActor in
+                        manager.handleReadAloudChord(enqueue: enqueue)
+                    }
+                    return nil
                 }
 
                 // Esc while upgrade panel showing → dismiss
