@@ -105,7 +105,7 @@ struct NotesView: View {
             XMODivider()
             HStack(spacing: 0) {
                 sidebar(controller: controller, state: state)
-                    .frame(width: 228)
+                    .frame(width: 340)
                 XMOTheme.Surface.line.frame(width: 1)
                 detailContent(controller: controller, state: state)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -217,43 +217,145 @@ struct NotesView: View {
         session.unviewed == true || isBatchInFlight(sessionID: session.id)
     }
 
-    // MARK: - Header (MREV-05)
+    // MARK: - Section toolbar (#107 prototype `.toolbar`)
 
+    /// Section-level row: "Meetings · N recorded" + Start recording. The
+    /// recording action lives HERE, not in the meeting header — it acts on
+    /// the Meetings section, not on the open recording.
     @ViewBuilder
     private func reviewHeader(controller: NotesController, state: NotesState) -> some View {
-        let selected = state.sessionHistory.first { $0.id == state.selectedSessionID }
-        XMOScreenHeader {
-            headerTitle(controller: controller, selected: selected)
-        } meta: {
-            if let selected {
-                VStack(alignment: .leading, spacing: 2) {
-                    dateDotTime(selected.startedAt)
-                        + Text(" \u{00B7} \(selected.utteranceCount) utterances")
-                    // Auto-enrichment summary (#107). The explicit lineLimit
-                    // overrides the header's meta-wide lineLimit(1).
-                    if let summary = selected.summary, !summary.isEmpty {
-                        Text(summary)
-                            .lineLimit(2)
-                    }
-                }
-            } else {
-                Text("\(state.sessionHistory.count) recorded")
-            }
-        } trailing: {
+        HStack(spacing: 10) {
+            Text("Meetings")
+                .font(XMOTheme.Typography.control)
+                .foregroundStyle(XMOTheme.TextColor.primary)
+            Text("\(state.sessionHistory.count) recorded")
+                .font(XMOTheme.Typography.monoMeta)
+                .foregroundStyle(XMOTheme.TextColor.faint)
+            Spacer(minLength: 12)
             // Routes into the existing guarded start/stop flows in ContentView.
             // While recording (review side shown via the header switch) the
             // button reads Stop and stops the session — it must never say
             // "Start recording" over a running one.
             let recordingActive = shell.isRecordingActive()
-            XMOStartStopButton(isRecording: recordingActive) {
+            XMOStartStopButton(isRecording: recordingActive, compact: true) {
                 (recordingActive ? shell.requestMeetingRecordingStop
                                  : shell.requestMeetingRecordingStart)?()
             }
             .accessibilityIdentifier("meetings.startRecordingButton")
         }
+        .padding(.horizontal, 16)
+        .padding(.vertical, 12)
         .onChange(of: state.selectedSessionID) {
             headerRenaming = false
         }
+    }
+
+    // MARK: - Tag grammar (#107): work/personal = type, everything else = entity
+
+    /// UI-level split only — data stays a flat tag list. Tags equal to
+    /// "work"/"personal" (case-insensitive) are the meeting's *type* and live
+    /// in the meta line; every other tag is an *entity* (person/organization).
+    private enum MeetingType: String, CaseIterable {
+        case work, personal
+
+        var displayName: String { rawValue.capitalized }
+    }
+
+    private func typeTag(_ session: SessionIndex) -> MeetingType? {
+        session.tags?.lazy
+            .compactMap { MeetingType(rawValue: $0.lowercased()) }
+            .first
+    }
+
+    private func entityTags(_ session: SessionIndex) -> [String] {
+        (session.tags ?? []).filter { MeetingType(rawValue: $0.lowercased()) == nil }
+    }
+
+    /// Mono meta line with the type prefix slightly brighter than the rest:
+    /// `work · 27 July · 09:58 · 29 min`. No prefix when untyped.
+    private func metaLine(type: String?, components: [String]) -> Text {
+        let rest = Text(components.joined(separator: " \u{00B7} "))
+            .foregroundStyle(XMOTheme.TextColor.faint)
+        guard let type else { return rest }
+        return Text(type).foregroundStyle(XMOTheme.TextColor.muted)
+            + Text(" \u{00B7} ").foregroundStyle(XMOTheme.TextColor.faint)
+            + rest
+    }
+
+    /// Amber ✦ ("assistant output") + summary, as one concatenated Text so a
+    /// single lineLimit truncates across both.
+    private func sparkSummary(_ summary: String, size: CGFloat) -> Text {
+        Text("\u{2726} ")
+            .font(.system(size: 10))
+            .foregroundStyle(XMOTheme.Accent.amber)
+            + Text(summary)
+            .font(.system(size: size))
+            .foregroundStyle(XMOTheme.TextColor.muted)
+    }
+
+    // MARK: - Detail header (#107 prototype `.dhead`)
+
+    /// The open meeting's own content ONLY: title (click-to-edit, #61), mono
+    /// meta with the type prefix, full ✦-summary, entity chips (click = set
+    /// that tag as the sidebar filter). The type never renders as a chip.
+    @ViewBuilder
+    private func detailHeader(controller: NotesController, session: SessionIndex) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            headerTitle(controller: controller, selected: session)
+                .font(XMOTheme.Typography.heading)
+                .foregroundStyle(XMOTheme.TextColor.primary)
+                .lineLimit(1)
+
+            metaLine(type: typeTag(session)?.rawValue, components: metaComponents(session, detail: true))
+                .font(XMOTheme.Typography.monoMeta)
+                .lineLimit(1)
+                .padding(.top, 4)
+
+            if let summary = session.summary, !summary.isEmpty {
+                sparkSummary(summary, size: 12.5)
+                    .lineSpacing(4)
+                    .lineLimit(3)
+                    .frame(maxWidth: 640, alignment: .leading)
+                    .padding(.top, 8)
+            }
+
+            let entities = entityTags(session)
+            if !entities.isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(entities, id: \.self) { tag in
+                        entityChip(tag) {
+                            controller.setTagFilter(tag)
+                        }
+                    }
+                }
+                .padding(.top, 9)
+            }
+        }
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .padding(.init(top: 16, leading: 20, bottom: 14, trailing: 20))
+    }
+
+    /// Uniform entity chip: 10.5/muted on card-2, 1px line border, 6px radius.
+    private func entityChip(_ tag: String, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            Text(tag)
+                .font(.system(size: 10.5))
+                .foregroundStyle(XMOTheme.TextColor.muted)
+                .lineLimit(1)
+                .padding(.horizontal, 8)
+                .padding(.vertical, 2)
+                .background(
+                    XMOTheme.Surface.card2,
+                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                )
+                .overlay(
+                    RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                        .strokeBorder(XMOTheme.Surface.line, lineWidth: 1)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+        }
+        .buttonStyle(.plain)
+        .help("Filter meetings by \(tag)")
     }
 
     /// Click-to-edit title (#61): same repository rename as the list row's
@@ -263,40 +365,35 @@ struct NotesView: View {
     /// field commits an empty title, which falls back to the derived
     /// default name.
     @ViewBuilder
-    private func headerTitle(controller: NotesController, selected: SessionIndex?) -> some View {
-        if let selected {
-            if headerRenaming {
-                TextField("Title", text: $headerRenameText, onCommit: {
+    private func headerTitle(controller: NotesController, selected: SessionIndex) -> some View {
+        if headerRenaming {
+            TextField("Title", text: $headerRenameText, onCommit: {
+                commitHeaderRename(controller: controller, sessionID: selected.id)
+            })
+            .textFieldStyle(.plain)
+            .frame(maxWidth: 420)
+            .focused($headerTitleFocused)
+            .onAppear { headerTitleFocused = true }
+            .onChange(of: headerTitleFocused) { _, focused in
+                if !focused && headerRenaming {
                     commitHeaderRename(controller: controller, sessionID: selected.id)
-                })
-                .textFieldStyle(.plain)
-                .frame(maxWidth: 420)
-                .focused($headerTitleFocused)
-                .onAppear { headerTitleFocused = true }
-                .onChange(of: headerTitleFocused) { _, focused in
-                    if !focused && headerRenaming {
-                        commitHeaderRename(controller: controller, sessionID: selected.id)
-                    }
                 }
-                .onExitCommand {
-                    headerRenaming = false
-                }
-            } else {
-                Text(selected.displayTitle)
-                    .onTapGesture {
-                        // Prefill with what's on screen: the stored title, or
-                        // the derived default (committing it unchanged simply
-                        // stores that name).
-                        headerRenameText = selected.displayTitle
-                        headerRenaming = true
-                    }
-                    .help("Click to rename")
-                    .accessibilityAddTraits(.isButton)
-                    .accessibilityHint("Rename meeting")
+            }
+            .onExitCommand {
+                headerRenaming = false
             }
         } else {
-            Text("No meeting selected")
-                .foregroundStyle(XMOTheme.TextColor.muted)
+            Text(selected.displayTitle)
+                .onTapGesture {
+                    // Prefill with what's on screen: the stored title, or
+                    // the derived default (committing it unchanged simply
+                    // stores that name).
+                    headerRenameText = selected.displayTitle
+                    headerRenaming = true
+                }
+                .help("Click to rename")
+                .accessibilityAddTraits(.isButton)
+                .accessibilityHint("Rename meeting")
         }
     }
 
@@ -304,10 +401,6 @@ struct NotesView: View {
         guard headerRenaming else { return }
         headerRenaming = false
         controller.renameSession(sessionID: sessionID, newTitle: headerRenameText)
-    }
-
-    private func dateDotTime(_ date: Date) -> Text {
-        Text(date, style: .date) + Text(" \u{00B7} ") + Text(date, style: .time)
     }
 
     /// Compact recorded duration for the list row meta (#58), derived from
@@ -321,6 +414,20 @@ struct NotesView: View {
         if minutes < 1 { return "<1 min" }
         let hours = minutes / 60
         return hours > 0 ? "\(hours)h \(minutes % 60)m" : "\(minutes) min"
+    }
+
+    /// Meta components: `27 July · 09:58 · 29 min` (duration omitted when
+    /// unknown). Detail adds the year and the utterance count:
+    /// `27 July 2026 · 09:58 · 29 min · 135 utterances`.
+    private func metaComponents(_ session: SessionIndex, detail: Bool = false) -> [String] {
+        let dateFormat = Date.FormatStyle.dateTime.day().month(.wide)
+        var components = [
+            session.startedAt.formatted(detail ? dateFormat.year() : dateFormat),
+            session.startedAt.formatted(.dateTime.hour().minute()),
+            durationLabel(session)
+        ].compactMap { $0 }
+        if detail { components.append("\(session.utteranceCount) utterances") }
+        return components
     }
 
     // MARK: - Meeting list rail (MREV-01…10)
@@ -525,92 +632,121 @@ struct NotesView: View {
                 }
             }
 
-            dateDotTime(session.startedAt)
+            // `work · 27 July · 09:58 · 29 min` — type prefix slightly brighter.
+            metaLine(type: typeTag(session)?.rawValue, components: metaComponents(session))
                 .font(XMOTheme.Typography.monoMeta)
-                .foregroundStyle(XMOTheme.TextColor.muted)
                 .lineLimit(1)
 
-            Text(
-                [durationLabel(session), "\(session.utteranceCount) utterances"]
-                    .compactMap { $0 }
-                    .joined(separator: " \u{00B7} ")
-            )
-            .font(XMOTheme.Typography.monoMeta)
-            .foregroundStyle(XMOTheme.TextColor.muted)
-
-            // Auto-enrichment summary (#107) — one truncated grey line.
+            // ✦-summary (#107) — one truncated grey line; absent for
+            // unenriched/empty sessions.
             if let summary = session.summary, !summary.isEmpty {
-                Text(summary)
-                    .font(.system(size: 11))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                sparkSummary(summary, size: 12)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
 
-            if let tags = session.tags, !tags.isEmpty {
-                HStack(spacing: 4) {
-                    ForEach(tags, id: \.self) { tag in
-                        Text(tag)
-                            .font(.system(size: 10))
-                            .foregroundStyle(XMOTheme.TextColor.muted)
-                            .padding(.horizontal, 5)
-                            .padding(.vertical, 1)
-                            .background(XMOTheme.Surface.card3)
-                            .clipShape(Capsule())
-                    }
-                }
+            // Entities (people + organizations) — one quiet line, no chips.
+            let entities = entityTags(session)
+            if !entities.isEmpty {
+                Text(entities.joined(separator: " \u{00B7} "))
+                    .font(.system(size: 11))
+                    .foregroundStyle(XMOTheme.TextColor.faint)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
             }
         }
     }
 
-    // MARK: - Tag Filter Bar (MREV-09)
+    // MARK: - Tag Filter Bar (MREV-09, #107 prototype `.filterbar`)
 
+    /// Single non-wrapping line: `All <total>` always first (active when no
+    /// filter), then Work/Personal when present, then entities by frequency.
     @ViewBuilder
     private func tagFilterBar(controller: NotesController, state: NotesState) -> some View {
-        let allTags = uniqueTags(from: state.sessionHistory)
-        if !allTags.isEmpty {
-            ScrollView(.horizontal, showsIndicators: false) {
-                HStack(spacing: 6) {
-                    ForEach(allTags, id: \.self) { tag in
-                        let isActive = state.tagFilter?.localizedCaseInsensitiveCompare(tag) == .orderedSame
-                        Button {
-                            controller.setTagFilter(isActive ? nil : tag)
-                        } label: {
-                            Text(tag)
-                                .font(.system(size: 11))
-                                .foregroundStyle(isActive ? Color.white : XMOTheme.TextColor.muted)
-                                .padding(.horizontal, 8)
-                                .padding(.vertical, 3)
-                                .background(isActive ? Color.white.opacity(0.12) : Color.clear)
-                                .overlay(
-                                    Capsule()
-                                        .strokeBorder(XMOTheme.Surface.line, lineWidth: 1)
-                                )
-                                .clipShape(Capsule())
-                        }
-                        .buttonStyle(.plain)
+        let sessions = state.sessionHistory
+        ScrollView(.horizontal, showsIndicators: false) {
+            HStack(spacing: 6) {
+                filterChip(
+                    label: "All",
+                    count: sessions.count,
+                    isActive: state.tagFilter == nil
+                ) {
+                    controller.setTagFilter(nil)
+                }
+                ForEach(MeetingType.allCases, id: \.self) { type in
+                    let count = typeCount(type, in: sessions)
+                    if count > 0 {
+                        tagChip(controller: controller, state: state, tag: type.displayName, count: count)
                     }
                 }
-                .padding(.horizontal, 12)
-                .padding(.vertical, 6)
+                ForEach(entityFrequency(sessions), id: \.tag) { entity in
+                    tagChip(controller: controller, state: state,
+                            tag: entity.tag, count: entity.count)
+                }
             }
-            XMODivider()
+            .padding(.horizontal, 12)
+            .padding(.vertical, 6)
+        }
+        XMODivider()
+    }
+
+    @ViewBuilder
+    private func tagChip(controller: NotesController, state: NotesState, tag: String, count: Int) -> some View {
+        let isActive = state.tagFilter?.localizedCaseInsensitiveCompare(tag) == .orderedSame
+        // Prototype hides the count on singleton chips (`Марина`, no count);
+        // All always shows its total.
+        filterChip(label: tag, count: count > 1 ? count : nil, isActive: isActive) {
+            // Tapping the active chip clears the filter.
+            controller.setTagFilter(isActive ? nil : tag)
         }
     }
 
-    private func uniqueTags(from sessions: [SessionIndex]) -> [String] {
-        var seen = Set<String>()
-        var result: [String] = []
+    private func filterChip(label: String, count: Int?, isActive: Bool, action: @escaping () -> Void) -> some View {
+        Button(action: action) {
+            (
+                Text(label)
+                    .foregroundStyle(isActive ? Color.white : XMOTheme.TextColor.muted)
+                + Text(count.map { " \($0)" } ?? "")
+                    .font(XMOTheme.Typography.mono(10))
+                    .foregroundStyle(XMOTheme.TextColor.faint)
+            )
+            .font(.system(size: 11))
+            .padding(.horizontal, 9)
+            .padding(.vertical, 3)
+            .background(isActive ? Color.white.opacity(0.12) : Color.clear)
+            .overlay(
+                Capsule()
+                    .strokeBorder(XMOTheme.Surface.line, lineWidth: 1)
+            )
+            .clipShape(Capsule())
+            .contentShape(Capsule())
+        }
+        .buttonStyle(.plain)
+    }
+
+    /// Sessions carrying the given type tag (case-insensitive).
+    private func typeCount(_ type: MeetingType, in sessions: [SessionIndex]) -> Int {
+        sessions.count { session in
+            session.tags?.contains { $0.lowercased() == type.rawValue } ?? false
+        }
+    }
+
+    /// Entity tags by descending session frequency (name breaks ties), with
+    /// the first-seen casing as the display form.
+    private func entityFrequency(_ sessions: [SessionIndex]) -> [(tag: String, count: Int)] {
+        var counts: [String: (display: String, count: Int)] = [:]
         for session in sessions {
-            for tag in session.tags ?? [] {
-                let key = tag.lowercased()
-                if !seen.contains(key) {
-                    seen.insert(key)
-                    result.append(tag)
-                }
+            for tag in entityTags(session) {
+                counts[tag.lowercased(), default: (tag, 0)].count += 1
             }
         }
-        return result.sorted { $0.localizedCaseInsensitiveCompare($1) == .orderedAscending }
+        return counts.values
+            .sorted {
+                $0.count != $1.count
+                    ? $0.count > $1.count
+                    : $0.display.localizedCaseInsensitiveCompare($1.display) == .orderedAscending
+            }
+            .map { (tag: $0.display, count: $0.count) }
     }
 
     // MARK: - Tag Editor Popover
@@ -724,6 +860,10 @@ struct NotesView: View {
                     processingView
                 } else {
                     VStack(spacing: 0) {
+                        if let session = selectedSession(state) {
+                            detailHeader(controller: controller, session: session)
+                            XMODivider()
+                        }
                         detailToolbar(controller: controller, state: state)
                         XMODivider()
                         detailBody(controller: controller, state: state, sessionID: sessionID)

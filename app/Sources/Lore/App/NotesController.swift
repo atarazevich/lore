@@ -276,5 +276,17 @@ final class NotesController {
 
     func loadHistory() async {
         state.sessionHistory = await coordinator.sessionRepository.listSessions()
+        // Stale-filter guard: when the last session carrying the filtered tag
+        // disappears (deleted, or the tag removed via the editor), the chip
+        // vanishes from the filter bar and the sidebar would be blank with no
+        // affordance — fall back to All.
+        if let filter = state.tagFilter,
+           !state.sessionHistory.contains(where: { session in
+               session.tags?.contains(where: {
+                   $0.localizedCaseInsensitiveCompare(filter) == .orderedSame
+               }) ?? false
+           }) {
+            state.tagFilter = nil
+        }
     }
 }

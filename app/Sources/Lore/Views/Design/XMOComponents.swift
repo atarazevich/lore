@@ -455,25 +455,35 @@ struct XMOChatBubble: View {
 
 /// Idle: neutral white .07 fill, primary text, 9px red round dot. Recording:
 /// red fill, white text, dot morphs to a 2px-radius square, red glow.
+/// `compact` is the meetings-toolbar `.rec-btn` variant (#107 prototype):
+/// card-3 fill with a 1px line border, 6px radius, 12.5/600 label, 8px dot.
 struct XMOStartStopButton: View {
     var isRecording = false
+    var compact = false
     let action: () -> Void
 
     var body: some View {
         Button(action: action) {
-            HStack(spacing: 8) {
-                RoundedRectangle(cornerRadius: isRecording ? 2 : 4.5)
+            HStack(spacing: compact ? 7 : 8) {
+                RoundedRectangle(cornerRadius: isRecording ? 2 : (compact ? 4 : 4.5))
                     .fill(isRecording ? Color.white : XMOTheme.Accent.red)
-                    .frame(width: 9, height: 9)
+                    .frame(width: compact ? 8 : 9, height: compact ? 8 : 9)
                 Text(isRecording ? "Stop recording" : "Start recording")
-                    .font(XMOTheme.Typography.control)
+                    .font(compact ? .system(size: 12.5, weight: .semibold)
+                                  : XMOTheme.Typography.control)
                     .foregroundStyle(isRecording ? Color.white : XMOTheme.TextColor.primary)
             }
-            .padding(.vertical, 10)
-            .padding(.horizontal, 16)
+            .padding(.vertical, compact ? 6 : 10)
+            .padding(.horizontal, compact ? 12 : 16)
             .background(
-                isRecording ? XMOTheme.Accent.red : Color.white.opacity(0.07),
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                isRecording ? XMOTheme.Accent.red
+                            : (compact ? XMOTheme.Surface.card3 : Color.white.opacity(0.07)),
+                in: RoundedRectangle(cornerRadius: compact ? XMOTheme.Radius.chip
+                                                           : XMOTheme.Radius.button)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                    .strokeBorder(compact && !isRecording ? XMOTheme.Surface.line : .clear, lineWidth: 1)
             )
             .shadow(
                 color: isRecording ? XMOTheme.Shadow.redGlow.color : .clear,
