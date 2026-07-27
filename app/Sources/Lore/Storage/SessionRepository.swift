@@ -98,6 +98,10 @@ struct SessionMetadata: Codable, Sendable {
     /// Fresh-meeting marker (MREV-39): true while batch/import output is
     /// pending or unseen; cleared on view. Optional — absent in older files.
     var unviewed: Bool? = nil
+    /// On-device enrichment summary (#107). nil = not yet enriched — the
+    /// single idempotency rule for the enrichment sweep. Optional — absent
+    /// in older files, which therefore backfill themselves.
+    var summary: String? = nil
 }
 
 extension SessionIndex {
@@ -116,7 +120,8 @@ extension SessionIndex {
             engine: meta.engine,
             tags: meta.tags,
             source: meta.source,
-            unviewed: meta.unviewed
+            unviewed: meta.unviewed,
+            summary: meta.summary
         )
     }
 }
@@ -665,49 +670,60 @@ actor SessionRepository {
         // surface (list context menu, review header) inherits it.
         let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
 
-        // Try canonical
-        if var meta = loadSessionMetadataFile(sessionID: sessionID) {
-            meta.title = trimmed.isEmpty ? nil : trimmed
-            writeSessionMetadata(meta, sessionID: sessionID)
-            mirrorNotesArtifacts(sessionID: sessionID)
+        // Legacy sessions keep the sidecar rename — no migration on rename.
+        guard loadSessionMetadataFile(sessionID: sessionID) != nil else {
+            LegacySessionReader.renameSession(
+                sessionID: sessionID,
+                newTitle: trimmed,
+                sessionsDirectory: sessionsDirectory
+            )
             return
         }
 
-        // Fall back to legacy rename (updates sidecar)
-        LegacySessionReader.renameSession(
-            sessionID: sessionID,
-            newTitle: trimmed,
-            sessionsDirectory: sessionsDirectory
-        )
+        mutateSessionMetadata(sessionID: sessionID) { $0.title = trimmed.isEmpty ? nil : trimmed }
+        mirrorNotesArtifacts(sessionID: sessionID)
     }
 
     func updateSessionTags(sessionID: String, tags: [String]) {
         let normalized = Self.normalizeTags(tags)
+        mutateSessionMetadata(sessionID: sessionID) { $0.tags = normalized.isEmpty ? nil : normalized }
+    }
 
-        // Try canonical first
-        if var meta = loadSessionMetadataFile(sessionID: sessionID) {
-            meta.tags = normalized.isEmpty ? nil : normalized
-            writeSessionMetadata(meta, sessionID: sessionID)
-            return
+    /// Persist the on-device enrichment summary (#107). Written last by the
+    /// enrichment engine — a non-nil summary is what marks a session as
+    /// enriched. Legacy sessions migrate to canonical on first write, same
+    /// as `updateSessionTags`, so the sweep converges instead of retrying
+    /// them forever.
+    func updateSessionSummary(sessionID: String, summary: String) {
+        mutateSessionMetadata(sessionID: sessionID) { $0.summary = summary }
+    }
+
+    /// Shared load-or-migrate + write behind the metadata writers above:
+    /// canonical sessions are mutated in place; legacy sessions migrate to
+    /// canonical format on first write.
+    private func mutateSessionMetadata(sessionID: String, _ mutate: (inout SessionMetadata) -> Void) {
+        var meta: SessionMetadata
+        if let existing = loadSessionMetadataFile(sessionID: sessionID) {
+            meta = existing
+        } else {
+            let index = LegacySessionReader.loadIndex(sessionID: sessionID, sessionsDirectory: sessionsDirectory)
+            meta = SessionMetadata(
+                id: index.id,
+                startedAt: index.startedAt,
+                endedAt: index.endedAt,
+                templateSnapshot: index.templateSnapshot,
+                title: index.title,
+                utteranceCount: index.utteranceCount,
+                hasNotes: index.hasNotes,
+                language: index.language,
+                meetingApp: index.meetingApp,
+                engine: index.engine,
+                tags: index.tags
+            )
+            let dir = sessionDirectory(for: sessionID)
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         }
-
-        // For legacy sessions: migrate to canonical format on first tag write
-        let index = LegacySessionReader.loadIndex(sessionID: sessionID, sessionsDirectory: sessionsDirectory)
-        let meta = SessionMetadata(
-            id: index.id,
-            startedAt: index.startedAt,
-            endedAt: index.endedAt,
-            templateSnapshot: index.templateSnapshot,
-            title: index.title,
-            utteranceCount: index.utteranceCount,
-            hasNotes: index.hasNotes,
-            language: index.language,
-            meetingApp: index.meetingApp,
-            engine: index.engine,
-            tags: normalized.isEmpty ? nil : normalized
-        )
-        let dir = sessionDirectory(for: sessionID)
-        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        mutate(&meta)
         writeSessionMetadata(meta, sessionID: sessionID)
     }
 
@@ -838,8 +854,7 @@ actor SessionRepository {
         timeFmt.dateFormat = "HH:mm:ss"
 
         for record in records {
-            let displayText = record.refinedText ?? record.text
-            result += "[\(timeFmt.string(from: record.timestamp))] \(record.speaker.displayLabel): \(displayText)\n"
+            result += "[\(timeFmt.string(from: record.timestamp))] \(record.speaker.displayLabel): \(record.displayText)\n"
         }
 
         return result

@@ -91,6 +91,9 @@ final class AppCoordinator {
     var refinementEngine: TranscriptRefinementEngine?
     var audioRecorder: AudioRecorder?
     var batchEngine: BatchTranscriptionEngine?
+    /// Meeting auto-enrichment (#107). Live mode only — nil in UI tests, so
+    /// every trigger is a no-op there.
+    var enrichmentEngine: MeetingEnrichmentEngine?
 
     // MARK: - Shared Backend Cache
 

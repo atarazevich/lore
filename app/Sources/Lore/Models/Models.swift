@@ -25,6 +25,9 @@ struct SessionRecord: Codable {
         self.refinedText = refinedText
     }
 
+    /// Refined text when the batch pass produced one, else the live text.
+    var displayText: String { refinedText ?? text }
+
     func withRefinedText(_ text: String?) -> SessionRecord {
         SessionRecord(
             speaker: speaker, text: self.text, timestamp: timestamp,
@@ -79,6 +82,10 @@ struct SessionIndex: Identifiable, Codable, Sendable {
     /// kicked off, cleared when the user views the processed meeting.
     /// Optional + defaulted so legacy indexes decode unchanged.
     var unviewed: Bool? = nil
+    /// On-device enrichment summary (#107): 1–2 factual sentences generated
+    /// by Apple Foundation Models. Doubles as the enriched marker — nil means
+    /// "not yet enriched" and the launch sweep will pick the session up.
+    var summary: String? = nil
 
     /// `source` value for sessions created via audio import (#43).
     /// Live/legacy sessions carry nil.

@@ -43,6 +43,7 @@ final class LiveSessionController {
     /// Tracks the session ID we last handled a batch completion for,
     /// preventing the auto-dismiss → re-poll cycle from re-triggering the history reload.
     private var lastHandledBatchSessionID: String?
+    private var lastHandledFailedBatchSessionID: String?
 
     init(coordinator: AppCoordinator, container: AppContainer) {
         self.coordinator = coordinator
@@ -54,6 +55,15 @@ final class LiveSessionController {
     /// One-time setup tasks called when the view first appears.
     func performInitialSetup() async {
         await coordinator.sessionRepository.purgeRecentlyDeleted()
+
+        // Launch backfill sweep (#107): every meeting without a summary gets
+        // enriched on-device, one at a time, at background priority. No-op
+        // when the model is unavailable; nil engine in UI-test mode.
+        if let engine = coordinator.enrichmentEngine {
+            Task.detached(priority: .background) {
+                await engine.sweep()
+            }
+        }
     }
 
     // MARK: - Polling Loop
@@ -74,9 +84,30 @@ final class LiveSessionController {
                     coordinator.batchStatus = status
                     coordinator.batchIsImporting = importing
 
+                    // A failed batch leaves the live transcript in place —
+                    // still worth enriching now (#107) instead of waiting for
+                    // the next launch sweep. Separate dedupe var so a later
+                    // successful retry of the same session is handled fully.
+                    if case .failed(_, let sid) = status, lastHandledFailedBatchSessionID != sid {
+                        lastHandledFailedBatchSessionID = sid
+                        if let engine = coordinator.enrichmentEngine {
+                            Task.detached(priority: .utility) {
+                                await engine.enrichIfNeeded(sessionID: sid)
+                            }
+                        }
+                    }
+
                     if case .completed(let sid) = status, lastHandledBatchSessionID != sid {
                         lastHandledBatchSessionID = sid
                         await coordinator.loadHistory()
+
+                        // Batch replaced the transcript — enrich now if this
+                        // session hasn't been enriched yet (#107).
+                        if let engine = coordinator.enrichmentEngine {
+                            Task.detached(priority: .utility) {
+                                await engine.enrichIfNeeded(sessionID: sid)
+                            }
+                        }
 
                         Task { @MainActor in
                             try? await Task.sleep(for: .seconds(3))
@@ -417,7 +448,18 @@ final class LiveSessionController {
         if _currentSessionID == sessionID { _currentSessionID = nil }
         await coordinator.loadHistory()
 
-        // 7. Kick off batch transcription if enabled
+        // 7. Enrich on-device (#107) — unless a batch pass is about to
+        //    replace the transcript, in which case enrichment waits for its
+        //    completion (poll loop). Detached: never blocks finalization.
+        let batchWillRun = settings?.enableBatchRefinement == true && coordinator.batchEngine != nil
+        if !batchWillRun, let engine = coordinator.enrichmentEngine {
+            let endedSessionID = sessionID
+            Task.detached(priority: .utility) {
+                await engine.enrichIfNeeded(sessionID: endedSessionID)
+            }
+        }
+
+        // 8. Kick off batch transcription if enabled
         if let settings, settings.enableBatchRefinement, let batchEngine = coordinator.batchEngine {
             let batchSessionID = sessionID
             // Fresh marker (MREV-39): persisted so the green dot / processing

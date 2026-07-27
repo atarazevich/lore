@@ -226,8 +226,16 @@ struct NotesView: View {
             headerTitle(controller: controller, selected: selected)
         } meta: {
             if let selected {
-                dateDotTime(selected.startedAt)
-                    + Text(" \u{00B7} \(selected.utteranceCount) utterances")
+                VStack(alignment: .leading, spacing: 2) {
+                    dateDotTime(selected.startedAt)
+                        + Text(" \u{00B7} \(selected.utteranceCount) utterances")
+                    // Auto-enrichment summary (#107). The explicit lineLimit
+                    // overrides the header's meta-wide lineLimit(1).
+                    if let summary = selected.summary, !summary.isEmpty {
+                        Text(summary)
+                            .lineLimit(2)
+                    }
+                }
             } else {
                 Text("\(state.sessionHistory.count) recorded")
             }
@@ -529,6 +537,15 @@ struct NotesView: View {
             )
             .font(XMOTheme.Typography.monoMeta)
             .foregroundStyle(XMOTheme.TextColor.muted)
+
+            // Auto-enrichment summary (#107) — one truncated grey line.
+            if let summary = session.summary, !summary.isEmpty {
+                Text(summary)
+                    .font(.system(size: 11))
+                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .lineLimit(1)
+                    .truncationMode(.tail)
+            }
 
             if let tags = session.tags, !tags.isEmpty {
                 HStack(spacing: 4) {
@@ -1035,7 +1052,7 @@ struct NotesView: View {
     private func transcriptRow(record: SessionRecord, anchor: Date?, showingOriginal: Bool) -> some View {
         TranscriptSpeakerRow(
             speaker: record.speaker,
-            text: showingOriginal ? record.text : (record.refinedText ?? record.text),
+            text: showingOriginal ? record.text : record.displayText,
             elapsed: record.timestamp.timeIntervalSince(anchor ?? record.timestamp)
         )
     }
@@ -1335,7 +1352,7 @@ struct NotesView: View {
         case .transcript:
             text = state.loadedTranscript.map { record in
                 let label = record.speaker.displayLabel
-                let content = state.showingOriginal ? record.text : (record.refinedText ?? record.text)
+                let content = state.showingOriginal ? record.text : record.displayText
                 return "[\(Self.transcriptTimeFormatter.string(from: record.timestamp))] \(label): \(content)"
             }.joined(separator: "\n")
         case .chat:

@@ -160,6 +160,17 @@ final class AppContainer {
         coordinator.refinementEngine = services.refinementEngine
         coordinator.audioRecorder = services.audioRecorder
         coordinator.batchEngine = services.batchEngine
+
+        // Meeting auto-enrichment (#107): live mode only — UI-test sessions
+        // must stay byte-stable, and scripted runs must not call the model.
+        if case .live = mode {
+            coordinator.enrichmentEngine = MeetingEnrichmentEngine(
+                repository: coordinator.sessionRepository,
+                onEnriched: { [weak coordinator] in
+                    await coordinator?.loadHistory()
+                }
+            )
+        }
     }
 
     /// Create and start the detection controller, wire the coordinator event loop.
