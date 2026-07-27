@@ -1,5 +1,23 @@
 # Changelog
 
+## v2.6.0 — 2026-07-27
+
+Lore learns to speak: Read Aloud turns any selected text into speech, in the language it's written in. Plus a dictation pipeline fix.
+
+**Read Aloud — select text anywhere, listen (#105)**
+- Select text in any app and press Fn+R — Lore reads it aloud. Fn+Q adds texts to a listening queue instead
+- Works out of the box for free with the built-in system voices; entering a Speechify API key (Settings → Read aloud) unlocks 950+ natural voices, including ~50 native Russian ones
+- The voice follows the text's language: Russian text is read by your Russian voice, English by your English one — detected automatically, configurable per language with in-place previews
+- A floating mini-player controls it all: pause, restart, skip to next, 0.5x–3x speed (pitch-preserved and free — the audio is never re-synthesized), and an expandable queue with drag-to-reorder, play-now, and remove
+- Long reads start within ~2 seconds and keep streaming while you listen; a configurable length limit (default 20,000 characters) stops an accidental 50-page selection before it costs anything
+- Reading and dictation never fight over your audio: holding Fn pauses the reading before the microphone opens, and an accidental short tap resumes it automatically
+
+**Nothing selected? It reads your clipboard (#106)**
+- Fn+R with no selection speaks the last thing you copied; the panel marks the source as "clipboard" so a stale clipboard never plays as a mystery
+
+**A new dictation no longer kills the previous transcription (#104)**
+- Pressing Fn while the previous dictation was still transcribing used to abort that transcription and lose the text. The pipeline now finishes in the background — both dictations arrive
+
 ## v2.5.0 — 2026-07-25
 
 Six fixes from the field: reliability retries, an "Ignore" button that actually ignored nothing, a Space that could leak into your document, and the last honesty gaps in the secure-input diagnostics.
