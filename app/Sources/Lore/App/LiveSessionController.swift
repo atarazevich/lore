@@ -84,6 +84,20 @@ final class LiveSessionController {
                     coordinator.batchStatus = status
                     coordinator.batchIsImporting = importing
 
+                    // A new run (retry, manual rebuild) may complete or fail
+                    // the same session again — a zero-record batch even
+                    // reports .completed without writing the final
+                    // transcript, so the session stays chunked and gets
+                    // rebuilt again. Reset both dedupe guards when a run
+                    // starts (mirrors NotesView's view-level dedupe).
+                    switch status {
+                    case .loading, .transcribing:
+                        lastHandledBatchSessionID = nil
+                        lastHandledFailedBatchSessionID = nil
+                    default:
+                        break
+                    }
+
                     // A failed batch leaves the live transcript in place —
                     // still worth enriching now (#107) instead of waiting for
                     // the next launch sweep. Separate dedupe var so a later
@@ -99,6 +113,13 @@ final class LiveSessionController {
 
                     if case .completed(let sid) = status, lastHandledBatchSessionID != sid {
                         lastHandledBatchSessionID = sid
+                        // Rebuild before analysis (#109): the whole transcript
+                        // just replaced the chunked one — drop the summary
+                        // idempotency marker so enrichment re-runs on the new
+                        // text. No-op on the auto path (summary still nil);
+                        // effective after a manual rebuild of an
+                        // already-enriched meeting.
+                        await coordinator.sessionRepository.updateSessionSummary(sessionID: sid, summary: nil)
                         await coordinator.loadHistory()
 
                         // Batch replaced the transcript — enrich now if this

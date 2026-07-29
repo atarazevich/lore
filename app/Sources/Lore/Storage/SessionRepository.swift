@@ -418,7 +418,13 @@ actor SessionRepository {
     func finalizeImportedSession(sessionID: String, utteranceCount: Int, endedAt: Date) {
         guard var meta = loadSessionMetadataFile(sessionID: sessionID) else { return }
         meta.utteranceCount = utteranceCount
-        meta.endedAt = endedAt
+        // A live session (source nil) rebuilt from its m4a export (#109)
+        // keeps its recorded end — the last speech timestamp would shrink
+        // the duration when the meeting had trailing silence. Imports have
+        // no prior end worth preserving.
+        if meta.source != nil || meta.endedAt == nil {
+            meta.endedAt = endedAt
+        }
         writeSessionMetadata(meta, sessionID: sessionID)
     }
 
@@ -584,7 +590,17 @@ actor SessionRepository {
                 let metaURL = item.appendingPathComponent("session.json")
                 if let data = try? Data(contentsOf: metaURL),
                    let meta = try? decoder.decode(SessionMetadata.self, from: data) {
-                    results.append(SessionIndex(from: meta))
+                    // Transcript-state flags (#109): derived from file
+                    // existence at load, never persisted. Refreshed by the
+                    // history reloads that follow a completed rebuild.
+                    var index = SessionIndex(from: meta)
+                    index.hasFinalTranscript = fm.fileExists(
+                        atPath: item.appendingPathComponent("transcript.final.jsonl").path
+                    )
+                    if !index.hasFinalTranscript {
+                        index.hasRebuildAudio = rebuildAudioSource(sessionID: meta.id) != nil
+                    }
+                    results.append(index)
                     continue
                 }
             }
@@ -694,7 +710,16 @@ actor SessionRepository {
     /// enriched. Legacy sessions migrate to canonical on first write, same
     /// as `updateSessionTags`, so the sweep converges instead of retrying
     /// them forever.
-    func updateSessionSummary(sessionID: String, summary: String) {
+    ///
+    /// nil drops the marker (#109): called after a successful rebuild
+    /// replaces the transcript, so `enrichIfNeeded` regenerates on the whole
+    /// text. Title and tags are left alone — enrichment's own rules protect
+    /// manual renames and append tags. Clearing never migrates legacy
+    /// sessions and no-ops when there is nothing to clear (the auto path:
+    /// enrichment waits for the batch, so the summary is still nil).
+    func updateSessionSummary(sessionID: String, summary: String?) {
+        guard summary != nil
+            || loadSessionMetadataFile(sessionID: sessionID)?.summary != nil else { return }
         mutateSessionMetadata(sessionID: sessionID) { $0.summary = summary }
     }
 
@@ -930,6 +955,51 @@ actor SessionRepository {
         try? fm.removeItem(at: dir.appendingPathComponent("mic.caf"))
         try? fm.removeItem(at: dir.appendingPathComponent("sys.caf"))
         try? fm.removeItem(at: dir.appendingPathComponent("batch-meta.json"))
+    }
+
+    /// Audio a chunked session can be rebuilt from (#109), in preference
+    /// order: the per-track batch stash (keeps You/Them via timing anchors),
+    /// the session's own audio copy (imports, earlier rebuild attempts), then
+    /// the merged m4a export in the notes folder.
+    func rebuildAudioSource(sessionID: String) -> RebuildAudioSource? {
+        let tracks = batchAudioURLs(sessionID: sessionID)
+        if tracks.mic != nil || tracks.sys != nil { return .tracks }
+        if let sessionCopy = audioFileURL(for: sessionID) { return .file(sessionCopy) }
+        if let export = notesFolderExport(sessionID: sessionID) { return .file(export) }
+        return nil
+    }
+
+    /// The merged m4a export in the notes folder for a session. The export
+    /// filename (`AudioRecorder.exportTimestampFormat`, minute resolution)
+    /// and the session ID come from two independent `Date()` reads separated
+    /// by actor hops — and, on the model-download-gate path, arbitrary user
+    /// wait — so prefix equality can miss across a minute boundary. Tolerant
+    /// match instead: parse every m4a timestamp and take the one nearest the
+    /// session's start within [startedAt − 1 min, endedAt (startedAt +
+    /// 10 min when the session never ended)]; nearest-to-start wins so a
+    /// later meeting's export can't be grabbed.
+    private func notesFolderExport(sessionID: String) -> URL? {
+        guard let notesFolder = notesFolderPath,
+              let meta = loadSessionMetadataFile(sessionID: sessionID),
+              let files = try? FileManager.default.contentsOfDirectory(
+                  at: notesFolder, includingPropertiesForKeys: nil
+              )
+        else { return nil }
+
+        let formatter = DateFormatter()
+        formatter.dateFormat = AudioRecorder.exportTimestampFormat
+        let windowStart = meta.startedAt.addingTimeInterval(-60)
+        let windowEnd = meta.endedAt ?? meta.startedAt.addingTimeInterval(600)
+
+        return files
+            .filter { $0.pathExtension == "m4a" }
+            .compactMap { url -> (url: URL, distance: TimeInterval)? in
+                guard let stamp = formatter.date(from: url.deletingPathExtension().lastPathComponent),
+                      stamp >= windowStart, stamp <= windowEnd else { return nil }
+                return (url, abs(stamp.timeIntervalSince(meta.startedAt)))
+            }
+            .min { $0.distance < $1.distance }?
+            .url
     }
 
     func loadBatchMeta(sessionID: String) -> BatchMeta? {
@@ -1244,6 +1314,16 @@ actor SessionRepository {
 }
 
 // MARK: - Batch Transcription Support Types
+
+/// What a chunked session's rebuild (#109) can run from.
+enum RebuildAudioSource: Sendable {
+    /// Per-track mic/sys stash — `BatchTranscriptionEngine.process()`,
+    /// keeps You/Them via timing anchors.
+    case tracks
+    /// A single merged audio file — the import-style pass
+    /// (`BatchTranscriptionEngine.importFile`), single-speaker transcript.
+    case file(URL)
+}
 
 /// Timing anchor data passed from AudioRecorder to SessionRepository.
 struct BatchAnchors: Sendable {

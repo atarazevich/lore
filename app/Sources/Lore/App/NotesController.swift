@@ -166,39 +166,49 @@ final class NotesController {
         state.loadedChat.append(exchange)
     }
 
-    // MARK: - Batch Retry (MREV-32)
+    // MARK: - Transcript Rebuild (MREV-32, #109)
 
-    /// Re-kick the batch enhancement pass for a session whose previous run
-    /// failed. Mirrors the kickoff in `LiveSessionController.finalizeCurrentSession`.
-    /// Imported sessions (#43) have no mic/sys batch audio — their retry
-    /// re-runs the import over the audio copied into the session at kickoff.
-    func retryBatch(sessionID: String, settings: AppSettings) {
+    /// Rebuild a session's transcript from its audio. Serves both the failed
+    /// banner's Retry (MREV-32/#43) and the chunked indicator's
+    /// click-to-rebuild (#109). Source resolution lives in the repository:
+    /// per-track stash → `process()` (keeps You/Them), merged audio (session
+    /// copy or notes-folder m4a export) → the import-style pass, anchored at
+    /// the session's real start. The session's identity (title, tags, source)
+    /// is untouched — the import path only replaces the transcript. No audio
+    /// findable → `.failed`, so the retry banner says why instead of running
+    /// a doomed pass.
+    func rebuildTranscript(sessionID: String, settings: AppSettings) {
         guard let batchEngine = coordinator.batchEngine else { return }
         let notesDir = URL(fileURLWithPath: settings.notesFolderPath)
         let repo = coordinator.sessionRepository
-        let isImport = state.sessionHistory.first { $0.id == sessionID }?.source
-            == SessionIndex.importedSource
+        let startedAt = state.sessionHistory.first { $0.id == sessionID }?.startedAt
         Task.detached { [batchEngine] in
-            if isImport {
-                if let audioURL = await repo.audioFileURL(for: sessionID) {
-                    await batchEngine.importFile(
-                        url: audioURL,
-                        sessionID: sessionID,
-                        sessionRepository: repo
-                    )
-                } else {
-                    // process() can't run an import (no mic/sys batch audio) —
-                    // surface the real problem instead of a wrong path.
-                    await batchEngine.markFailed(
-                        "Original audio no longer available",
-                        sessionID: sessionID
-                    )
-                }
-            } else {
+            guard let source = await repo.rebuildAudioSource(sessionID: sessionID) else {
+                // Surface the real problem instead of a wrong path.
+                await batchEngine.markFailed(
+                    "Original audio no longer available",
+                    sessionID: sessionID
+                )
+                return
+            }
+
+            // Fresh marker (MREV-39): green dot / processing state survive
+            // relaunch mid-rebuild, same as the auto kickoff.
+            await repo.markSessionUnviewed(sessionID: sessionID)
+
+            switch source {
+            case .tracks:
                 await batchEngine.process(
                     sessionID: sessionID,
                     sessionRepository: repo,
                     notesDirectory: notesDir
+                )
+            case .file(let audioURL):
+                await batchEngine.importFile(
+                    url: audioURL,
+                    sessionID: sessionID,
+                    sessionRepository: repo,
+                    startDate: startedAt
                 )
             }
         }

@@ -65,8 +65,10 @@ final class SettingsStoreTests: XCTestCase {
 
     func testDefaultEnableBatchRefinement() {
         let store = makeStore()
-        // Defaults to false when key never set
-        XCTAssertFalse(store.enableBatchRefinement)
+        // Defaults to true when key never set (#109): every stopped meeting
+        // rebuilds its transcript from the whole audio. An explicit prior
+        // choice (true or false) still persists and is honored.
+        XCTAssertTrue(store.enableBatchRefinement)
     }
 
     // MARK: - Detection Settings Group

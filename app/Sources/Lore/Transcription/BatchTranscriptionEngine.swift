@@ -85,10 +85,15 @@ actor BatchTranscriptionEngine {
     // MARK: - Audio Import
 
     /// Import and transcribe an external audio file (meeting recording).
+    /// `startDate` anchors the record timestamps; nil falls back to the
+    /// file's creation date. A rebuild of a live session over its m4a export
+    /// (#109) passes the session's real start — the export is written at
+    /// meeting END, so its file date would shift every timestamp.
     func importFile(
         url: URL,
         sessionID: String,
-        sessionRepository: SessionRepository
+        sessionRepository: SessionRepository,
+        startDate: Date? = nil
     ) async {
         currentTask?.cancel()
         isImporting = true
@@ -99,7 +104,8 @@ actor BatchTranscriptionEngine {
                 try await self.runImport(
                     url: url,
                     sessionID: sessionID,
-                    sessionRepository: sessionRepository
+                    sessionRepository: sessionRepository,
+                    startDate: startDate
                 )
             } catch is CancellationError {
                 // #43: the only canceller is a recording start preempting the
@@ -122,7 +128,8 @@ actor BatchTranscriptionEngine {
     private func runImport(
         url: URL,
         sessionID: String,
-        sessionRepository: SessionRepository
+        sessionRepository: SessionRepository,
+        startDate anchorDate: Date?
     ) async throws {
         batchLog.info("Starting audio import for \(sessionID) from \(url.lastPathComponent)")
         status = .loading(sessionID: sessionID)
@@ -146,10 +153,12 @@ actor BatchTranscriptionEngine {
 
         status = .transcribing(progress: 0, sessionID: sessionID)
 
-        // Derive start date from file attributes
+        // Anchor timestamps: the caller-provided start, else file attributes.
         let startDate: Date
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
-           let creationDate = attrs[.creationDate] as? Date {
+        if let anchorDate {
+            startDate = anchorDate
+        } else if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+                  let creationDate = attrs[.creationDate] as? Date {
             startDate = creationDate
         } else if let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
                   let modDate = attrs[.modificationDate] as? Date {

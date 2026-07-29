@@ -507,8 +507,12 @@ final class SettingsStore {
         self._transcriptionLocale = defaults.string(forKey: "transcriptionLocale") ?? "en-US"
         self._saveAudioRecording = defaults.bool(forKey: "saveAudioRecording")
 
+        // Default ON (#109): the live transcript is chunk-assembled and rough;
+        // the whole-file batch rebuild after every meeting is what makes it
+        // readable. Only affects installs where the key was never set; an
+        // explicit prior choice (true or false) persists and is honored.
         if defaults.object(forKey: "enableBatchRefinement") == nil {
-            self._enableBatchRefinement = false
+            self._enableBatchRefinement = true
         } else {
             self._enableBatchRefinement = defaults.bool(forKey: "enableBatchRefinement")
         }

@@ -87,9 +87,27 @@ struct SessionIndex: Identifiable, Codable, Sendable {
     /// "not yet enriched" and the launch sweep will pick the session up.
     var summary: String? = nil
 
+    /// Derived at list time (#109), never persisted (excluded from
+    /// CodingKeys): whether `transcript.final.jsonl` exists — a whole
+    /// (rebuilt-from-audio) transcript vs the chunked live one.
+    var hasFinalTranscript = false
+    /// Derived at list time (#109), never persisted: whether audio to rebuild
+    /// from is findable (per-track stash, session audio copy, or the merged
+    /// m4a export in the notes folder). Only derived for chunked sessions.
+    var hasRebuildAudio = false
+
     /// `source` value for sessions created via audio import (#43).
     /// Live/legacy sessions carry nil.
     static let importedSource = "imported"
+
+    /// Everything except the derived transcript-state flags (#109) — those
+    /// describe the filesystem, not the session, and must never be persisted
+    /// (session.json or legacy sidecars).
+    private enum CodingKeys: String, CodingKey {
+        case id, startedAt, endedAt, templateSnapshot, title, utteranceCount,
+             hasNotes, language, meetingApp, engine, tags, source, unviewed,
+             summary
+    }
 }
 
 struct SessionSidecar: Codable, Sendable {

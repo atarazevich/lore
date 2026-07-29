@@ -6,6 +6,12 @@ private let recorderLog = Logger(subsystem: "com.lore.app", category: "AudioReco
 /// Records mic and system audio to temporary CAF files during a session,
 /// then merges and encodes them into a single M4A (AAC) file on finalization.
 final class AudioRecorder: @unchecked Sendable {
+    /// Timestamp format for the merged m4a export filename (`<stamp>.m4a` in
+    /// the notes folder). Shared with the rebuild-audio matcher in
+    /// `SessionRepository.notesFolderExport` (#109) so writer and matcher
+    /// can't drift.
+    static let exportTimestampFormat = "yyyy-MM-dd_HH-mm"
+
     private let lock = NSLock()
     private var micFile: AVAudioFile?
     private var sysFile: AVAudioFile?
@@ -56,7 +62,7 @@ final class AudioRecorder: @unchecked Sendable {
             sysAnchors = []
 
             let fmt = DateFormatter()
-            fmt.dateFormat = "yyyy-MM-dd_HH-mm"
+            fmt.dateFormat = Self.exportTimestampFormat
             sessionTimestamp = fmt.string(from: Date())
 
             let tmp = URL(fileURLWithPath: NSTemporaryDirectory())

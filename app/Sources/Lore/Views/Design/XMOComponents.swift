@@ -177,6 +177,31 @@ struct XMOCopyButton: View {
     }
 }
 
+// MARK: - Chip chrome (entity chips, banner action buttons)
+
+/// Bordered-chip chrome shared by the meta entity chips and the transcript
+/// banner's action button (#109): fill + 1px `Surface.line` border + hit
+/// shape, all on the chip radius. Font and padding stay with the caller.
+struct XMOChipChrome: ViewModifier {
+    var fill: Color
+
+    func body(content: Content) -> some View {
+        content
+            .background(fill, in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+            .overlay(
+                RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                    .strokeBorder(XMOTheme.Surface.line, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+    }
+}
+
+extension View {
+    func xmoChipChrome(fill: Color) -> some View {
+        modifier(XMOChipChrome(fill: fill))
+    }
+}
+
 // MARK: - Selectable row (sidebar nav items, meeting list rows)
 
 /// Row treatment shared by the shell sidebar and the meetings list rail:

@@ -217,6 +217,22 @@ struct NotesView: View {
         session.unviewed == true || isBatchInFlight(sessionID: session.id)
     }
 
+    // MARK: - Transcript state (#109)
+
+    /// Chunked / whole / rebuilding for the indicator (#109). In-flight wins:
+    /// a manual rebuild can run over a session that already has a final
+    /// transcript from an earlier pass.
+    private func transcriptState(_ session: SessionIndex) -> TranscriptState {
+        if isBatchInFlight(sessionID: session.id) {
+            if case .transcribing(let progress, _) = coordinator.batchStatus {
+                return .rebuilding(progress: progress)
+            }
+            return .rebuilding(progress: nil)
+        }
+        if session.hasFinalTranscript { return .whole }
+        return .chunked(canRebuild: session.hasRebuildAudio)
+    }
+
     // MARK: - Section toolbar (#107 prototype `.toolbar`)
 
     /// Section-level row: "Meetings · N recorded" + Start recording. The
@@ -306,10 +322,21 @@ struct NotesView: View {
                 .foregroundStyle(XMOTheme.TextColor.primary)
                 .lineLimit(1)
 
-            metaLine(type: typeTag(session)?.rawValue, components: metaComponents(session, detail: true))
+            // Icon + meta (#109, prototype `.dmeta`); the whole state adds a
+            // quiet trailing "whole". Non-clickable here — the chunked
+            // banner's button is the detail-view action.
+            let transcript = transcriptState(session)
+            HStack(spacing: 10) {
+                TranscriptStateIcon(state: transcript)
+                metaLine(
+                    type: typeTag(session)?.rawValue,
+                    components: metaComponents(session, detail: true)
+                        + (transcript == .whole ? ["whole"] : [])
+                )
                 .font(XMOTheme.Typography.monoMeta)
                 .lineLimit(1)
-                .padding(.top, 4)
+            }
+            .padding(.top, 4)
 
             if let summary = session.summary, !summary.isEmpty {
                 sparkSummary(summary, size: 12.5)
@@ -344,15 +371,7 @@ struct NotesView: View {
                 .lineLimit(1)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 2)
-                .background(
-                    XMOTheme.Surface.card2,
-                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
-                        .strokeBorder(XMOTheme.Surface.line, lineWidth: 1)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+                .xmoChipChrome(fill: XMOTheme.Surface.card2)
         }
         .buttonStyle(.plain)
         .help("Filter meetings by \(tag)")
@@ -632,10 +651,17 @@ struct NotesView: View {
                 }
             }
 
-            // `work · 27 July · 09:58 · 29 min` — type prefix slightly brighter.
-            metaLine(type: typeTag(session)?.rawValue, components: metaComponents(session))
-                .font(XMOTheme.Typography.monoMeta)
-                .lineLimit(1)
+            // Transcript-state icon (#109, prototype V1) leading the meta
+            // line: `work · 27 July · 09:58 · 29 min` — type prefix slightly
+            // brighter. Clicking the amber (chunked) icon starts a rebuild.
+            HStack(spacing: 6) {
+                TranscriptStateIcon(state: transcriptState(session)) {
+                    controller.rebuildTranscript(sessionID: session.id, settings: settings)
+                }
+                metaLine(type: typeTag(session)?.rawValue, components: metaComponents(session))
+                    .font(XMOTheme.Typography.monoMeta)
+                    .lineLimit(1)
+            }
 
             // ✦-summary (#107) — one truncated grey line; absent for
             // unenriched/empty sessions.
@@ -854,14 +880,18 @@ struct NotesView: View {
     private func detailContent(controller: NotesController, state: NotesState) -> some View {
         Group {
             if let sessionID = state.selectedSessionID {
-                if isBatchInFlight(sessionID: sessionID) {
+                if isBatchInFlight(sessionID: sessionID) && state.loadedTranscript.isEmpty {
                     // Processing state (MREV-30): controls hidden while the
-                    // batch/import pass runs for the selected meeting.
+                    // batch/import pass runs and there is nothing to read yet
+                    // (imports, empty sessions). A rebuild over an existing
+                    // live transcript keeps the meeting readable under the
+                    // blue progress banner instead (#109).
                     processingView
                 } else {
                     VStack(spacing: 0) {
                         if let session = selectedSession(state) {
                             detailHeader(controller: controller, session: session)
+                            transcriptStateBanner(controller: controller, session: session)
                             XMODivider()
                         }
                         detailToolbar(controller: controller, state: state)
@@ -888,6 +918,71 @@ struct NotesView: View {
                 .accessibilityHidden(true)
             }
         }
+    }
+
+    // MARK: - Transcript-state banner (#109, prototype `.banner`)
+
+    /// Under the detail header: chunked → amber banner with "↻ Rebuild whole"
+    /// (only when audio is findable — without audio the meta icon's tooltip
+    /// says why and there is no action to offer); rebuilding → blue progress
+    /// banner; whole → nothing. Suppressed while this session's failed banner
+    /// (MREV-32) shows — that one already carries Retry.
+    @ViewBuilder
+    private func transcriptStateBanner(controller: NotesController, session: SessionIndex) -> some View {
+        switch transcriptState(session) {
+        case .chunked(canRebuild: true) where !isBatchFailed(sessionID: session.id):
+            stateBanner(tint: XMOTheme.Accent.amber) {
+                TranscriptStateIcon(state: .chunked(canRebuild: true))
+                Text("Chunked transcript \u{2014} assembled live during the meeting. Audio saved.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                Button {
+                    controller.rebuildTranscript(sessionID: session.id, settings: settings)
+                } label: {
+                    Text("\u{21BB} Rebuild whole")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(.white)
+                        .padding(.horizontal, 11)
+                        .padding(.vertical, 4)
+                        .xmoChipChrome(fill: Color.white.opacity(0.12))
+                }
+                .buttonStyle(.plain)
+                .help("Rebuild the whole transcript from audio")
+            }
+        case .rebuilding(let progress):
+            stateBanner(tint: XMOTheme.Accent.blue) {
+                TranscriptStateIcon(state: .rebuilding(progress: progress))
+                Text("Rebuilding from the full audio \u{2014} the transcript will update itself.")
+                    .font(.system(size: 12))
+                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                if let progress, progress > 0 {
+                    Text("\(Int(progress * 100))%")
+                        .font(XMOTheme.Typography.monoMeta)
+                        .foregroundStyle(XMOTheme.Accent.blue)
+                }
+            }
+        default:
+            EmptyView()
+        }
+    }
+
+    /// Prototype `.banner` chrome: tinted .08 fill, .25 border, card radius.
+    private func stateBanner(tint: Color, @ViewBuilder content: () -> some View) -> some View {
+        HStack(spacing: 10, content: content)
+            .padding(.horizontal, 12)
+            .padding(.vertical, 9)
+            .background(
+                tint.opacity(0.08),
+                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.card)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: XMOTheme.Radius.card)
+                    .strokeBorder(tint.opacity(0.25), lineWidth: 1)
+            )
+            .padding(.horizontal, 20)
+            .padding(.bottom, 14)
     }
 
     // MARK: - Processing state (MREV-30/32)
@@ -1088,7 +1183,7 @@ struct NotesView: View {
                 errorBanner(isImport
                             ? "Import failed: \(batchError)"
                             : "Transcript enhancement failed: \(batchError)") {
-                    controller.retryBatch(sessionID: sid, settings: settings)
+                    controller.rebuildTranscript(sessionID: sid, settings: settings)
                 }
                 .padding(.top, 12)
             }
