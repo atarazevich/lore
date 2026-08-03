@@ -8,6 +8,9 @@ struct DictationIndicatorView: View {
     let audioLevel: Float
     var isLocked = false
     var pendingMode: UpgradeAction?
+    /// Fn+K armed or entry flagged (#122): shows the K badge while
+    /// recording and fills the upgrade panel's K keycap after paste.
+    var operatorAddressed = false
     var recordingSeconds: Int = 0
     var showUpgradeButtons = false
     var hideCleanupButton = false
@@ -20,6 +23,8 @@ struct DictationIndicatorView: View {
     var noSignal = false
     @State private var showBluetoothInfo = false
     var onUpgrade: ((UpgradeAction) -> Void)?
+    /// Post-paste K toggle (#122) — same tap affordance as the C/T buttons.
+    var onOperatorToggle: (() -> Void)?
 
     var body: some View {
         Group {
@@ -101,6 +106,19 @@ struct DictationIndicatorView: View {
                 Text("+ \(mode == .cleanup ? "Cleanup" : "Translate")")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(XMOTheme.TextColor.primary)
+            }
+            if operatorAddressed {
+                // Fn+K armed (#122) — small keycap badge, same idiom as the
+                // C/T keycaps in the upgrade panel.
+                Text("K")
+                    .font(XMOTheme.Typography.mono(11, weight: .semibold))
+                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .background(
+                        RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                            .fill(Color.white.opacity(0.07))
+                    )
             }
         }
     }
@@ -193,9 +211,13 @@ struct DictationIndicatorView: View {
                     .frame(width: 1, height: 14)
 
                 if !hideCleanupButton {
-                    upgradeButton(label: "C", subtitle: "Cleanup", action: .cleanup)
+                    upgradeButton(label: "C", subtitle: "Cleanup") { onUpgrade?(.cleanup) }
                 }
-                upgradeButton(label: "T", subtitle: "Translate", action: .translate)
+                upgradeButton(label: "T", subtitle: "Translate") { onUpgrade?(.translate) }
+                // Fn+K (#122): filled while the entry is flagged — the bare-K
+                // press's visual feedback; tap toggles like the keycap does.
+                upgradeButton(label: "K", subtitle: "Operator",
+                              highlighted: operatorAddressed) { onOperatorToggle?() }
             }
 
             if let countdown = upgradeCountdown, countdown > 0 {
@@ -210,12 +232,15 @@ struct DictationIndicatorView: View {
     }
 
     @ViewBuilder
-    private func upgradeButton(label: String, subtitle: String, action: UpgradeAction) -> some View {
+    private func upgradeButton(
+        label: String, subtitle: String, highlighted: Bool = false,
+        action: @escaping () -> Void
+    ) -> some View {
         HStack(spacing: 4) {
             if showUpgradeKeycaps {
                 Text(label)
                     .font(XMOTheme.Typography.mono(11, weight: .semibold))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .foregroundStyle(highlighted ? XMOTheme.TextColor.primary : XMOTheme.TextColor.muted)
             }
             Text(subtitle)
                 .font(.system(size: 12, weight: .medium))
@@ -224,14 +249,13 @@ struct DictationIndicatorView: View {
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(
-            // Design `.ibtn` fill — same white .07 as XMOIconButton.
+            // Design `.ibtn` fill — same white .07 as XMOIconButton; the
+            // highlighted (flagged) state fills with the selection accent.
             RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
-                .fill(Color.white.opacity(0.07))
+                .fill(highlighted ? XMOTheme.Accent.blue.opacity(0.35) : Color.white.opacity(0.07))
         )
         .contentShape(Rectangle())
-        .onTapGesture {
-            onUpgrade?(action)
-        }
+        .onTapGesture(perform: action)
     }
 }
 
@@ -244,6 +268,7 @@ final class DictationIndicatorModel {
     var audioLevel: Float = 0
     var isLocked = false
     var pendingMode: UpgradeAction?
+    var operatorAddressed = false
     var recordingSeconds: Int = 0
     var showUpgradeButtons = false
     var hideCleanupButton = false
@@ -253,6 +278,7 @@ final class DictationIndicatorModel {
     var bluetoothRedirected = false
     var noSignal = false
     var onUpgrade: ((UpgradeAction) -> Void)?
+    var onOperatorToggle: (() -> Void)?
 }
 
 /// SwiftUI wrapper that reads the observable model.
@@ -265,6 +291,7 @@ private struct DictationIndicatorHost: View {
             audioLevel: model.audioLevel,
             isLocked: model.isLocked,
             pendingMode: model.pendingMode,
+            operatorAddressed: model.operatorAddressed,
             recordingSeconds: model.recordingSeconds,
             showUpgradeButtons: model.showUpgradeButtons,
             hideCleanupButton: model.hideCleanupButton,
@@ -273,7 +300,8 @@ private struct DictationIndicatorHost: View {
             lastError: model.lastError,
             bluetoothRedirected: model.bluetoothRedirected,
             noSignal: model.noSignal,
-            onUpgrade: model.onUpgrade
+            onUpgrade: model.onUpgrade,
+            onOperatorToggle: model.onOperatorToggle
         )
     }
 }
@@ -299,6 +327,11 @@ final class DictationIndicatorManager {
         model.onUpgrade = { [weak coordinator] action in
             Task { @MainActor in
                 await coordinator?.applyUpgradeByKey(action)
+            }
+        }
+        model.onOperatorToggle = { [weak coordinator] in
+            Task { @MainActor in
+                coordinator?.toggleOperatorAddressedByKey()
             }
         }
 
@@ -329,6 +362,7 @@ final class DictationIndicatorManager {
                 self.model.audioLevel = coordinator.audioLevel
                 self.model.isLocked = hotkeyManager?.isLocked ?? false
                 self.model.pendingMode = coordinator.pendingCleanupMode
+                self.model.operatorAddressed = coordinator.operatorAddressedDisplayed
                 if newSeconds != self.model.recordingSeconds {
                     self.model.recordingSeconds = newSeconds
                 }

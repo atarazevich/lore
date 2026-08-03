@@ -81,7 +81,7 @@ final class HotkeyManager {
         // return value, and by the time its closure runs the keystroke has
         // already been delivered to the focused app. So it must never handle a
         // key that must be consumed. Every consumable key (Space lock, Esc,
-        // Fn+V/T, C/T upgrades) is owned by the CGEvent tap, which can return
+        // Fn+V/T/K, C/T/K upgrades) is owned by the CGEvent tap, which can return
         // nil; this monitor is narrowed to the one chord it uniquely owns and
         // that may pass through: Ctrl+Cmd+V re-paste, which the tap does not
         // carry. Routing all keys here once made Space lock leak a literal
@@ -118,10 +118,11 @@ final class HotkeyManager {
                 return nil
             }
 
-            // Fn+V/T while recording → consume (use event's own Fn flag, not tracked flag)
+            // Fn+V/T/K while recording → consume (use event's own Fn flag, not tracked flag)
             if event.modifierFlags.contains(.function) && self.isRecordingFlag {
                 if (event.keyCode == 9 && self.modifierOn({ $0.modifierCleanupEnabled }))
-                    || (event.keyCode == 17 && self.modifierOn({ $0.modifierTranslateEnabled })) { // V or T
+                    || (event.keyCode == 17 && self.modifierOn({ $0.modifierTranslateEnabled }))
+                    || (event.keyCode == 40 && self.modifierOn({ $0.modifierUpgradeKeysEnabled })) { // V, T, or K (#122)
                     Task { @MainActor in
                         self.handleKeyDown(event)
                     }
@@ -129,7 +130,7 @@ final class HotkeyManager {
                 }
             }
 
-            // C or T while upgrade panel is showing → apply upgrade
+            // C, T, or K while upgrade panel is showing → apply upgrade / flag operator
             // Only match bare keypress (no Cmd/Ctrl/Option modifiers) to avoid eating Cmd+C etc.
             if self.isUpgradeShowingFlag,
                self.modifierOn({ $0.modifierUpgradeKeysEnabled }),
@@ -142,6 +143,13 @@ final class HotkeyManager {
                     Task { @MainActor in
                         HotkeyManager.hkLog.debug("[HOTKEY] \(String(describing: action), privacy: .public) key → apply upgrade")
                         await self.coordinator?.applyUpgradeByKey(action)
+                    }
+                    return nil
+                }
+                if chars == "k" { // send to operator (#122)
+                    Task { @MainActor in
+                        HotkeyManager.hkLog.debug("[HOTKEY] K key → toggle operator addressed")
+                        self.coordinator?.toggleOperatorAddressedByKey()
                     }
                     return nil
                 }
@@ -362,6 +370,11 @@ final class HotkeyManager {
                 if isLocked { fnHeldAtLock = true }
                 HotkeyManager.hkLog.debug("[HOTKEY] Fn+T → pending translate")
                 return
+            } else if event.keyCode == 40, modifierOn({ $0.modifierUpgradeKeysEnabled }) { // K (#122)
+                coordinator.toggleOperatorAddressed()
+                if isLocked { fnHeldAtLock = true }
+                HotkeyManager.hkLog.debug("[HOTKEY] Fn+K → operator addressed")
+                return
             }
         }
 
@@ -511,10 +524,17 @@ final class HotkeyManager {
                             HotkeyManager.hkLog.debug("[HOTKEY] Fn+T (CGEvent) → pending translate")
                         }
                         return nil
+                    } else if keyCode == 40, manager.modifierOn({ $0.modifierUpgradeKeysEnabled }) { // K (#122)
+                        Task { @MainActor in
+                            manager.coordinator?.toggleOperatorAddressed()
+                            if manager.isLocked { manager.fnHeldAtLock = true }
+                            HotkeyManager.hkLog.debug("[HOTKEY] Fn+K (CGEvent) → operator addressed")
+                        }
+                        return nil
                     }
                 }
 
-                // C or T while upgrade panel showing → apply upgrade
+                // C, T, or K while upgrade panel showing → apply upgrade / flag operator
                 // Check no modifiers (allow Cmd+C etc. through)
                 let hasModifiers = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
                 if manager.isUpgradeShowingFlag && manager.modifierOn({ $0.modifierUpgradeKeysEnabled }) && !hasModifiers {
@@ -527,6 +547,13 @@ final class HotkeyManager {
                             Task { @MainActor in
                                 HotkeyManager.hkLog.debug("[HOTKEY] \(String(describing: action), privacy: .public) key (CGEvent tap) → apply upgrade")
                                 await manager.coordinator?.applyUpgradeByKey(action)
+                            }
+                            return nil
+                        }
+                        if chars == "k" { // send to operator (#122)
+                            Task { @MainActor in
+                                HotkeyManager.hkLog.debug("[HOTKEY] K key (CGEvent tap) → toggle operator addressed")
+                                manager.coordinator?.toggleOperatorAddressedByKey()
                             }
                             return nil
                         }

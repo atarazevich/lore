@@ -101,4 +101,28 @@ final class DictationHistoryEntryTests: XCTestCase {
         XCTAssertNil(CleanupMethod(rawValue: entry.cleanupMethodName!))
         XCTAssertNil(TranslationLanguage(rawValue: entry.translatedToLanguage!))
     }
+
+    /// Fn+K contract (#122): `operatorAddressed` is `Bool?` so the
+    /// synthesized encoder omits it unless set — old and non-flagged
+    /// entries stay byte-identical — and an entry without the key decodes
+    /// as nil (readers check `== true`). Unflagging writes nil back, so a
+    /// flag-then-unflag round trip is byte-identical to never flagging
+    /// (the double bare-K toggle).
+    func testOperatorAddressedEncodedOnlyWhenTrue() throws {
+        var entry = DictationHistoryEntry(durationSeconds: 2.0, audioFilename: nil)
+        entry.status = .transcribed
+        entry.rawText = "send this to the operator"
+
+        let unflagged = try JSONEncoder().encode(entry)
+        XCTAssertFalse(String(data: unflagged, encoding: .utf8)!.contains("operatorAddressed"))
+        XCTAssertNil(try JSONDecoder().decode(DictationHistoryEntry.self, from: unflagged).operatorAddressed)
+
+        entry.operatorAddressed = true
+        let flagged = try JSONEncoder().encode(entry)
+        XCTAssertTrue(String(data: flagged, encoding: .utf8)!.contains("\"operatorAddressed\":true"))
+        XCTAssertEqual(try JSONDecoder().decode(DictationHistoryEntry.self, from: flagged).operatorAddressed, true)
+
+        entry.operatorAddressed = nil    // double bare-K: toggled off
+        XCTAssertEqual(try JSONEncoder().encode(entry), unflagged)
+    }
 }

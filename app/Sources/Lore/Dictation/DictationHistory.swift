@@ -40,6 +40,13 @@ struct DictationHistoryEntry: Identifiable, Codable, Equatable {
     /// the language popover checkmark (DIC-36/37). Tolerant string like
     /// `cleanupMethodName`.
     var translatedToLanguage: String?
+    /// Fn+K "send to operator" (#122): the dispatcher's dictation door
+    /// processes ONLY entries carrying this flag; everything else is
+    /// archive. Optional so the synthesized encoder omits nil — old and
+    /// non-flagged entries stay byte-identical on disk. Call sites write
+    /// `true` (or nil to unflag) and read `== true`; `false` is never
+    /// stored.
+    var operatorAddressed: Bool?
 
     /// The text for the currently active version.
     var displayText: String? {
@@ -79,6 +86,7 @@ struct DictationHistoryEntry: Identifiable, Codable, Equatable {
         cleanupModeName = try c.decodeIfPresent(String.self, forKey: .cleanupModeName)
         cleanupMethodName = try c.decodeIfPresent(String.self, forKey: .cleanupMethodName)
         translatedToLanguage = try c.decodeIfPresent(String.self, forKey: .translatedToLanguage)
+        operatorAddressed = try c.decodeIfPresent(Bool.self, forKey: .operatorAddressed)
     }
 }
 

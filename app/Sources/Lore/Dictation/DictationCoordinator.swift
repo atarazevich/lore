@@ -23,6 +23,10 @@ final class DictationCoordinator {
     private(set) var upgradeCountdown: Double?
     /// Pre-paste cleanup mode set during recording via Fn+V/Fn+T.
     private(set) var pendingCleanupMode: UpgradeAction?
+    /// Fn+K "send to operator" (#122): armed during recording, lands on the
+    /// entry as `operatorAddressed` so the dispatcher's dictation door
+    /// picks it up. The indicator shows a K badge while armed.
+    private(set) var pendingOperatorAddressed = false
     /// True while audio is being buffered before hold is confirmed (pre-buffer phase).
     private(set) var isPreBuffering = false
     /// True when a wireless default input was detected and capture redirected to built-in mic.
@@ -313,6 +317,7 @@ final class DictationCoordinator {
         upgradeCountdown = nil
         currentEntryID = nil
         pendingCleanupMode = nil
+        pendingOperatorAddressed = false
         lastError = nil
         captureConfirmed = true
         state = .recording
@@ -415,6 +420,15 @@ final class DictationCoordinator {
         history.audioRetentionLimit = settings?.dictationAudioRetentionCount ?? 500
         let audioFilename = history.saveAudio(samples)
         var entry = DictationHistoryEntry(durationSeconds: durationSeconds, audioFilename: audioFilename)
+        // Fn+K (#122): the flag belongs to this session — a stale pipeline
+        // must not steal a newer session's arming (same rule as `pending`
+        // below). Set before `add` so the entry's FIRST write carries it;
+        // the indicator's K badge survives the consumption because
+        // `operatorAddressedDisplayed` follows the entry from here on.
+        if isCurrentSession(epoch) {
+            if pendingOperatorAddressed { entry.operatorAddressed = true }
+            pendingOperatorAddressed = false
+        }
         history.add(entry)
         if isCurrentSession(epoch) { currentEntryID = entry.id }
         log.debug("audio saved: \(audioFilename ?? "FAILED", privacy: .private)")
@@ -632,6 +646,7 @@ final class DictationCoordinator {
         stopMicCapture()
         accumulatedSamples.removeAll()
         pendingCleanupMode = nil
+        pendingOperatorAddressed = false
         state = .idle
     }
 
@@ -760,6 +775,39 @@ final class DictationCoordinator {
             pendingCleanupMode = action
         }
         log.debug("pending mode: \(self.pendingCleanupMode.map { "\($0)" } ?? "none", privacy: .public)")
+    }
+
+    /// Toggle the operator-addressed flag during recording (Fn+K, #122).
+    /// Same toggle idiom as `setPendingMode`: pressed twice → off.
+    func toggleOperatorAddressed() {
+        guard state == .recording else { return }
+        pendingOperatorAddressed.toggle()
+        log.debug("operator addressed: \(self.pendingOperatorAddressed, privacy: .public)")
+    }
+
+    /// Toggle the just-pasted dictation's operator-addressed flag from the
+    /// upgrade panel (bare K, #122) — the "right after" half of the gesture,
+    /// same window as the C/T upgrade keys, and the same toggle idiom as the
+    /// recording chord: pressed twice → off (nil, not false, so the entry's
+    /// JSON returns to its unflagged byte-identical form). The panel stays
+    /// up: toggling doesn't consume the C/T retry affordance.
+    func toggleOperatorAddressedByKey() {
+        guard isUpgradePanelVisible, let entryID = currentEntryID,
+              var entry = history.entries.first(where: { $0.id == entryID }) else { return }
+        entry.operatorAddressed = entry.operatorAddressed == true ? nil : true
+        history.update(entry)
+        log.debug("operator addressed toggled by key (post-paste): \(entry.operatorAddressed == true, privacy: .public)")
+    }
+
+    /// The K badge state for the indicator (#122): armed while recording
+    /// (`pendingOperatorAddressed`), then — after the pipeline consumes the
+    /// arming into the entry's first write — the entry's own flag, which the
+    /// post-paste bare K toggles. Keeps the badge from vanishing at entry
+    /// write and lights the upgrade panel's K keycap.
+    var operatorAddressedDisplayed: Bool {
+        if pendingOperatorAddressed { return true }
+        guard let entryID = currentEntryID else { return false }
+        return history.entries.first(where: { $0.id == entryID })?.operatorAddressed == true
     }
 
     func pasteLastTranscript() {
