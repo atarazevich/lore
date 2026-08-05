@@ -309,4 +309,66 @@ final class AudioRecorderTests: XCTestCase {
         XCTAssertEqual(recordingSavedCount() - before, 2, "two sessions, two outcomes")
     }
 
+    // MARK: - Capture-gap anchors (#128)
+
+    /// A dead tap writes no frames while wall time keeps moving: 10s of wall
+    /// time against 1s of audio is a gap; normal jitter around real-time
+    /// delivery is not.
+    func testIsCaptureGapDetectsOutage() {
+        XCTAssertTrue(AudioRecorder.isCaptureGap(
+            frameDelta: 48_000, sampleRate: 48_000, wallDelta: 10.0
+        ), "10s wall for 1s of audio is an outage")
+        XCTAssertFalse(AudioRecorder.isCaptureGap(
+            frameDelta: 48_000, sampleRate: 48_000, wallDelta: 1.5
+        ), "sub-threshold jitter is not an outage")
+        XCTAssertFalse(AudioRecorder.isCaptureGap(
+            frameDelta: 480, sampleRate: 0, wallDelta: 10.0
+        ), "degenerate sample rate never triggers")
+        XCTAssertTrue(AudioRecorder.isCaptureGap(
+            frameDelta: 0, sampleRate: 48_000, wallDelta: 3.0
+        ), "no frames written while wall time passed is an outage — the resume-after-failed-writes shape")
+    }
+
+    /// Failure exits must leave gap tracking untouched: with the output path
+    /// blocked no write ever succeeds, so no start date, no end tracking, and
+    /// no anchors. The old code advanced end-frame/date tracking before the
+    /// failure exits, skewing the frame delta and (under persistent failure)
+    /// spamming anchors on every buffer.
+    func testFailingWritesLeaveAnchorTrackingUntouched() {
+        let blocked = blockTempCAFPaths()
+        defer { blocked.forEach { try? FileManager.default.removeItem(at: $0) } }
+
+        let recorder = AudioRecorder(outputDirectory: outputDir)
+        recorder.startSession()
+
+        let buffer = makeSineBuffer(sampleRate: 48_000, frameCount: 512)
+        for _ in 0..<40 {
+            recorder.writeMicBuffer(buffer)
+            recorder.writeSysBuffer(buffer)
+        }
+
+        let anchors = recorder.timingAnchors()
+        XCTAssertNil(anchors.micStartDate, "failed writes must not set a start date")
+        XCTAssertNil(anchors.sysStartDate, "failed writes must not set a start date")
+        XCTAssertTrue(anchors.micAnchors.isEmpty, "failed writes must not append anchors")
+        XCTAssertTrue(anchors.sysAnchors.isEmpty, "failed writes must not append anchors")
+    }
+
+    /// Continuous back-to-back writes must keep exactly one anchor per track —
+    /// the first-write one. The gap path stays dormant without an outage.
+    func testContinuousWritesAddNoExtraAnchors() {
+        let recorder = AudioRecorder(outputDirectory: outputDir)
+        recorder.startSession()
+
+        let buffer = makeSineBuffer(sampleRate: 48_000, frameCount: 4800)
+        for _ in 0..<20 {
+            recorder.writeMicBuffer(buffer)
+            recorder.writeSysBuffer(buffer)
+        }
+
+        let anchors = recorder.timingAnchors()
+        XCTAssertEqual(anchors.micAnchors.count, 1)
+        XCTAssertEqual(anchors.sysAnchors.count, 1)
+    }
+
 }

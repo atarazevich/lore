@@ -4,6 +4,34 @@ import os
 
 private let batchLog = Logger(subsystem: "com.lore.app", category: "BatchTranscription")
 
+/// Maps a file frame position to wall-clock time using the timing anchors
+/// persisted in batch-meta.json (#128). A capture outage produces no silence
+/// padding — frames are appended contiguously — so pure `start + frame/rate`
+/// math drags every post-gap utterance earlier by the outage length. With two
+/// or more anchors the mapping is piecewise: each frame is based on the
+/// nearest anchor at-or-before it. With fewer anchors (legacy batch-meta.json)
+/// it reduces exactly to the start-date math.
+struct AnchorClock {
+    let startDate: Date
+    let sampleRate: Double
+    let anchors: [BatchMeta.TimingAnchor]
+
+    init(startDate: Date, sampleRate: Double, anchors: [BatchMeta.TimingAnchor]) {
+        self.startDate = startDate
+        self.sampleRate = sampleRate
+        self.anchors = anchors.sorted { $0.frame < $1.frame }
+    }
+
+    /// Wall-clock date for a frame position in the file's sample-rate domain.
+    func date(atFrame frame: Double) -> Date {
+        guard anchors.count >= 2 else {
+            return startDate.addingTimeInterval(frame / sampleRate)
+        }
+        let base = anchors.last(where: { Double($0.frame) <= frame }) ?? anchors[0]
+        return base.date.addingTimeInterval((frame - Double(base.frame)) / sampleRate)
+    }
+}
+
 /// Offline two-pass transcription engine that re-processes recorded CAF files
 /// after a meeting ends — same model, full-context re-pass.
 actor BatchTranscriptionEngine {
@@ -265,6 +293,7 @@ actor BatchTranscriptionEngine {
                 speaker: .you,
                 startDate: anchors?.micStartDate,
                 sampleRate: anchors?.micSampleRate,
+                anchors: anchors?.micAnchors ?? [],
                 backend: backend,
                 vad: vad,
                 progressBase: 0,
@@ -283,6 +312,7 @@ actor BatchTranscriptionEngine {
                 speaker: .them,
                 startDate: anchors?.sysStartDate,
                 sampleRate: anchors?.sysSampleRate,
+                anchors: anchors?.sysAnchors ?? [],
                 backend: backend,
                 vad: vad,
                 progressBase: Double(filesProcessed) / Double(totalFiles),
@@ -325,6 +355,7 @@ actor BatchTranscriptionEngine {
         speaker: Speaker,
         startDate: Date?,
         sampleRate: Double?,
+        anchors: [BatchMeta.TimingAnchor] = [],
         backend: any TranscriptionBackend,
         vad: VadManager,
         progressBase: Double,
@@ -341,6 +372,11 @@ actor BatchTranscriptionEngine {
 
         let resolvedStartDate = startDate ?? Date()
         let resolvedSampleRate = sampleRate ?? fileSampleRate
+        let clock = AnchorClock(
+            startDate: resolvedStartDate,
+            sampleRate: resolvedSampleRate,
+            anchors: anchors
+        )
 
         // Process in 30-second chunks
         let chunkFrames = Int64(30.0 * fileSampleRate)
@@ -371,10 +407,9 @@ actor BatchTranscriptionEngine {
                 let text = try await backend.transcribe(segment.samples, previousContext: nil)
                 guard !text.isEmpty else { continue }
 
-                // Calculate timestamp from frame position
+                // Calculate timestamp from frame position (anchor-aware, #128)
                 let sampleOffsetInFile = Double(frameOffset) + Double(segment.startSample) * fileSampleRate / 16000.0
-                let timeOffset = sampleOffsetInFile / resolvedSampleRate
-                let timestamp = resolvedStartDate.addingTimeInterval(timeOffset)
+                let timestamp = clock.date(atFrame: sampleOffsetInFile)
 
                 records.append(SessionRecord(
                     speaker: speaker,
@@ -549,6 +584,8 @@ actor BatchTranscriptionEngine {
         let sysStartDate: Date?
         let micSampleRate: Double?
         let sysSampleRate: Double?
+        let micAnchors: [BatchMeta.TimingAnchor]
+        let sysAnchors: [BatchMeta.TimingAnchor]
     }
 
     private func loadBatchMeta(
@@ -563,7 +600,9 @@ actor BatchTranscriptionEngine {
             micStartDate: meta.micStartDate,
             sysStartDate: meta.sysStartDate,
             micSampleRate: nil,
-            sysSampleRate: nil
+            sysSampleRate: nil,
+            micAnchors: meta.micAnchors,
+            sysAnchors: meta.sysAnchors
         )
     }
 

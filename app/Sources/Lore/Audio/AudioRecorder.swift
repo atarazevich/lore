@@ -37,9 +37,29 @@ final class AudioRecorder: @unchecked Sendable {
     private var sysEndDate: Date?
     private var sysEndFrame: Int64 = 0
 
+    /// Same for the mic track — used only for capture-gap detection (#128);
+    /// the sys pair above doubles for effective-sample-rate computation.
+    private var micEndDate: Date?
+    private var micEndFrame: Int64 = 0
+
     /// Timing anchors mapping frame positions to wall-clock dates.
     private(set) var micAnchors: [(frame: Int64, date: Date)] = []
     private(set) var sysAnchors: [(frame: Int64, date: Date)] = []
+
+    /// A capture outage appends no silence: wall time advances while file
+    /// frames don't. True when the wall-clock delta since the last write
+    /// exceeds the audio duration written since then by more than the
+    /// threshold — capture went dark and resumed, so a fresh anchor is due (#128).
+    private static let captureGapThreshold: TimeInterval = 2.0
+
+    static func isCaptureGap(
+        frameDelta: Int64,
+        sampleRate: Double,
+        wallDelta: TimeInterval
+    ) -> Bool {
+        guard sampleRate > 0 else { return false }
+        return wallDelta - Double(frameDelta) / sampleRate > captureGapThreshold
+    }
 
     init(outputDirectory: URL) {
         self.outputDirectory = outputDirectory
@@ -58,6 +78,8 @@ final class AudioRecorder: @unchecked Sendable {
             sysStartDate = nil
             sysEndDate = nil
             sysEndFrame = 0
+            micEndDate = nil
+            micEndFrame = 0
             micAnchors = []
             sysAnchors = []
 
@@ -95,12 +117,7 @@ final class AudioRecorder: @unchecked Sendable {
                 }
             }
 
-            // Record timing anchor on first write
-            if micStartDate == nil {
-                let now = Date()
-                micStartDate = now
-                micAnchors.append((frame: micFile?.length ?? 0, date: now))
-            }
+            let now = Date()
 
             // Downmix to mono inline — handle float32, int16, and int32 formats
             guard let monoFormat = AVAudioFormat(
@@ -176,11 +193,32 @@ final class AudioRecorder: @unchecked Sendable {
                 return
             }
 
+            let preWriteFrame = micFile?.length ?? 0
             do {
                 try micFile?.write(from: monoBuf)
             } catch {
                 recorderLog.error("mic write error: \(error.localizedDescription, privacy: .private)")
+                return
             }
+
+            // Timing anchor on first successful write, and again whenever
+            // capture resumes after an outage (#128). Tracking advances only
+            // on success — a failing write leaves state at the last audio
+            // that actually landed, so persistent failure can't spam anchors
+            // or skew the frame delta.
+            if micStartDate == nil {
+                micStartDate = now
+                micAnchors.append((frame: preWriteFrame, date: now))
+            } else if let last = micEndDate, let file = micFile,
+                      Self.isCaptureGap(
+                          frameDelta: preWriteFrame - micEndFrame,
+                          sampleRate: file.processingFormat.sampleRate,
+                          wallDelta: now.timeIntervalSince(last)
+                      ) {
+                micAnchors.append((frame: preWriteFrame, date: now))
+            }
+            micEndDate = now
+            micEndFrame = micFile?.length ?? preWriteFrame
         }
     }
 
@@ -202,22 +240,33 @@ final class AudioRecorder: @unchecked Sendable {
                 }
             }
 
-            // Record timing anchor on first write
             let now = Date()
-            if sysStartDate == nil {
-                sysStartDate = now
-                sysAnchors.append((frame: sysFile?.length ?? 0, date: now))
-            }
-
-            // Track latest write position for effective sample rate computation
-            sysEndDate = now
-            sysEndFrame = (sysFile?.length ?? 0) + Int64(buffer.frameLength)
-
+            let preWriteFrame = sysFile?.length ?? 0
             do {
                 try sysFile?.write(from: buffer)
             } catch {
                 recorderLog.error("sys write error: \(error.localizedDescription, privacy: .private)")
+                return
             }
+
+            // Timing anchor on first successful write, and again whenever
+            // capture resumes after an outage (#128). Tracking advances only
+            // on success; the end date/frame also feed the effective-sample-
+            // rate computation in mergeAndEncode, which wants actually-written
+            // audio — the post-write file length gives both consumers that.
+            if sysStartDate == nil {
+                sysStartDate = now
+                sysAnchors.append((frame: preWriteFrame, date: now))
+            } else if let last = sysEndDate, let file = sysFile,
+                      Self.isCaptureGap(
+                          frameDelta: preWriteFrame - sysEndFrame,
+                          sampleRate: file.processingFormat.sampleRate,
+                          wallDelta: now.timeIntervalSince(last)
+                      ) {
+                sysAnchors.append((frame: preWriteFrame, date: now))
+            }
+            sysEndDate = now
+            sysEndFrame = sysFile?.length ?? preWriteFrame
         }
     }
 
