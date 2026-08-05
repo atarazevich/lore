@@ -26,7 +26,7 @@ private struct GeneratedEnrichment {
     var title: String
     @Guide(description: "personal = family, friends, relationships, health, errands, leisure, everyday life. work = job tasks, business deals, clients, colleagues, contracts, projects. If the conversation is mostly everyday life, it is personal even if a job is mentioned in passing.")
     var type: MeetingType
-    @Guide(description: "Personal names of people mentioned in the conversation (people talked about or addressed). Real names only — no roles, no companies, no invented names. Empty list if none.")
+    @Guide(description: "Personal names of people mentioned in the conversation (people talked about or addressed). Proper names only — never pronouns, no roles, no companies, no invented names. Empty list if none.")
     var people: [String]
     @Guide(description: "Names of companies, organizations, or clients mentioned in the conversation. Real organization names only — no people, no roles, no invented names. Empty list if none.")
     var organizations: [String]
@@ -123,10 +123,14 @@ actor MeetingEnrichmentEngine {
             await repository.renameSession(sessionID: index.id, title: generated)
         }
 
-        // Tags: appended behind whatever the user already set — the
+        // Tags: appended behind whatever the user already set — pronouns and
+        // junk the model emits as entities are dropped first (#131), then the
         // repository normalizes (case-insensitive dedupe, cap).
-        let appended = [result.type.rawValue] + result.people + result.organizations
-        await repository.updateSessionTags(sessionID: index.id, tags: (index.tags ?? []) + appended)
+        let existing = index.tags ?? []
+        let appended = Self.filteredTags(
+            [result.type.rawValue] + result.people + result.organizations
+        )
+        await repository.updateSessionTags(sessionID: index.id, tags: existing + appended)
 
         // Summary last: it is the enriched marker, so a partial apply
         // (app quit mid-write) is simply redone by the next sweep. An empty
@@ -137,6 +141,44 @@ actor MeetingEnrichmentEngine {
         await repository.updateSessionSummary(sessionID: index.id, summary: summary)
     }
     #endif
+
+    // MARK: - Tag filtering (#131)
+
+    /// Case-insensitive stoplist of Russian and English personal/possessive
+    /// pronouns the on-device model occasionally emits as "people" on long
+    /// noisy transcripts (#131). ё-less spellings included — STT and the
+    /// model both drop the diaeresis.
+    private static let pronounStoplist: Set<String> = [
+        // Russian
+        "я", "ты", "вы", "мы", "он", "она", "оно", "они",
+        "мой", "моя", "моё", "мое", "мои",
+        "твой", "твоя", "твоё", "твое", "твои",
+        "ваш", "ваша", "ваше", "ваши",
+        "наш", "наша", "наше", "наши",
+        "его", "её", "ее", "их",
+        "мне", "тебе", "нам", "вам", "ему", "ей", "им",
+        "меня", "тебя", "нас", "вас", "него", "неё", "нее", "них",
+        "себя", "свой", "своя", "своё", "свое", "свои",
+        // English
+        "i", "me", "you", "we", "they", "he", "she", "it",
+        "my", "mine", "your", "yours", "our", "ours",
+        "their", "theirs", "them", "us", "him", "her",
+        "its", "his", "hers",
+    ]
+
+    /// Post-filter for generated tags (#131), engine-agnostic: drops
+    /// pronouns, single-character and purely numeric candidates. Dedupe
+    /// against existing (user-set) tags is not done here — the repository's
+    /// `updateSessionTags` normalizes case-insensitively, first-wins.
+    static func filteredTags(_ candidates: [String]) -> [String] {
+        candidates.compactMap { candidate in
+            let trimmed = candidate.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard trimmed.count > 1,
+                  !trimmed.allSatisfy(\.isNumber),
+                  !pronounStoplist.contains(trimmed.lowercased()) else { return nil }
+            return trimmed
+        }
+    }
 
     // MARK: - Prompt assembly (validated in experiments/enrichment)
 

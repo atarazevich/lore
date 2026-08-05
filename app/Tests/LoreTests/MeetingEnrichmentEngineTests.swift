@@ -45,6 +45,26 @@ final class MeetingEnrichmentEngineTests: XCTestCase {
         XCTAssertNil(sessions.first?.summary)
     }
 
+    func testTagFilterDropsPronounsAndJunk() {
+        // People as the model emitted them on a real long Russian
+        // transcript (#131): "Я" and "Твоя" tagged as people.
+        let filtered = MeetingEnrichmentEngine.filteredTags(
+            ["Марина", "Я", "Твоя", " they ", "42", "K"]
+        )
+        XCTAssertEqual(filtered, ["Марина"])
+    }
+
+    func testRepositoryDedupesTagsCaseInsensitivelyFirstWins() async {
+        // Dedupe against existing tags lives in the repository, not the
+        // filter: the engine passes `existing + appended` and
+        // `updateSessionTags` normalizes case-insensitively, first-wins.
+        await repo.seedSession(id: "session_tags", records: transcript(), startedAt: .now)
+        await repo.updateSessionTags(sessionID: "session_tags", tags: ["марина", "Марина", "Acme"])
+
+        let tags = await repo.listSessions().first?.tags
+        XCTAssertEqual(tags, ["марина", "Acme"])
+    }
+
     // MARK: - On-device model (skips when unavailable)
 
     func testEnrichmentFillsTitleTagsAndSummary() async throws {
