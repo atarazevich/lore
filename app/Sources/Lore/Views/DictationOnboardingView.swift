@@ -7,8 +7,12 @@ struct DictationOnboardingView: View {
     @Bindable var settings: AppSettings
     @AppStorage("completedDictationOnboarding") private var completedDictationOnboarding = false
     @State private var currentStep = 0
-    @State private var micPermission: MicPermissionStatus = .unknown
+    @State private var micStatus: AVAuthorizationStatus = .notDetermined
     @State private var accessibilityGranted = false
+    @State private var inputMonitoringGranted = false
+    /// The user has been sent to the Input Monitoring pane at least once, so the
+    /// row switches from "Open Settings" to the relaunch that makes the grant visible.
+    @State private var inputMonitoringPaneOpened = false
 
     private let totalSteps = 4
 
@@ -54,9 +58,6 @@ struct DictationOnboardingView: View {
         .padding(.horizontal, 28)
         .padding(.vertical, 20)
         .frame(maxWidth: .infinity, maxHeight: 480)
-        .onAppear {
-            refreshPermissions()
-        }
     }
 
     // MARK: - Step 1: Welcome
@@ -98,57 +99,30 @@ struct DictationOnboardingView: View {
             Spacer().frame(height: 14)
 
             VStack(alignment: .leading, spacing: 12) {
-                // Microphone
-                HStack(spacing: 12) {
-                    permissionIcon(granted: micPermission == .granted)
+                permissionRow(
+                    name: "Microphone",
+                    granted: micStatus == .authorized,
+                    need: "Required for dictation",
+                    actionTitle: micStatus == .notDetermined ? "Grant Microphone" : "Open Settings",
+                    action: micAction
+                )
 
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Microphone")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(XMOTheme.TextColor.primary)
-                        Text(micPermission == .granted ? "Access granted" : "Required for dictation")
-                            .font(XMOTheme.Typography.meta)
-                            .foregroundStyle(XMOTheme.TextColor.muted)
-                    }
+                permissionRow(
+                    name: "Accessibility",
+                    granted: accessibilityGranted,
+                    need: "Required for global hotkey",
+                    action: { openSettings(.accessibility) }
+                )
 
-                    Spacer()
-
-                    if micPermission != .granted {
-                        Button("Grant Microphone") {
-                            requestMicPermission()
-                        }
-                        .font(.system(size: 11, weight: .medium))
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
-
-                // Accessibility
-                HStack(spacing: 12) {
-                    permissionIcon(granted: accessibilityGranted)
-
-                    VStack(alignment: .leading, spacing: 2) {
-                        Text("Accessibility")
-                            .font(.system(size: 13, weight: .medium))
-                            .foregroundStyle(XMOTheme.TextColor.primary)
-                        Text(accessibilityGranted ? "Access granted" : "Required for global hotkey")
-                            .font(XMOTheme.Typography.meta)
-                            .foregroundStyle(XMOTheme.TextColor.muted)
-                    }
-
-                    Spacer()
-
-                    if !accessibilityGranted {
-                        Button("Open Settings") {
-                            if let url = URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility") {
-                                NSWorkspace.shared.open(url)
-                            }
-                        }
-                        .font(.system(size: 11, weight: .medium))
-                        .buttonStyle(.bordered)
-                        .controlSize(.small)
-                    }
-                }
+                permissionRow(
+                    name: "Input Monitoring",
+                    granted: inputMonitoringGranted,
+                    need: inputMonitoringPaneOpened
+                        ? "After enabling, quit and reopen \(XMOTheme.wordmark)"
+                        : "Required to feel the Fn key",
+                    actionTitle: inputMonitoringPaneOpened ? "Restart \(XMOTheme.wordmark)" : "Open Settings",
+                    action: inputMonitoringAction
+                )
             }
             .padding(.horizontal, 8)
 
@@ -160,6 +134,11 @@ struct DictationOnboardingView: View {
                 .multilineTextAlignment(.center)
         }
         .onAppear { refreshPermissions() }
+        // Grants happen during a System Settings round trip, so re-read every time
+        // the app comes forward.
+        .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in
+            refreshPermissions()
+        }
     }
 
     // MARK: - Step 3: Fn Key Setup
@@ -259,10 +238,42 @@ struct DictationOnboardingView: View {
 
     // MARK: - Helpers
 
-    private func permissionIcon(granted: Bool) -> some View {
-        Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle.fill")
-            .font(.system(size: 20))
-            .foregroundStyle(granted ? XMOTheme.Accent.green : XMOTheme.Accent.red)
+    /// One permission row: state icon, name, one-line why, and the button that
+    /// gets it granted.
+    private func permissionRow(
+        name: String,
+        granted: Bool,
+        need: String,
+        actionTitle: String = "Open Settings",
+        action: @escaping () -> Void
+    ) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle.fill")
+                .font(.system(size: 20))
+                .foregroundStyle(granted ? XMOTheme.Accent.green : XMOTheme.Accent.red)
+
+            VStack(alignment: .leading, spacing: 2) {
+                Text(name)
+                    .font(.system(size: 13, weight: .medium))
+                    .foregroundStyle(XMOTheme.TextColor.primary)
+                Text(granted ? "Access granted" : need)
+                    .font(XMOTheme.Typography.meta)
+                    .foregroundStyle(XMOTheme.TextColor.muted)
+            }
+
+            Spacer()
+
+            if !granted {
+                Button(actionTitle, action: action)
+                    .font(.system(size: 11, weight: .medium))
+                    .buttonStyle(.bordered)
+                    .controlSize(.small)
+            }
+        }
+    }
+
+    private func openSettings(_ pane: SettingsPane) {
+        _ = pane.settingsURL.map { NSWorkspace.shared.open($0) }
     }
 
     private func cheatSheetRow(_ key: String, _ action: String) -> some View {
@@ -281,25 +292,35 @@ struct DictationOnboardingView: View {
     }
 
     private func refreshPermissions() {
-        let perm = AVAudioApplication.shared.recordPermission
-        switch perm {
-        case .granted:
-            micPermission = .granted
-        case .denied:
-            micPermission = .denied
-        case .undetermined:
-            micPermission = .undetermined
-        @unknown default:
-            micPermission = .unknown
-        }
+        micStatus = MicrophonePermission.status
         accessibilityGranted = AXIsProcessTrusted()
+        // Same call as the hotkey health check and the inputMonitoring probe.
+        inputMonitoringGranted = CGPreflightListenEventAccess()
     }
 
-    private func requestMicPermission() {
-        AVAudioApplication.requestRecordPermission { granted in
-            Task { @MainActor in
-                micPermission = granted ? .granted : .denied
-            }
+    /// Undetermined is the only state the system prompt can still appear in;
+    /// once denied it never shows again, so the button becomes the deep link.
+    private func micAction() {
+        guard micStatus == .notDetermined else {
+            openSettings(.microphone)
+            return
+        }
+        Task { @MainActor in
+            let granted = await MicrophonePermission.request()
+            micStatus = granted ? .authorized : .denied
+        }
+    }
+
+    /// `CGPreflightListenEventAccess()` is answered once per process, so a grant
+    /// made during the round trip cannot show up here — the row would stay red
+    /// beside a green Accessibility and the step would loop. After the pane has
+    /// been opened the row offers the relaunch the health panel's remedy performs.
+    private func inputMonitoringAction() {
+        if inputMonitoringPaneOpened {
+            AppRelauncher.relaunch()
+        } else {
+            inputMonitoringPaneOpened = true
+            openSettings(.inputMonitoring)
         }
     }
 
@@ -307,8 +328,4 @@ struct DictationOnboardingView: View {
         settings.hasAcknowledgedRecordingConsent = true
         completedDictationOnboarding = true
     }
-}
-
-private enum MicPermissionStatus {
-    case unknown, undetermined, granted, denied
 }

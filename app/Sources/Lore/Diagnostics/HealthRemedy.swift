@@ -1,7 +1,7 @@
 import Foundation
 
 /// A System Settings pane a remedy can deep-link to. The URL is the documented
-/// `x-apple.systempreferences:` scheme already used by `DictationOnboardingView`.
+/// `x-apple.systempreferences:` scheme; `DictationOnboardingView` links through here too.
 enum SettingsPane: String, Equatable, Sendable {
     case accessibility
     case inputMonitoring
