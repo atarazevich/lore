@@ -959,13 +959,13 @@ actor SessionRepository {
 
     /// Audio a chunked session can be rebuilt from (#109), in preference
     /// order: the per-track batch stash (keeps You/Them via timing anchors),
-    /// the session's own audio copy (imports, earlier rebuild attempts), then
-    /// the merged m4a export in the notes folder.
+    /// then any merged audio `audioFileURL(for:)` resolves — the session's
+    /// own copy (imports, earlier rebuild attempts) or the m4a export in the
+    /// notes folder.
     func rebuildAudioSource(sessionID: String) -> RebuildAudioSource? {
         let tracks = batchAudioURLs(sessionID: sessionID)
         if tracks.mic != nil || tracks.sys != nil { return .tracks }
-        if let sessionCopy = audioFileURL(for: sessionID) { return .file(sessionCopy) }
-        if let export = notesFolderExport(sessionID: sessionID) { return .file(export) }
+        if let merged = audioFileURL(for: sessionID) { return .file(merged) }
         return nil
     }
 
@@ -1118,22 +1118,27 @@ actor SessionRepository {
     func getCurrentSessionID() -> String? { currentSessionID }
 
     /// Returns the URL of the playable audio file for a session, if one exists.
-    /// Checks for merged M4A exports and imported audio files.
+    /// Checks for merged M4A exports and imported audio files. Normal meetings
+    /// keep their merged m4a in the notes folder, not in the session (#130) —
+    /// when the session's audio/ has no playable file, resolve it there. The
+    /// session-local copy wins when both exist.
     func audioFileURL(for sessionID: String) -> URL? {
         let audioDir = sessionDirectory(for: sessionID)
             .appendingPathComponent("audio", isDirectory: true)
-        let fm = FileManager.default
-        guard fm.fileExists(atPath: audioDir.path) else { return nil }
-
-        guard let contents = try? fm.contentsOfDirectory(
-            at: audioDir,
-            includingPropertiesForKeys: nil
-        ) else { return nil }
-
-        // Prefer M4A exports, then imported files — skip raw CAF and batch metadata
+        let contents = (try? FileManager.default.contentsOfDirectory(
+            at: audioDir, includingPropertiesForKeys: nil
+        )) ?? []
+        // Skip raw CAF and batch metadata; among playable files prefer M4A
+        // exports, tie-broken by filename so the pick is deterministic.
         let skipExtensions: Set<String> = ["caf", "json"]
-        let playable = contents.filter { !skipExtensions.contains($0.pathExtension.lowercased()) }
-        return playable.first
+        return contents
+            .filter { !skipExtensions.contains($0.pathExtension.lowercased()) }
+            .min { a, b in
+                let aM4A = a.pathExtension.lowercased() == "m4a"
+                let bM4A = b.pathExtension.lowercased() == "m4a"
+                if aM4A != bM4A { return aM4A }
+                return a.lastPathComponent < b.lastPathComponent
+            } ?? notesFolderExport(sessionID: sessionID)
     }
 
     // MARK: - Private Helpers
