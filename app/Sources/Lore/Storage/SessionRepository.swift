@@ -969,6 +969,24 @@ actor SessionRepository {
         return nil
     }
 
+    /// Resolve the rebuild source once and answer, from that same resolved
+    /// source, whether the rebuild would destroy speaker separation (#129):
+    /// the per-track stash is gone, so the merged-file pass would label every
+    /// utterance `.them` — while the existing transcript (final if present,
+    /// else live) still distinguishes more than one speaker. One resolution
+    /// serves both the prompt and the engine dispatch, so the check and the
+    /// run can't disagree about the source.
+    func resolveRebuild(sessionID: String) -> RebuildResolution? {
+        guard let source = rebuildAudioSource(sessionID: sessionID) else { return nil }
+        let wouldCollapseSpeakers: Bool
+        if case .file = source {
+            wouldCollapseSpeakers = Set(loadTranscript(sessionID: sessionID).map(\.speaker)).count > 1
+        } else {
+            wouldCollapseSpeakers = false
+        }
+        return RebuildResolution(source: source, wouldCollapseSpeakers: wouldCollapseSpeakers)
+    }
+
     /// The merged m4a export in the notes folder for a session. The export
     /// filename (`AudioRecorder.exportTimestampFormat`, minute resolution)
     /// and the session ID come from two independent `Date()` reads separated
@@ -1323,6 +1341,14 @@ enum RebuildAudioSource: Sendable {
     /// A single merged audio file — the import-style pass
     /// (`BatchTranscriptionEngine.importFile`), single-speaker transcript.
     case file(URL)
+}
+
+/// A rebuild source resolved once (#129): the source drives the engine
+/// dispatch, and the speaker-collapse answer is computed from that same
+/// source so the confirmation prompt and the run can't diverge.
+struct RebuildResolution: Sendable {
+    let source: RebuildAudioSource
+    let wouldCollapseSpeakers: Bool
 }
 
 /// Timing anchor data passed from AudioRecorder to SessionRepository.
