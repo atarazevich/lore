@@ -601,9 +601,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard coordinator.healthMonitor == nil else { return }
 
         let hotkeyManager = coordinator.hotkeyManager
+        // The signing-identity migration (#135, rationale on
+        // `SigningIdentityLedger`) rides on the prober; the monitor reads it
+        // from there.
+        let signingLedger = SigningIdentityLedger(defaults: container?.defaults ?? .standard)
         let prober = HealthProber(
             readTapLiveness: { hotkeyManager.tapLiveness },
-            hasOpenAIKey: { !settings.openaiApiKey.isEmpty }
+            hasOpenAIKey: { !settings.openaiApiKey.isEmpty },
+            signingLedger: signingLedger
         )
         let monitor = HealthMonitor(prober: prober)
 
@@ -631,6 +636,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         coordinator.healthMonitor = monitor
         monitor.start()
+
+        // Proactive summon (#135): the identity changed since the last launch,
+        // so guide the re-grant now instead of waiting for the user to discover
+        // dead hotkeys. Through `onSummon` like every other summon — the notch
+        // wiring has one definition. `start()` ran one refresh synchronously, so
+        // a keystroke that already reached the tap has cleared this.
+        if signingLedger.migrationPending {
+            monitor.onSummon(HealthSummon(probe: .signing))
+        } else {
+            // Nothing pending: make the current identity the record, which is
+            // what starts it on a first-ever launch.
+            signingLedger.acknowledge()
+        }
     }
 
     // MARK: - Global Hotkey (Cmd+Shift+L)

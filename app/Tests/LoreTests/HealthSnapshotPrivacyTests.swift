@@ -28,7 +28,8 @@ final class HealthSnapshotPrivacyTests: XCTestCase {
     /// property `testEveryStringInEncodedSnapshotIsFromTheClosedVocabulary` checks.
     private static var worstCaseLiveness: TapLiveness {
         var liveness = TapLiveness()
-        _ = liveness.observe(isAlive: false, tapSilent: .greatestFiniteMagnitude, sessionSilent: 0,
+        _ = liveness.observe(isAlive: false, hasReceivedKeyDown: true,
+                             tapSilent: .greatestFiniteMagnitude, sessionSilent: 0,
                              secureInputActive: false)
         return liveness
     }
@@ -46,6 +47,7 @@ final class HealthSnapshotPrivacyTests: XCTestCase {
                     status: .failed,
                     secureInputHolderPID: .max,
                     signingCert: .adHoc,
+                    signingIdentityChanged: true,
                     freeDiskGB: 0,
                     lastAttempt: HealthLastAttempt(outcome: .failed, ageSeconds: .max),
                     tapLiveness: Self.worstCaseLiveness

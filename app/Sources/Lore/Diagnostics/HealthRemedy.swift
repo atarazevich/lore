@@ -76,6 +76,13 @@ struct HealthItem: Identifiable, Equatable {
 /// the critical ones carry actionable buttons.
 enum HealthCatalog {
 
+    /// The one procedure that re-binds a TCC grant: macOS keys the grant to the
+    /// signature, so toggling off and on reuses the stale binding while removing
+    /// and re-adding forces a fresh one. Two rows reach the same dead end — a
+    /// measured stale grant on `.tap`, and a signature change on `.signing`
+    /// (#135) — and must not drift apart in wording.
+    private static let reGrantWalkthrough = "Remove Lore from Privacy & Security → Accessibility with the “−” button, do the same under Input Monitoring, quit Lore, then add it back to both and open it again."
+
     /// - Parameters:
     ///   - result: the PII-free probe result.
     ///   - secureInputHolder: who the panel may say holds secure input —
@@ -120,6 +127,17 @@ enum HealthCatalog {
             let title = "Code signature"
             switch result.signingCert {
             case .appleDevelopment, .developerID:
+                // The identity changed since the last launch (#135, rationale on
+                // `SigningIdentityLedger`): the guided re-grant, gated on the
+                // *current* cert being a signed one — a build that migrated INTO
+                // ad-hoc takes the arm below, whose answer is to reinstall, not
+                // to re-grant permissions macOS will drop again next launch.
+                if result.signingIdentityChanged == true {
+                    return (title,
+                            "Lore's signature changed since the last launch — macOS drops permission grants when that happens, even where the toggles still look on.",
+                            Remedy(instruction: "Lore is signed with a different certificate than last time, and macOS tied its Accessibility and Input Monitoring grants to the old one. \(reGrantWalkthrough) This row clears itself as soon as a keystroke actually reaches Lore.",
+                                   actions: [.openSettings(.accessibility), .openSettings(.inputMonitoring), .restartApp]))
+                }
                 let kind = result.signingCert == .developerID ? "Developer ID" : "Apple Development"
                 let team = teamID.map { " (team \($0))" } ?? ""
                 return (title, "Signed with \(kind)\(team).", nil)
@@ -195,7 +213,7 @@ enum HealthCatalog {
             if let liveness = result.tapLiveness, liveness.isStarved == true, liveness.isAlive {
                 return (title,
                         "Keystrokes are reaching the Mac but not Lore — the Mac's last keystroke was \(silence(liveness.sessionSilentSeconds)) ago, while Lore's tap has been silent for \(silence(liveness.tapSilentSeconds)).",
-                        Remedy(instruction: "macOS reports Accessibility and Input Monitoring as granted, yet no keystroke is reaching Lore — that is what a stale permission grant looks like, and toggling the switch off and on does not clear it. Remove Lore from Privacy & Security → Accessibility with the “−” button, do the same under Input Monitoring, quit Lore, then add it back to both and open it again.",
+                        Remedy(instruction: "macOS reports Accessibility and Input Monitoring as granted, yet no keystroke is reaching Lore — that is what a stale permission grant looks like, and toggling the switch off and on does not clear it. \(reGrantWalkthrough)",
                                actions: [.openSettings(.accessibility), .openSettings(.inputMonitoring)]))
             }
             return (title,

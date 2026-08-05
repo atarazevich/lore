@@ -51,6 +51,15 @@ final class HealthSummonTests: XCTestCase {
         XCTAssertTrue(title.contains("no app"), "the user's Raycast hotkey died too — say so")
     }
 
+    /// `.signing` is summoned by the launch check alone (#135), never by the
+    /// debouncer — so the template's "Signing not working" would name a fault
+    /// where the condition is a change.
+    func testSigningSummonNamesTheChangeNotAFault() {
+        let title = HealthSummon(probe: .signing).title
+        XCTAssertTrue(title.contains("signature changed"))
+        XCTAssertFalse(title.contains("not working"))
+    }
+
     func testCriticalFailuresAreOrderedUpstreamFirst() {
         let snap = snapshot([
             HealthResult(id: .microphone, status: .failed),

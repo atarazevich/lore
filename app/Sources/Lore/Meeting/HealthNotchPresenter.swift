@@ -19,16 +19,27 @@ final class HealthNotchPresenter {
     private let timeout: Duration
     private var notch: DynamicNotch<HealthNotchView, EmptyView, EmptyView>?
     private var timeoutTask: Task<Void, Never>?
-    /// Suppresses re-summoning while a summon is already on screen.
-    private var isPresenting = false
+
+    /// The summon on screen, or `nil`. Also the re-summon guard: one notch at a
+    /// time, first come first served — **except** that a critical outage
+    /// displaces a non-critical notice. The launch migration summon (#135) is
+    /// non-critical and holds the notch for the full timeout, which is exactly
+    /// the window in which an Accessibility or Input Monitoring failure surfaces
+    /// (the user has just been told to remove Lore from both panes), and
+    /// `SummonDebouncer` fires once per outage — so a summon dropped here is
+    /// lost for the rest of the session, not merely delayed.
+    private(set) var onScreen: HealthSummon?
 
     init(timeout: Duration = .seconds(30)) {
         self.timeout = timeout
     }
 
     func present(_ summon: HealthSummon) {
-        guard !isPresenting else { return }
-        isPresenting = true
+        if let onScreen {
+            guard summon.probe.isCritical, !onScreen.probe.isCritical else { return }
+            dismiss()
+        }
+        onScreen = summon
 
         let notch = DynamicNotch(hoverBehavior: [.increaseShadow]) {
             HealthNotchView(title: summon.title) { [weak self] in
@@ -63,7 +74,7 @@ final class HealthNotchPresenter {
     func dismiss() {
         timeoutTask?.cancel()
         timeoutTask = nil
-        isPresenting = false
+        onScreen = nil
         guard let notch else { return }
         self.notch = nil
         Task { await notch.hide() }

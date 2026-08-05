@@ -164,6 +164,11 @@ struct HealthResult: Codable, Sendable, Equatable {
     let status: HealthStatus
     var secureInputHolderPID: Int32? = nil
     var signingCert: SigningCertKind? = nil
+    /// `.signing` only: the identity differs from the one seen at the previous
+    /// launch (#135, rationale on `SigningIdentityLedger`). Rides only when true
+    /// (the tri-state discipline `isStarved` set), a Bool, so the PII guarantee
+    /// holds unchanged.
+    var signingIdentityChanged: Bool? = nil
     var freeDiskGB: Int? = nil
     var lastAttempt: HealthLastAttempt? = nil
     /// `.tap` only: the evidence its verdict was derived from, so a report's reader

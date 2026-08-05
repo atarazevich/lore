@@ -17,7 +17,8 @@ final class TapLivenessTests: XCTestCase {
     /// had, because their working Fn key kept reassuring it. Key-downs alone now.
     func testTapStarvesWhileTheSessionIsFedKeyDowns() {
         var liveness = TapLiveness()
-        XCTAssertEqual(liveness.observe(isAlive: true, tapSilent: over, sessionSilent: 0,
+        XCTAssertEqual(liveness.observe(isAlive: true, hasReceivedKeyDown: true,
+                                        tapSilent: over, sessionSilent: 0,
                                         secureInputActive: false), .stalled)
         XCTAssertEqual(liveness.isStarved, true)
     }
@@ -27,7 +28,8 @@ final class TapLivenessTests: XCTestCase {
     /// must say so — `nil`, not a foregone `false` (#99).
     func testOurOwnSilenceIsNotAFaultWhenNobodyElseIsTypingEither() {
         var liveness = TapLiveness()
-        XCTAssertNil(liveness.observe(isAlive: true, tapSilent: over, sessionSilent: over,
+        XCTAssertNil(liveness.observe(isAlive: true, hasReceivedKeyDown: true,
+                                      tapSilent: over, sessionSilent: over,
                                       secureInputActive: false))
         XCTAssertNil(liveness.isStarved, "a quiet machine proves nothing — no verdict, not a verdict of health")
     }
@@ -41,14 +43,16 @@ final class TapLivenessTests: XCTestCase {
     /// shortcuts are broken. This is the inverse of the bug the fix exists to kill.
     func testAStarvationIsNotDrawnWhileSecureInputMakesItUnmeasurable() {
         var liveness = TapLiveness()
-        XCTAssertNil(liveness.observe(isAlive: true, tapSilent: over, sessionSilent: 0,
+        XCTAssertNil(liveness.observe(isAlive: true, hasReceivedKeyDown: true,
+                                      tapSilent: over, sessionSilent: 0,
                                       secureInputActive: true),
                      "the session fed while we are not is what secure input IS — not evidence about our tap")
         XCTAssertNil(liveness.isStarved, "designed never to conclude here, so no verdict exists (#99)")
 
         // The password is typed, the field closes, and the user works with the
         // mouse: nobody types, so neither branch can run again.
-        XCTAssertNil(liveness.observe(isAlive: true, tapSilent: over * 2, sessionSilent: over,
+        XCTAssertNil(liveness.observe(isAlive: true, hasReceivedKeyDown: true,
+                                      tapSilent: over * 2, sessionSilent: over,
                                       secureInputActive: false))
         XCTAssertNil(liveness.isStarved, "nothing was ever measured, so there is nothing to hold")
     }
@@ -59,9 +63,11 @@ final class TapLivenessTests: XCTestCase {
     /// merely did not type for 30 s on their way to opening it.
     func testAQuietMachineDoesNotClearAStarvation() {
         var liveness = TapLiveness()
-        XCTAssertEqual(liveness.observe(isAlive: true, tapSilent: over, sessionSilent: 0,
+        XCTAssertEqual(liveness.observe(isAlive: true, hasReceivedKeyDown: true,
+                                        tapSilent: over, sessionSilent: 0,
                                         secureInputActive: false), .stalled)
-        XCTAssertNil(liveness.observe(isAlive: true, tapSilent: over * 2, sessionSilent: over,
+        XCTAssertNil(liveness.observe(isAlive: true, hasReceivedKeyDown: true,
+                                      tapSilent: over * 2, sessionSilent: over,
                                       secureInputActive: false),
                      "the user simply stopped typing — that is not a recovery")
         XCTAssertEqual(liveness.isStarved, true, "the verdict holds until the tap proves itself fed")
@@ -72,8 +78,10 @@ final class TapLivenessTests: XCTestCase {
     /// is why that term gates only the half that concludes a starvation.
     func testOnlyTheTapReceivingAKeyDownResumesIt() {
         var liveness = TapLiveness()
-        _ = liveness.observe(isAlive: true, tapSilent: over, sessionSilent: 0, secureInputActive: false)
-        XCTAssertEqual(liveness.observe(isAlive: true, tapSilent: 0, sessionSilent: 0,
+        _ = liveness.observe(isAlive: true, hasReceivedKeyDown: true, tapSilent: over,
+                             sessionSilent: 0, secureInputActive: false)
+        XCTAssertEqual(liveness.observe(isAlive: true, hasReceivedKeyDown: true,
+                                        tapSilent: 0, sessionSilent: 0,
                                         secureInputActive: true), .resumed)
         XCTAssertEqual(liveness.isStarved, false)
     }
@@ -83,7 +91,8 @@ final class TapLivenessTests: XCTestCase {
     /// starvation that never happened (#99).
     func testTheFirstFedVerdictIsNotARecovery() {
         var liveness = TapLiveness()
-        XCTAssertNil(liveness.observe(isAlive: true, tapSilent: 0, sessionSilent: 0,
+        XCTAssertNil(liveness.observe(isAlive: true, hasReceivedKeyDown: true,
+                                      tapSilent: 0, sessionSilent: 0,
                                       secureInputActive: false),
                      "nothing was stalled, so nothing resumed — no event")
         XCTAssertEqual(liveness.isStarved, false, "but the verdict is drawn: measured fed")
@@ -93,7 +102,8 @@ final class TapLivenessTests: XCTestCase {
     /// `false`. Old reports, where `false` was ambiguous, must keep decoding.
     func testNoVerdictIsAbsentFromTheWireNotAForegoneFalse() throws {
         var undecided = TapLiveness()
-        _ = undecided.observe(isAlive: true, tapSilent: over * 2, sessionSilent: over,
+        _ = undecided.observe(isAlive: true, hasReceivedKeyDown: true,
+                              tapSilent: over * 2, sessionSilent: over,
                               secureInputActive: false)
         let keys = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: JSONEncoder().encode(undecided)) as? [String: Any]
@@ -101,7 +111,8 @@ final class TapLivenessTests: XCTestCase {
         XCTAssertFalse(keys.contains("isStarved"), "no verdict must not serialize as one")
 
         var fed = TapLiveness()
-        _ = fed.observe(isAlive: true, tapSilent: 0, sessionSilent: 0, secureInputActive: false)
+        _ = fed.observe(isAlive: true, hasReceivedKeyDown: true, tapSilent: 0,
+                        sessionSilent: 0, secureInputActive: false)
         let fedKeys = try XCTUnwrap(
             try JSONSerialization.jsonObject(with: JSONEncoder().encode(fed)) as? [String: Any]
         ).keys
@@ -112,6 +123,8 @@ final class TapLivenessTests: XCTestCase {
         """#.utf8)
         let decoded = try JSONDecoder().decode(TapLiveness.self, from: oldReport)
         XCTAssertEqual(decoded.isStarved, false, "pre-#99 reports keep decoding")
+        XCTAssertNil(decoded.hasReceivedKeyDown,
+                     "a report from before the fact was measured must not claim it either way (#135)")
     }
 
     /// The measurement reaches the panel and the uploaded report, so the counts must
@@ -119,7 +132,8 @@ final class TapLivenessTests: XCTestCase {
     /// conclusion.
     func testTheMeasurementIsCarried() {
         var liveness = TapLiveness()
-        _ = liveness.observe(isAlive: false, tapSilent: 90.7, sessionSilent: 2.3, secureInputActive: false)
+        _ = liveness.observe(isAlive: false, hasReceivedKeyDown: true, tapSilent: 90.7,
+                             sessionSilent: 2.3, secureInputActive: false)
         XCTAssertEqual(liveness.tapSilentSeconds, 90)
         XCTAssertEqual(liveness.sessionSilentSeconds, 2)
         XCTAssertFalse(liveness.isAlive)

@@ -146,7 +146,11 @@ extension HealthResult {
     var plainLanguageIssue: String? {
         guard HealthSummary.countsInFooter(self) else { return nil }
         switch id {
-        case .signing: return "The app isn't signed with a recognized certificate."
+        case .signing:
+            // The migration warning (#135) is about the *change*, not the cert.
+            return signingIdentityChanged == true
+                ? "Lore's signature changed since the last launch — the permission grants may be stale until re-granted."
+                : "The app isn't signed with a recognized certificate."
         case .urlScheme: return "Deep links (lore://) aren't registered with macOS."
         case .diskSpace: return "Free disk space is low."
         case .accessibility: return "Accessibility permission isn't granted — the Fn key can't insert text."

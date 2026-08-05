@@ -10,9 +10,11 @@ import XCTest
 final class HealthProberTests: XCTestCase {
 
     /// A fresh empty event store so the expensive probes have no last-attempt.
-    private func emptyStore() -> DiagStore {
+    /// `static` and shared with the other health suites, like `liveness` and
+    /// `secureInputState` below — one definition of a health test's fixtures.
+    static func emptyStore() -> DiagStore {
         let dir = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("HealthProber-\(UUID().uuidString)", isDirectory: true)
+            .appendingPathComponent("HealthTests-\(UUID().uuidString)", isDirectory: true)
         return DiagStore(directory: dir)
     }
 
@@ -24,7 +26,7 @@ final class HealthProberTests: XCTestCase {
             readTapLiveness: { Self.liveness(alive: alive, stalled: stalled) },
             readSecureInput: { Self.secureInputState(active: secureInput) },
             hasOpenAIKey: { true },
-            store: emptyStore()
+            store: Self.emptyStore()
         )
     }
 
@@ -47,6 +49,7 @@ final class HealthProberTests: XCTestCase {
     static func liveness(alive: Bool, stalled: Bool) -> TapLiveness {
         var liveness = TapLiveness()
         _ = liveness.observe(isAlive: alive,
+                            hasReceivedKeyDown: true,
                             tapSilent: stalled ? TapLiveness.threshold + 1 : 0,
                             sessionSilent: 0,
                             secureInputActive: false)
@@ -96,7 +99,7 @@ final class HealthProberTests: XCTestCase {
         let prober = HealthProber(
             readTapLiveness: { TapLiveness() },
             hasOpenAIKey: { true },
-            store: emptyStore()
+            store: Self.emptyStore()
         )
         XCTAssertNotEqual(tapResult(prober).status, .ok)
     }
@@ -136,13 +139,14 @@ final class HealthProberTests: XCTestCase {
     /// told their keyboard is broken for having entered a password (#97).
     func testAStarvationTheSecureInputWindowWouldHaveProducedNeverSurvivesIt() {
         var measured = TapLiveness()
-        _ = measured.observe(isAlive: true, tapSilent: TapLiveness.threshold + 1, sessionSilent: 0,
+        _ = measured.observe(isAlive: true, hasReceivedKeyDown: true,
+                             tapSilent: TapLiveness.threshold + 1, sessionSilent: 0,
                              secureInputActive: true)
         let prober = HealthProber(
             readTapLiveness: { measured },
             readSecureInput: { Self.secureInputState(active: false) },
             hasOpenAIKey: { true },
-            store: emptyStore()
+            store: Self.emptyStore()
         )
         XCTAssertEqual(tapResult(prober).status, .ok,
                        "secure input clearing must not reveal a verdict it was never possible to measure")
@@ -157,7 +161,7 @@ final class HealthProberTests: XCTestCase {
             readTapLiveness: { TapLiveness() },
             readSecureInput: { Self.secureInputState(active: false, pid: 4242, attribution: .process(4242)) },
             hasOpenAIKey: { true },
-            store: emptyStore()
+            store: Self.emptyStore()
         )
         let row = prober.probe().snapshot.results.first { $0.id == .secureInput }!
         XCTAssertEqual(row.status, .ok)
@@ -171,7 +175,7 @@ final class HealthProberTests: XCTestCase {
             readTapLiveness: { TapLiveness() },
             readSecureInput: { state },
             hasOpenAIKey: { true },
-            store: emptyStore()
+            store: Self.emptyStore()
         )
         let (snapshot, items) = prober.probe()
         return (snapshot.results.first { $0.id == .secureInput }!,

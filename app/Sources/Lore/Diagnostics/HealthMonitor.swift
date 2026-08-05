@@ -17,6 +17,9 @@ struct HealthSummon: Equatable, Sendable {
     var title: String {
         switch probe {
         case .secureInput: return "Secure input is on — no app is receiving keys"
+        // `.signing` summons only for the identity migration (#135), raised by
+        // the launch check — "Signing not working" would name the wrong thing.
+        case .signing: return "Lore's signature changed — permissions need a re-grant"
         default: return "\(probe.shortName) not working"
         }
     }
@@ -111,6 +114,16 @@ final class HealthMonitor {
 
     /// Re-run the cheap chain, publish, and evaluate the self-summon.
     func refresh() {
+        // Close the signing-identity migration (#135, rationale on
+        // `SigningIdentityLedger`) on the one fact a cert change cannot fake: a
+        // key-down that actually reached our tap. Not the permission flags —
+        // they are the part that lies — and not the tap's `.ok`, which a fresh
+        // launch reads on mere aliveness. Acknowledged *before* the probe, so
+        // the chain runs once and the signing row is rendered already clear.
+        if let ledger = prober.signingLedger, ledger.migrationPending,
+           prober.readTapLiveness().hasReceivedKeyDown == true {
+            ledger.acknowledge()
+        }
         let report = prober.probe()
         snapshot = report.snapshot
         items = report.items

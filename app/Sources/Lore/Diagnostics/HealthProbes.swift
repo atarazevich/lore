@@ -28,6 +28,11 @@ struct HealthProber {
     /// well as the `.secureInput` row.
     var readSecureInput: () -> SecureInput.State
     var hasOpenAIKey: () -> Bool
+    /// The signing-identity migration (#135, rationale on `SigningIdentityLedger`).
+    /// The ledger itself, injected once and shared with `HealthMonitor`, which
+    /// reads it from here — one owner, so the row and the acknowledge cannot
+    /// disagree about which ledger they mean.
+    var signingLedger: SigningIdentityLedger?
     var store: DiagStore
     var now: () -> Date
 
@@ -35,12 +40,14 @@ struct HealthProber {
         readTapLiveness: @escaping () -> TapLiveness,
         readSecureInput: @escaping () -> SecureInput.State = SecureInput.read,
         hasOpenAIKey: @escaping () -> Bool,
+        signingLedger: SigningIdentityLedger? = nil,
         store: DiagStore = .shared,
         now: @escaping () -> Date = Date.init
     ) {
         self.readTapLiveness = readTapLiveness
         self.readSecureInput = readSecureInput
         self.hasOpenAIKey = hasOpenAIKey
+        self.signingLedger = signingLedger
         self.store = store
         self.now = now
     }
@@ -150,14 +157,21 @@ struct HealthProber {
 
     private func signingReading() -> Reading {
         let info = SigningIdentity.current()
+        // A pending identity migration (#135) degrades even a well-signed build
+        // to `.warning`: a cheap warning counts in the footer, so "1 issue —
+        // Signing" shows amber until it is acknowledged. Never `.failed` —
+        // `.signing` is not critical, and the guided flow is summoned directly
+        // at launch, not through the debouncer.
+        let changed = signingLedger?.migrationPending ?? false
         let status: HealthStatus
         switch info.certKind {
-        case .appleDevelopment, .developerID: status = .ok
+        case .appleDevelopment, .developerID: status = changed ? .warning : .ok
         case .adHoc: status = .warning
         case .unknown: status = .warning
         }
         return Reading(
-            result: HealthResult(id: .signing, status: status, signingCert: info.certKind),
+            result: HealthResult(id: .signing, status: status, signingCert: info.certKind,
+                                 signingIdentityChanged: changed ? true : nil),
             teamID: info.teamID
         )
     }

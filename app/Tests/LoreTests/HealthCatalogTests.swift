@@ -10,10 +10,12 @@ final class HealthCatalogTests: XCTestCase {
                       holder: SecureInput.Attribution? = nil,
                       holderPID: Int32? = nil,
                       cert: SigningCertKind? = nil,
+                      identityChanged: Bool? = nil,
                       lastAttempt: HealthLastAttempt? = nil) -> HealthItem {
         HealthCatalog.describe(
             HealthResult(id: id, status: status, secureInputHolderPID: holderPID,
-                         signingCert: cert, lastAttempt: lastAttempt),
+                         signingCert: cert, signingIdentityChanged: identityChanged,
+                         lastAttempt: lastAttempt),
             secureInputHolder: holder
         )
     }
@@ -123,6 +125,31 @@ final class HealthCatalogTests: XCTestCase {
         let it = item(.signing, .warning, cert: .adHoc)
         let remedy = try! XCTUnwrap(it.remedy)
         XCTAssertTrue(remedy.instruction.localizedCaseInsensitiveContains("permission"))
+    }
+
+    /// The identity migration (#135): a signed build whose signature changed
+    /// carries the same remove-and-re-add walkthrough as a measured stale grant,
+    /// because macOS keys the grant to the signature and toggling does not
+    /// re-bind it.
+    func testASignatureChangeCarriesTheReGrantWalkthroughWithBothPanes() {
+        let it = item(.signing, .warning, cert: .developerID, identityChanged: true)
+        XCTAssertTrue(it.detail.contains("changed since the last launch"))
+        let remedy = try! XCTUnwrap(it.remedy)
+        XCTAssertTrue(remedy.actions.contains(.openSettings(.accessibility)))
+        XCTAssertTrue(remedy.actions.contains(.openSettings(.inputMonitoring)))
+        XCTAssertTrue(remedy.actions.contains(.restartApp))
+        XCTAssertTrue(remedy.instruction.localizedCaseInsensitiveContains("remove"),
+                      "removing the entry is the step that re-binds a grant; toggling is not")
+    }
+
+    /// A build that changed *into* ad-hoc changed identity too, but re-granting
+    /// is not its answer: macOS drops the grants again on the next launch, so the
+    /// row must keep its own advice — reinstall a signed build.
+    func testAChangeIntoAdHocKeepsTheReinstallAdviceNotTheReGrantWalkthrough() {
+        let it = item(.signing, .warning, cert: .adHoc, identityChanged: true)
+        let remedy = try! XCTUnwrap(it.remedy)
+        XCTAssertTrue(remedy.instruction.localizedCaseInsensitiveContains("reinstall"))
+        XCTAssertEqual(remedy.actions, [], "no pane to re-grant in")
     }
 
     func testDeveloperSigningIsHealthy() {

@@ -21,11 +21,23 @@ struct TapLiveness: Codable, Sendable, Equatable {
     /// reported green for the 5 s before the first health tick, tap or no tap.
     var isAlive = false
 
-    /// Seconds since **our tap's own callback** last received a key-down.
+    /// Seconds since **our tap's own callback** last received a key-down — or,
+    /// while none ever has, since launch. A silence is measured from *something*,
+    /// and launch is the honest floor.
     var tapSilentSeconds = 0
 
     /// Seconds since the **session** last received a key-down, from any process.
     var sessionSilentSeconds = 0
+
+    /// A key-down has actually reached our tap's callback since launch — `nil`
+    /// until the first measurement (and in pre-#135 reports), so it is never a
+    /// foregone `false`, the same wire discipline as `isStarved`.
+    ///
+    /// Kept apart from `tapSilentSeconds`, which is *small right after launch for
+    /// the trivial reason that launch was recent*: a short silence is the absence
+    /// of a measurement, not evidence that the tap is fed. This is the one fact
+    /// the signing-identity migration closes on (`SigningIdentityLedger`).
+    private(set) var hasReceivedKeyDown: Bool? = nil
 
     /// The session is receiving key-downs and our tap is not — or `nil` while no
     /// verdict has been drawn. Tri-state on the wire too: the synthesized Codable
@@ -60,9 +72,11 @@ struct TapLiveness: Codable, Sendable, Equatable {
     /// clearing half is unaffected: a key-down reaching our tap is proof it is fed
     /// no matter what else is true of the machine.
     mutating func observe(
-        isAlive: Bool, tapSilent: TimeInterval, sessionSilent: TimeInterval, secureInputActive: Bool
+        isAlive: Bool, hasReceivedKeyDown: Bool, tapSilent: TimeInterval,
+        sessionSilent: TimeInterval, secureInputActive: Bool
     ) -> Edge? {
         self.isAlive = isAlive
+        self.hasReceivedKeyDown = hasReceivedKeyDown
         tapSilentSeconds = Self.count(tapSilent)
         sessionSilentSeconds = Self.count(sessionSilent)
 

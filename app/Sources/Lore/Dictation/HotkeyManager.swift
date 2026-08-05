@@ -40,7 +40,14 @@ final class HotkeyManager {
     private var healthMonitorTask: Task<Void, Never>?
     /// When our tap's own callback last received a key-down. Stamped **there and
     /// nowhere else** — that is the whole of #97 (see `runHealthCheck` step 4).
-    private var lastTapKeyDown = Date()
+    ///
+    /// `nil` until the first one arrives, so "no key-down has ever reached our
+    /// tap" is a fact we hold rather than a short silence that looks like health
+    /// (#135). Seeding it with `Date()` made every launch read as fed for 30 s;
+    /// seeding it with `.distantPast` would make every launch read as starved.
+    private var lastTapKeyDown: Date?
+    /// The floor a silence is measured from before any key-down has arrived.
+    private let launchedAt = Date()
     /// Previous permission state, tracked per permission so each carries its own edge
     private var lastAccessibilityOK = true
     private var lastInputMonitoringOK = true
@@ -765,7 +772,8 @@ final class HotkeyManager {
         //    Only the transitions are recorded; the verdict latches in `TapLiveness`.
         let edge = tapLiveness.observe(
             isAlive: isEventTapAlive,
-            tapSilent: Date().timeIntervalSince(lastTapKeyDown),
+            hasReceivedKeyDown: lastTapKeyDown != nil,
+            tapSilent: Date().timeIntervalSince(lastTapKeyDown ?? launchedAt),
             sessionSilent: CGEventSource.secondsSinceLastEventType(
                 .combinedSessionState, eventType: .keyDown
             ),
