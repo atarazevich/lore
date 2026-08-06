@@ -9,7 +9,11 @@ import XCTest
 @MainActor
 final class SigningMigrationTests: XCTestCase {
 
-    private var suiteName = ""
+    /// `nonisolated(unsafe)`: `tearDown()` overrides a nonisolated ObjC method
+    /// on this @MainActor class, so it cannot touch actor-isolated state — but
+    /// XCTest runs both the tests and tearDown on the main thread, so the
+    /// access is race-free in practice.
+    private nonisolated(unsafe) var suiteName = ""
 
     private func freshDefaults() -> UserDefaults {
         suiteName = "SigningMigration-\(UUID().uuidString)"
@@ -228,6 +232,31 @@ final class SigningMigrationTests: XCTestCase {
         let backToSigned = SigningIdentityLedger(defaults: defaults, current: info(.developerID, team: "NEW"))
         XCTAssertTrue(backToSigned.migrationPending)
         XCTAssertTrue(backToSigned.claimMigrationSummon(), "new transition — one new announcement")
+    }
+
+    /// The marker describes a *closed* migration once acknowledged: baseline
+    /// A → B summons and persists the "A>B" marker; the identity reverts to A
+    /// and a quiet launch acknowledges (closing nothing — the baseline is still
+    /// A); a later re-sign to B is a fresh TCC-invalidating migration and must
+    /// summon again. A marker surviving the acknowledge would suppress it
+    /// forever.
+    func testTheSameTransitionAfterARevertAndAcknowledgeSummonsAgain() {
+        let defaults = freshDefaults()
+        launch(defaults, info(.appleDevelopment, team: "A"))
+        let toB = SigningIdentityLedger(defaults: defaults, current: info(.appleDevelopment, team: "B"))
+        XCTAssertTrue(toB.claimMigrationSummon(), "first A→B announces")
+
+        // Reverted to A before any ack: nothing pending (the baseline is still
+        // A), so the launch path acknowledges quietly.
+        let reverted = launch(defaults, info(.appleDevelopment, team: "A"))
+        XCTAssertFalse(reverted.migrationPending)
+
+        // Re-signed to B: the same A→B transition string, but the previous
+        // migration is closed — this is a new cause.
+        let again = SigningIdentityLedger(defaults: defaults, current: info(.appleDevelopment, team: "B"))
+        XCTAssertTrue(again.migrationPending)
+        XCTAssertTrue(again.claimMigrationSummon(),
+                      "acknowledge cleared the marker — a fresh migration announces")
     }
 
     func testAQuietLedgerNeverClaimsASummon() {

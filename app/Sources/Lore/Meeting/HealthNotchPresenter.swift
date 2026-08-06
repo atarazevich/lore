@@ -34,9 +34,6 @@ final class HealthNotchPresenter {
     /// Serializes expand/hide — see `NotchOpQueue` for the stranded
     /// continuation this prevents.
     private let windowOps = NotchOpQueue()
-    /// Orders the library's ghost panel back out after a screen-parameter
-    /// rebuild (#144) — see `sweepGhostPanel`.
-    private var ghostSweepTask: Task<Void, Never>?
     private var screenChangeObserver: (any NSObjectProtocol)?
 
     /// The summon on screen, or `nil`. Also the re-summon guard: one notch at a
@@ -146,7 +143,6 @@ final class HealthNotchPresenter {
     /// out — so a dismissed or expired summon is never re-fronted by a display
     /// change (#144). Wrapper-side by design: the SPM checkout stays untouched.
     private func observeScreenChanges() {
-        guard screenChangeObserver == nil else { return }
         screenChangeObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
             object: nil,
@@ -157,13 +153,13 @@ final class HealthNotchPresenter {
     }
 
     private func sweepGhostPanel() {
-        ghostSweepTask?.cancel()
-        ghostSweepTask = Task { [weak self] in
+        Task { [weak self] in
             // The library rebuilds on this same notification; sweep after its
-            // rebuild has settled. Each notification restarts the delay, so a
-            // sleep-wake burst coalesces into one sweep after the last rebuild.
+            // rebuild has settled. Fire-and-forget: `orderOut` is idempotent,
+            // so overlapping sweeps from a notification burst are harmless,
+            // and the `onScreen` guard protects a live summon.
             try? await Task.sleep(for: .milliseconds(500))
-            guard !Task.isCancelled, let self, self.onScreen == nil else { return }
+            guard let self, self.onScreen == nil else { return }
             self.notch?.windowController?.window?.orderOut(nil)
         }
     }

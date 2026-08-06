@@ -85,10 +85,6 @@ final class SigningIdentityLedger {
 
     private let defaults: UserDefaults
     private let current: SigningIdentity.Info
-    /// The baseline fingerprint the pending state was derived from, kept for
-    /// `claimMigrationSummon()`'s transition marker. `nil` when nothing was
-    /// persisted or the current signature is unreadable.
-    private let seenFingerprint: String?
 
     /// True from launch until `acknowledge()`: the binary's identity differs
     /// from the one persisted at the previous launch. First-ever launch (no
@@ -111,11 +107,9 @@ final class SigningIdentityLedger {
         // `acknowledge()` from the launch path.
         guard current.certKind != .unknown,
               let seen = defaults.string(forKey: Self.key) else {
-            seenFingerprint = nil
             migrationPending = false
             return
         }
-        seenFingerprint = seen
         migrationPending = Self.tccKey(seen) != Self.tccKey(Self.fingerprint(current))
     }
 
@@ -128,6 +122,11 @@ final class SigningIdentityLedger {
         // readable launch still has to compare against the real previous one.
         guard current.certKind != .unknown else { return }
         defaults.set(Self.fingerprint(current), forKey: Self.key)
+        // The marker describes a *closed* migration now. Keeping it would
+        // suppress the summon forever if the same transition ever recurs
+        // (revert to the old identity, ack, re-sign) — a fresh TCC-invalidating
+        // migration with no announcement.
+        defaults.removeObject(forKey: Self.summonKey)
         let closedAMigration = migrationPending
         migrationPending = false
         if closedAMigration { onMigrationClosed?() }
@@ -141,8 +140,8 @@ final class SigningIdentityLedger {
     /// so `migrationPending` — and the panel row's warning — survive relaunch
     /// until a real `acknowledge()`.
     func claimMigrationSummon() -> Bool {
-        guard migrationPending, let seenFingerprint else { return false }
-        let transition = "\(Self.tccKey(seenFingerprint))>\(Self.tccKey(Self.fingerprint(current)))"
+        guard migrationPending, let seen = defaults.string(forKey: Self.key) else { return false }
+        let transition = "\(Self.tccKey(seen))>\(Self.tccKey(Self.fingerprint(current)))"
         guard defaults.string(forKey: Self.summonKey) != transition else { return false }
         defaults.set(transition, forKey: Self.summonKey)
         return true

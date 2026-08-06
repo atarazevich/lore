@@ -667,6 +667,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // relaunch is not a new cause, so the notch fires once per transition
         // while the panel row keeps warning until the real acknowledge.
         if signingLedger.migrationPending {
+            // The claim burns the persisted marker before `present()` decides
+            // whether to show — safe only because this runs synchronously on
+            // the main actor before any `noteFailure` Task hop can land and
+            // occupy the notch.
             if signingLedger.claimMigrationSummon() {
                 monitor.onSummon(HealthSummon(trigger: .identityMigration))
             }
