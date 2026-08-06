@@ -28,9 +28,11 @@ struct NotchPromptContent {
 
 /// Minimal seam between the presenter's timer/callback logic and the
 /// DynamicNotchKit window, so the presenter is testable without a display.
+/// One long-lived window per presenter (#141): `present(content:)` replaces
+/// whatever is showing, `dismiss()` takes the panel down.
 @MainActor
 protocol NotchPromptWindow: AnyObject {
-    func present() async
+    func present(content: NotchPromptContent) async
     func dismiss() async
 }
 
@@ -59,31 +61,38 @@ final class NotchPromptPresenter {
     var onTimeout: (() -> Void)?
 
     private let timeout: Duration
-    private let makeWindow: @MainActor (NotchPromptContent) -> NotchPromptWindow
-    private var window: NotchPromptWindow?
+    /// The one long-lived window (#141); tests substitute a fake.
+    private let window: NotchPromptWindow
     private var timeoutTask: Task<Void, Never>?
+    /// True while a prompt is on screen and unresolved.
+    private var promptLive = false
+    /// Serializes present/dismiss — see `NotchOpQueue` for the stranded
+    /// continuation this prevents.
+    private let windowOps = NotchOpQueue()
 
     /// Identifies the live prompt: bumped on every present() so actions from
-    /// a replaced window (mid hide animation) can't resolve the new prompt.
+    /// a replaced prompt (still rendered mid content swap) can't resolve the
+    /// new one.
     private var generation = 0
 
     /// - Parameters:
     ///   - timeout: auto-dismiss interval; injectable for tests.
-    ///   - makeWindow: window factory; tests substitute a stub.
+    ///   - window: the surface's one window; tests substitute a stub.
     init(
         timeout: Duration = .seconds(60),
-        makeWindow: @escaping @MainActor (NotchPromptContent) -> NotchPromptWindow = {
-            DynamicNotchPromptWindow(content: $0)
-        }
+        window: NotchPromptWindow = DynamicNotchPromptWindow()
     ) {
         self.timeout = timeout
-        self.makeWindow = makeWindow
+        self.window = window
     }
 
-    /// Present the detection prompt. A pending prompt is replaced (its window
-    /// dismissed, its timeout cancelled) so at most one prompt is live.
+    /// Present the detection prompt. A pending prompt is replaced in place —
+    /// its timeout dies and its buttons go stale, but the panel is not taken
+    /// down: the new content swaps in through the window's model, so at most
+    /// one prompt is live and the notch never dips mid-replace.
     func present(appName: String?) {
-        cancelPending()
+        timeoutTask?.cancel()
+        timeoutTask = nil
         generation += 1
         let gen = generation
 
@@ -93,9 +102,8 @@ final class NotchPromptPresenter {
             onNotAMeeting: { [weak self] in self?.resolve(gen, "not a meeting", firing: self?.onNotAMeeting) },
             onIgnoreApp: { [weak self] in self?.resolve(gen, "ignore this app", firing: self?.onIgnoreApp) }
         )
-        let window = makeWindow(content)
-        self.window = window
-        Task { await window.present() }
+        promptLive = true
+        windowOps.enqueue { [window] in await window.present(content: content) }
         notchLog.debug("notch prompt shown (\(appName ?? "unknown app", privacy: .private))")
 
         timeoutTask = Task { [weak self, timeout] in
@@ -115,9 +123,10 @@ final class NotchPromptPresenter {
     }
 
     /// One prompt resolves at most once: buttons of an already-resolved
-    /// window (`window == nil`) or a superseded one (stale generation) no-op.
+    /// prompt (`promptLive == false`) or a superseded one (stale generation)
+    /// no-op.
     private func resolve(_ gen: Int, _ action: String, firing callback: (() -> Void)?) {
-        guard gen == generation, window != nil else { return }
+        guard gen == generation, promptLive else { return }
         timeoutTask?.cancel()
         timeoutTask = nil
         dismissWindow()
@@ -126,9 +135,9 @@ final class NotchPromptPresenter {
     }
 
     private func dismissWindow() {
-        guard let window else { return }
-        self.window = nil
-        Task { await window.dismiss() }
+        guard promptLive else { return }
+        promptLive = false
+        windowOps.enqueue { [window] in await window.dismiss() }
     }
 }
 
@@ -138,51 +147,64 @@ final class NotchPromptPresenter {
 /// name beside the notch) on notched screens, expanding to the full prompt on
 /// hover; screens without a notch get the expanded floating pill directly
 /// (DynamicNotchKit's floating style has no compact state).
+///
+/// One `DynamicNotch` for the app's whole life, with per-prompt content
+/// flowing through `model` (#141) — full rationale and the accepted residual
+/// on `HealthNotchPresenter.notch`. Created lazily on the first prompt.
 @MainActor
 final class DynamicNotchPromptWindow: NotchPromptWindow {
-    private let notch: DynamicNotch<NotchPromptExpandedView, NotchPromptCompactIcon, NotchPromptCompactLabel>
-    private let screenHasNotch: Bool
+    private var notch: DynamicNotch<NotchPromptExpandedView, NotchPromptCompactIcon, NotchPromptCompactLabel>?
+    private let model = NotchPromptModel()
     private var hoverObservation: AnyCancellable?
 
-    /// Set once dismiss() runs. present() and the hover-driven state changes
-    /// suspend in DynamicNotchKit's ~0.4s animations; on a rapid replace a
-    /// suspended continuation can resume after dismiss() completed and would
-    /// otherwise re-front the dead panel (orderFrontRegardless) or re-arm the
-    /// hover subscription — so every await is followed by a dismissed check.
-    private var dismissed = false
+    /// Fences async work started for an earlier prompt: present() and the
+    /// hover-driven state changes suspend in DynamicNotchKit's ~0.4s
+    /// animations, and a continuation resuming after this prompt was replaced
+    /// or dismissed must not re-front the panel (orderFrontRegardless) or
+    /// re-arm the hover subscription. The presenter's queue already keeps
+    /// present/dismiss from overlapping; this covers the hover Tasks, which
+    /// run outside it.
+    private var generation = 0
 
-    init(content: NotchPromptContent) {
-        // Main screen (screens[0]) is where DynamicNotchKit presents by default.
-        screenHasNotch = (NSScreen.screens.first?.safeAreaInsets.top ?? 0) > 0
-
-        // No `.keepVisible`: it makes `hide()` spin until the mouse leaves,
-        // which would let a resolved prompt linger under the cursor.
-        let notch = DynamicNotch(hoverBehavior: [.increaseShadow]) {
-            NotchPromptExpandedView(content: content)
-        } compactLeading: {
-            NotchPromptCompactIcon()
-        } compactTrailing: {
-            NotchPromptCompactLabel(appName: content.appName)
-        }
-        notch.transitionConfiguration = .init(skipIntermediateHides: true)
-        self.notch = notch
-    }
-
-    func present() async {
+    func present(content: NotchPromptContent) async {
+        generation += 1
+        let gen = generation
+        model.content = content
+        // Main screen (screens[0]) is where DynamicNotchKit presents by
+        // default. Read per prompt — displays come and go across the app's life.
+        let screenHasNotch = (NSScreen.screens.first?.safeAreaInsets.top ?? 0) > 0
+        let notch = ensureNotch()
         if screenHasNotch {
             await notch.compact()
         } else {
             await notch.expand()
         }
-        guard !dismissed else { return }
+        guard gen == generation else { return }
         applyFullscreenVisibilityPatch()
-        observeHoverForExpansion()
+        observeHoverForExpansion(screenHasNotch: screenHasNotch)
     }
 
     func dismiss() async {
-        dismissed = true
+        generation += 1
         hoverObservation = nil
+        guard let notch else { return }
         await notch.hide()
+    }
+
+    private func ensureNotch() -> DynamicNotch<NotchPromptExpandedView, NotchPromptCompactIcon, NotchPromptCompactLabel> {
+        if let notch { return notch }
+        // No `.keepVisible`: it makes `hide()` spin until the mouse leaves,
+        // which would let a resolved prompt linger under the cursor.
+        let notch = DynamicNotch(hoverBehavior: [.increaseShadow]) { [model] in
+            NotchPromptExpandedView(model: model)
+        } compactLeading: {
+            NotchPromptCompactIcon()
+        } compactTrailing: { [model] in
+            NotchPromptCompactLabel(model: model)
+        }
+        notch.transitionConfiguration = .init(skipIntermediateHides: true)
+        self.notch = notch
+        return notch
     }
 
     /// Upstream gap (DynamicNotchKit 1.1.0): `DynamicNotchPanel` sets
@@ -200,7 +222,7 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
     /// prompt is live), which bypasses this patch until the next state
     /// change. Accepted for v1 — a prompt lives at most 60 seconds.
     private func applyFullscreenVisibilityPatch() {
-        notch.windowController?.window?.applyFullscreenAuxiliaryVisibility()
+        notch?.windowController?.window?.applyFullscreenAuxiliaryVisibility()
     }
 
     /// DynamicNotchKit publishes hover but does not act on it: drive the
@@ -208,27 +230,37 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
     /// hover-away collapses back to compact (not a dismissal; the prompt lives
     /// until a button or the presenter's timeout resolves it). Skipped on
     /// non-notch screens, where `compact()` would hide the floating window.
-    private func observeHoverForExpansion() {
-        guard screenHasNotch else { return }
+    private func observeHoverForExpansion(screenHasNotch: Bool) {
+        guard screenHasNotch, let notch else { return }
+        let gen = generation
         hoverObservation = notch.$isHovering
             .dropFirst()
             .removeDuplicates()
             .sink { [weak self] hovering in
                 guard let self else { return }
                 Task { @MainActor in
-                    guard !self.dismissed else { return }
+                    guard gen == self.generation else { return }
                     if hovering {
-                        await self.notch.expand()
+                        await notch.expand()
                     } else {
-                        await self.notch.compact()
+                        await notch.compact()
                     }
-                    guard !self.dismissed else { return }
+                    guard gen == self.generation else { return }
                     // State transitions from hidden recreate the panel with
                     // the library's default behavior — re-apply.
                     self.applyFullscreenVisibilityPatch()
                 }
             }
     }
+}
+
+/// The reusable notch's one mutable input (#141): DynamicNotchKit captures its
+/// content views once at init, so per-prompt content has to flow through an
+/// observed model rather than freshly built views. `nil` only before the first
+/// prompt, when the notch has never been shown.
+@MainActor
+final class NotchPromptModel: ObservableObject {
+    @Published var content: NotchPromptContent?
 }
 
 // MARK: - Prompt views (dark by design — notch content is always dark)
@@ -242,10 +274,10 @@ struct NotchPromptCompactIcon: View {
 }
 
 struct NotchPromptCompactLabel: View {
-    let appName: String?
+    @ObservedObject var model: NotchPromptModel
 
     var body: some View {
-        Text(appName ?? "Meeting?")
+        Text(model.content?.appName ?? "Meeting?")
             .font(LoreTheme.Typography.secondary)
             .foregroundStyle(LoreTheme.TextColor.primary)
             .lineLimit(1)
@@ -253,29 +285,31 @@ struct NotchPromptCompactLabel: View {
 }
 
 struct NotchPromptExpandedView: View {
-    let content: NotchPromptContent
+    @ObservedObject var model: NotchPromptModel
 
     var body: some View {
-        VStack(spacing: 10) {
-            Text("Meeting detected — start transcribing?")
-                .font(LoreTheme.Typography.control)
-                .foregroundStyle(LoreTheme.TextColor.primary)
-            HStack(spacing: 8) {
-                NotchPromptButton(
-                    title: "Start transcribing",
-                    isPrimary: true,
-                    action: content.onAccept
-                )
-                NotchPromptButton(title: "Not a meeting", action: content.onNotAMeeting)
-                // No attribution — nothing "this app" could refer to, and
-                // ignoring would be a guaranteed no-op (#101).
-                if content.appName != nil {
-                    NotchPromptButton(title: "Ignore this app", action: content.onIgnoreApp)
+        if let content = model.content {
+            VStack(spacing: 10) {
+                Text("Meeting detected — start transcribing?")
+                    .font(LoreTheme.Typography.control)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                HStack(spacing: 8) {
+                    NotchPromptButton(
+                        title: "Start transcribing",
+                        isPrimary: true,
+                        action: content.onAccept
+                    )
+                    NotchPromptButton(title: "Not a meeting", action: content.onNotAMeeting)
+                    // No attribution — nothing "this app" could refer to, and
+                    // ignoring would be a guaranteed no-op (#101).
+                    if content.appName != nil {
+                        NotchPromptButton(title: "Ignore this app", action: content.onIgnoreApp)
+                    }
                 }
             }
+            .padding(.vertical, 4)
+            .fixedSize()
         }
-        .padding(.vertical, 4)
-        .fixedSize()
     }
 }
 

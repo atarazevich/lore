@@ -17,17 +17,31 @@ final class HealthNotchPresenter {
     var onFix: (() -> Void)?
 
     private let timeout: Duration
+    /// One `DynamicNotch` for the presenter's whole life — the full #141
+    /// rationale for both notch surfaces (`DynamicNotchPromptWindow` points
+    /// here): the library's init spawns an unstructured Task iterating
+    /// screen-parameter notifications forever with a strong `self` capture, so
+    /// no DynamicNotch ever deallocates. Per-present construction therefore
+    /// accumulated an instance per summon, each rebuilding a ghost panel
+    /// (`initializeWindow` + `orderFrontRegardless`) on every display change.
+    /// Created lazily on the first summon; per-summon content flows through
+    /// `model` instead. Accepted residual: the observer re-creates and fronts
+    /// the one panel on display changes even while hidden — a steady count of
+    /// one per surface (#141's criterion), not growth.
     private var notch: DynamicNotch<HealthNotchView, EmptyView, EmptyView>?
+    private let model = HealthNotchModel()
     private var timeoutTask: Task<Void, Never>?
+    /// Serializes expand/hide — see `NotchOpQueue` for the stranded
+    /// continuation this prevents.
+    private let windowOps = NotchOpQueue()
 
     /// The summon on screen, or `nil`. Also the re-summon guard: one notch at a
     /// time, first come first served — **except** that a critical outage
     /// displaces a non-critical notice. The launch migration summon (#135) is
     /// non-critical and holds the notch for the full timeout, which is exactly
     /// the window in which an Accessibility or Input Monitoring failure surfaces
-    /// (the user has just been told to remove Lore from both panes), and
-    /// `SummonDebouncer` fires once per outage — so a summon dropped here is
-    /// lost for the rest of the session, not merely delayed.
+    /// (the user has just been told to remove Lore from both panes) — so a
+    /// summon dropped here could go unseen for the rest of the outage.
     private(set) var onScreen: HealthSummon?
 
     init(timeout: Duration = .seconds(30)) {
@@ -37,25 +51,23 @@ final class HealthNotchPresenter {
     func present(_ summon: HealthSummon) {
         if let onScreen {
             guard summon.probe.isCritical, !onScreen.probe.isCritical else { return }
-            dismiss()
         }
+        let alreadyUp = onScreen != nil
         onScreen = summon
+        model.title = summon.title
 
-        let notch = DynamicNotch(hoverBehavior: [.increaseShadow]) {
-            HealthNotchView(title: summon.title) { [weak self] in
-                self?.fix()
+        timeoutTask?.cancel()
+        let notch = ensureNotch()
+        // Displacement is a pure content swap: the notch is already expanded,
+        // so only a hidden notch needs the raise.
+        if !alreadyUp {
+            windowOps.enqueue { [weak self] in
+                await notch.expand()
+                // Dismissed mid-animation: don't re-front a panel the library
+                // is about to close.
+                guard self?.onScreen != nil else { return }
+                notch.windowController?.window?.applyFullscreenAuxiliaryVisibility()
             }
-        } compactLeading: {
-            EmptyView()
-        } compactTrailing: {
-            EmptyView()
-        }
-        notch.transitionConfiguration = .init(skipIntermediateHides: true)
-        self.notch = notch
-
-        Task {
-            await notch.expand()
-            notch.windowController?.window?.applyFullscreenAuxiliaryVisibility()
         }
         healthNotchLog.debug("health notch summoned: \(summon.probe.rawValue, privacy: .public)")
 
@@ -74,16 +86,43 @@ final class HealthNotchPresenter {
     func dismiss() {
         timeoutTask?.cancel()
         timeoutTask = nil
+        guard onScreen != nil else { return }
         onScreen = nil
         guard let notch else { return }
-        self.notch = nil
-        Task { await notch.hide() }
+        // The reference is deliberately kept (see `notch`): `hide()` closes the
+        // library's panel only at the end of its animation, so the presenter
+        // must not forget the window before that completes.
+        windowOps.enqueue { await notch.hide() }
     }
+
+    private func ensureNotch() -> DynamicNotch<HealthNotchView, EmptyView, EmptyView> {
+        if let notch { return notch }
+        let notch = DynamicNotch(hoverBehavior: [.increaseShadow]) { [model] in
+            HealthNotchView(model: model) { [weak self] in
+                self?.fix()
+            }
+        } compactLeading: {
+            EmptyView()
+        } compactTrailing: {
+            EmptyView()
+        }
+        notch.transitionConfiguration = .init(skipIntermediateHides: true)
+        self.notch = notch
+        return notch
+    }
+}
+
+/// The reusable notch's one mutable input (#141): DynamicNotchKit captures its
+/// content view once at init, so per-summon content has to flow through an
+/// observed model rather than a freshly built view.
+@MainActor
+final class HealthNotchModel: ObservableObject {
+    @Published var title = ""
 }
 
 /// The expanded alert content. Dark by design — notch content is always dark.
 struct HealthNotchView: View {
-    let title: String
+    @ObservedObject var model: HealthNotchModel
     let onFix: () -> Void
 
     var body: some View {
@@ -91,7 +130,7 @@ struct HealthNotchView: View {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 13, weight: .semibold))
                 .foregroundStyle(LoreTheme.Accent.red)
-            Text(title)
+            Text(model.title)
                 .font(LoreTheme.Typography.control)
                 .foregroundStyle(LoreTheme.TextColor.primary)
             Button("Fix it", action: onFix)
