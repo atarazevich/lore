@@ -141,7 +141,10 @@ final class HealthNotchPresenter {
     /// the #141 residual). With the model cleared on dismiss the rebuilt panel
     /// carries no summon content, and this sweep orders the ghost window back
     /// out — so a dismissed or expired summon is never re-fronted by a display
-    /// change (#144). Wrapper-side by design: the SPM checkout stays untouched.
+    /// change (#144). While a summon IS live, the rebuilt panel carries the
+    /// library's default window properties, so the fullscreen/screen-share
+    /// patch is re-applied instead (#145). Wrapper-side by design: the SPM
+    /// checkout stays untouched.
     private func observeScreenChanges() {
         screenChangeObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -155,12 +158,16 @@ final class HealthNotchPresenter {
     private func sweepGhostPanel() {
         Task { [weak self] in
             // The library rebuilds on this same notification; sweep after its
-            // rebuild has settled. Fire-and-forget: `orderOut` is idempotent,
-            // so overlapping sweeps from a notification burst are harmless,
-            // and the `onScreen` guard protects a live summon.
+            // rebuild has settled. Fire-and-forget: both branches are
+            // idempotent, so overlapping sweeps from a notification burst are
+            // harmless, and the `onScreen` check protects a live summon.
             try? await Task.sleep(for: .milliseconds(500))
-            guard let self, self.onScreen == nil else { return }
-            self.notch?.windowController?.window?.orderOut(nil)
+            guard let self, let window = self.notch?.windowController?.window else { return }
+            if self.onScreen == nil {
+                window.orderOut(nil)
+            } else {
+                window.applyFullscreenAuxiliaryVisibility()
+            }
         }
     }
 }

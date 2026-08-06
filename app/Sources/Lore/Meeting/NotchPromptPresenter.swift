@@ -156,6 +156,10 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
     private var notch: DynamicNotch<NotchPromptExpandedView, NotchPromptCompactIcon, NotchPromptCompactLabel>?
     private let model = NotchPromptModel()
     private var hoverObservation: AnyCancellable?
+    private var screenChangeObserver: (any NSObjectProtocol)?
+    /// True from present() until dismiss(): gates the screen-change re-apply,
+    /// which must never `orderFrontRegardless()` a hidden panel.
+    private var promptShowing = false
 
     /// Fences async work started for an earlier prompt: present() and the
     /// hover-driven state changes suspend in DynamicNotchKit's ~0.4s
@@ -169,6 +173,7 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
     func present(content: NotchPromptContent) async {
         generation += 1
         let gen = generation
+        promptShowing = true
         model.content = content
         // Main screen (screens[0]) is where DynamicNotchKit presents by
         // default. Read per prompt — displays come and go across the app's life.
@@ -186,6 +191,7 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
 
     func dismiss() async {
         generation += 1
+        promptShowing = false
         hoverObservation = nil
         guard let notch else { return }
         await notch.hide()
@@ -204,23 +210,42 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
         }
         notch.transitionConfiguration = .init(skipIntermediateHides: true)
         self.notch = notch
+        observeScreenChanges()
         return notch
+    }
+
+    /// The library re-creates its panel on `didChangeScreenParametersNotification`
+    /// (display plug/unplug while a prompt is live) with default window
+    /// properties — captured by screen recordings and invisible over fullscreen
+    /// apps. Re-apply the patch after the library's rebuild settles (#145;
+    /// same delay rationale as `HealthNotchPresenter.sweepGhostPanel`). While
+    /// no prompt is showing, do nothing: the patch fronts the panel, and a
+    /// hidden ghost must not be raised.
+    private func observeScreenChanges() {
+        screenChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in
+                try? await Task.sleep(for: .milliseconds(500))
+                guard let self, self.promptShowing else { return }
+                self.applyFullscreenVisibilityPatch()
+            }
+        }
     }
 
     /// Upstream gap (DynamicNotchKit 1.1.0): `DynamicNotchPanel` sets
     /// `collectionBehavior = [.canJoinAllSpaces, .stationary]` — without
     /// `.fullScreenAuxiliary` the prompt never appears over fullscreen apps
-    /// (fullscreen Zoom is the primary use case). The library exposes its
-    /// `windowController` publicly for exactly this kind of adjustment, so we
-    /// patch the panel after each present/state change (the panel is recreated
-    /// from hidden state). Reference config: NotchDrop's NotchWindow (MIT).
-    /// Panel level stays at the library's `.screenSaver` default, which is
-    /// already above fullscreen content.
-    ///
-    /// Known residual gap: the library also re-creates its panel on
-    /// `didChangeScreenParametersNotification` (display plug/unplug while a
-    /// prompt is live), which bypasses this patch until the next state
-    /// change. Accepted for v1 — a prompt lives at most 60 seconds.
+    /// (fullscreen Zoom is the primary use case) — and no `sharingType`, so
+    /// screen recordings capture it against the user's setting (#145). The
+    /// library exposes its `windowController` publicly for exactly this kind
+    /// of adjustment, so we patch the panel after each present/state change
+    /// (the panel is recreated from hidden state) and after screen-parameter
+    /// rebuilds (`observeScreenChanges`). Reference config: NotchDrop's
+    /// NotchWindow (MIT). Panel level stays at the library's `.screenSaver`
+    /// default, which is already above fullscreen content.
     private func applyFullscreenVisibilityPatch() {
         notch?.windowController?.window?.applyFullscreenAuxiliaryVisibility()
     }
