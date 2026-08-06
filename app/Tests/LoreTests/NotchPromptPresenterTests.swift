@@ -15,6 +15,11 @@ private final class StubNotchWindow: NotchPromptWindow {
     var gateDismiss = false
     private var dismissGate: CheckedContinuation<Void, Never>?
 
+    /// True while `dismiss()` sits suspended in the gate — the test waits on
+    /// it so `releaseDismiss()` cannot silently no-op on a gate nobody has
+    /// entered yet (#147).
+    var dismissGateEntered: Bool { dismissGate != nil }
+
     func present(content: NotchPromptContent) async {
         ops.append(.present(appName: content.appName))
         presented.append(content)
@@ -35,12 +40,15 @@ private final class StubNotchWindow: NotchPromptWindow {
     var dismissCount: Int { ops.filter { $0 == .dismiss }.count }
 }
 
+/// Every wait in this suite is condition- or expectation-driven (#147): a
+/// positive claim waits on the event with a generous ceiling; a negative claim
+/// ("this never fires") holds an inverted expectation open for a bounded
+/// window, which contention can only make stricter, never flaky.
 @MainActor
 final class NotchPromptPresenterTests: XCTestCase {
     private var window: StubNotchWindow!
 
-    override func setUp() {
-        super.setUp()
+    override func setUp() async throws {
         window = StubNotchWindow()
     }
 
@@ -48,9 +56,31 @@ final class NotchPromptPresenterTests: XCTestCase {
         NotchPromptPresenter(timeout: timeout, window: window)
     }
 
-    /// Let the presenter's queued window Tasks run.
-    private func drain() async {
-        try? await Task.sleep(for: .milliseconds(50))
+    /// Checked, condition-driven replacement for `window.presented[index]`:
+    /// waits until the op queue has delivered present #(index + 1), and fails
+    /// instead of crashing when it never arrives.
+    private func presentedContent(at index: Int) async -> NotchPromptContent? {
+        guard await waitUntil({ window.presented.count > index }) else {
+            XCTFail("present #\(index + 1) never reached the window; ops so far: \(window.ops)")
+            return nil
+        }
+        return window.presented[index]
+    }
+
+    /// Negative-claim window (#147): holds an inverted expectation open for
+    /// `window` seconds after rebinding the callback under test — `rebind`
+    /// receives the fulfill hook and must keep incrementing the test's own
+    /// counter. A fire inside the window fails the test; contention can only
+    /// make the check stricter, never flaky.
+    private func assertStaysSilent(
+        _ description: String,
+        window: TimeInterval,
+        rebind: (@escaping () -> Void) -> Void
+    ) async {
+        let silent = expectation(description: description)
+        silent.isInverted = true
+        rebind { silent.fulfill() }
+        await fulfillment(of: [silent], timeout: window)
     }
 
     // MARK: - Timeout
@@ -58,10 +88,17 @@ final class NotchPromptPresenterTests: XCTestCase {
     func testTimeoutFiresOnTimeoutOnceAndDismissesWindow() async {
         let presenter = makePresenter(timeout: .milliseconds(50))
         var timeouts = 0
-        presenter.onTimeout = { timeouts += 1 }
+        let timedOut = expectation(description: "onTimeout fires")
+        presenter.onTimeout = { timeouts += 1; timedOut.fulfill() }
 
         presenter.present(appName: "Zoom")
-        try? await Task.sleep(for: .milliseconds(200))
+        await fulfillment(of: [timedOut], timeout: 5)
+        await waitUntil { window.dismissCount == 1 }
+
+        // Bounded negative window: a re-armed timer would fire again in here.
+        await assertStaysSilent("timeout does not re-fire", window: 0.2) { fulfill in
+            presenter.onTimeout = { timeouts += 1; fulfill() }
+        }
 
         XCTAssertEqual(timeouts, 1, "timeout fires exactly once")
         XCTAssertEqual(window.dismissCount, 1, "window dismissed on timeout")
@@ -74,7 +111,12 @@ final class NotchPromptPresenterTests: XCTestCase {
 
         presenter.present(appName: "Zoom")
         presenter.cancelPending()
-        try? await Task.sleep(for: .milliseconds(200))
+        await waitUntil { window.dismissCount == 1 }
+        // 50ms timer against a 200ms inverted window: a timer cancelPending
+        // failed to cancel fires inside it (an earlier fire trips the counter).
+        await assertStaysSilent("cancelled timer never fires", window: 0.2) { fulfill in
+            presenter.onTimeout = { timeouts += 1; fulfill() }
+        }
 
         XCTAssertEqual(timeouts, 0, "cancelPending prevents the timeout callback")
         XCTAssertEqual(window.dismissCount, 1, "cancelPending dismisses the window")
@@ -83,7 +125,13 @@ final class NotchPromptPresenterTests: XCTestCase {
     // MARK: - Actions route to the matching callback, once, and cancel the timeout
 
     func testAcceptFiresOnAcceptAndDismisses() async {
-        let presenter = makePresenter(timeout: .milliseconds(50))
+        // 60s timeout: the accept cannot race a live deadline (the old 50ms
+        // timer vs 50ms drain coin flip). Mis-routes to the other callbacks
+        // are synchronous inside the click, so the counters catch them.
+        // Accept-path timer cancellation is NOT pinned by this suite — doing
+        // that deterministically needs a cancellation seam on the presenter,
+        // deliberately out of #147's test-only scope.
+        let presenter = makePresenter(timeout: .seconds(60))
         var accepts = 0
         var others = 0
         presenter.onAccept = { accepts += 1 }
@@ -92,13 +140,13 @@ final class NotchPromptPresenterTests: XCTestCase {
         presenter.onTimeout = { others += 1 }
 
         presenter.present(appName: "Zoom")
-        await drain()
-        window.presented[0].onAccept()
-        window.presented[0].onAccept() // second click on a resolved prompt
-        try? await Task.sleep(for: .milliseconds(200)) // past the timeout
+        guard let prompt = await presentedContent(at: 0) else { return }
+        prompt.onAccept()
+        prompt.onAccept() // second click on a resolved prompt
+        await waitUntil { window.dismissCount == 1 }
 
         XCTAssertEqual(accepts, 1, "accept fires exactly once")
-        XCTAssertEqual(others, 0, "no other callback fires — including the cancelled timeout")
+        XCTAssertEqual(others, 0, "no other callback fires")
         XCTAssertEqual(window.dismissCount, 1)
     }
 
@@ -110,12 +158,12 @@ final class NotchPromptPresenterTests: XCTestCase {
         presenter.onIgnoreApp = { ignores += 1 }
 
         presenter.present(appName: "Zoom")
-        await drain()
-        window.presented[0].onNotAMeeting()
+        guard let zoom = await presentedContent(at: 0) else { return }
+        zoom.onNotAMeeting() // resolves synchronously
+
         presenter.present(appName: "Meet")
-        await drain()
-        window.presented[1].onIgnoreApp()
-        await drain()
+        guard let meet = await presentedContent(at: 1) else { return }
+        meet.onIgnoreApp()
 
         XCTAssertEqual(notAMeetings, 1)
         XCTAssertEqual(ignores, 1)
@@ -127,23 +175,38 @@ final class NotchPromptPresenterTests: XCTestCase {
         let presenter = makePresenter(timeout: .milliseconds(100))
         var accepts = 0
         var timeouts = 0
+        let timedOut = expectation(description: "the live prompt times out")
         presenter.onAccept = { accepts += 1 }
-        presenter.onTimeout = { timeouts += 1 }
+        presenter.onTimeout = { timeouts += 1; timedOut.fulfill() }
 
         presenter.present(appName: "Zoom")
         presenter.present(appName: "Meet")
-        await drain()
+        await waitUntil { window.ops.count >= 2 }
 
         // A replace is a content swap, not a down-and-up: no dismiss between
-        // the two presents — the panel must not dip mid-replace.
-        XCTAssertEqual(window.ops, [.present(appName: "Zoom"), .present(appName: "Meet")])
+        // the two presents — the panel must not dip mid-replace. (The live
+        // prompt's timeout dismiss lands later, beyond this prefix.)
+        XCTAssertEqual(
+            Array(window.ops.prefix(2)),
+            [.present(appName: "Zoom"), .present(appName: "Meet")]
+        )
 
-        // The replaced prompt's buttons are dead.
-        window.presented[0].onAccept()
+        // The replaced prompt's buttons are dead — stale generation, so this
+        // holds whether or not the live prompt has timed out yet.
+        guard let zoom = await presentedContent(at: 0) else { return }
+        zoom.onAccept()
         XCTAssertEqual(accepts, 0, "replaced prompt must not fire callbacks")
 
         // Only the live prompt's timeout fires, and it takes the panel down.
-        try? await Task.sleep(for: .milliseconds(300))
+        await fulfillment(of: [timedOut], timeout: 5)
+        await waitUntil { window.dismissCount == 1 }
+
+        // Bounded negative window: had the replaced prompt's timer survived,
+        // it was armed alongside the live one and fires in here.
+        await assertStaysSilent("the replaced prompt's timer is dead", window: 0.3) { fulfill in
+            presenter.onTimeout = { timeouts += 1; fulfill() }
+        }
+
         XCTAssertEqual(timeouts, 1, "exactly one timeout for the live prompt")
         XCTAssertEqual(window.dismissCount, 1)
     }
@@ -160,16 +223,16 @@ final class NotchPromptPresenterTests: XCTestCase {
         window.gateDismiss = true
 
         presenter.present(appName: "Zoom")
-        await drain()
-        presenter.cancelPending() // dismiss starts and suspends in the gate
-        presenter.present(appName: "Meet") // must queue behind it
-        await drain()
+        presenter.cancelPending() // dismiss queues behind the present, then suspends in the gate
+        presenter.present(appName: "Meet") // must queue behind the dismiss
+        let gateEntered = await waitUntil { window.dismissGateEntered }
+        XCTAssertTrue(gateEntered, "dismiss never reached its gate")
 
         XCTAssertEqual(window.ops, [.present(appName: "Zoom")],
                        "the second present must not start while the dismiss is in flight")
 
         window.releaseDismiss()
-        await drain()
+        await waitUntil { window.ops.count >= 3 }
         XCTAssertEqual(
             window.ops,
             [.present(appName: "Zoom"), .dismiss, .present(appName: "Meet")],
@@ -182,7 +245,8 @@ final class NotchPromptPresenterTests: XCTestCase {
     func testCancelPendingWithoutPromptIsSafe() async {
         let presenter = makePresenter()
         presenter.cancelPending() // must not crash or touch the window
-        await drain()
+        // Bounded negative wait: a regressed window op gets 200ms to surface.
+        await waitUntil(timeout: .milliseconds(200)) { !window.ops.isEmpty }
         XCTAssertTrue(window.ops.isEmpty)
     }
 }
