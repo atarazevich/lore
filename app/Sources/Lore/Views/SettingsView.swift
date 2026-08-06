@@ -222,17 +222,15 @@ struct SettingsView: View {
     /// liveness verdict — checking… / rejected (red) / OK (muted). An
     /// inconclusive probe (offline) falls back to the neutral description.
     private var openAIKeySub: String {
+        let powers = "cleanup, translation, refinement, Ask \(LoreTheme.wordmark)"
         if openAIKeyWarningActive { return "OpenAI API key required" }
-        guard !settings.openaiApiKey.isEmpty else {
-            return "Powers cleanup, translation, refinement, Ask Lore"
-        }
+        guard !settings.openaiApiKey.isEmpty else { return "Powers \(powers)" }
         switch keyHealth {
         case .invalid: return "Key rejected by OpenAI (401)"
-        case .ok: return "Key OK \u{2014} powers cleanup, translation, refinement, Ask Lore"
-        case .unknown: return "Powers cleanup, translation, refinement, Ask Lore"
+        case .ok: return "Key OK \u{2014} powers \(powers)"
+        case .unknown: return "Powers \(powers)"
         case nil:
-            return keyProbeTask == nil
-                ? "Powers cleanup, translation, refinement, Ask Lore" : "Checking key\u{2026}"
+            return keyProbeTask == nil ? "Powers \(powers)" : "Checking key\u{2026}"
         }
     }
 

@@ -28,7 +28,7 @@ struct HealthSummon: Equatable, Sendable {
         // Raised by the launch check alone (#135): the condition is a change,
         // not a fault, so no "not working" template fits it.
         case .identityMigration:
-            return "Lore's signature changed — permissions need a re-grant"
+            return "\(LoreTheme.wordmark)'s signature changed — permissions need a re-grant"
         case .captureFailed:
             return explanation == .microphone
                 ? "Recording failed — microphone access is off"

@@ -440,7 +440,7 @@ final class SessionRepositoryTests: XCTestCase {
         )
 
         let text = await repo.exportPlainText(sessionID: sessionID)
-        XCTAssertTrue(text.contains("Lore"))
+        XCTAssertTrue(text.contains(LoreTheme.wordmark))
         XCTAssertTrue(text.contains("You: Hello there"))
         XCTAssertTrue(text.contains("Them: Hi back"))
 

@@ -353,7 +353,7 @@ final class HealthProberTests: XCTestCase {
     func testAStarvedTapRowShowsTheMeasurementItsVerdictCameFrom() {
         let tap = prober(alive: true, stalled: true).probe().items.first { $0.id == .tap }!
         XCTAssertEqual(tap.status, .warning)
-        XCTAssertTrue(tap.detail.contains("reaching the Mac but not Lore"),
+        XCTAssertTrue(tap.detail.contains("reaching the Mac but not \(LoreTheme.wordmark)"),
                       "the row states what the gap means, not arithmetic for the reader to get wrong")
         XCTAssertTrue(tap.detail.contains("silent for 31s"),
                       "the row states how long our tap has gone without a keystroke")

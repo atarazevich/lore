@@ -873,7 +873,7 @@ actor SessionRepository {
         let headerFmt = DateFormatter()
         headerFmt.dateStyle = .medium
         headerFmt.timeStyle = .short
-        var result = "Lore - \(headerFmt.string(from: startDate))\n\n"
+        var result = "\(LoreTheme.wordmark) - \(headerFmt.string(from: startDate))\n\n"
 
         let timeFmt = DateFormatter()
         timeFmt.dateFormat = "HH:mm:ss"

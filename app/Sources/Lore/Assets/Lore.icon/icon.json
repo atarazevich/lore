@@ -1,0 +1,26 @@
+{
+  "fill": {
+    "linear-gradient": [
+      "extended-srgb:0.20000,0.20000,0.22745,1.00000",
+      "extended-srgb:0.08235,0.08235,0.09020,1.00000"
+    ]
+  },
+  "groups": [
+    {
+      "layers": [
+        {
+          "image-name": "mark.svg",
+          "name": "mark"
+        }
+      ]
+    }
+  ],
+  "supported-platforms": {
+    "circles": [
+      "watchOS"
+    ],
+    "squares": [
+      "macOS"
+    ]
+  }
+}

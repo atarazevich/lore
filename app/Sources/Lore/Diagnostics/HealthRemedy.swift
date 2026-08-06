@@ -41,7 +41,7 @@ enum HealthRemedyAction: Equatable, Sendable {
     var buttonLabel: String {
         switch self {
         case .openSettings(let pane): return pane.buttonLabel
-        case .restartApp: return "Restart Lore"
+        case .restartApp: return "Restart \(LoreTheme.wordmark)"
         case .openLoreSettings: return "Open Settings"
         case .testNow: return "Test now"
         }
@@ -81,7 +81,7 @@ enum HealthCatalog {
     /// and re-adding forces a fresh one. Two rows reach the same dead end — a
     /// measured stale grant on `.tap`, and a signature change on `.signing`
     /// (#135) — and must not drift apart in wording.
-    private static let reGrantWalkthrough = "Remove Lore from Privacy & Security → Accessibility with the “−” button, do the same under Input Monitoring, quit Lore, then add it back to both and open it again."
+    private static let reGrantWalkthrough = "Remove \(LoreTheme.wordmark) from Privacy & Security → Accessibility with the “−” button, do the same under Input Monitoring, quit \(LoreTheme.wordmark), then add it back to both and open it again."
 
     /// - Parameters:
     ///   - result: the PII-free probe result.
@@ -134,8 +134,8 @@ enum HealthCatalog {
                 // to re-grant permissions macOS will drop again next launch.
                 if result.signingIdentityChanged == true {
                     return (title,
-                            "Lore's signature changed since the last launch — macOS drops permission grants when that happens, even where the toggles still look on.",
-                            Remedy(instruction: "Lore is signed with a different certificate than last time, and macOS tied its Accessibility and Input Monitoring grants to the old one. \(reGrantWalkthrough) This row clears itself as soon as a keystroke actually reaches Lore.",
+                            "\(LoreTheme.wordmark)'s signature changed since the last launch — macOS drops permission grants when that happens, even where the toggles still look on.",
+                            Remedy(instruction: "\(LoreTheme.wordmark) is signed with a different certificate than last time, and macOS tied its Accessibility and Input Monitoring grants to the old one. \(reGrantWalkthrough) This row clears itself as soon as a keystroke actually reaches \(LoreTheme.wordmark).",
                                    actions: [.openSettings(.accessibility), .openSettings(.inputMonitoring), .restartApp]))
                 }
                 let kind = result.signingCert == .developerID ? "Developer ID" : "Apple Development"
@@ -161,17 +161,17 @@ enum HealthCatalog {
         // MARK: Input
 
         case .accessibility:
-            if ok { return ("Accessibility", "Granted — Lore can post keystrokes.", nil) }
+            if ok { return ("Accessibility", "Granted — \(LoreTheme.wordmark) can post keystrokes.", nil) }
             return ("Accessibility",
-                    "macOS reports Accessibility as off for Lore. If the toggle looks on, macOS no longer recognizes this build.",
-                    Remedy(instruction: "macOS shows Lore as enabled but no longer recognizes it. Turn Lore off, then on again in Privacy & Security → Accessibility, then restart Lore.",
+                    "macOS reports Accessibility as off for \(LoreTheme.wordmark). If the toggle looks on, macOS no longer recognizes this build.",
+                    Remedy(instruction: "macOS shows \(LoreTheme.wordmark) as enabled but no longer recognizes it. Turn \(LoreTheme.wordmark) off, then on again in Privacy & Security → Accessibility, then restart \(LoreTheme.wordmark).",
                            actions: [.openSettings(.accessibility), .restartApp]))
 
         case .inputMonitoring:
-            if ok { return ("Input Monitoring", "Granted — Lore receives the Fn key.", nil) }
+            if ok { return ("Input Monitoring", "Granted — \(LoreTheme.wordmark) receives the Fn key.", nil) }
             return ("Input Monitoring",
-                    "Input Monitoring is off, so the Fn hotkey never reaches Lore.",
-                    Remedy(instruction: "Enable Lore under Privacy & Security → Input Monitoring, then restart Lore.",
+                    "Input Monitoring is off, so the Fn hotkey never reaches \(LoreTheme.wordmark).",
+                    Remedy(instruction: "Enable \(LoreTheme.wordmark) under Privacy & Security → Input Monitoring, then restart \(LoreTheme.wordmark).",
                            actions: [.openSettings(.inputMonitoring), .restartApp]))
 
         case .tap:
@@ -189,7 +189,7 @@ enum HealthCatalog {
             if secureInputActive {
                 return (title,
                         "Can't be measured while secure input is on — it starves every app's keyboard tap by design. See Secure input above.",
-                        Remedy(instruction: "Secure input is holding the keyboard; that is what stops Lore's shortcuts. Release it (see the Secure input item above) — restarting Lore will not help while it is on.",
+                        Remedy(instruction: "Secure input is holding the keyboard; that is what stops \(LoreTheme.wordmark)'s shortcuts. Release it (see the Secure input item above) — restarting \(LoreTheme.wordmark) will not help while it is on.",
                                actions: []))
             }
             // A live tap that is starved is the *only* case a restart cannot fix:
@@ -205,13 +205,13 @@ enum HealthCatalog {
             // subtraction the reader can get sign-wrong (#99).
             if let liveness = result.tapLiveness, liveness.isStarved == true, liveness.isAlive {
                 return (title,
-                        "Keystrokes are reaching the Mac but not Lore — the Mac's last keystroke was \(silence(liveness.sessionSilentSeconds)) ago, while Lore's tap has been silent for \(silence(liveness.tapSilentSeconds)).",
-                        Remedy(instruction: "macOS reports Accessibility and Input Monitoring as granted, yet no keystroke is reaching Lore — that is what a stale permission grant looks like, and toggling the switch off and on does not clear it. \(reGrantWalkthrough)",
+                        "Keystrokes are reaching the Mac but not \(LoreTheme.wordmark) — the Mac's last keystroke was \(silence(liveness.sessionSilentSeconds)) ago, while \(LoreTheme.wordmark)'s tap has been silent for \(silence(liveness.tapSilentSeconds)).",
+                        Remedy(instruction: "macOS reports Accessibility and Input Monitoring as granted, yet no keystroke is reaching \(LoreTheme.wordmark) — that is what a stale permission grant looks like, and toggling the switch off and on does not clear it. \(reGrantWalkthrough)",
                                actions: [.openSettings(.accessibility), .openSettings(.inputMonitoring)]))
             }
             return (title,
-                    "Lore's keyboard tap isn't installed.",
-                    Remedy(instruction: "Restart Lore to reinstall the keyboard tap. If it keeps failing, check Input Monitoring above.",
+                    "\(LoreTheme.wordmark)'s keyboard tap isn't installed.",
+                    Remedy(instruction: "Restart \(LoreTheme.wordmark) to reinstall the keyboard tap. If it keeps failing, check Input Monitoring above.",
                            actions: [.restartApp, .openSettings(.inputMonitoring)]))
 
         case .secureInput:
@@ -229,7 +229,7 @@ enum HealthCatalog {
             // almost immediately when the real holder quits.
             if holder == .misattributed {
                 return ("Secure input",
-                        "Secure input is active, held by a process macOS won't name — the recorded holder is a system process that was merely in front when the flag was grabbed. While on, no app — including Lore — receives keystrokes.",
+                        "Secure input is active, held by a process macOS won't name — the recorded holder is a system process that was merely in front when the flag was grabbed. While on, no app — including \(LoreTheme.wordmark) — receives keystrokes.",
                         Remedy(instruction: "Quit likely holders one at a time while watching this panel — this row clears within about 5 seconds of quitting the right one. Prime suspects: Electron and Chromium apps, password managers, and Terminal or iTerm with Secure Keyboard Entry enabled. If nothing clears it, log out or restart the Mac; locking and unlocking the screen does not release it.",
                                actions: []))
             }
@@ -249,7 +249,7 @@ enum HealthCatalog {
                 ", and macOS associates it with \($0) — though it names whichever app was in front, which may not be the one responsible"
             } ?? ""
             return ("Secure input",
-                    "Secure input is active\(hint). While on, no app — including Lore — receives keystrokes.",
+                    "Secure input is active\(hint). While on, no app — including \(LoreTheme.wordmark) — receives keystrokes.",
                     Remedy(instruction: "A password field or app has locked keyboard input. Close it (or click out of the password field) to release the Fn key.",
                            actions: []))
 
@@ -261,12 +261,12 @@ enum HealthCatalog {
             // asked yet, and the first recording triggers the prompt.
             if result.status == .warning {
                 return ("Microphone permission",
-                        "Not requested yet — macOS asks the first time Lore records.",
+                        "Not requested yet — macOS asks the first time \(LoreTheme.wordmark) records.",
                         nil)
             }
             return ("Microphone permission",
                     "Microphone access is off, so dictation and meetings can't record.",
-                    Remedy(instruction: "Enable Lore under Privacy & Security → Microphone.",
+                    Remedy(instruction: "Enable \(LoreTheme.wordmark) under Privacy & Security → Microphone.",
                            actions: [.openSettings(.microphone), .restartApp]))
 
         // MARK: Transcription
@@ -285,13 +285,13 @@ enum HealthCatalog {
                     Remedy(instruction: "It downloads alongside the transcription model on first use.",
                            actions: [.testNow(.modelWarmup)]))
 
-        // MARK: Cleanup & Ask Lore
+        // MARK: Cleanup & Ask lore
 
         case .openAIKey:
             if ok { return ("OpenAI key", "Present in Keychain.", nil) }
             return ("OpenAI key",
-                    "No OpenAI key is set, so cleanup, translate and Ask Lore are unavailable.",
-                    Remedy(instruction: "Add your OpenAI API key in Settings to enable cleanup and Ask Lore.",
+                    "No OpenAI key is set, so cleanup, translate and Ask \(LoreTheme.wordmark) are unavailable.",
+                    Remedy(instruction: "Add your OpenAI API key in Settings to enable cleanup and Ask \(LoreTheme.wordmark).",
                            actions: [.openLoreSettings]))
 
         // Expensive probes are dispatched by cost at the top of `copy`; this arm

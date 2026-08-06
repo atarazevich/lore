@@ -3,15 +3,17 @@
 <plist version="1.0">
 <dict>
 	<key>CFBundleDisplayName</key>
-	<string>Lore</string>
+	<string>lore</string>
 	<key>CFBundleExecutable</key>
 	<string>Lore</string>
 	<key>CFBundleIconFile</key>
-	<string>AppIcon</string>
+	<string>Lore</string>
+	<key>CFBundleIconName</key>
+	<string>Lore</string>
 	<key>CFBundleIdentifier</key>
 	<string>com.lore.app</string>
 	<key>CFBundleName</key>
-	<string>Lore</string>
+	<string>lore</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
@@ -41,9 +43,9 @@
 		<true/>
 	</dict>
 	<key>NSAudioCaptureUsageDescription</key>
-	<string>Lore needs system audio recording access to transcribe other participants in real time.</string>
+	<string>lore needs system audio recording access to transcribe other participants in real time.</string>
 	<key>NSMicrophoneUsageDescription</key>
-	<string>Lore needs microphone access to transcribe your voice in real-time during conversations.</string>
+	<string>lore needs microphone access to transcribe your voice in real-time during conversations.</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
 	<key>SUScheduledCheckInterval</key>

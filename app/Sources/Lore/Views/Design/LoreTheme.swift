@@ -9,7 +9,7 @@ enum LoreTheme {
 
     /// Brand wordmark. Single constant — every screen must reference this
     /// instead of hardcoding the name.
-    static let wordmark = "Lore"
+    static let wordmark = "lore"
 
     // MARK: - Surfaces
 
@@ -70,7 +70,7 @@ enum LoreTheme {
         static let card: CGFloat = 7
         /// Buttons 5px (`--r-btn`).
         static let button: CGFloat = 5
-        /// Chips 6px (`--r-chip`, also brand mark and value/key buttons).
+        /// Chips 6px (`--r-chip`, also value/key buttons).
         static let chip: CGFloat = 6
         /// Popover 8px (`--r-pop`).
         static let popover: CGFloat = 8
@@ -124,8 +124,6 @@ enum LoreTheme {
         static let windowRim = rgb(255, 255, 255, 0.14)
         /// Popover: `0 18px 44px -10px rgba(0,0,0,.6)`.
         static let popover = ShadowSpec(color: .black.opacity(0.6), radius: 22, x: 0, y: 18)
-        /// Blue mark glow: `0 2px 10px rgba(10,132,255,.35)`.
-        static let blueGlow = ShadowSpec(color: Accent.blue.opacity(0.35), radius: 5, x: 0, y: 2)
         /// Active Stop button: `0 6px 18px rgba(255,69,58,.35)`.
         static let redGlow = ShadowSpec(color: Accent.red.opacity(0.35), radius: 9, x: 0, y: 6)
     }

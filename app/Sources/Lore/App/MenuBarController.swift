@@ -9,6 +9,11 @@ final class MenuBarController {
     private let coordinator: AppCoordinator
     private let settings: AppSettings
     private var iconUpdateTask: Task<Void, Never>?
+    /// The recording bead, hosted so it is literally the same view as the REC
+    /// pill's dot — same 1.3s cycle, same glow, same Reduce Motion behaviour.
+    /// A template image could not carry it: macOS repaints every pixel of one
+    /// with the bar's label colour, and an `NSImage` cannot animate.
+    private var beadView: BeadHost?
 
     var onShowMainWindow: (() -> Void)?
     /// Routes to the Meetings destination of the unified window (used when a
@@ -57,10 +62,16 @@ final class MenuBarController {
         popover.contentViewController = NSHostingController(rootView: popoverView)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: LoreTheme.wordmark)
-            button.image?.isTemplate = true
+            button.image = LoreMark.statusItem
             button.target = self
             button.action = #selector(togglePopover(_:))
+
+            // Placed once, by the host itself, and re-placed only if the bar ever
+            // resizes the button — `updateIcon` just shows and hides it.
+            let bead = BeadHost(rootView: LorePulsingDot(size: LoreMarkGeometry.beadSize))
+            bead.isHidden = true
+            button.addSubview(bead)
+            beadView = bead
         }
 
         applyScreenShareVisibility()
@@ -100,13 +111,15 @@ final class MenuBarController {
         }
     }
 
+    /// The glyph never changes — only the bead comes and goes. Its slot is already
+    /// reserved inside `LoreMarkGeometry.statusBox`, so the letter does not shift.
     private func updateIcon() {
-        let symbolName = coordinator.isRecording ? "waveform.circle.fill" : "waveform.circle"
-        statusItem.button?.image = NSImage(
-            systemSymbolName: symbolName,
-            accessibilityDescription: LoreTheme.wordmark
-        )
-        statusItem.button?.image?.isTemplate = true
+        let recording = coordinator.isRecording
+        guard let button = statusItem.button else { return }
+        // On the button, not on the image: the image is a shared instance.
+        button.setAccessibilityLabel(
+            recording ? "\(LoreTheme.wordmark) \u{2014} recording" : LoreTheme.wordmark)
+        beadView?.isHidden = !recording
     }
 
     /// The status-bar button lives in a system-owned `NSStatusBarWindow` that is
@@ -119,5 +132,33 @@ final class MenuBarController {
         let type = settings.screenSharingType
         statusItem.button?.window?.sharingType = type
         popover.contentViewController?.view.window?.sharingType = type
+    }
+}
+
+/// Hosts the recording bead inside the status-item button. Two overrides earn
+/// the subclass:
+///
+/// - `hitTest` returns nil so the bead is invisible to the mouse. Its padded
+///   12.8pt frame covers most of the 22pt button's right half, and a hosting
+///   view answers hit tests for its own bounds — measured, it swallowed clicks
+///   on the whole right half while recording.
+/// - the frame is placed here rather than in `updateIcon`, once on insertion and
+///   again only if the bar ever resizes the button.
+private final class BeadHost: NSHostingView<LorePulsingDot> {
+
+    override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+    override func viewDidMoveToSuperview() {
+        super.viewDidMoveToSuperview()
+        place()
+    }
+
+    override func resize(withOldSuperviewSize oldSize: NSSize) {
+        place()
+    }
+
+    private func place() {
+        guard let superview else { return }
+        frame = LoreMark.beadFrame(in: superview.bounds, flipped: superview.isFlipped)
     }
 }

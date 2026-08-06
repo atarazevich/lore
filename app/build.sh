@@ -63,18 +63,59 @@ if ! COMMIT_COUNT=$(git rev-list --count HEAD 2>/dev/null); then
     exit 1
 fi
 
-# Read with plutil, not `defaults read`: cfprefsd caches by path and can hand back a
-# stale value after release.sh rewrites the plist out of band.
+# plutil for every read and every write of this plist, never `defaults`: the
+# latter goes through cfprefsd, which caches by path and can hand back — or write
+# back — a copy that predates the edits below.
 MARKETING_VERSION=$(plutil -extract CFBundleShortVersionString raw -o - "Sources/Lore/Info.plist")
 BUILD_VERSION="$(echo "$MARKETING_VERSION" | cut -d. -f1,2).${COMMIT_COUNT}"
-defaults write "$PWD/$CONTENTS/Info.plist" CFBundleVersion "$BUILD_VERSION"
-plutil -convert xml1 "$CONTENTS/Info.plist"
+plutil -replace CFBundleVersion -string "$BUILD_VERSION" "$CONTENTS/Info.plist"
 echo "Version: $MARKETING_VERSION (build $BUILD_VERSION, commit #$COMMIT_COUNT)"
 
-# Copy app icon
-if [ -f "Sources/Lore/Assets/AppIcon.icns" ]; then
-    cp "Sources/Lore/Assets/AppIcon.icns" "$RESOURCES/AppIcon.icns"
+# Compile the macOS 26 icon document into Assets.car (the appearance stacks the
+# Dock reads) plus a partial plist naming the icon, merged below so Info.plist
+# never drifts from the artwork. Regenerate the document with
+# `python3 tools/make_mark.py`.
+if ! xcrun --find actool > /dev/null 2>&1; then
+    echo "Error: actool is missing. The app icon is a macOS 26 .icon document, and only" >&2
+    echo "  Xcode's actool compiles it — the Command Line Tools alone do not ship it." >&2
+    echo "  Install Xcode, then: sudo xcode-select -s /Applications/Xcode.app" >&2
+    exit 1
 fi
+ICON_DOC="Sources/Lore/Assets/Lore.icon"
+PARTIAL_PLIST="$BUILD_DIR/icon-partial.plist"
+xcrun actool --compile "$RESOURCES" --platform macosx \
+    --minimum-deployment-target 26.0 \
+    --app-icon Lore \
+    --output-partial-info-plist "$PARTIAL_PLIST" \
+    "$ICON_DOC" > /dev/null
+# actool still exits 0 when --app-icon names something the document does not
+# define; it just writes an empty partial plist. So the extracted value, not the
+# exit code, is what says the icon compiled.
+for key in CFBundleIconFile CFBundleIconName; do
+    ICON_VALUE=$(plutil -extract "$key" raw -o - "$PARTIAL_PLIST" 2>/dev/null || true)
+    if [ -z "$ICON_VALUE" ]; then
+        echo "Error: actool compiled no $key. Its --app-icon name (Lore) must match the" >&2
+        echo "  icon $ICON_DOC declares — a mismatch is silent." >&2
+        exit 1
+    fi
+    plutil -replace "$key" -string "$ICON_VALUE" "$CONTENTS/Info.plist"
+done
+
+# Committed artwork, copied in verbatim. Lore.icns overwrites the one actool just
+# emitted, which carries only the 16 and 128 slots — Package.swift targets
+# macOS 15, where the Dock and Finder read CFBundleIconFile rather than
+# Assets.car, and upsample everything else from those two. The two PDFs are the
+# marks the app draws itself (sidebar chip, status-item glyph); they load through
+# Bundle.main, not Bundle.module, because a SwiftPM resource bundle does not
+# survive a hand-assembled .app (the trap MeetingDetector.swift:365 documents for
+# its meeting-app table).
+for asset in Lore.icns BrandMark.pdf MenuBarMark.pdf; do
+    if [ ! -f "Sources/Lore/Assets/$asset" ]; then
+        echo "Error: Sources/Lore/Assets/$asset is missing — run python3 tools/make_mark.py" >&2
+        exit 1
+    fi
+    cp "Sources/Lore/Assets/$asset" "$RESOURCES/$asset"
+done
 
 # Copy Sparkle framework
 if [ -d "$BUILD_DIR/Sparkle.framework" ]; then

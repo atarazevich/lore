@@ -27,7 +27,7 @@ enum HealthSection: String, Codable, Sendable, CaseIterable {
         case .input: return "Input"
         case .audio: return "Audio"
         case .transcription: return "Transcription"
-        case .cleanup: return "Cleanup & Ask Lore"
+        case .cleanup: return "Cleanup & Ask \(LoreTheme.wordmark)"
         case .meetings: return "Meetings"
         }
     }

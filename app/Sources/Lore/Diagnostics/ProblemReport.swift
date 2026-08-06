@@ -149,19 +149,19 @@ extension HealthResult {
         case .signing:
             // The migration warning (#135) is about the *change*, not the cert.
             return signingIdentityChanged == true
-                ? "Lore's signature changed since the last launch — the permission grants may be stale until re-granted."
+                ? "\(LoreTheme.wordmark)'s signature changed since the last launch — the permission grants may be stale until re-granted."
                 : "The app isn't signed with a recognized certificate."
         case .diskSpace: return "Free disk space is low."
         case .accessibility: return "Accessibility permission isn't granted — the Fn key can't insert text."
         case .inputMonitoring: return "Input Monitoring permission isn't granted — the hotkey can't be seen."
-        case .tap: return "Lore's shortcuts aren't reaching it while other apps are focused (the event tap is dead or starved)."
+        case .tap: return "\(LoreTheme.wordmark)'s shortcuts aren't reaching it while other apps are focused (the event tap is dead or starved)."
         case .secureInput: return "Secure input is active, blocking the hotkey."
         case .microphone: return "Microphone permission isn't granted."
         case .micCapture: return "The last microphone capture failed."
         case .asrModel: return "The transcription model isn't installed."
         case .vadModel: return "The voice-activity model isn't installed."
         case .modelWarmup: return "The last model warm-up failed."
-        case .openAIKey: return "No OpenAI key is set — cleanup, translation and Ask Lore are off."
+        case .openAIKey: return "No OpenAI key is set — cleanup, translation and Ask \(LoreTheme.wordmark) are off."
         case .openAILiveness: return "The last OpenAI check failed."
         case .systemAudio: return "The last system-audio capture failed."
         }

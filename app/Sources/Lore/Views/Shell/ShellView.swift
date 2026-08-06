@@ -190,20 +190,13 @@ private struct ShellSidebar: View {
         }
     }
 
-    /// 28px blue rounded mark + wordmark (SHELL-07). Single-constant brand
-    /// so the pending app rename is one change (app-shell.md Q4).
+    /// 28px mark + wordmark (SHELL-07). The chip is the icon's own artwork, not
+    /// a typeset initial: a bare lowercase `l` in SF Pro is the ambiguous glyph
+    /// the mark was drawn in Menlo to avoid.
     private var brandRow: some View {
         HStack(spacing: 10) {
-            ZStack {
-                RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
-                    .fill(LoreTheme.Accent.blue)
-                    .frame(width: 28, height: 28)
-                    .loreShadow(LoreTheme.Shadow.blueGlow)
-                Text(String(LoreTheme.wordmark.prefix(1)))
-                    .font(.system(size: 13, weight: .semibold))
-                    .kerning(-0.26)
-                    .foregroundStyle(.white)
-            }
+            Image(nsImage: LoreMark.chip)
+                .accessibilityHidden(true)
             Text(LoreTheme.wordmark)
                 .font(LoreTheme.Typography.control)
                 .kerning(-0.13) // CSS `.brand .name` letter-spacing -.01em at 13px
@@ -373,7 +366,10 @@ struct LorePulsingDot: View {
         Circle()
             .fill(color)
             .frame(width: size, height: size)
-            .shadow(color: color, radius: 4)
+            // CSS `drop-shadow(0 0 <diameter>)`: a blur equal to the dot's own
+            // size, and SwiftUI's radius is half the CSS blur. Proportional, not
+            // the literal 4, so the 3.2pt menu-bar bead glows like the 8pt one.
+            .shadow(color: color, radius: size / 2)
             .phaseAnimator([1.0, 0.25]) { view, phase in
                 view.opacity(reduceMotion ? 1 : phase)
             } animation: { _ in

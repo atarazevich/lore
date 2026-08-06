@@ -344,7 +344,7 @@ final class SystemAudioCapture: @unchecked Sendable {
             case .outputDeviceUIDUnavailable(let status):
                 return "Unable to inspect the system output device (OSStatus \(status))."
             case .tapCreationFailed(let status):
-                return "System audio capture could not start. Enable System Audio Recording for Lore in System Settings > Privacy & Security (OSStatus \(status))."
+                return "System audio capture could not start. Enable System Audio Recording for \(LoreTheme.wordmark) in System Settings > Privacy & Security (OSStatus \(status))."
             case .aggregateDeviceCreationFailed(let status):
                 return "Unable to create the Core Audio aggregate device (OSStatus \(status))."
             case .tapFormatUnavailable(let status):
