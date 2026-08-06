@@ -56,13 +56,14 @@ enum SigningIdentity {
 
 /// Persists the identity seen at the last launch and detects a change (#135).
 ///
-/// **The rationale every other #135 site points back to.** A certificate change
-/// (free Apple Development → Developer ID at v3.0.0, or any future cert event)
+/// **The rationale every other #135 site points back to.** A TCC-affecting
+/// certificate change (a different team, or a transition involving ad-hoc)
 /// makes macOS silently invalidate the Accessibility and Input Monitoring
 /// grants — often while the toggles still *look* on and `AXIsProcessTrusted()`
 /// still reads true (the "granted but Fn dead" incident, design §6). So the
 /// change itself is the signal to guide a re-grant; the permission flags are
-/// exactly the part that lies across it, and cannot raise it.
+/// exactly the part that lies across it, and cannot raise it. Same-team cert
+/// flips (dev ↔ release) share grants and are non-events (#140, `tccKey`).
 ///
 /// For the same reason the flow closes only on the one fact that cannot lie: a
 /// key-down that actually reached Lore's own tap
@@ -98,7 +99,7 @@ final class SigningIdentityLedger {
             migrationPending = false
             return
         }
-        migrationPending = seen != Self.fingerprint(current)
+        migrationPending = Self.tccKey(seen) != Self.tccKey(Self.fingerprint(current))
     }
 
     /// Make the current identity the record: called on positive evidence the
@@ -113,10 +114,25 @@ final class SigningIdentityLedger {
         migrationPending = false
     }
 
-    /// Cert kind and team in one string, so "did the identity change" is one
-    /// read and one `==`. An ad-hoc build has no team; the empty half is part of
-    /// the fingerprint and round-trips like any other.
+    /// Cert kind and team in one string. The full pair stays the *stored* record
+    /// (precise history, and old records parse unchanged); comparison goes
+    /// through `tccKey`.
     private static func fingerprint(_ info: SigningIdentity.Info) -> String {
         "\(info.certKind.rawValue)|\(info.teamID ?? "")"
+    }
+
+    /// What a fingerprint means to TCC (#140). macOS keys Accessibility / Input
+    /// Monitoring grants to the designated requirement, which `build.sh` pins to
+    /// the *team* — so an Apple Development ↔ Developer ID flip within the same
+    /// team keeps its grants and must not summon a re-grant walkthrough. Only a
+    /// change that actually invalidates grants is a migration: a different team,
+    /// or any transition involving ad-hoc (which has no team to key on).
+    private static func tccKey(_ fingerprint: String) -> String {
+        let parts = fingerprint.split(separator: "|", maxSplits: 1, omittingEmptySubsequences: false)
+        guard parts.count == 2 else { return fingerprint }
+        let (kind, team) = (parts[0], parts[1])
+        let teamSigned = kind == SigningCertKind.appleDevelopment.rawValue
+            || kind == SigningCertKind.developerID.rawValue
+        return teamSigned && !team.isEmpty ? String(team) : fingerprint
     }
 }

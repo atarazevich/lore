@@ -35,6 +35,9 @@ struct HealthPanelView: View {
         .background(LoreTheme.Surface.window)
         .background(.ultraThinMaterial)
         .preferredColorScheme(.dark)
+        // The panel is an on-open fact sheet (#140): probes run when it opens,
+        // not on a background cycle.
+        .onAppear { monitor.refresh() }
     }
 
     // MARK: - Header

@@ -34,7 +34,7 @@ final class HealthCatalogTests: XCTestCase {
 
     func testEveryFailingCheapProbeCarriesARemedy() {
         // secureInput/signing failures are handled below with their extras.
-        let plain: [HealthProbeID] = [.urlScheme, .accessibility, .inputMonitoring,
+        let plain: [HealthProbeID] = [.accessibility, .inputMonitoring,
                                       .tap, .microphone, .asrModel, .vadModel, .openAIKey]
         for id in plain {
             XCTAssertNotNil(item(id, .failed).remedy, "\(id.rawValue) failed must carry a remedy")

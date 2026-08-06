@@ -67,6 +67,16 @@ final class HealthSummaryTests: XCTestCase {
         XCTAssertEqual(s.text, "1 issue — Disk space")
     }
 
+    /// #140: a mic `.warning` is `.notDetermined` — macOS was never asked. A
+    /// fresh install that has not recorded yet is not "1 issue — Microphone";
+    /// a denied mic still lands as `.failed` and counts.
+    func testAnUnrequestedMicrophonePermissionDoesNotCountInFooter() {
+        let s = summary([result(.microphone, .warning)])
+        XCTAssertEqual(s.issueCount, 0)
+        XCTAssertEqual(s.text, "All systems ready")
+        XCTAssertEqual(summary([result(.microphone, .failed)]).issueCount, 1)
+    }
+
     // MARK: - C2: untested expensive probes must not cry wolf
 
     /// A dictation-only user, with everything working, never exercises System

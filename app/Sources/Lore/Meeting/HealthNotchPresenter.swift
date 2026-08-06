@@ -5,9 +5,9 @@ import SwiftUI
 
 private let healthNotchLog = Logger(subsystem: "com.lore.app", category: "HealthNotch")
 
-/// Raises the notch to summon the user when a critical health link fails (#83,
-/// design §6) — "Keyboard shortcuts not working / Fix it" — rather than waiting for the
-/// panel to be found. A deliberately simpler surface than the meeting prompt
+/// Raises the notch to summon the user when a user action just failed (#140,
+/// design §6) — "Recording failed — microphone access is off / Fix it" — rather
+/// than waiting for the panel to be found. A deliberately simpler surface than the meeting prompt
 /// (`NotchPromptPresenter`): a single alert with one action and an auto-timeout,
 /// always expanded (no compact/hover island), so it does not reuse that
 /// presenter's meeting-shaped content and callbacks.
@@ -36,12 +36,11 @@ final class HealthNotchPresenter {
     private let windowOps = NotchOpQueue()
 
     /// The summon on screen, or `nil`. Also the re-summon guard: one notch at a
-    /// time, first come first served — **except** that a critical outage
-    /// displaces a non-critical notice. The launch migration summon (#135) is
-    /// non-critical and holds the notch for the full timeout, which is exactly
-    /// the window in which an Accessibility or Input Monitoring failure surfaces
-    /// (the user has just been told to remove Lore from both panes) — so a
-    /// summon dropped here could go unseen for the rest of the outage.
+    /// time, first come first served — **except** that a failed user action
+    /// displaces the launch migration notice (#135), which is advice, holds the
+    /// notch for its full timeout, and goes up at exactly the moment failures
+    /// caused by the stale grants start happening (the user has just been told
+    /// to remove Lore from both permission panes).
     private(set) var onScreen: HealthSummon?
 
     init(timeout: Duration = .seconds(30)) {
@@ -50,11 +49,14 @@ final class HealthNotchPresenter {
 
     func present(_ summon: HealthSummon) {
         if let onScreen {
-            guard summon.probe.isCritical, !onScreen.probe.isCritical else { return }
+            guard summon.isCritical, !onScreen.isCritical else { return }
         }
         let alreadyUp = onScreen != nil
         onScreen = summon
         model.title = summon.title
+        // The summon's observable trace (#140): before these, events.json held
+        // no record that a summon ever fired, so history was unrecoverable.
+        DiagStore.record(.healthSummonFired(trigger: summon.trigger))
 
         timeoutTask?.cancel()
         let notch = ensureNotch()
@@ -69,7 +71,7 @@ final class HealthNotchPresenter {
                 notch.windowController?.window?.applyFullscreenAuxiliaryVisibility()
             }
         }
-        healthNotchLog.debug("health notch summoned: \(summon.probe.rawValue, privacy: .public)")
+        healthNotchLog.debug("health notch summoned: \(summon.trigger.rawValue, privacy: .public)")
 
         timeoutTask = Task { [weak self, timeout] in
             try? await Task.sleep(for: timeout)
@@ -88,6 +90,7 @@ final class HealthNotchPresenter {
         timeoutTask = nil
         guard onScreen != nil else { return }
         onScreen = nil
+        DiagStore.record(.healthSummonCleared)
         guard let notch else { return }
         // The reference is deliberately kept (see `notch`): `hide()` closes the
         // library's panel only at the end of its animation, so the presenter

@@ -315,9 +315,10 @@ final class ProblemReportTests: XCTestCase {
         stalled.stalled = true
         monitor.refresh()
 
-        // The drift lever is real: a *fresh* probe now reports the tap differently.
+        // The drift lever is real: a *fresh* probe now reports the tap
+        // differently (a measured starvation reads `.warning` since #140).
         XCTAssertEqual(previewedTap, .ok)
-        XCTAssertEqual(monitor.snapshot.results.first { $0.id == .tap }?.status, .failed)
+        XCTAssertEqual(monitor.snapshot.results.first { $0.id == .tap }?.status, .warning)
 
         _ = try await composer.send()
         let postedBytes = try XCTUnwrap(StubURLProtocol.lastBody)

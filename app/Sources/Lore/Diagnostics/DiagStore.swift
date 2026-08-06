@@ -37,6 +37,16 @@ final class DiagStore: @unchecked Sendable {
     /// beyond the immutable `let`s above.
     private let state: OSAllocatedUnfairLock<State>
 
+    /// The one observer (#140): `HealthMonitor` listens for failed user actions
+    /// so a summon fires *because something just failed*, not because a 5 s loop
+    /// re-read a state bit. Called synchronously from `record()` on whatever
+    /// thread recorded — the observer must filter cheaply and hop itself.
+    private let observer = OSAllocatedUnfairLock<(@Sendable (DiagEvent) -> Void)?>(initialState: nil)
+
+    func setObserver(_ onRecord: (@Sendable (DiagEvent) -> Void)?) {
+        observer.withLock { $0 = onRecord }
+    }
+
     private struct State {
         /// Preallocated slots: `append` writes one slot and moves an index. No
         /// resize, no rehash, bounded work under the lock.
@@ -122,6 +132,7 @@ final class DiagStore: @unchecked Sendable {
             state.flushScheduled = true
             return true
         }
+        observer.withLock { $0 }?(event)
         guard needsSchedule else { return }
         flushQueue.asyncAfter(deadline: .now() + Self.flushInterval) { [weak self] in
             self?.flush()

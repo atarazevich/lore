@@ -144,9 +144,23 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case eventsJSON
     }
 
+    /// What summoned the health notch (#140): a user action that just failed, or
+    /// the launch identity migration (#135). Never a bare state bit — permission
+    /// flags and secure input are explanations, not triggers.
+    enum SummonTrigger: String, Codable, Sendable, CaseIterable {
+        case identityMigration
+        case captureFailed
+        case pasteFailed
+        case modelLoadFailed
+    }
+
     // MARK: - App
 
     case appLaunched(build: Int)
+    /// The health notch went up / came down (#140) — without these, summon
+    /// history was unrecoverable from events.json.
+    case healthSummonFired(trigger: SummonTrigger)
+    case healthSummonCleared
 
     // MARK: - Input (hotkey, permissions, paste)
 
@@ -155,8 +169,11 @@ enum DiagEvent: Codable, Sendable, Equatable {
     case tapReinstall(outcome: Outcome)
     case tapDisabledByOS
     case tapDiedDuringRecording
-    /// Emitted once when our modifier-event stream goes quiet *while the OS is
-    /// still delivering key events elsewhere* — never on plain user idleness.
+    /// Retired (#140): the starvation edge was silence-as-failure by
+    /// construction, so it is no longer recorded. The cases stay so a persisted
+    /// events.json that carries them keeps decoding instead of being moved
+    /// aside as corrupt (the same reason the notification cases below survive
+    /// Notification Center's removal).
     case tapEventsStalled(seconds: Int)
     case tapEventsResumed
     case secureInputChanged(active: Bool, holderPID: Int32?)
@@ -236,7 +253,7 @@ enum DiagEvent: Codable, Sendable, Equatable {
 extension DiagEvent {
     var subsystem: DiagSubsystem {
         switch self {
-        case .appLaunched:
+        case .appLaunched, .healthSummonFired, .healthSummonCleared:
             return .app
 
         case .permissionTransition, .tapCreate, .tapReinstall, .tapDisabledByOS,
@@ -279,6 +296,8 @@ extension DiagEvent {
     var caseName: String {
         switch self {
         case .appLaunched: return "appLaunched"
+        case .healthSummonFired: return "healthSummonFired"
+        case .healthSummonCleared: return "healthSummonCleared"
         case .permissionTransition: return "permissionTransition"
         case .tapCreate: return "tapCreate"
         case .tapReinstall: return "tapReinstall"

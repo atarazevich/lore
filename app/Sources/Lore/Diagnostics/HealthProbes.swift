@@ -1,4 +1,3 @@
-import AppKit
 import ApplicationServices
 import CoreGraphics
 import FluidAudio
@@ -107,13 +106,12 @@ struct HealthProber {
     private func cheapReading(_ id: HealthProbeID, _ secureInput: SecureInput.State) -> Reading {
         switch id {
         case .signing: return signingReading()
-        case .urlScheme: return plain(id, Self.urlSchemeRegistered() ? .ok : .failed)
         case .diskSpace: return diskReading()
         case .accessibility: return plain(id, AXIsProcessTrusted() ? .ok : .failed)
         case .inputMonitoring: return plain(id, CGPreflightListenEventAccess() ? .ok : .failed)
         case .tap: return tapReading(secureInput)
         case .secureInput: return secureInputReading(secureInput)
-        case .microphone: return plain(id, MicrophonePermission.status == .authorized ? .ok : .failed)
+        case .microphone: return plain(id, Self.microphoneStatus())
         case .asrModel: return plain(id, ParakeetBackend().checkStatus() == .ready ? .ok : .failed)
         case .vadModel: return plain(id, Self.vadModelPresent() ? .ok : .failed)
         case .openAIKey: return plain(id, hasOpenAIKey() ? .ok : .failed)
@@ -137,22 +135,20 @@ struct HealthProber {
         ))
     }
 
-    /// Enabled AND flowing: a starved tap reads as failed, not health (#83) — but
-    /// only when we can tell the difference. Under secure input we cannot: every
-    /// app is starved, so the starvation says nothing about *our* tap. `.warning`
-    /// and never `.failed` suffices there because `isCritical` summons on `.failed`
-    /// alone — no new state needed. It is returned *only* here, so `.tap` +
-    /// `.warning` means "no verdict" by construction, which is what
-    /// `HealthSummary.countsInFooter` reads it as (#94).
-    ///
-    /// This gate is the last resort, not the mechanism: `TapLiveness.observe` will
-    /// not draw a starvation under secure input in the first place (#97), so the
-    /// `.warning` here covers a starvation measured *before* it went on — which is
-    /// real, but still not attributable while every tap on the machine is starved.
+    /// `.failed` means the tap object is genuinely gone — the one tap state a
+    /// user action can be blamed on and a restart repairs. A measured starvation
+    /// is `.warning` (#140): it is inferred from keyboard silence, evidence too
+    /// weak for an outage verdict — the recorded 8.8-hour "stall" was a user who
+    /// slept — so it colors the panel row amber without counting in the footer
+    /// (`countsInFooter` excludes `.tap` warnings) and summons nothing. Under
+    /// secure input even that much is unmeasurable: every app is starved, so the
+    /// starvation says nothing about *our* tap (#94, #97) and the row says
+    /// "can't be measured".
     private func tapStatus(_ liveness: TapLiveness, secureInputActive: Bool) -> HealthStatus {
         guard !secureInputActive else { return .warning }
-        // `isStarved` is tri-state (#99); "no verdict drawn" is not a failure.
-        return (liveness.isAlive && liveness.isStarved != true) ? .ok : .failed
+        guard liveness.isAlive else { return .failed }
+        // `isStarved` is tri-state (#99); "no verdict drawn" is not degradation.
+        return liveness.isStarved == true ? .warning : .ok
     }
 
     private func signingReading() -> Reading {
@@ -209,14 +205,17 @@ struct HealthProber {
     }
 
     /// An expensive probe's card is driven entirely by the last real attempt
-    /// from the event stream; "never tested" is a `.warning`, not a failure.
+    /// from the event stream; "never tested" is a `.warning`, not a failure —
+    /// and so is an attempt past the age ceiling (#140): a day-old outcome is
+    /// "not tested recently", whichever way it went.
     private func expensiveReading(_ id: HealthProbeID) -> Reading {
         let last = Self.expensiveOutcome[id].flatMap(lastAttempt)
         let status: HealthStatus
-        switch last?.outcome {
-        case .ok: status = .ok
-        case .failed: status = .failed
-        case .unknown, .none: status = .warning
+        switch last {
+        case .some(let attempt) where attempt.isStale: status = .warning
+        case .some(let attempt) where attempt.outcome == .ok: status = .ok
+        case .some(let attempt) where attempt.outcome == .failed: status = .failed
+        case .some, .none: status = .warning
         }
         return Reading(result: HealthResult(id: id, status: status, lastAttempt: last))
     }
@@ -293,11 +292,13 @@ struct HealthProber {
         return Int(bytes / 1_000_000_000)
     }
 
-    /// True when macOS routes `lore://` to this exact build.
-    private static func urlSchemeRegistered() -> Bool {
-        guard let url = URL(string: "lore://health"),
-              let handler = NSWorkspace.shared.urlForApplication(toOpen: url),
-              let bundle = Bundle(url: handler) else { return false }
-        return bundle.bundleIdentifier == Bundle.main.bundleIdentifier
+    /// `.notDetermined` is a fresh install that has never recorded — macOS asks
+    /// on the first capture. Not knowing the answer is not a dead link (#140).
+    private static func microphoneStatus() -> HealthStatus {
+        switch MicrophonePermission.status {
+        case .authorized: return .ok
+        case .notDetermined: return .warning
+        default: return .failed
+        }
     }
 }

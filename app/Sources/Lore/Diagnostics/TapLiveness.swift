@@ -5,9 +5,8 @@ import Foundation
 /// #93 removed from secure input, kept out of here by construction.
 ///
 /// `HotkeyManager` owns the live instance and cannot be tested (every relevant
-/// piece of state is `private`, and `install()` creates a real tap), so the logic
-/// that was wrong lives here as a pure value type — the move `SummonDebouncer`
-/// makes for the notch's debounce.
+/// piece of state is `private`, and `install()` creates a real tap), so the
+/// logic that was wrong lives here as a pure value type.
 ///
 /// Codable and PII-free by construction: Bools and counts, nothing else — the
 /// same guarantee `DiagEvent` makes (design §4).
@@ -47,13 +46,7 @@ struct TapLiveness: Codable, Sendable, Equatable {
     /// one definition.
     private(set) var isStarved: Bool? = nil
 
-    /// A transition worth recording. Maps 1:1 onto `DiagEvent.tapEventsStalled` /
-    /// `.tapEventsResumed`, whose names now describe what they measure.
-    enum Edge: Equatable, Sendable { case stalled, resumed }
-
-    /// Feed one health cycle's measurement; returns the edge to record, or `nil`.
-    /// Edges, not a heartbeat: the loop ticks every 5 s and the ring buffer is
-    /// worthless if one starved minute evicts the launch history (design §4).
+    /// Feed one health cycle's measurement.
     ///
     /// **Only positive evidence moves the verdict.** Our tap receiving a key-down
     /// proves it is fed; the session being fed while we are not proves it is
@@ -74,23 +67,17 @@ struct TapLiveness: Codable, Sendable, Equatable {
     mutating func observe(
         isAlive: Bool, hasReceivedKeyDown: Bool, tapSilent: TimeInterval,
         sessionSilent: TimeInterval, secureInputActive: Bool
-    ) -> Edge? {
+    ) {
         self.isAlive = isAlive
         self.hasReceivedKeyDown = hasReceivedKeyDown
         tapSilentSeconds = Self.count(tapSilent)
         sessionSilentSeconds = Self.count(sessionSilent)
 
-        let was = isStarved
         if tapSilent <= Self.threshold {
             isStarved = false
         } else if sessionSilent <= Self.threshold && !secureInputActive {
             isStarved = true
         }
-        guard isStarved != was else { return nil }
-        if isStarved == true { return .stalled }
-        // The first fed verdict ever drawn (`nil` → `false`) is not a recovery:
-        // nothing was stalled, so nothing resumed and no event is recorded.
-        return was == true ? .resumed : nil
     }
 
     /// An interval as a whole-second count, floored at 0 and capped: the value

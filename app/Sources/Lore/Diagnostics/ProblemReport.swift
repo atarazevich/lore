@@ -151,7 +151,6 @@ extension HealthResult {
             return signingIdentityChanged == true
                 ? "Lore's signature changed since the last launch — the permission grants may be stale until re-granted."
                 : "The app isn't signed with a recognized certificate."
-        case .urlScheme: return "Deep links (lore://) aren't registered with macOS."
         case .diskSpace: return "Free disk space is low."
         case .accessibility: return "Accessibility permission isn't granted — the Fn key can't insert text."
         case .inputMonitoring: return "Input Monitoring permission isn't granted — the hotkey can't be seen."

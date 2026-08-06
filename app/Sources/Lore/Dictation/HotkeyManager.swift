@@ -46,6 +46,11 @@ final class HotkeyManager {
     /// (#135). Seeding it with `Date()` made every launch read as fed for 30 s;
     /// seeding it with `.distantPast` would make every launch read as starved.
     private var lastTapKeyDown: Date?
+    /// Fired once per launch, when the first *real* key-down reaches our tap —
+    /// the fact that closes the #135 signing migration. With the 5 s health
+    /// cycle gone (#140), the acknowledge has to ride the event itself: the
+    /// launch path wires this to one `HealthMonitor.refresh()`.
+    var onFirstRealKeyDown: (() -> Void)?
     /// The floor a silence is measured from before any key-down has arrived.
     private let launchedAt = Date()
     /// Previous permission state, tracked per permission so each carries its own edge
@@ -72,6 +77,41 @@ final class HotkeyManager {
     private var isEventTapAlive: Bool {
         guard let eventTap else { return false }
         return CGEvent.tapIsEnabled(tap: eventTap)
+    }
+
+    /// The one place `lastTapKeyDown` is stamped (#97), called by the tap
+    /// callback for every real (non-synthetic) key-down. On the first one it
+    /// feeds the liveness measurement itself and only then fires
+    /// `onFirstRealKeyDown` — the order is the #135 ack's correctness: the
+    /// refresh that callback runs reads `tapLiveness`, and the 5 s repair loop
+    /// has usually not ticked between the key-down and the refresh, so without
+    /// the fresh observe the one-shot would be consumed reading the stale
+    /// pre-key-down value and the migration would never acknowledge.
+    /// Internal so the wiring is pinned by `SigningMigrationTests`.
+    func noteRealKeyDown() {
+        let isFirst = lastTapKeyDown == nil
+        lastTapKeyDown = Date()
+        guard isFirst, let onFirstRealKeyDown else { return }
+        Task { @MainActor in
+            // Off the tap callback's critical path — the key event must not
+            // wait on a registry read or a probe pass.
+            self.observeTapLiveness(secureInputActive: SecureInput.read().active)
+            onFirstRealKeyDown()
+        }
+    }
+
+    /// Feed one measurement to `TapLiveness`: step 4 of the health cycle, and
+    /// the first-real-keydown path above.
+    private func observeTapLiveness(secureInputActive: Bool) {
+        tapLiveness.observe(
+            isAlive: isEventTapAlive,
+            hasReceivedKeyDown: lastTapKeyDown != nil,
+            tapSilent: Date().timeIntervalSince(lastTapKeyDown ?? launchedAt),
+            sessionSilent: CGEventSource.secondsSinceLastEventType(
+                .combinedSessionState, eventType: .keyDown
+            ),
+            secureInputActive: secureInputActive
+        )
     }
 
     func install(coordinator: DictationCoordinator, settings: AppSettings) {
@@ -498,17 +538,28 @@ final class HotkeyManager {
                 }
 
                 guard let refcon else { return Unmanaged.passRetained(event) }
+
+                // Lore's own synthetic chords (paste's Cmd+V/Z, Read Aloud's
+                // Cmd+C) arrive here too — cghidEventTap injection is upstream
+                // of the session tap. They are not the user's keyboard: letting
+                // them stamp liveness made every paste self-certify the tap as
+                // fed and silently acknowledge the #135 migration (#140). None
+                // of them is a key Lore handles, so pass straight through.
+                if SyntheticKeyEvent.isOurs(event) { return Unmanaged.passRetained(event) }
+
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
 
-                // The one place `lastTapKeyDown` is stamped (#97). `eventsOfInterest`
-                // is key-down only and the tap-disabled control events returned above,
-                // so reaching here *is* "our tap received a key-down" — the fact the
-                // health check exists to measure and never did.
+                // `eventsOfInterest` is key-down only and the tap-disabled
+                // control events returned above, so reaching here *is* "our tap
+                // received a real key-down" (the synthetic guard above) — the
+                // fact the health check exists to measure and never did (#97).
                 //
                 // The tap's source is on CFRunLoopGetMain (see below), so this runs on
                 // the main thread: the same assumption `modifierOn` and the Space path
                 // already make, and why no `nonisolated(unsafe)` mirror is needed.
-                MainActor.assumeIsolated { manager.lastTapKeyDown = Date() }
+                MainActor.assumeIsolated {
+                    manager.noteRealKeyDown()
+                }
 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 let flags = event.flags
@@ -769,25 +820,10 @@ final class HotkeyManager {
         //    never have a counterpart on our side and could only ever fabricate
         //    starvation. Secure input, read at step 3, makes that comparison
         //    unmeasurable rather than false — see `TapLiveness.observe`.
-        //    Only the transitions are recorded; the verdict latches in `TapLiveness`.
-        let edge = tapLiveness.observe(
-            isAlive: isEventTapAlive,
-            hasReceivedKeyDown: lastTapKeyDown != nil,
-            tapSilent: Date().timeIntervalSince(lastTapKeyDown ?? launchedAt),
-            sessionSilent: CGEventSource.secondsSinceLastEventType(
-                .combinedSessionState, eventType: .keyDown
-            ),
-            secureInputActive: secureInput.active
-        )
-        switch edge {
-        case .stalled:
-            DiagStore.record(.tapEventsStalled(seconds: tapLiveness.tapSilentSeconds))
-            HotkeyManager.hkLog.error("[HK] Health: the session received key-downs and our tap did not, for \(self.tapLiveness.tapSilentSeconds)s")
-        case .resumed:
-            DiagStore.record(.tapEventsResumed)
-            HotkeyManager.hkLog.info("[HK] Health: our tap is receiving key-downs again")
-        case nil:
-            break
-        }
+        //    The verdict latches in `TapLiveness` and feeds the panel row only:
+        //    the stalled/resumed edges are no longer recorded (#140) — a
+        //    silence-derived verdict is too weak for the event stream (one
+        //    recorded "stall" was 8.8 hours of the user not typing).
+        observeTapLiveness(secureInputActive: secureInput.active)
     }
 }

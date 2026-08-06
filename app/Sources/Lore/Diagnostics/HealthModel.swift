@@ -34,10 +34,11 @@ enum HealthSection: String, Codable, Sendable, CaseIterable {
 }
 
 /// Cost of running a probe (design §6). `cheap` probes are pure OS queries with
-/// no side effect — run at launch, on panel open, and on the footer's health
-/// cycle. `expensive` probes open the mic, load ~1 GB, or hit the network, so
-/// they run only on an explicit "Test now"; between presses the panel shows the
-/// last real outcome pulled from the `DiagEvent` stream.
+/// no side effect — run at launch, on panel open, and after a failed user
+/// action (#140; the 5 s cycle is gone). `expensive` probes open the mic, load
+/// ~1 GB, or hit the network, so they run only on an explicit "Test now";
+/// between presses the panel shows the last real outcome pulled from the
+/// `DiagEvent` stream.
 enum HealthCost: String, Codable, Sendable {
     case cheap
     case expensive
@@ -50,9 +51,10 @@ enum HealthCost: String, Codable, Sendable {
 /// Declaration order **is** chain order (used by `HealthSummary` to name the
 /// most upstream issue): a failed upper link makes the lower ones meaningless.
 enum HealthProbeID: String, Codable, Sendable, CaseIterable {
-    // Install & identity
+    // Install & identity. `.urlScheme` was deleted in #140: deep links are a
+    // convenience, not a readiness link, and the probe re-ran an
+    // NSWorkspace/LaunchServices query every cycle for a row nobody acted on.
     case signing
-    case urlScheme
     case diskSpace
     // Input. Secure input sits above the tap: while it is on, the tap's verdict is
     // unmeasurable and its failure is a symptom — the upper link makes the lower
@@ -76,7 +78,7 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
 
     var section: HealthSection {
         switch self {
-        case .signing, .urlScheme, .diskSpace: return .installIdentity
+        case .signing, .diskSpace: return .installIdentity
         case .accessibility, .inputMonitoring, .secureInput, .tap: return .input
         case .microphone, .micCapture: return .audio
         case .asrModel, .vadModel, .modelWarmup: return .transcription
@@ -92,9 +94,10 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
         }
     }
 
-    /// A failure here means the core hold-to-talk loop is dead, so the app
-    /// summons itself via the notch rather than waiting to be found (design §6).
-    /// Every other failure stays silent in the panel.
+    /// A failure here means the core hold-to-talk loop is dead. Since #140 this
+    /// no longer summons anything — summons fire only from failed user actions
+    /// (`HealthMonitor.noteFailure`) — it drives the footer's red-vs-amber dot
+    /// via `HealthSnapshot.criticalFailures`.
     ///
     /// #83 excluded `.secureInput` as a curiosity; report 8763HGZT showed a
     /// system-wide outage, so it joined the set (#94).
@@ -117,7 +120,6 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
     var shortName: String {
         switch self {
         case .signing: return "Signing"
-        case .urlScheme: return "Deep links"
         case .diskSpace: return "Disk space"
         case .accessibility: return "Accessibility"
         case .inputMonitoring: return "Input Monitoring"
@@ -151,6 +153,13 @@ enum SigningCertKind: String, Codable, Sendable {
 struct HealthLastAttempt: Codable, Sendable, Equatable {
     let outcome: DiagEvent.Outcome
     let ageSeconds: Int
+
+    /// The age ceiling (#140): a day-old outcome — a 401 from last week, a
+    /// captureFailed from before a reboot — is history, not a verdict. Past it
+    /// the row reads "not tested recently" instead of staying red (or green)
+    /// forever.
+    var isStale: Bool { ageSeconds > Self.maxFreshAgeSeconds }
+    static let maxFreshAgeSeconds = 24 * 3600
 }
 
 /// One probe result. Codable and PII-free **by construction**: every field is
@@ -189,8 +198,8 @@ struct HealthSnapshot: Codable, Sendable, Equatable {
     let build: String
     let results: [HealthResult]
 
-    /// Critical links (design §6) that are failing, in chain order — the input
-    /// to the notch self-summon.
+    /// Critical links (design §6) that are failing, in chain order — what turns
+    /// the footer dot red (no longer a summon input, #140).
     var criticalFailures: [HealthProbeID] {
         results
             .filter { $0.status == .failed && $0.id.isCritical }
@@ -230,21 +239,25 @@ struct HealthSummary: Equatable {
     /// verdict" never counts — it stays visible inside the panel, but the
     /// always-visible footer would cry wolf. Two probes mean "no verdict":
     ///
-    /// - Any *expensive* probe: `.warning` is "not tested yet". Otherwise a
-    ///   dictation-only user, whose System audio and OpenAI liveness are never
-    ///   exercised, could never reach "All systems ready" (the cry-wolf inversion).
-    /// - `.tap`: `tapStatus()` returns `.warning` **only** under secure input and
-    ///   never for degradation, so the pair is "no verdict" by construction (#94).
-    ///   Counting it would inflate one physical condition into "2 issues — Secure
-    ///   input", and `plainLanguageIssue` — gated on this rule — would tell the
-    ///   report's reader Lore's shortcuts are broken directly beneath the truth.
+    /// - Any *expensive* probe: `.warning` is "not tested yet" or "not tested
+    ///   recently" (the #140 age ceiling). Otherwise a dictation-only user, whose
+    ///   System audio and OpenAI liveness are never exercised, could never reach
+    ///   "All systems ready" (the cry-wolf inversion).
+    /// - `.tap`: `tapStatus()` returns `.warning` for the two silence-shaped
+    ///   states — unmeasurable under secure input (#94), and a measured
+    ///   starvation, demoted from `.failed` in #140 because it is inferred from
+    ///   keyboard silence, not from a failed action. Neither is footer material:
+    ///   the always-visible footer would cry wolf on every idle machine.
+    ///
+    /// - `.microphone`: `.warning` is `.notDetermined` — macOS was never asked
+    ///   (#140). A fresh install is not an issue; the first recording prompts.
     ///
     /// A real recorded failure still lands as `.failed` and counts.
     static func countsInFooter(_ result: HealthResult) -> Bool {
         switch result.status {
         case .ok: return false
         case .failed: return true
-        case .warning: return result.id.cost == .cheap && result.id != .tap
+        case .warning: return result.id.cost == .cheap && ![.tap, .microphone].contains(result.id)
         }
     }
 

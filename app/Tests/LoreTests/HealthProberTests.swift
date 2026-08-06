@@ -1,11 +1,11 @@
 import XCTest
 @testable import LoreKit
 
-/// C1 (#83): the tap probe must reflect the *starved* verdict, not just
-/// "the tap object exists". An enabled-but-starved tap — the reported "Fn dead,
-/// all toggles on" incident, caused by secure input — has to read as failed so
-/// the critical link fails and the notch summons itself. `tapIsEnabled` alone
-/// reads it as healthy, which is exactly why the bug went unseen.
+/// C1 (#83), recalibrated by #140: the tap probe must reflect the *starved*
+/// verdict, not just "the tap object exists" — but a starvation is inferred
+/// from keyboard silence, so it colors the panel row `.warning` and never
+/// summons (the recorded 8.8-hour "stall" was a user who slept). Only a dead
+/// tap object is `.failed`.
 @MainActor
 final class HealthProberTests: XCTestCase {
 
@@ -20,13 +20,19 @@ final class HealthProberTests: XCTestCase {
 
     /// `secureInput` drives the injected read (#94), so the tap gate is exercised
     /// without touching this machine's actual secure-input flag — holding it for
-    /// real would starve the keyboard of whoever runs the suite.
-    private func prober(alive: Bool, stalled: Bool, secureInput: Bool = false) -> HealthProber {
+    /// real would starve the keyboard of whoever runs the suite. `store`/`now`
+    /// default to a fresh empty store and the real clock; the age-ceiling tests
+    /// override them.
+    private func prober(
+        alive: Bool, stalled: Bool, secureInput: Bool = false,
+        store: DiagStore? = nil, now: @escaping () -> Date = Date.init
+    ) -> HealthProber {
         HealthProber(
             readTapLiveness: { Self.liveness(alive: alive, stalled: stalled) },
             readSecureInput: { Self.secureInputState(active: secureInput) },
             hasOpenAIKey: { true },
-            store: Self.emptyStore()
+            store: store ?? Self.emptyStore(),
+            now: now
         )
     }
 
@@ -48,11 +54,11 @@ final class HealthProberTests: XCTestCase {
     /// read at: the banner goes up on this tick and the user opens the panel next.
     static func liveness(alive: Bool, stalled: Bool) -> TapLiveness {
         var liveness = TapLiveness()
-        _ = liveness.observe(isAlive: alive,
-                            hasReceivedKeyDown: true,
-                            tapSilent: stalled ? TapLiveness.threshold + 1 : 0,
-                            sessionSilent: 0,
-                            secureInputActive: false)
+        liveness.observe(isAlive: alive,
+                         hasReceivedKeyDown: true,
+                         tapSilent: stalled ? TapLiveness.threshold + 1 : 0,
+                         sessionSilent: 0,
+                         secureInputActive: false)
         return liveness
     }
 
@@ -64,20 +70,24 @@ final class HealthProberTests: XCTestCase {
         XCTAssertEqual(tapResult(prober(alive: true, stalled: false)).status, .ok)
     }
 
-    func testEnabledButStarvedTapReadsAsFailed() {
-        // The whole point: alive == true, yet no events flow → failed.
+    /// #140: not healthy, but not an outage verdict either — the starvation is
+    /// derived from silence, so it is degradation the panel shows, never a
+    /// `.failed` that turns the footer red.
+    func testEnabledButStarvedTapReadsAsWarningNotFailed() {
         let result = tapResult(prober(alive: true, stalled: true))
-        XCTAssertEqual(result.status, .failed, "enabled-but-starved must not read healthy")
+        XCTAssertEqual(result.status, .warning, "enabled-but-starved must not read healthy")
     }
 
     func testDeadTapReadsAsFailed() {
         XCTAssertEqual(tapResult(prober(alive: false, stalled: false)).status, .failed)
     }
 
-    func testStalledTapIsACriticalFailure() {
+    /// The silence-as-failure kill (#140): a starvation never reaches the
+    /// critical set — an overnight idle session must not produce a red footer.
+    func testStalledTapIsNotACriticalFailure() {
         let snapshot = prober(alive: true, stalled: true).probe().snapshot
-        XCTAssertTrue(snapshot.criticalFailures.contains(.tap),
-                      "a starved tap is a critical link failure")
+        XCTAssertFalse(snapshot.criticalFailures.contains(.tap),
+                       "a silence-derived verdict must not read as an outage")
     }
 
     /// The remedy has to match the fault, and a starvation can be measured on a tap
@@ -139,9 +149,9 @@ final class HealthProberTests: XCTestCase {
     /// told their keyboard is broken for having entered a password (#97).
     func testAStarvationTheSecureInputWindowWouldHaveProducedNeverSurvivesIt() {
         var measured = TapLiveness()
-        _ = measured.observe(isAlive: true, hasReceivedKeyDown: true,
-                             tapSilent: TapLiveness.threshold + 1, sessionSilent: 0,
-                             secureInputActive: true)
+        measured.observe(isAlive: true, hasReceivedKeyDown: true,
+                         tapSilent: TapLiveness.threshold + 1, sessionSilent: 0,
+                         secureInputActive: true)
         let prober = HealthProber(
             readTapLiveness: { measured },
             readSecureInput: { Self.secureInputState(active: false) },
@@ -342,7 +352,7 @@ final class HealthProberTests: XCTestCase {
     /// And the line states the *direction*, not two numbers to subtract (#99).
     func testAStarvedTapRowShowsTheMeasurementItsVerdictCameFrom() {
         let tap = prober(alive: true, stalled: true).probe().items.first { $0.id == .tap }!
-        XCTAssertEqual(tap.status, .failed)
+        XCTAssertEqual(tap.status, .warning)
         XCTAssertTrue(tap.detail.contains("reaching the Mac but not Lore"),
                       "the row states what the gap means, not arithmetic for the reader to get wrong")
         XCTAssertTrue(tap.detail.contains("silent for 31s"),
@@ -370,14 +380,60 @@ final class HealthProberTests: XCTestCase {
                       "and toggling — what the user will try first — is called out as not working")
     }
 
-    /// End to end: a stalled-tap verdict drives the monitor to summon the notch.
-    func testStalledTapTriggersTheSummon() {
-        let monitor = HealthMonitor(prober: prober(alive: true, stalled: true), summonThreshold: 1)
+    // MARK: - #140: summons fire from failed actions, and probes stay quiet
+
+    /// The inversion at the heart of #140: a red critical probe no longer
+    /// summons by itself — `refresh()` publishes state and nothing else.
+    func testRefreshNeverSummonsEvenWithACriticalFailure() {
+        let monitor = HealthMonitor(prober: prober(alive: false, stalled: false))
         var summoned: HealthSummon?
         monitor.onSummon = { summoned = $0 }
 
         monitor.refresh()
 
-        XCTAssertNotNil(summoned, "a starved tap must summon the notch")
+        XCTAssertNil(summoned, "state bits explain failures; they must not trigger summons")
+    }
+
+    /// A failed user action does: `noteFailure` re-probes and summons, naming
+    /// the trigger.
+    func testAFailedUserActionSummonsWithItsTrigger() {
+        let monitor = HealthMonitor(prober: prober(alive: true, stalled: false))
+        var summoned: HealthSummon?
+        monitor.onSummon = { summoned = $0 }
+
+        monitor.noteFailure(.captureFailed)
+
+        XCTAssertEqual(summoned?.trigger, .captureFailed)
+    }
+
+    // MARK: - #140: the age ceiling on expensive outcomes
+
+    /// A day-old failure is history, not a verdict: past the ceiling the row
+    /// reads `.warning` ("not tested recently"), red no longer sticks forever —
+    /// and a stale success must not keep reading green either.
+    func testAnExpensiveOutcomePastTheAgeCeilingReadsAsNotTestedRecently() {
+        for outcome in [DiagEvent.Outcome.ok, .failed] {
+            let store = Self.emptyStore()
+            store.record(.apiCall(endpoint: .keyHealth, outcome: outcome, httpStatus: nil, ms: 1))
+            let aged = prober(
+                alive: true, stalled: false, store: store,
+                now: { Date().addingTimeInterval(TimeInterval(HealthLastAttempt.maxFreshAgeSeconds + 60)) }
+            )
+            let (snapshot, items) = aged.probe()
+            let row = snapshot.results.first { $0.id == .openAILiveness }!
+            XCTAssertEqual(row.status, .warning, "a stale \(outcome.rawValue) is no verdict")
+            let item = items.first { $0.id == .openAILiveness }!
+            XCTAssertTrue(item.detail.contains("Not tested recently"), "the row says so")
+        }
+    }
+
+    /// The same outcome inside the ceiling still renders its color — the
+    /// ceiling ages verdicts out; it must not mute fresh ones.
+    func testAFreshExpensiveOutcomeKeepsItsVerdict() {
+        let store = Self.emptyStore()
+        store.record(.apiCall(endpoint: .keyHealth, outcome: .failed, httpStatus: 401, ms: 1))
+        let row = prober(alive: true, stalled: false, store: store)
+            .probe().snapshot.results.first { $0.id == .openAILiveness }!
+        XCTAssertEqual(row.status, .failed)
     }
 }

@@ -1,6 +1,34 @@
 import AppKit
 import os
 
+/// Marks the key events Lore itself synthesizes (paste's Cmd+V/Z, Read Aloud's
+/// Cmd+C) so the session tap can tell them from the user's (#140). Without the
+/// marker, Lore's own Cmd+V arrived at its own tap and stamped `lastTapKeyDown`
+/// — self-generated "evidence" that the tap is fed, which silently acknowledged
+/// the #135 signing migration and reset the starvation measurement.
+enum SyntheticKeyEvent {
+    /// Rides in `.eventSourceUserData`, which synthetic sources carry through
+    /// to taps and real HID events never set. "Lore" in ASCII.
+    ///
+    /// The OS-native alternative (`.eventSourceUnixProcessID == getpid()` in
+    /// the tap) was rejected for lack of a verifiable negative: every CGEvent
+    /// created in-process carries our pid in that field (even with a nil
+    /// source), and whether hardware key-downs arrive at the tap with a
+    /// different value cannot be pinned in a test — a listen tap needs Input
+    /// Monitoring and posting real events would type into the user's session.
+    /// Misclassifying a real key-down as ours would drop Space-lock/Esc
+    /// handling entirely, so the explicit marker stays.
+    private static let marker: Int64 = 0x4C6F_7265
+
+    static func mark(_ event: CGEvent) {
+        event.setIntegerValueField(.eventSourceUserData, value: marker)
+    }
+
+    static func isOurs(_ event: CGEvent) -> Bool {
+        event.getIntegerValueField(.eventSourceUserData) == marker
+    }
+}
+
 enum TextInserter {
     private static let log = Logger(subsystem: "com.lore.app", category: "TextInserter")
 
@@ -107,6 +135,9 @@ enum TextInserter {
         }
         keyDown.flags = .maskCommand
         keyUp.flags = .maskCommand
+        // Our own chord must not count as tap-liveness evidence (#140).
+        SyntheticKeyEvent.mark(keyDown)
+        SyntheticKeyEvent.mark(keyUp)
         keyDown.post(tap: .cghidEventTap)
         usleep(20_000) // 20ms between key down and up for reliable delivery
         keyUp.post(tap: .cghidEventTap)

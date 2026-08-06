@@ -150,13 +150,6 @@ enum HealthCatalog {
                 return (title, "Signature could not be read.", nil)
             }
 
-        case .urlScheme:
-            if ok { return ("Deep links", "lore:// is registered.", nil) }
-            return ("Deep links",
-                    "The lore:// URL scheme isn't registered to this build; menu-bar and notification deep links won't open.",
-                    Remedy(instruction: "Reinstall Lore so macOS re-registers the lore:// scheme.",
-                           actions: [.restartApp]))
-
         case .diskSpace:
             let free = result.freeDiskGB.map { "\($0) GB free." } ?? "Free space unknown."
             if ok { return ("Disk space", free, nil) }
@@ -264,6 +257,13 @@ enum HealthCatalog {
 
         case .microphone:
             if ok { return ("Microphone permission", "Granted.", nil) }
+            // `.notDetermined` (#140): nothing is broken — macOS simply hasn't
+            // asked yet, and the first recording triggers the prompt.
+            if result.status == .warning {
+                return ("Microphone permission",
+                        "Not requested yet — macOS asks the first time Lore records.",
+                        nil)
+            }
             return ("Microphone permission",
                     "Microphone access is off, so dictation and meetings can't record.",
                     Remedy(instruction: "Enable Lore under Privacy & Security → Microphone.",
@@ -328,7 +328,7 @@ enum HealthCatalog {
             return .init(title: "System-audio capture", okDetail: "Last capture succeeded",
                          failDetail: "Last capture failed", warnDetail: "No meeting recorded yet.",
                          sideEffect: "observable only during a meeting recording")
-        case .signing, .urlScheme, .diskSpace, .accessibility, .inputMonitoring,
+        case .signing, .diskSpace, .accessibility, .inputMonitoring,
              .tap, .secureInput, .microphone, .asrModel, .vadModel, .openAIKey:
             preconditionFailure("cheap probe \(id.rawValue) has no expensive labels")
         }
@@ -352,6 +352,11 @@ enum HealthCatalog {
             return (labels.title, labels.warnDetail, remedy("Test now"))
         }
         let age = relativeAge(last.ageSeconds)
+        // Past the age ceiling (#140) the outcome is history, not a verdict:
+        // the card says so instead of staying red or green forever.
+        if last.isStale {
+            return (labels.title, "Not tested recently — last attempt \(age).", remedy("Test now"))
+        }
         switch last.outcome {
         case .ok:
             return (labels.title, "\(labels.okDetail) \(age).", remedy("Re-test"))

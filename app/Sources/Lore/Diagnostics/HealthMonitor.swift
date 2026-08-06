@@ -1,63 +1,54 @@
 import Foundation
 import Observation
 
-/// The notch self-summon payload: which critical link failed, and the copy the
-/// notch shows ("Keyboard shortcuts not working" / "Fix it").
+/// The notch self-summon payload (#140): which user action failed (or that the
+/// launch found an identity migration), plus the state bit that explains it when
+/// one is red right now. The trigger is always a failure the user just felt —
+/// state bits (permissions, secure input) are the *explanation*, never the
+/// trigger, because they flap (16 "lost" transitions vs 1 "granted" in 3 days of
+/// events.json) and because a bit being red costs the user nothing until an
+/// action fails on it.
 struct HealthSummon: Equatable, Sendable {
-    let probe: HealthProbeID
+    let trigger: DiagEvent.SummonTrigger
+    /// The chain link that explains the failure — `.microphone` behind a failed
+    /// capture, `.accessibility` behind a failed paste — or `nil` when the state
+    /// bits all read fine and the failure speaks for itself.
+    var explanation: HealthProbeID? = nil
 
-    /// `"<shortName> not working"` fits every critical link but one: secure input
-    /// *working* is the problem, so the template renders nonsense for it (#94). A
-    /// `switch` with a `default`, not a table — this is one exception, and there
-    /// are already three per-probe copy catalogs (`ProblemReport.swift:142-145`).
-    ///
-    /// The notch renders this line plus "Fix it" and nothing else, so it carries
-    /// the system-wide fact and hands off; the panel's `.secureInput` row carries
-    /// the remedy (and that restarting Lore will not help while it is on).
+    /// A failed user action always displaces the launch migration notice on the
+    /// notch (`HealthNotchPresenter`): the notice is advice, the failure is now.
+    var isCritical: Bool { trigger != .identityMigration }
+
+    /// The notch renders this line plus "Fix it" and nothing else — the panel's
+    /// rows carry the remedies. Deliberately NOT merged into `HealthCatalog`'s
+    /// copy tables: the notch line is a one-glance alert with its own tone and
+    /// length budget, not a panel row's detail — don't "deduplicate" it there.
     var title: String {
-        switch probe {
-        case .secureInput: return "Secure input is on — no app is receiving keys"
-        // `.signing` summons only for the identity migration (#135), raised by
-        // the launch check — "Signing not working" would name the wrong thing.
-        case .signing: return "Lore's signature changed — permissions need a re-grant"
-        default: return "\(probe.shortName) not working"
+        switch trigger {
+        // Raised by the launch check alone (#135): the condition is a change,
+        // not a fault, so no "not working" template fits it.
+        case .identityMigration:
+            return "Lore's signature changed — permissions need a re-grant"
+        case .captureFailed:
+            return explanation == .microphone
+                ? "Recording failed — microphone access is off"
+                : "Recording failed — the microphone produced no audio"
+        case .pasteFailed:
+            return explanation == .accessibility
+                ? "Paste failed — Accessibility permission is off"
+                : "Paste failed — your text is still on the clipboard"
+        case .modelLoadFailed:
+            return "Transcription failed — the model did not load"
         }
     }
 }
 
-/// Debounce for the notch self-summon: a critical failure must persist across
-/// `threshold` consecutive health cycles before it summons, so a transient flap
-/// (a permission blip while a certificate refreshes) stays silent. It fires once
-/// per outage and re-arms only after a clear cycle.
-struct SummonDebouncer {
-    let threshold: Int
-    private var consecutive = 0
-    private var fired = false
-
-    init(threshold: Int = 2) {
-        self.threshold = max(1, threshold)
-    }
-
-    /// Feed one cycle's verdict; returns `true` on the single cycle it should
-    /// summon.
-    mutating func record(hasCriticalFailure: Bool) -> Bool {
-        guard hasCriticalFailure else {
-            consecutive = 0
-            fired = false
-            return false
-        }
-        consecutive += 1
-        guard consecutive >= threshold, !fired else { return false }
-        fired = true
-        return true
-    }
-}
-
-/// Owns the live health state: re-probes the cheap chain every cycle so the
-/// footer turns red within one cycle of a permission dropping, publishes the
-/// snapshot and rendered items for the panel, and raises the notch (debounced)
-/// when a critical link fails. Created at launch and kept running even when the
-/// window is closed — the "Fn dead" incident happens with no window open.
+/// Owns the health state as an **on-open fact sheet** (#140): probes run once at
+/// launch and whenever the panel opens (plus after a Test-now), never on a
+/// timer — the 5 s verdict loop interrupted with conclusions its evidence could
+/// not support (30 s of keyboard silence read as "shortcuts not working" after
+/// an 8.8-hour idle gap). Summons now arrive through `noteFailure`, fed by the
+/// `DiagStore` observer: a summon fires only when a user action just failed.
 @MainActor
 @Observable
 final class HealthMonitor {
@@ -73,10 +64,9 @@ final class HealthMonitor {
     var summary: HealthSummary { HealthSummary(snapshot) }
 
     @ObservationIgnored private let prober: HealthProber
-    @ObservationIgnored private var debouncer: SummonDebouncer
-    @ObservationIgnored private var timer: Task<Void, Never>?
 
-    /// Fired (debounced) when a critical link fails — wired to the notch.
+    /// Fired when a user action failed (or the launch found a migration) —
+    /// wired to the notch.
     @ObservationIgnored var onSummon: (HealthSummon) -> Void = { _ in }
 
     /// The three expensive "Test now" actions, injected because they reach for
@@ -86,40 +76,25 @@ final class HealthMonitor {
     @ObservationIgnored var runModelWarmupTest: () async -> Void = {}
     @ObservationIgnored var runOpenAITest: () async -> Void = {}
 
-    init(prober: HealthProber, summonThreshold: Int = 2) {
+    init(prober: HealthProber) {
         self.prober = prober
-        self.debouncer = SummonDebouncer(threshold: summonThreshold)
         let initial = prober.probe()
         self.snapshot = initial.snapshot
         self.items = initial.items
     }
 
-    /// Begin the periodic cheap-probe cycle. Idempotent.
-    func start(interval: Duration = .seconds(5)) {
-        guard timer == nil else { return }
-        refresh()
-        timer = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: interval)
-                guard !Task.isCancelled, let self else { break }
-                self.refresh()
-            }
-        }
-    }
-
-    func stop() {
-        timer?.cancel()
-        timer = nil
-    }
-
-    /// Re-run the cheap chain, publish, and evaluate the self-summon.
+    /// Re-run the cheap chain and publish. Called at launch (init), on panel
+    /// open, after a Test-now, and by `noteFailure` so a summon's explanation is
+    /// read off fresh state — never on a timer.
     func refresh() {
         // Close the signing-identity migration (#135, rationale on
         // `SigningIdentityLedger`) on the one fact a cert change cannot fake: a
-        // key-down that actually reached our tap. Not the permission flags —
-        // they are the part that lies — and not the tap's `.ok`, which a fresh
-        // launch reads on mere aliveness. Acknowledged *before* the probe, so
-        // the chain runs once and the signing row is rendered already clear.
+        // key-down that actually reached our tap — and only a real one; Lore's
+        // own synthetic Cmd+V never stamps it (#140, `SyntheticKeyEvent`). Not
+        // the permission flags — they are the part that lies — and not the
+        // tap's `.ok`, which a fresh launch reads on mere aliveness.
+        // Acknowledged *before* the probe, so the chain runs once and the
+        // signing row is rendered already clear.
         if let ledger = prober.signingLedger, ledger.migrationPending,
            prober.readTapLiveness().hasReceivedKeyDown == true {
             ledger.acknowledge()
@@ -127,10 +102,46 @@ final class HealthMonitor {
         let report = prober.probe()
         snapshot = report.snapshot
         items = report.items
-        let critical = snapshot.criticalFailures
-        if debouncer.record(hasCriticalFailure: !critical.isEmpty), let first = critical.first {
-            onSummon(HealthSummon(probe: first))
+    }
+
+    /// The events that mean a user action just failed — the only things allowed
+    /// to summon besides the launch migration. `nonisolated` and cheap: the
+    /// `DiagStore` observer runs this filter on the recording thread and hops to
+    /// the main actor only for a match.
+    nonisolated static func failureTrigger(for event: DiagEvent) -> DiagEvent.SummonTrigger? {
+        switch event {
+        case .captureGaveUp:
+            return .captureFailed
+        case .pasteAttempt(_, false, _):
+            return .pasteFailed
+        case .modelLoad(.asr, .failed, _, _):
+            return .modelLoadFailed
+        default:
+            return nil
         }
+    }
+
+    /// A user action failed: re-probe so the panel is fresh when "Fix it" opens
+    /// it, name the failure, and attach the state bit that explains it.
+    func noteFailure(_ trigger: DiagEvent.SummonTrigger) {
+        refresh()
+        onSummon(HealthSummon(trigger: trigger, explanation: explanation(for: trigger)))
+    }
+
+    /// The most likely chain link behind a failed action, iff it reads `.failed`
+    /// right now. One link per trigger, not a scan: naming an unrelated red bit
+    /// would be the state-bit-as-verdict pattern this rework removes.
+    private func explanation(for trigger: DiagEvent.SummonTrigger) -> HealthProbeID? {
+        let candidate: HealthProbeID?
+        switch trigger {
+        case .captureFailed: candidate = .microphone
+        case .pasteFailed: candidate = .accessibility
+        case .modelLoadFailed, .identityMigration: candidate = nil
+        }
+        guard let candidate,
+              snapshot.results.first(where: { $0.id == candidate })?.status == .failed
+        else { return nil }
+        return candidate
     }
 
     /// Perform an expensive probe on the user's explicit request, then refresh

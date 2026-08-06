@@ -62,6 +62,37 @@ final class SigningMigrationTests: XCTestCase {
         XCTAssertTrue(next.migrationPending)
     }
 
+    /// #140: macOS keys TCC grants to the team (`build.sh` pins the designated
+    /// requirement there), so a dev ↔ release cert flip within the same team
+    /// keeps its grants — summoning the re-grant walkthrough for it would be a
+    /// state-bit interruption over a non-event. The stored record is the old
+    /// full `kind|team` format, so this also pins old-format compatibility.
+    func testACertKindFlipWithinTheSameTeamIsNotAMigration() {
+        let defaults = freshDefaults()
+        launch(defaults, info(.appleDevelopment, team: "SAME"))
+        let release = SigningIdentityLedger(defaults: defaults, current: info(.developerID, team: "SAME"))
+        XCTAssertFalse(release.migrationPending, "same team shares TCC — a non-event")
+
+        // And back: the record now says developerID|SAME after the launch path
+        // acknowledged; a dev build on the same team stays quiet too.
+        if !release.migrationPending { release.acknowledge() }
+        let dev = SigningIdentityLedger(defaults: defaults, current: info(.appleDevelopment, team: "SAME"))
+        XCTAssertFalse(dev.migrationPending)
+    }
+
+    /// Ad-hoc has no team to key grants on, so any transition involving it is
+    /// genuinely TCC-affecting and keeps summoning.
+    func testTransitionsInvolvingAdHocRemainMigrations() {
+        let defaults = freshDefaults()
+        launch(defaults, info(.appleDevelopment, team: "SAME"))
+        let intoAdHoc = SigningIdentityLedger(defaults: defaults, current: info(.adHoc, team: nil))
+        XCTAssertTrue(intoAdHoc.migrationPending, "into ad-hoc: grants drop")
+        intoAdHoc.acknowledge()
+
+        let outOfAdHoc = SigningIdentityLedger(defaults: defaults, current: info(.appleDevelopment, team: "SAME"))
+        XCTAssertTrue(outOfAdHoc.migrationPending, "out of ad-hoc: a fresh identity to grant")
+    }
+
     /// The pending state is derived from the mismatch, so quitting without
     /// re-granting cannot lose it: the next launch re-derives it.
     func testUnacknowledgedMigrationSurvivesARelaunch() {
@@ -130,8 +161,8 @@ final class SigningMigrationTests: XCTestCase {
     func testTheFirstCyclesAfterLaunchDoNotAcknowledgeTheMigration() {
         let (_, ledger) = migrationLedger()
         var justLaunched = TapLiveness()
-        _ = justLaunched.observe(isAlive: true, hasReceivedKeyDown: false, tapSilent: 5,
-                                 sessionSilent: 5, secureInputActive: false)
+        justLaunched.observe(isAlive: true, hasReceivedKeyDown: false, tapSilent: 5,
+                             sessionSilent: 5, secureInputActive: false)
         let monitor = monitor(ledger: ledger, liveness: justLaunched)
 
         monitor.refresh()
@@ -145,8 +176,8 @@ final class SigningMigrationTests: XCTestCase {
     func testAKeystrokeReachingTheTapAcknowledgesAndClearsTheRowSameCycle() {
         let (defaults, ledger) = migrationLedger()
         var fed = TapLiveness()
-        _ = fed.observe(isAlive: true, hasReceivedKeyDown: true, tapSilent: 0,
-                        sessionSilent: 0, secureInputActive: false)
+        fed.observe(isAlive: true, hasReceivedKeyDown: true, tapSilent: 0,
+                    sessionSilent: 0, secureInputActive: false)
         let monitor = monitor(ledger: ledger, liveness: fed)
 
         monitor.refresh()
@@ -157,5 +188,36 @@ final class SigningMigrationTests: XCTestCase {
 
         let relaunch = SigningIdentityLedger(defaults: defaults, current: info(.developerID, team: "NEW"))
         XCTAssertFalse(relaunch.migrationPending, "acknowledged — never re-triggers")
+    }
+
+    /// The production wiring, end to end: the ack rides the first real key-down
+    /// (`HotkeyManager.noteRealKeyDown` → `onFirstRealKeyDown` → one
+    /// `refresh()`), and the prober reads the *manager's own* liveness — the
+    /// exact shape `LoreApp.setupHealthMonitor` wires. The 5 s repair loop has
+    /// usually not ticked between the key-down and the refresh, so the key-down
+    /// path must feed the measurement itself; a refresh reading the last tick's
+    /// stale value consumed the one-shot with `hasReceivedKeyDown` still nil
+    /// and left the migration pending forever. The direct-injection tests above
+    /// cannot catch that — this one pins the wiring.
+    func testTheFirstRealKeyDownAcknowledgesThroughTheLiveWiring() async {
+        let (_, ledger) = migrationLedger()
+        let hotkeys = HotkeyManager() // no install(): no tap, no monitors
+        let prober = HealthProber(
+            readTapLiveness: { hotkeys.tapLiveness },
+            readSecureInput: { HealthProberTests.secureInputState(active: false) },
+            hasOpenAIKey: { true },
+            signingLedger: ledger,
+            store: HealthProberTests.emptyStore()
+        )
+        let monitor = HealthMonitor(prober: prober)
+        hotkeys.onFirstRealKeyDown = { monitor.refresh() }
+
+        XCTAssertTrue(ledger.migrationPending)
+        hotkeys.noteRealKeyDown() // what the tap callback runs on a real key-down
+        // The observe + refresh ride a Task hop off the callback's critical path.
+        try? await Task.sleep(for: .milliseconds(100))
+
+        XCTAssertFalse(ledger.migrationPending,
+                       "the first real key-down must acknowledge without waiting for a 5 s tick")
     }
 }

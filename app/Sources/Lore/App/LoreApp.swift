@@ -592,9 +592,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Build and start the health monitor (#83). Runs even while the window is
-    /// closed — the "Fn dead" incident happens with no window open — so it lives
-    /// on the delegate, not a view. The prober reads the hotkey tap's existing
+    /// Build the health monitor (#83, reworked #140): an on-open fact sheet plus
+    /// failure-triggered summons — no periodic verdict loop. It lives on the
+    /// delegate, not a view, because failed actions summon with no window open
+    /// (the "Fn dead" incident). The prober reads the hotkey tap's existing
     /// liveness (never installs a second tap) and the key presence; the three
     /// expensive Test-now actions reach the real mic / model cache / network.
     private func setupHealthMonitor(coordinator: AppCoordinator, settings: AppSettings) {
@@ -635,15 +636,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
 
         coordinator.healthMonitor = monitor
-        monitor.start()
 
-        // Proactive summon (#135): the identity changed since the last launch,
-        // so guide the re-grant now instead of waiting for the user to discover
-        // dead hotkeys. Through `onSummon` like every other summon — the notch
-        // wiring has one definition. `start()` ran one refresh synchronously, so
-        // a keystroke that already reached the tap has cleared this.
+        // The summon trigger (#140): a summon fires only when a user action just
+        // failed, delivered by the event stream itself — no verdict loop. The
+        // filter runs on the recording thread; only a match hops to main.
+        DiagStore.shared.setObserver { [weak monitor] event in
+            guard let trigger = HealthMonitor.failureTrigger(for: event) else { return }
+            Task { @MainActor in monitor?.noteFailure(trigger) }
+        }
+
+        // The #135 acknowledge rode the deleted 5 s cycle; now it rides its own
+        // event — the first real key-down reaching the tap runs one refresh,
+        // whose ack path closes a pending migration (#140).
+        hotkeyManager.onFirstRealKeyDown = { [weak monitor] in monitor?.refresh() }
+
+        // Proactive summon (#135): the identity changed since the last launch in
+        // a TCC-affecting way (different team, or ad-hoc involved — same-team
+        // dev↔release flips share grants and stay silent, #140), so guide the
+        // re-grant now instead of waiting for the user to discover dead hotkeys.
+        // Through `onSummon` like every other summon — the notch wiring has one
+        // definition.
         if signingLedger.migrationPending {
-            monitor.onSummon(HealthSummon(probe: .signing))
+            monitor.onSummon(HealthSummon(trigger: .identityMigration))
         } else {
             // Nothing pending: make the current identity the record, which is
             // what starts it on a first-ever launch.

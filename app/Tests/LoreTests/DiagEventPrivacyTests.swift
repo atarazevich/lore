@@ -63,6 +63,7 @@ final class DiagEventPrivacyTests: XCTestCase {
     /// is added here; `CaseIterable` then grows the expected set for free.
     private enum CaseKey: String, CaseIterable {
         case appLaunched
+        case healthSummonFired, healthSummonCleared
         case permissionTransition, tapCreate, tapReinstall, tapDisabledByOS
         case tapDiedDuringRecording, tapEventsStalled, tapEventsResumed
         case secureInputChanged, pasteAttempt
@@ -85,6 +86,8 @@ final class DiagEventPrivacyTests: XCTestCase {
     private static func key(of event: DiagEvent) -> CaseKey {
         switch event {
         case .appLaunched: return .appLaunched
+        case .healthSummonFired: return .healthSummonFired
+        case .healthSummonCleared: return .healthSummonCleared
         case .permissionTransition: return .permissionTransition
         case .tapCreate: return .tapCreate
         case .tapReinstall: return .tapReinstall
@@ -141,6 +144,8 @@ final class DiagEventPrivacyTests: XCTestCase {
     private static func sample(for key: CaseKey) -> DiagEvent {
         switch key {
         case .appLaunched: return .appLaunched(build: .max)
+        case .healthSummonFired: return .healthSummonFired(trigger: .pasteFailed)
+        case .healthSummonCleared: return .healthSummonCleared
 
         case .permissionTransition:
             return .permissionTransition(permission: .accessibility, granted: false)
@@ -226,6 +231,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         allowed.formUnion(DiagEvent.PasteKind.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.PromptDisposition.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.Artifact.allCases.map(\.rawValue))
+        allowed.formUnion(DiagEvent.SummonTrigger.allCases.map(\.rawValue))
         allowed.formUnion(DictationState.allCases.map(\.rawValue))
         return allowed
     }()
