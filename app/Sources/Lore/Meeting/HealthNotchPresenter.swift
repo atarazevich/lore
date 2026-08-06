@@ -34,6 +34,10 @@ final class HealthNotchPresenter {
     /// Serializes expand/hide — see `NotchOpQueue` for the stranded
     /// continuation this prevents.
     private let windowOps = NotchOpQueue()
+    /// Orders the library's ghost panel back out after a screen-parameter
+    /// rebuild (#144) — see `sweepGhostPanel`.
+    private var ghostSweepTask: Task<Void, Never>?
+    private var screenChangeObserver: (any NSObjectProtocol)?
 
     /// The summon on screen, or `nil`. Also the re-summon guard: one notch at a
     /// time, first come first served — **except** that a failed user action
@@ -50,6 +54,9 @@ final class HealthNotchPresenter {
     func present(_ summon: HealthSummon) {
         if let onScreen {
             guard summon.isCritical, !onScreen.isCritical else { return }
+            // Displacement takes the migration notice down: record its clear so
+            // every fired summon has a matching cleared in events.json (#144).
+            DiagStore.record(.healthSummonCleared)
         }
         let alreadyUp = onScreen != nil
         onScreen = summon
@@ -95,7 +102,22 @@ final class HealthNotchPresenter {
         // The reference is deliberately kept (see `notch`): `hide()` closes the
         // library's panel only at the end of its animation, so the presenter
         // must not forget the window before that completes.
-        windowOps.enqueue { await notch.hide() }
+        windowOps.enqueue { [weak self, model] in
+            await notch.hide()
+            // Un-latch the title once the closing animation is done (#144): a
+            // later screen-parameter rebuild must have nothing to re-show.
+            // Skipped when a new summon was presented behind this hide.
+            if self?.onScreen == nil { model.title = "" }
+        }
+    }
+
+    /// Self-clear (#144): the signing ledger acknowledged — wired from
+    /// `SigningIdentityLedger.onMigrationClosed` — so the migration notice's
+    /// claim is stale and it withdraws itself. A failure summon is untouched:
+    /// it reports its own event, not the ledger.
+    func clearIdentitySummon() {
+        guard onScreen?.trigger == .identityMigration else { return }
+        dismiss()
     }
 
     private func ensureNotch() -> DynamicNotch<HealthNotchView, EmptyView, EmptyView> {
@@ -103,6 +125,8 @@ final class HealthNotchPresenter {
         let notch = DynamicNotch(hoverBehavior: [.increaseShadow]) { [model] in
             HealthNotchView(model: model) { [weak self] in
                 self?.fix()
+            } onClose: { [weak self] in
+                self?.dismiss()
             }
         } compactLeading: {
             EmptyView()
@@ -111,7 +135,37 @@ final class HealthNotchPresenter {
         }
         notch.transitionConfiguration = .init(skipIntermediateHides: true)
         self.notch = notch
+        observeScreenChanges()
         return notch
+    }
+
+    /// The library's own screen-parameter observer rebuilds its panel and
+    /// `orderFrontRegardless()`s it even while hidden (`DynamicNotch.swift:144`,
+    /// the #141 residual). With the model cleared on dismiss the rebuilt panel
+    /// carries no summon content, and this sweep orders the ghost window back
+    /// out — so a dismissed or expired summon is never re-fronted by a display
+    /// change (#144). Wrapper-side by design: the SPM checkout stays untouched.
+    private func observeScreenChanges() {
+        guard screenChangeObserver == nil else { return }
+        screenChangeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didChangeScreenParametersNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            Task { @MainActor in self?.sweepGhostPanel() }
+        }
+    }
+
+    private func sweepGhostPanel() {
+        ghostSweepTask?.cancel()
+        ghostSweepTask = Task { [weak self] in
+            // The library rebuilds on this same notification; sweep after its
+            // rebuild has settled. Each notification restarts the delay, so a
+            // sleep-wake burst coalesces into one sweep after the last rebuild.
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled, let self, self.onScreen == nil else { return }
+            self.notch?.windowController?.window?.orderOut(nil)
+        }
     }
 }
 
@@ -127,21 +181,36 @@ final class HealthNotchModel: ObservableObject {
 struct HealthNotchView: View {
     @ObservedObject var model: HealthNotchModel
     let onFix: () -> Void
+    let onClose: () -> Void
 
     var body: some View {
-        HStack(spacing: 12) {
-            Image(systemName: "exclamationmark.triangle.fill")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(LoreTheme.Accent.red)
-            Text(model.title)
-                .font(LoreTheme.Typography.control)
-                .foregroundStyle(LoreTheme.TextColor.primary)
-            Button("Fix it", action: onFix)
-                .buttonStyle(HealthNotchButtonStyle())
+        // A cleared model renders nothing (#144): the library's screen-change
+        // rebuild re-fronts its panel even while hidden, and that ghost must
+        // carry no summon.
+        if !model.title.isEmpty {
+            HStack(spacing: 12) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .font(.system(size: 13, weight: .semibold))
+                    .foregroundStyle(LoreTheme.Accent.red)
+                Text(model.title)
+                    .font(LoreTheme.Typography.control)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                Button("Fix it", action: onFix)
+                    .buttonStyle(HealthNotchButtonStyle())
+                Button(action: onClose) {
+                    Image(systemName: "xmark")
+                        .font(.system(size: 9, weight: .bold))
+                        .foregroundStyle(LoreTheme.TextColor.muted)
+                        .padding(5)
+                        .contentShape(Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Dismiss")
+            }
+            .padding(.vertical, 6)
+            .padding(.horizontal, 4)
+            .fixedSize()
         }
-        .padding(.vertical, 6)
-        .padding(.horizontal, 4)
-        .fixedSize()
     }
 }
 

@@ -87,22 +87,22 @@ install_name_tool -add_rpath @loader_path/../Frameworks "$MACOS/Lore" 2>/dev/nul
 # Sign with Apple Development certificate (stable identity preserves Accessibility permission across rebuilds)
 # Filter by paid-account email (team CTHL87V7H8) so dev builds share TCC permissions
 # with Developer ID releases. Grep by email, not cert ID — the ID changes on renewal.
+# No fallback and no swallowed stderr (#144): a silently ad-hoc bundle flips the
+# TCC identity, drops the permission grants, and fires the signature-changed
+# summon — the ad-hoc path was only ever a trap. Fail loudly instead.
 SIGN_ID=$(security find-identity -v -p codesigning ~/Library/Keychains/login.keychain-db 2>/dev/null | grep "Apple Development: a@cognition.design" | head -1 | awk '{print $2}')
-if [ -n "$SIGN_ID" ]; then
-    # Sign Sparkle framework first if present
-    if [ -d "$FRAMEWORKS/Sparkle.framework" ]; then
-        codesign --force --sign "$SIGN_ID" "$FRAMEWORKS/Sparkle.framework" 2>/dev/null || true
-    fi
-    codesign --force --sign "$SIGN_ID" \
-        --entitlements "Sources/Lore/Lore.entitlements" \
-        "$APP_DIR" 2>/dev/null || echo "Warning: codesign with '$SIGN_ID' failed"
-else
-    echo "Warning: '$SIGN_ID' certificate not found, falling back to ad-hoc signing"
-    echo "  Create an 'Apple Development' certificate in Keychain Access to fix this"
-    codesign --force --deep --sign - \
-        --entitlements "Sources/Lore/Lore.entitlements" \
-        "$APP_DIR" 2>/dev/null || true
+if [ -z "$SIGN_ID" ]; then
+    echo "Error: 'Apple Development: a@cognition.design' certificate not found in login keychain." >&2
+    echo "  Unlock the keychain or install the certificate — an ad-hoc bundle would drop TCC grants." >&2
+    exit 1
 fi
+# Sign Sparkle framework first if present
+if [ -d "$FRAMEWORKS/Sparkle.framework" ]; then
+    codesign --force --sign "$SIGN_ID" "$FRAMEWORKS/Sparkle.framework"
+fi
+codesign --force --sign "$SIGN_ID" \
+    --entitlements "Sources/Lore/Lore.entitlements" \
+    "$APP_DIR"
 
 echo ""
 echo "Built: $APP_DIR"

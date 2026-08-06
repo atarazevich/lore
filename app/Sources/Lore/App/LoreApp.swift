@@ -650,14 +650,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // whose ack path closes a pending migration (#140).
         hotkeyManager.onFirstRealKeyDown = { [weak monitor] in monitor?.refresh() }
 
+        // Self-clear (#144): a keystroke reaching the tap acknowledges the
+        // ledger (`HealthMonitor.refresh`), and an identity summon still on
+        // screen withdraws itself the same moment — no polling, the ack site
+        // drives it.
+        signingLedger.onMigrationClosed = { [weak self] in
+            self?.healthNotch.clearIdentitySummon()
+        }
+
         // Proactive summon (#135): the identity changed since the last launch in
         // a TCC-affecting way (different team, or ad-hoc involved — same-team
         // dev↔release flips share grants and stay silent, #140), so guide the
         // re-grant now instead of waiting for the user to discover dead hotkeys.
         // Through `onSummon` like every other summon — the notch wiring has one
-        // definition.
+        // definition. `claimMigrationSummon` dedupes across launches (#144): a
+        // relaunch is not a new cause, so the notch fires once per transition
+        // while the panel row keeps warning until the real acknowledge.
         if signingLedger.migrationPending {
-            monitor.onSummon(HealthSummon(trigger: .identityMigration))
+            if signingLedger.claimMigrationSummon() {
+                monitor.onSummon(HealthSummon(trigger: .identityMigration))
+            }
         } else {
             // Nothing pending: make the current identity the record, which is
             // what starts it on a first-ever launch.

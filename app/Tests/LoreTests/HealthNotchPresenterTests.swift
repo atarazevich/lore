@@ -48,4 +48,19 @@ final class HealthNotchPresenterTests: XCTestCase {
         notch.present(HealthSummon(trigger: .identityMigration))
         XCTAssertEqual(notch.onScreen?.trigger, .identityMigration)
     }
+
+    /// Self-clear (#144): the ledger's acknowledge withdraws the migration
+    /// notice while it is up — and only that notice; a failure summon reports
+    /// its own event, not the ledger, and must survive the ack.
+    func testClearIdentitySummonWithdrawsOnlyTheMigrationNotice() {
+        let notch = presenter()
+        notch.present(HealthSummon(trigger: .identityMigration))
+        notch.clearIdentitySummon()
+        XCTAssertNil(notch.onScreen, "the ledger acknowledged — the claim is stale")
+
+        notch.present(HealthSummon(trigger: .captureFailed))
+        notch.clearIdentitySummon()
+        XCTAssertEqual(notch.onScreen?.trigger, .captureFailed,
+                       "a failure summon is not the ledger's to clear")
+    }
 }

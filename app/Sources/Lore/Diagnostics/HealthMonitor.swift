@@ -87,21 +87,23 @@ final class HealthMonitor {
     /// open, after a Test-now, and by `noteFailure` so a summon's explanation is
     /// read off fresh state — never on a timer.
     func refresh() {
+        let report = prober.probe()
+        snapshot = report.snapshot
+        items = report.items
         // Close the signing-identity migration (#135, rationale on
         // `SigningIdentityLedger`) on the one fact a cert change cannot fake: a
         // key-down that actually reached our tap — and only a real one; Lore's
         // own synthetic Cmd+V never stamps it (#140, `SyntheticKeyEvent`). Not
         // the permission flags — they are the part that lies — and not the
         // tap's `.ok`, which a fresh launch reads on mere aliveness.
-        // Acknowledged *before* the probe, so the chain runs once and the
-        // signing row is rendered already clear.
+        // Acknowledged *after* the probe (#144): "Fix it" opens the panel onto
+        // a signing row that still explains what changed; the next refresh
+        // publishes the clear. The notch withdraws through the ledger's
+        // `onMigrationClosed`, not through this snapshot.
         if let ledger = prober.signingLedger, ledger.migrationPending,
            prober.readTapLiveness().hasReceivedKeyDown == true {
             ledger.acknowledge()
         }
-        let report = prober.probe()
-        snapshot = report.snapshot
-        items = report.items
     }
 
     /// The events that mean a user action just failed — the only things allowed

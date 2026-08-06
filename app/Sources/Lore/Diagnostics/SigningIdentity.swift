@@ -77,15 +77,30 @@ enum SigningIdentity {
 @MainActor
 final class SigningIdentityLedger {
     private static let key = "signingIdentityLastSeen"
+    /// The tccKey transition last announced on the notch (#144). Separate from
+    /// the baseline so the notch summon dedupes across launches while
+    /// `migrationPending` stays derived: the panel row keeps warning until a
+    /// real acknowledge, but the popup fires once per distinct transition.
+    private static let summonKey = "signingMigrationSummoned"
 
     private let defaults: UserDefaults
     private let current: SigningIdentity.Info
+    /// The baseline fingerprint the pending state was derived from, kept for
+    /// `claimMigrationSummon()`'s transition marker. `nil` when nothing was
+    /// persisted or the current signature is unreadable.
+    private let seenFingerprint: String?
 
     /// True from launch until `acknowledge()`: the binary's identity differs
     /// from the one persisted at the previous launch. First-ever launch (no
     /// persisted value) is NOT a migration — the launch path just starts the
     /// record by acknowledging.
     private(set) var migrationPending: Bool
+
+    /// Fired when `acknowledge()` closes a pending migration — never on the
+    /// record-starting ack of a quiet launch. The notch's self-clear (#144)
+    /// hangs off this: an identity summon on screen withdraws itself the moment
+    /// the ledger has positive evidence the grants work.
+    var onMigrationClosed: (() -> Void)?
 
     init(defaults: UserDefaults = .standard,
          current: SigningIdentity.Info = SigningIdentity.current()) {
@@ -96,9 +111,11 @@ final class SigningIdentityLedger {
         // `acknowledge()` from the launch path.
         guard current.certKind != .unknown,
               let seen = defaults.string(forKey: Self.key) else {
+            seenFingerprint = nil
             migrationPending = false
             return
         }
+        seenFingerprint = seen
         migrationPending = Self.tccKey(seen) != Self.tccKey(Self.fingerprint(current))
     }
 
@@ -111,7 +128,24 @@ final class SigningIdentityLedger {
         // readable launch still has to compare against the real previous one.
         guard current.certKind != .unknown else { return }
         defaults.set(Self.fingerprint(current), forKey: Self.key)
+        let closedAMigration = migrationPending
         migrationPending = false
+        if closedAMigration { onMigrationClosed?() }
+    }
+
+    /// The notch summon's cross-launch dedup (#144): true at most once per
+    /// distinct baseline→current tccKey transition, persisting the announced
+    /// transition as the marker. A relaunch before the ack re-derives the same
+    /// transition and stays silent; a genuinely new transition (baseline or
+    /// current changed) claims again. Deliberately does NOT touch the baseline,
+    /// so `migrationPending` — and the panel row's warning — survive relaunch
+    /// until a real `acknowledge()`.
+    func claimMigrationSummon() -> Bool {
+        guard migrationPending, let seenFingerprint else { return false }
+        let transition = "\(Self.tccKey(seenFingerprint))>\(Self.tccKey(Self.fingerprint(current)))"
+        guard defaults.string(forKey: Self.summonKey) != transition else { return false }
+        defaults.set(transition, forKey: Self.summonKey)
+        return true
     }
 
     /// Cert kind and team in one string. The full pair stays the *stored* record
