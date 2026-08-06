@@ -6,15 +6,31 @@ import XCTest
 /// The library's `DynamicNotchPanel` is born captured (`sharingType` never
 /// set = AppKit's `.readOnly`) and is rebuilt on every hide/show and screen
 /// change, so both notch presenters re-apply `applyFullscreenAuxiliaryVisibility`
-/// on every show. These tests pin what the seam owns — capture exclusion per
-/// the user setting plus fullscreen auxiliary behavior — and verify that an
-/// alive panel is reachable by the settings-toggle sweep
-/// (`SettingsStore.applyScreenShareVisibility` iterates `NSApp.windows`).
+/// on every show and register with `NotchScreenChangeSweeper` for the rebuilds.
+/// These tests pin what the seam owns — the wiring from the store's sharing
+/// decision to the panel, fullscreen auxiliary behavior, the sweeper's
+/// live/hidden branches — and verify that an alive panel is reachable by the
+/// settings-toggle sweep (`SettingsStore.applyScreenShareVisibility` iterates
+/// `NSApp.windows`).
 @MainActor
 final class NotchWindowVisibilityTests: XCTestCase {
 
+    private var suiteNames: [String] = []
+
+    override func tearDown() {
+        // makeSuite materializes com.lore.test.<UUID>.plist under
+        // ~/Library/Preferences — remove the domains so runs don't accumulate.
+        for name in suiteNames {
+            UserDefaults(suiteName: name)?.removePersistentDomain(forName: name)
+        }
+        suiteNames = []
+        super.tearDown()
+    }
+
     private func makeSuite(hideFromScreenShare: Bool? = nil) -> UserDefaults {
-        let suite = UserDefaults(suiteName: "com.lore.test.\(UUID().uuidString)")!
+        let name = "com.lore.test.\(UUID().uuidString)"
+        suiteNames.append(name)
+        let suite = UserDefaults(suiteName: name)!
         if let hideFromScreenShare {
             suite.set(hideFromScreenShare, forKey: "hideFromScreenShare")
         }
@@ -36,33 +52,22 @@ final class NotchWindowVisibilityTests: XCTestCase {
         return panel
     }
 
-    // MARK: - The leak, and the seam that closes it
+    // MARK: - The seam's wiring
 
-    func testLibraryShapedPanelIsCapturedByDefault() {
-        XCTAssertEqual(makeNotchStylePanel().sharingType, .readOnly,
-                       "AppKit default — the reason an unpatched notch panel leaks into recordings")
-    }
-
-    func testPatchExcludesThePanelWhenTheSettingIsOnOrAbsent() {
+    /// The on/off/absent decision table is pinned by
+    /// `SettingsStoreTests.testScreenSharingTypeFromRawDefaults`; the seam owns
+    /// only the wiring — the panel carries whatever the store decides, plus the
+    /// fullscreen-auxiliary behavior that was the seam's original duty.
+    func testPatchAppliesTheStoresSharingDecisionAndFullscreenBehavior() {
         let panel = makeNotchStylePanel()
-        panel.applyFullscreenAuxiliaryVisibility(defaults: makeSuite())
-        XCTAssertEqual(panel.sharingType, .none, "absent key defaults to hidden (privacy-first)")
 
         panel.applyFullscreenAuxiliaryVisibility(defaults: makeSuite(hideFromScreenShare: true))
         XCTAssertEqual(panel.sharingType, .none)
-    }
-
-    func testPatchLeavesThePanelCapturableWhenTheSettingIsOff() {
-        let panel = makeNotchStylePanel()
-        panel.applyFullscreenAuxiliaryVisibility(defaults: makeSuite(hideFromScreenShare: false))
-        XCTAssertEqual(panel.sharingType, .readOnly)
-    }
-
-    func testPatchKeepsFullscreenAuxiliaryBehavior() {
-        let panel = makeNotchStylePanel()
-        panel.applyFullscreenAuxiliaryVisibility(defaults: makeSuite())
         XCTAssertTrue(panel.collectionBehavior.contains(.fullScreenAuxiliary),
                       "the seam's original duty must survive the #145 extension")
+
+        panel.applyFullscreenAuxiliaryVisibility(defaults: makeSuite(hideFromScreenShare: false))
+        XCTAssertEqual(panel.sharingType, .readOnly)
     }
 
     // MARK: - Toggle-while-alive (#145 AC 2)
@@ -75,6 +80,40 @@ final class NotchWindowVisibilityTests: XCTestCase {
         let panel = makeNotchStylePanel()
         XCTAssertTrue(NSApp.windows.contains(panel),
                       "panel absent from NSApp.windows — the settings toggle could not reach an alive notch")
+    }
+
+    // MARK: - Screen-parameter rebuild (shared sweeper)
+
+    /// The library rebuilds and re-fronts its panel on screen-parameter
+    /// changes even while hidden. The sweeper's two branches: a hidden
+    /// surface's ghost is ordered back out; a live surface's rebuilt panel
+    /// gets the policy re-applied. Driven by posting the notification the
+    /// sweeper observes; needs a window server to order panels in and out.
+    func testSweeperOrdersGhostOutAndReappliesPolicyToLivePanel() async throws {
+        _ = NSApplication.shared
+        try XCTSkipIf(NSScreen.screens.isEmpty, "no display — cannot order panels front")
+
+        let ghost = makeNotchStylePanel()
+        ghost.orderFrontRegardless()
+        let live = makeNotchStylePanel()
+        live.orderFrontRegardless()
+
+        let ghostSweeper = NotchScreenChangeSweeper(isLive: { false }, window: { ghost })
+        let liveSweeper = NotchScreenChangeSweeper(isLive: { true }, window: { live })
+
+        NotificationCenter.default.post(
+            name: NSApplication.didChangeScreenParametersNotification, object: NSApp)
+
+        let expected = SettingsStore.screenSharingType(from: .standard)
+        for _ in 0..<30 {  // the sweeper settles 500 ms; poll past it
+            try await Task.sleep(for: .milliseconds(100))
+            if !ghost.isVisible, live.sharingType == expected { break }
+        }
+
+        XCTAssertFalse(ghost.isVisible, "hidden surface: the rebuilt ghost must be ordered back out")
+        XCTAssertEqual(live.sharingType, expected, "live surface: the rebuilt panel must carry the policy")
+        live.orderOut(nil)
+        _ = (ghostSweeper, liveSweeper)  // keep the observers alive through the poll
     }
 
     // MARK: - End to end through the presenter

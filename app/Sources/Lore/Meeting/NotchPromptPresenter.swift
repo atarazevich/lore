@@ -156,9 +156,11 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
     private var notch: DynamicNotch<NotchPromptExpandedView, NotchPromptCompactIcon, NotchPromptCompactLabel>?
     private let model = NotchPromptModel()
     private var hoverObservation: AnyCancellable?
-    private var screenChangeObserver: (any NSObjectProtocol)?
-    /// True from present() until dismiss(): gates the screen-change re-apply,
-    /// which must never `orderFrontRegardless()` a hidden panel.
+    /// Screen-parameter rebuild handling — live re-apply vs ghost order-out —
+    /// lives in the shared `NotchScreenChangeSweeper`.
+    private var screenChangeSweeper: NotchScreenChangeSweeper?
+    /// True from present() until dismiss(): the sweeper's liveness signal — a
+    /// hidden ghost is ordered out, never re-fronted.
     private var promptShowing = false
 
     /// Fences async work started for an earlier prompt: present() and the
@@ -191,10 +193,16 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
 
     func dismiss() async {
         generation += 1
+        let gen = generation
         promptShowing = false
         hoverObservation = nil
         guard let notch else { return }
         await notch.hide()
+        // Un-latch the content once the closing animation is done (the health
+        // surface's #144 pattern): the library's screen-parameter rebuild must
+        // have nothing to re-show. Skipped if a present slipped in behind the
+        // hide — it bumps `generation`.
+        if gen == generation { model.content = nil }
     }
 
     private func ensureNotch() -> DynamicNotch<NotchPromptExpandedView, NotchPromptCompactIcon, NotchPromptCompactLabel> {
@@ -210,42 +218,16 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
         }
         notch.transitionConfiguration = .init(skipIntermediateHides: true)
         self.notch = notch
-        observeScreenChanges()
+        screenChangeSweeper = NotchScreenChangeSweeper(
+            isLive: { [weak self] in self?.promptShowing ?? false },
+            window: { [weak self] in self?.notch?.windowController?.window }
+        )
         return notch
     }
 
-    /// The library re-creates its panel on `didChangeScreenParametersNotification`
-    /// (display plug/unplug while a prompt is live) with default window
-    /// properties — captured by screen recordings and invisible over fullscreen
-    /// apps. Re-apply the patch after the library's rebuild settles (#145;
-    /// same delay rationale as `HealthNotchPresenter.sweepGhostPanel`). While
-    /// no prompt is showing, do nothing: the patch fronts the panel, and a
-    /// hidden ghost must not be raised.
-    private func observeScreenChanges() {
-        screenChangeObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didChangeScreenParametersNotification,
-            object: nil,
-            queue: .main
-        ) { [weak self] _ in
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(500))
-                guard let self, self.promptShowing else { return }
-                self.applyFullscreenVisibilityPatch()
-            }
-        }
-    }
-
-    /// Upstream gap (DynamicNotchKit 1.1.0): `DynamicNotchPanel` sets
-    /// `collectionBehavior = [.canJoinAllSpaces, .stationary]` — without
-    /// `.fullScreenAuxiliary` the prompt never appears over fullscreen apps
-    /// (fullscreen Zoom is the primary use case) — and no `sharingType`, so
-    /// screen recordings capture it against the user's setting (#145). The
-    /// library exposes its `windowController` publicly for exactly this kind
-    /// of adjustment, so we patch the panel after each present/state change
-    /// (the panel is recreated from hidden state) and after screen-parameter
-    /// rebuilds (`observeScreenChanges`). Reference config: NotchDrop's
-    /// NotchWindow (MIT). Panel level stays at the library's `.screenSaver`
-    /// default, which is already above fullscreen content.
+    /// Upstream gap, rationale, and reference config live at the seam:
+    /// `NSWindow.applyFullscreenAuxiliaryVisibility` (#145). Re-applied after
+    /// every present/state change because the panel is recreated from hidden.
     private func applyFullscreenVisibilityPatch() {
         notch?.windowController?.window?.applyFullscreenAuxiliaryVisibility()
     }
@@ -281,8 +263,9 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
 
 /// The reusable notch's one mutable input (#141): DynamicNotchKit captures its
 /// content views once at init, so per-prompt content has to flow through an
-/// observed model rather than freshly built views. `nil` only before the first
-/// prompt, when the notch has never been shown.
+/// observed model rather than freshly built views. `nil` while no prompt is
+/// live — before the first prompt, and cleared again on dismiss so the
+/// library's screen-parameter rebuild has nothing to re-show (#144 pattern).
 @MainActor
 final class NotchPromptModel: ObservableObject {
     @Published var content: NotchPromptContent?
