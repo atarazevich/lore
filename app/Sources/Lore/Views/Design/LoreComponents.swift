@@ -144,24 +144,22 @@ struct LoreIconButton: View {
     }
 }
 
-// MARK: - Copy button (dictation rows, meetings detail header)
+// MARK: - Copy flash (copy buttons and chips)
 
-/// Copy icon button with green ✓ feedback for ~1.4s (design `.ibtn` + the
-/// prototype's `copied` flash). A rapid re-copy restarts the full window.
-struct LoreCopyButton: View {
-    var label: String = "Copy"
+/// Copy-feedback state machine shared by `LoreCopyButton` and the settings
+/// prompt copy chip (#146): `fire` runs `copy` and flips `copied` for 1.4s;
+/// a rapid re-copy restarts the full window. The content closure supplies the
+/// button chrome for both states — icon button or chip.
+struct LoreCopyFlash<Content: View>: View {
     /// Performs the actual copy (pasteboard write).
     let copy: () -> Void
+    @ViewBuilder let content: (_ copied: Bool, _ fire: @escaping () -> Void) -> Content
 
     @State private var copied = false
     @State private var flashID = 0
 
     var body: some View {
-        LoreIconButton(
-            systemName: copied ? "checkmark" : "doc.on.doc",
-            label: label,
-            tint: copied ? LoreTheme.Accent.green : LoreTheme.TextColor.muted
-        ) {
+        content(copied) {
             copy()
             copied = true
             flashID += 1
@@ -174,6 +172,27 @@ struct LoreCopyButton: View {
             }
         }
         .help("Copy to clipboard")
+    }
+}
+
+// MARK: - Copy button (dictation rows, meetings detail header)
+
+/// Copy icon button with green ✓ feedback for ~1.4s (design `.ibtn` + the
+/// prototype's `copied` flash). A rapid re-copy restarts the full window.
+struct LoreCopyButton: View {
+    var label: String = "Copy"
+    /// Performs the actual copy (pasteboard write).
+    let copy: () -> Void
+
+    var body: some View {
+        LoreCopyFlash(copy: copy) { copied, fire in
+            LoreIconButton(
+                systemName: copied ? "checkmark" : "doc.on.doc",
+                label: label,
+                tint: copied ? LoreTheme.Accent.green : LoreTheme.TextColor.muted,
+                action: fire
+            )
+        }
     }
 }
 
