@@ -278,7 +278,7 @@ final class SettingsStore {
     }
 
     var activeCleanupPrompt: String {
-        CleanupMode.prompt(for: cleanupPreset, customPrompt: customCleanupPrompt)
+        cleanupPreset == .clean ? CleanupMode.cleanPrompt : customCleanupPrompt
     }
 
     @ObservationIgnored nonisolated(unsafe) private var _cleanupByDefault: Bool

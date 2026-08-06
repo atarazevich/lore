@@ -4,7 +4,6 @@ import Foundation
 
 enum CleanupPreset: String, CaseIterable, Identifiable, Codable {
     case clean
-    case concise
     case custom
 
     var id: String { rawValue }
@@ -12,7 +11,6 @@ enum CleanupPreset: String, CaseIterable, Identifiable, Codable {
     var displayName: String {
         switch self {
         case .clean: "Clean (default)"
-        case .concise: "Concise"
         case .custom: "Custom"
         }
     }
@@ -38,9 +36,7 @@ struct CleanupMode: Codable, Identifiable, Equatable {
 
     // MARK: - Preset Prompts
 
-    static let cleanPrompt = "You are processing a voice dictation into clean text. Rules:\n1. Remove all fillers (um, uh, like, you know, right, basically, I mean, so)\n2. Remove all repetitions and false starts\n3. Remove verbal thinking (\"let me think\", \"hold on\", \"what was I saying\")\n4. Fix grammar and punctuation\n5. Break into logical paragraphs\n6. Preserve technical terms exactly\n7. Keep the speaker's voice \u{2014} don't make it overly formal\nOutput only the cleaned text."
-
-    static let concisePrompt = "Clean up this dictation transcript. Remove ALL filler words, false starts, repetitions, and self-corrections. Restructure run-on sentences into clear, concise ones. Preserve the speaker's intent and key points but make the text read as polished written prose. Output only the cleaned text."
+    static let cleanPrompt = "Clean up this voice dictation. Remove filler words, false starts, repetition. Resolve self-corrections \u{2014} keep only the final intended statement. Fix grammar and punctuation. Do not paraphrase or change wording otherwise. Output only the cleaned text."
 
     static let punctuationOnlyPrompt = "You are processing a voice dictation. Keep the wording exactly as spoken \u{2014} do not remove, add, replace, or reorder any words. Only add punctuation, fix capitalization, and break the text into paragraphs at natural pauses. Preserve fillers and repetitions as spoken. Output only the punctuated text."
 
@@ -55,16 +51,6 @@ struct CleanupMode: Codable, Identifiable, Equatable {
     static func translateSuffix(to language: TranslationLanguage = .english) -> String {
         "\n\nAlso translate the result into \(language.displayName). Output only the translated text."
     }
-
-    /// Resolve the prompt for a given preset, with optional custom text.
-    static func prompt(for preset: CleanupPreset, customPrompt: String = "") -> String {
-        switch preset {
-        case .clean: cleanPrompt
-        case .concise: concisePrompt
-        case .custom: customPrompt
-        }
-    }
-
 }
 
 // MARK: - Retroactive Cleanup Methods (history row popover, DIC-35)
