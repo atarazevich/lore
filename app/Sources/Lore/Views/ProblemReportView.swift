@@ -8,7 +8,7 @@ import SwiftUI
 ///
 /// All build/send logic lives in `ProblemReportComposer`, which freezes the
 /// diagnostics once so the previewed bytes are byte-for-byte the posted bytes.
-/// Dark-only, XMOTheme tokens (D-031). Presented as a sheet from the health
+/// Dark-only, LoreTheme tokens (D-031). Presented as a sheet from the health
 /// panel and from Settings.
 struct ProblemReportView: View {
     @State private var composer: ProblemReportComposer
@@ -36,7 +36,7 @@ struct ProblemReportView: View {
         @Bindable var composer = composer
         return VStack(spacing: 0) {
             header
-            XMODivider()
+            LoreDivider()
             ScrollView {
                 VStack(alignment: .leading, spacing: 18) {
                     prompt(text: $composer.message)
@@ -45,11 +45,11 @@ struct ProblemReportView: View {
                 }
                 .padding(20)
             }
-            XMODivider()
+            LoreDivider()
             actions
         }
         .frame(width: 460, height: 560)
-        .background(XMOTheme.Surface.window)
+        .background(LoreTheme.Surface.window)
         .background(.ultraThinMaterial)
         .preferredColorScheme(.dark)
         // Freeze the diagnostics once, as the flow opens — the single probe.
@@ -65,14 +65,14 @@ struct ProblemReportView: View {
         HStack(alignment: .top, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Report a problem")
-                    .font(XMOTheme.Typography.control)
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .font(LoreTheme.Typography.control)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
                 Text("Sends a diagnostic report so we can see what your Mac saw.")
-                    .font(XMOTheme.Typography.meta)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.meta)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             }
             Spacer()
-            XMOIconButton(systemName: "xmark", label: "Close report", action: onClose)
+            LoreIconButton(systemName: "xmark", label: "Close report", action: onClose)
         }
         .padding(.horizontal, 20)
         .frame(height: 60)
@@ -82,24 +82,24 @@ struct ProblemReportView: View {
 
     private func prompt(text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 8) {
-            XMOSectionLabel(text: "What happened?")
+            LoreSectionLabel(text: "What happened?")
             ZStack(alignment: .topLeading) {
                 if text.wrappedValue.isEmpty {
                     Text("Describe what went wrong — e.g. the Fn key stopped inserting text after a meeting.")
-                        .font(XMOTheme.Typography.body)
-                        .foregroundStyle(XMOTheme.TextColor.faint)
+                        .font(LoreTheme.Typography.body)
+                        .foregroundStyle(LoreTheme.TextColor.faint)
                         .padding(.top, 8)
                         .padding(.leading, 5)
                         .allowsHitTesting(false)
                 }
                 TextEditor(text: text)
-                    .font(XMOTheme.Typography.body)
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .font(LoreTheme.Typography.body)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
                     .scrollContentBackground(.hidden)
                     .frame(height: 96)
                     .padding(4)
             }
-            .background(XMOTheme.Surface.card3, in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+            .background(LoreTheme.Surface.card3, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
             .disabled(composer.phase == .sending)
         }
     }
@@ -108,11 +108,11 @@ struct ProblemReportView: View {
 
     private var manifest: some View {
         VStack(alignment: .leading, spacing: 8) {
-            XMOSectionLabel(text: "What gets sent")
-            XMOCard {
+            LoreSectionLabel(text: "What gets sent")
+            LoreCard {
                 VStack(alignment: .leading, spacing: 9) {
-                    ForEach(Self.attached, id: \.self) { manifestRow(icon: "checkmark", color: XMOTheme.Accent.green, text: $0) }
-                    ForEach(Self.notAttached, id: \.self) { manifestRow(icon: "xmark", color: XMOTheme.TextColor.muted, text: $0) }
+                    ForEach(Self.attached, id: \.self) { manifestRow(icon: "checkmark", color: LoreTheme.Accent.green, text: $0) }
+                    ForEach(Self.notAttached, id: \.self) { manifestRow(icon: "xmark", color: LoreTheme.TextColor.muted, text: $0) }
                 }
                 .padding(12)
             }
@@ -123,8 +123,8 @@ struct ProblemReportView: View {
                     Image(systemName: "eye")
                     Text("Preview exactly what's sent")
                 }
-                .font(XMOTheme.Typography.meta)
-                .foregroundStyle(XMOTheme.Accent.blue)
+                .font(LoreTheme.Typography.meta)
+                .foregroundStyle(LoreTheme.Accent.blue)
             }
             .buttonStyle(.plain)
             .accessibilityLabel("Preview the report contents")
@@ -138,8 +138,8 @@ struct ProblemReportView: View {
                 .foregroundStyle(color)
                 .frame(width: 14)
             Text(text)
-                .font(XMOTheme.Typography.meta)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.meta)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .fixedSize(horizontal: false, vertical: true)
             Spacer(minLength: 0)
         }
@@ -153,35 +153,35 @@ struct ProblemReportView: View {
         case .sent(let id):
             HStack(spacing: 8) {
                 Image(systemName: "checkmark.circle.fill")
-                    .foregroundStyle(XMOTheme.Accent.green)
+                    .foregroundStyle(LoreTheme.Accent.green)
                 VStack(alignment: .leading, spacing: 2) {
                     Text("Report \(id) sent")
-                        .font(XMOTheme.Typography.control)
-                        .foregroundStyle(XMOTheme.TextColor.primary)
+                        .font(LoreTheme.Typography.control)
+                        .foregroundStyle(LoreTheme.TextColor.primary)
                     Text("Quote this ID to us and we'll find it.")
-                        .font(XMOTheme.Typography.meta)
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .font(LoreTheme.Typography.meta)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                 }
                 Spacer(minLength: 0)
-                XMOCopyButton(label: "Copy report ID") {
+                LoreCopyButton(label: "Copy report ID") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(id, forType: .string)
                 }
             }
             .padding(12)
-            .background(XMOTheme.Surface.card2, in: RoundedRectangle(cornerRadius: XMOTheme.Radius.card))
+            .background(LoreTheme.Surface.card2, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card))
         case .failed(let error):
             HStack(alignment: .firstTextBaseline, spacing: 8) {
                 Image(systemName: "exclamationmark.triangle.fill")
-                    .foregroundStyle(XMOTheme.Accent.amber)
+                    .foregroundStyle(LoreTheme.Accent.amber)
                 Text(error)
-                    .font(XMOTheme.Typography.meta)
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .font(LoreTheme.Typography.meta)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
                     .fixedSize(horizontal: false, vertical: true)
                 Spacer(minLength: 0)
             }
             .padding(12)
-            .background(XMOTheme.Surface.card2, in: RoundedRectangle(cornerRadius: XMOTheme.Radius.card))
+            .background(LoreTheme.Surface.card2, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card))
         case .editing, .sending:
             EmptyView()
         }
@@ -238,10 +238,10 @@ private struct ProblemReportPreview: View {
         VStack(spacing: 0) {
             HStack {
                 Text("Preview")
-                    .font(XMOTheme.Typography.control)
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .font(LoreTheme.Typography.control)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
                 Spacer()
-                XMOIconButton(systemName: "xmark", label: "Close preview", action: onClose)
+                LoreIconButton(systemName: "xmark", label: "Close preview", action: onClose)
             }
             .padding(.horizontal, 20)
             .frame(height: 52)
@@ -254,7 +254,7 @@ private struct ProblemReportPreview: View {
             .padding(.horizontal, 20)
             .padding(.bottom, 12)
 
-            XMODivider()
+            LoreDivider()
 
             ScrollView {
                 switch tab {
@@ -264,7 +264,7 @@ private struct ProblemReportPreview: View {
             }
         }
         .frame(width: 480, height: 560)
-        .background(XMOTheme.Surface.window)
+        .background(LoreTheme.Surface.window)
         .background(.ultraThinMaterial)
         .preferredColorScheme(.dark)
     }
@@ -275,18 +275,18 @@ private struct ProblemReportPreview: View {
                 HStack(alignment: .firstTextBaseline, spacing: 8) {
                     Image(systemName: "circle.fill")
                         .font(.system(size: 4))
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                         .padding(.top, 5)
                     Text(line)
-                        .font(XMOTheme.Typography.body)
-                        .foregroundStyle(XMOTheme.TextColor.primary)
+                        .font(LoreTheme.Typography.body)
+                        .foregroundStyle(LoreTheme.TextColor.primary)
                         .fixedSize(horizontal: false, vertical: true)
                     Spacer(minLength: 0)
                 }
             }
             Text("\(report.events.count) diagnostic events attached · \(report.environment.macModel) · macOS \(report.environment.macOSVersion) · \(report.environment.appVersion) (build \(report.environment.appBuild))")
-                .font(XMOTheme.Typography.meta)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.meta)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .padding(.top, 4)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -295,8 +295,8 @@ private struct ProblemReportPreview: View {
 
     private var rawTab: some View {
         Text(rawJSON)
-            .font(XMOTheme.Typography.mono(10.5))
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .font(LoreTheme.Typography.mono(10.5))
+            .foregroundStyle(LoreTheme.TextColor.primary)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(16)
@@ -313,20 +313,20 @@ private struct ProblemReportPreview: View {
 // MARK: - Button style
 
 /// Filled (Send/Done) or plain (Cancel) action button. The press scale/animation
-/// is `XMOPressButtonStyle`'s job — this only adds the filled/plain background.
+/// is `LorePressButtonStyle`'s job — this only adds the filled/plain background.
 private struct ProblemReportButtonStyle: ButtonStyle {
     let filled: Bool
     @Environment(\.isEnabled) private var isEnabled
 
     func makeBody(configuration: Configuration) -> some View {
-        XMOPressButtonStyle().makeBody(configuration: configuration)
-            .font(XMOTheme.Typography.control)
-            .foregroundStyle(filled ? Color.white : XMOTheme.TextColor.primary)
+        LorePressButtonStyle().makeBody(configuration: configuration)
+            .font(LoreTheme.Typography.control)
+            .foregroundStyle(filled ? Color.white : LoreTheme.TextColor.primary)
             .padding(.horizontal, 14)
             .padding(.vertical, 7)
             .background(
-                filled ? XMOTheme.Accent.blue : XMOTheme.Surface.card3,
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                filled ? LoreTheme.Accent.blue : LoreTheme.Surface.card3,
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
             )
             .opacity(isEnabled ? 1 : 0.4)
     }

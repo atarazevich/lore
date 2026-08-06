@@ -1,12 +1,12 @@
 import Foundation
 
-/// Prompt assembly + transport for the "Ask XMO" chat — live rail (MREC-30/31)
+/// Prompt assembly + transport for the "Ask Lore" chat — live rail (MREC-30/31)
 /// and review Chat tab (#62). Transport goes through the shared
 /// `ChatCompletionsClient.complete` — it sends `max_completion_tokens`,
 /// which gpt-5.4-mini requires.
 /// D-031: purely additive — a failure here surfaces only as a chat bubble and
 /// never touches recording, transcription, or stats.
-struct AskXMOClient: Sendable {
+struct AskLoreClient: Sendable {
     private static let model = ChatCompletionsClient.defaultOpenAIModel
     /// A hung request must not lock the chat input for the default 60s.
     private static let timeout: TimeInterval = 30
@@ -53,7 +53,7 @@ struct AskXMOClient: Sendable {
         }
 
         var system = """
-        You are \(XMOTheme.wordmark), assisting \
+        You are \(LoreTheme.wordmark), assisting \
         \(isLive ? "during a meeting that is still in progress" : "after a meeting that has ended"). \
         Answer the user's questions using ONLY the \
         \(isLive ? "live transcript" : "meeting transcript") below. \

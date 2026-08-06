@@ -39,7 +39,7 @@ struct MeetingsDestination: View {
         VStack(spacing: 0) {
             if recordingActive {
                 liveReviewSwitch(showLive: showLive)
-                XMODivider()
+                LoreDivider()
             }
             ZStack {
                 ContentView(settings: settings)
@@ -66,7 +66,7 @@ struct MeetingsDestination: View {
                 switchSegment(isOn: showLive) {
                     shell.meetingsReviewWhileRecording = false
                 } label: {
-                    XMOPulsingDot(color: XMOTheme.Accent.red, size: 7)
+                    LorePulsingDot(color: LoreTheme.Accent.red, size: 7)
                     Text("Live")
                 }
                 switchSegment(isOn: !showLive) {
@@ -77,8 +77,8 @@ struct MeetingsDestination: View {
             }
             .padding(3)
             .background(
-                XMOTheme.Surface.hover,
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                LoreTheme.Surface.hover,
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
             )
             Spacer()
         }
@@ -93,20 +93,20 @@ struct MeetingsDestination: View {
         Button(action: action) {
             HStack(spacing: 6) { label() }
                 .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(isOn ? Color.white : XMOTheme.TextColor.muted)
+                .foregroundStyle(isOn ? Color.white : LoreTheme.TextColor.muted)
                 .padding(.vertical, 5)
                 .padding(.horizontal, 14)
                 .background(
                     isOn ? Color.white.opacity(0.12) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
                 )
-                .contentShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+                .contentShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
         }
         .buttonStyle(.plain)
     }
 }
 
-/// Settings destination — the unified XMO settings screen (Stage D). The old
+/// Settings destination — the unified Lore settings screen (Stage D). The old
 /// Cmd+, Settings scene is gone; this is the only Settings surface (SET-06).
 struct SettingsDestination: View {
     @Bindable var settings: AppSettings

@@ -1,6 +1,6 @@
 import Observation
 
-/// Sidebar destinations of the unified XMO window (SHELL-16).
+/// Sidebar destinations of the unified Lore window (SHELL-16).
 ///
 /// The nav model is 5-capable — Tasks and Library are designed but ship in
 /// Stage 2 — so adding them later is a `ShellModel.enabledDestinations` entry,

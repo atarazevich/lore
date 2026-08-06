@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// XMO Stage 1 shared primitives (D-031: additive only, not yet wired into
+/// Stage 1 shared primitives (D-031: additive only, not yet wired into
 /// existing views). Each component mirrors a treatment that appears in two or
 /// more designed screens — see `docs/design/xmo-stage1/handoff/screens/`.
 
@@ -9,7 +9,7 @@ import SwiftUI
 /// 42×24 pill: off `rgba(255,255,255,.12)` → on green; 18px white knob,
 /// left 3px → 21px. Renders the pill only — row layout (name + sub + toggle)
 /// belongs to the screen.
-struct XMOToggleStyle: ToggleStyle {
+struct LoreToggleStyle: ToggleStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
@@ -18,7 +18,7 @@ struct XMOToggleStyle: ToggleStyle {
         } label: {
             ZStack(alignment: .leading) {
                 Capsule()
-                    .fill(configuration.isOn ? XMOTheme.Accent.green : Color.white.opacity(0.12))
+                    .fill(configuration.isOn ? LoreTheme.Accent.green : Color.white.opacity(0.12))
                     .frame(width: 42, height: 24)
                 Circle()
                     .fill(.white)
@@ -28,7 +28,7 @@ struct XMOToggleStyle: ToggleStyle {
         }
         .buttonStyle(.plain)
         .animation(
-            reduceMotion ? nil : .easeOut(duration: XMOTheme.Motion.hoverDuration),
+            reduceMotion ? nil : .easeOut(duration: LoreTheme.Motion.hoverDuration),
             value: configuration.isOn
         )
     }
@@ -37,17 +37,17 @@ struct XMOToggleStyle: ToggleStyle {
 // MARK: - Grouped card (Settings `.scard`)
 
 /// Inset grouped-card container: `--card` fill, 7px radius, 1px `--line` inset border.
-/// Stack rows inside and separate them with `XMODivider`.
-struct XMOCard<Content: View>: View {
+/// Stack rows inside and separate them with `LoreDivider`.
+struct LoreCard<Content: View>: View {
     @ViewBuilder var content: Content
 
     var body: some View {
         VStack(spacing: 0) { content }
-            .background(XMOTheme.Surface.card)
-            .clipShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.card))
+            .background(LoreTheme.Surface.card)
+            .clipShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.card))
             .overlay(
-                RoundedRectangle(cornerRadius: XMOTheme.Radius.card)
-                    .strokeBorder(XMOTheme.Surface.line, lineWidth: 1)
+                RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
+                    .strokeBorder(LoreTheme.Surface.line, lineWidth: 1)
             )
     }
 }
@@ -56,7 +56,7 @@ struct XMOCard<Content: View>: View {
 
 /// Uppercase muted section label. Sizes in the design: 11 (settings
 /// sections), 10.5 (day headers, .09em tracking), 9 (popover headers, mono).
-struct XMOSectionLabel: View {
+struct LoreSectionLabel: View {
     let text: String
     var size: CGFloat = 10.5
     var mono = false
@@ -66,10 +66,10 @@ struct XMOSectionLabel: View {
 
     var body: some View {
         Text(text.uppercased())
-            .font(mono ? XMOTheme.Typography.mono(size, weight: .semibold)
+            .font(mono ? LoreTheme.Typography.mono(size, weight: .semibold)
                        : .system(size: size, weight: .semibold))
             .tracking(size * trackingEm)
-            .foregroundStyle(XMOTheme.TextColor.muted)
+            .foregroundStyle(LoreTheme.TextColor.muted)
     }
 }
 
@@ -79,7 +79,7 @@ struct XMOSectionLabel: View {
 /// 6px radius. Pass `width` for the fixed-width key variant (`.keybtn`, 64px,
 /// mono 12/600, `.08` fill). A nil `action` renders the same chip statically
 /// (non-interactive) — used for key chips that are not remappable yet.
-struct XMOMonoValueButton: View {
+struct LoreMonoValueButton: View {
     let title: String
     var width: CGFloat?
     var action: (() -> Void)?
@@ -87,7 +87,7 @@ struct XMOMonoValueButton: View {
     var body: some View {
         if let action {
             Button(action: action) { label }
-                .buttonStyle(XMOPressButtonStyle())
+                .buttonStyle(LorePressButtonStyle())
         } else {
             label
         }
@@ -95,15 +95,15 @@ struct XMOMonoValueButton: View {
 
     private var label: some View {
         Text(title)
-            .font(width == nil ? XMOTheme.Typography.monoControl
-                               : XMOTheme.Typography.mono(12, weight: .semibold))
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .font(width == nil ? LoreTheme.Typography.monoControl
+                               : LoreTheme.Typography.mono(12, weight: .semibold))
+            .foregroundStyle(LoreTheme.TextColor.primary)
             .padding(.vertical, 6)
             .padding(.horizontal, width == nil ? 12 : 0)
             .frame(width: width)
             .background(
                 Color.white.opacity(width == nil ? 0.06 : 0.08),
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
             )
     }
 }
@@ -112,11 +112,11 @@ struct XMOMonoValueButton: View {
 
 /// 30×30 icon button, 5px radius, `rgba(255,255,255,.07)` fill. Hover-reveal
 /// (opacity 0 → 1 on row hover) is the parent row's responsibility.
-struct XMOIconButton: View {
+struct LoreIconButton: View {
     let systemName: String
     /// Accessibility label — required, icon-only buttons say nothing otherwise.
     let label: String
-    var tint: Color = XMOTheme.TextColor.muted
+    var tint: Color = LoreTheme.TextColor.muted
     /// Fill override — default `rgba(255,255,255,.07)`; the dictation rows use
     /// amber `.16` while a popover is open and red `.12` for the retry button.
     var background: Color = Color.white.opacity(0.07)
@@ -135,10 +135,10 @@ struct XMOIconButton: View {
                 .frame(width: 30, height: 30)
                 .background(
                     background,
-                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
                 )
         }
-        .buttonStyle(XMOPressButtonStyle())
+        .buttonStyle(LorePressButtonStyle())
         .opacity(isEnabled ? 1 : 0.4)
         .accessibilityLabel(label)
     }
@@ -148,7 +148,7 @@ struct XMOIconButton: View {
 
 /// Copy icon button with green ✓ feedback for ~1.4s (design `.ibtn` + the
 /// prototype's `copied` flash). A rapid re-copy restarts the full window.
-struct XMOCopyButton: View {
+struct LoreCopyButton: View {
     var label: String = "Copy"
     /// Performs the actual copy (pasteboard write).
     let copy: () -> Void
@@ -157,10 +157,10 @@ struct XMOCopyButton: View {
     @State private var flashID = 0
 
     var body: some View {
-        XMOIconButton(
+        LoreIconButton(
             systemName: copied ? "checkmark" : "doc.on.doc",
             label: label,
-            tint: copied ? XMOTheme.Accent.green : XMOTheme.TextColor.muted
+            tint: copied ? LoreTheme.Accent.green : LoreTheme.TextColor.muted
         ) {
             copy()
             copied = true
@@ -182,23 +182,23 @@ struct XMOCopyButton: View {
 /// Bordered-chip chrome shared by the meta entity chips and the transcript
 /// banner's action button (#109): fill + 1px `Surface.line` border + hit
 /// shape, all on the chip radius. Font and padding stay with the caller.
-struct XMOChipChrome: ViewModifier {
+struct LoreChipChrome: ViewModifier {
     var fill: Color
 
     func body(content: Content) -> some View {
         content
-            .background(fill, in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+            .background(fill, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
             .overlay(
-                RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
-                    .strokeBorder(XMOTheme.Surface.line, lineWidth: 1)
+                RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
+                    .strokeBorder(LoreTheme.Surface.line, lineWidth: 1)
             )
-            .contentShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+            .contentShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
     }
 }
 
 extension View {
-    func xmoChipChrome(fill: Color) -> some View {
-        modifier(XMOChipChrome(fill: fill))
+    func loreChipChrome(fill: Color) -> some View {
+        modifier(LoreChipChrome(fill: fill))
     }
 }
 
@@ -206,7 +206,7 @@ extension View {
 
 /// Row treatment shared by the shell sidebar and the meetings list rail:
 /// 9×11 padding, 6px radius, active fill, hover fill when inactive.
-struct XMOSelectableRow: ViewModifier {
+struct LoreSelectableRow: ViewModifier {
     var isActive: Bool
     /// Design: nav items use white .08, meeting list rows white .06.
     var activeFill: Color = Color.white.opacity(0.08)
@@ -215,38 +215,38 @@ struct XMOSelectableRow: ViewModifier {
         content
             .padding(.vertical, 9)
             .padding(.horizontal, 11)
-            .contentShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+            .contentShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
             .background(
                 isActive ? activeFill : Color.clear,
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
             )
-            .xmoHoverFill(cornerRadius: XMOTheme.Radius.chip, enabled: !isActive)
+            .loreHoverFill(cornerRadius: LoreTheme.Radius.chip, enabled: !isActive)
     }
 }
 
 extension View {
-    func xmoSelectableRow(
+    func loreSelectableRow(
         isActive: Bool,
         activeFill: Color = Color.white.opacity(0.08)
     ) -> some View {
-        modifier(XMOSelectableRow(isActive: isActive, activeFill: activeFill))
+        modifier(LoreSelectableRow(isActive: isActive, activeFill: activeFill))
     }
 }
 
 // MARK: - Press feedback (CSS `:active { scale: .96 }`)
 
-/// Scales to 0.96 while pressed; shared by all XMO buttons. No press scale
+/// Scales to 0.96 while pressed; shared by all Lore buttons. No press scale
 /// under Reduce Motion.
-struct XMOPressButtonStyle: ButtonStyle {
+struct LorePressButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
             .scaleEffect(
                 configuration.isPressed && !reduceMotion
-                    ? XMOTheme.Motion.pressScale : 1
+                    ? LoreTheme.Motion.pressScale : 1
             )
-            .animation(.easeOut(duration: XMOTheme.Motion.hoverDuration), value: configuration.isPressed)
+            .animation(.easeOut(duration: LoreTheme.Motion.hoverDuration), value: configuration.isPressed)
     }
 }
 
@@ -255,26 +255,26 @@ struct XMOPressButtonStyle: ButtonStyle {
 extension View {
     /// Popover container: `--popover` bg, 8px radius, 1px `--line` border,
     /// popover shadow, 5px content inset.
-    func xmoPopoverChrome() -> some View {
+    func lorePopoverChrome() -> some View {
         padding(5)
             .background(
-                XMOTheme.Surface.popover,
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.popover)
+                LoreTheme.Surface.popover,
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.popover)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: XMOTheme.Radius.popover)
-                    .strokeBorder(XMOTheme.Surface.line, lineWidth: 1)
+                RoundedRectangle(cornerRadius: LoreTheme.Radius.popover)
+                    .strokeBorder(LoreTheme.Surface.line, lineWidth: 1)
             )
-            .xmoShadow(XMOTheme.Shadow.popover)
+            .loreShadow(LoreTheme.Shadow.popover)
     }
 }
 
 // MARK: - Hairline divider (`.hairline`, `.srow` borders)
 
 /// 1px `--line` divider.
-struct XMODivider: View {
+struct LoreDivider: View {
     var body: some View {
-        XMOTheme.Surface.line.frame(height: 1)
+        LoreTheme.Surface.line.frame(height: 1)
     }
 }
 
@@ -283,8 +283,8 @@ struct XMODivider: View {
 /// Hover-reveal background fill: token ease-out (0.15s), static under Reduce
 /// Motion. `onHoverChange` lets a parent that also needs the hover state
 /// (e.g. the dictation row's action reveal) share this single tracker.
-struct XMOHoverFill: ViewModifier {
-    var fill: Color = XMOTheme.Surface.hover
+struct LoreHoverFill: ViewModifier {
+    var fill: Color = LoreTheme.Surface.hover
     var cornerRadius: CGFloat = 0
     var enabled: Bool = true
     var onHoverChange: ((Bool) -> Void)?
@@ -303,20 +303,20 @@ struct XMOHoverFill: ViewModifier {
                 onHoverChange?(hovering)
             }
             .animation(
-                reduceMotion ? nil : .easeOut(duration: XMOTheme.Motion.hoverDuration),
+                reduceMotion ? nil : .easeOut(duration: LoreTheme.Motion.hoverDuration),
                 value: isHovering
             )
     }
 }
 
 extension View {
-    func xmoHoverFill(
-        _ fill: Color = XMOTheme.Surface.hover,
+    func loreHoverFill(
+        _ fill: Color = LoreTheme.Surface.hover,
         cornerRadius: CGFloat = 0,
         enabled: Bool = true,
         onHoverChange: ((Bool) -> Void)? = nil
     ) -> some View {
-        modifier(XMOHoverFill(
+        modifier(LoreHoverFill(
             fill: fill,
             cornerRadius: cornerRadius,
             enabled: enabled,
@@ -330,7 +330,7 @@ extension View {
 /// Generic picker popover: mono section header + item rows with hover fill
 /// and a trailing amber ✓ on the active item. Consumers: dictation cleanup
 /// method (224px) and translate language (180px).
-struct XMOPickerPopover<Item: Identifiable, ItemLabel: View>: View {
+struct LorePickerPopover<Item: Identifiable, ItemLabel: View>: View {
     let header: String
     let items: [Item]
     let width: CGFloat
@@ -340,7 +340,7 @@ struct XMOPickerPopover<Item: Identifiable, ItemLabel: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            XMOSectionLabel(text: header, size: 9, mono: true)
+            LoreSectionLabel(text: header, size: 9, mono: true)
                 .padding(EdgeInsets(top: 6, leading: 9, bottom: 5, trailing: 9))
             ForEach(items) { item in
                 Button {
@@ -352,7 +352,7 @@ struct XMOPickerPopover<Item: Identifiable, ItemLabel: View>: View {
                         if isActive(item) {
                             Text("\u{2713}")
                                 .font(.system(size: 12))
-                                .foregroundStyle(XMOTheme.Accent.amber)
+                                .foregroundStyle(LoreTheme.Accent.amber)
                         }
                     }
                     .padding(EdgeInsets(top: 8, leading: 9, bottom: 8, trailing: 9))
@@ -360,28 +360,28 @@ struct XMOPickerPopover<Item: Identifiable, ItemLabel: View>: View {
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .xmoHoverFill(cornerRadius: XMOTheme.Radius.chip)
+                .loreHoverFill(cornerRadius: LoreTheme.Radius.chip)
             }
         }
         .frame(width: width)
-        .xmoPopoverChrome()
+        .lorePopoverChrome()
     }
 }
 
 /// Default picker item label — plain title, 12.5/500, primary. Shared by
 /// pickers whose rows have no subtitle or glyph (languages, models, devices).
-struct XMOPickerItemLabel: View {
+struct LorePickerItemLabel: View {
     let title: String
 
     var body: some View {
         Text(title)
             .font(.system(size: 12.5, weight: .medium))
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .foregroundStyle(LoreTheme.TextColor.primary)
             .lineLimit(1)
     }
 }
 
-extension XMOPickerPopover where ItemLabel == XMOPickerItemLabel {
+extension LorePickerPopover where ItemLabel == LorePickerItemLabel {
     /// Convenience for plain-text pickers: pass a title per item instead of a
     /// label view.
     init(
@@ -399,7 +399,7 @@ extension XMOPickerPopover where ItemLabel == XMOPickerItemLabel {
             isActive: isActive,
             onSelect: onSelect
         ) { item in
-            XMOPickerItemLabel(title: title(item))
+            LorePickerItemLabel(title: title(item))
         }
     }
 }
@@ -412,7 +412,7 @@ extension XMOPickerPopover where ItemLabel == XMOPickerItemLabel {
 /// treatment; inner fonts (e.g. a mono clock) still win.
 /// The title slot is generic so the review header can swap in a rename
 /// TextField (#61).
-struct XMOScreenHeader<Title: View, Meta: View, Trailing: View>: View {
+struct LoreScreenHeader<Title: View, Meta: View, Trailing: View>: View {
     @ViewBuilder let titleContent: Title
     @ViewBuilder let meta: Meta
     @ViewBuilder let trailing: Trailing
@@ -431,12 +431,12 @@ struct XMOScreenHeader<Title: View, Meta: View, Trailing: View>: View {
         HStack(spacing: 11) {
             VStack(alignment: .leading, spacing: 2) {
                 titleContent
-                    .font(XMOTheme.Typography.heading)
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .font(LoreTheme.Typography.heading)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
                     .lineLimit(1)
                 meta
-                    .font(XMOTheme.Typography.secondary)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.secondary)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                     .lineLimit(1)
             }
             Spacer(minLength: 12)
@@ -446,13 +446,13 @@ struct XMOScreenHeader<Title: View, Meta: View, Trailing: View>: View {
     }
 }
 
-// MARK: - Chat bubble (Ask XMO rail + review chat transcript)
+// MARK: - Chat bubble (Ask Lore rail + review chat transcript)
 
 /// One chat bubble, shared by the live Ask rail and the read-only review
 /// chat (#60): user = blue .16 fill, right-aligned; assistant = white .05,
 /// left-aligned. `inset` is the min spacer on the opposite side (the rail's
 /// ~88% width cap uses 36; the wide review pane uses more).
-struct XMOChatBubble: View {
+struct LoreChatBubble: View {
     let text: String
     let isUser: Bool
     var inset: CGFloat = 36
@@ -462,13 +462,13 @@ struct XMOChatBubble: View {
             if isUser { Spacer(minLength: inset) }
             Text(text)
                 .font(.system(size: 13))
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .lineSpacing(3)
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
                 .padding(.init(top: 9, leading: 12, bottom: 9, trailing: 12))
                 .background(
-                    isUser ? XMOTheme.Accent.blue.opacity(0.16) : Color.white.opacity(0.05),
+                    isUser ? LoreTheme.Accent.blue.opacity(0.16) : Color.white.opacity(0.05),
                     in: RoundedRectangle(cornerRadius: 8)
                 )
             if !isUser { Spacer(minLength: inset) }
@@ -482,7 +482,7 @@ struct XMOChatBubble: View {
 /// red fill, white text, dot morphs to a 2px-radius square, red glow.
 /// `compact` is the meetings-toolbar `.rec-btn` variant (#107 prototype):
 /// card-3 fill with a 1px line border, 6px radius, 12.5/600 label, 8px dot.
-struct XMOStartStopButton: View {
+struct LoreStartStopButton: View {
     var isRecording = false
     var compact = false
     let action: () -> Void
@@ -491,43 +491,43 @@ struct XMOStartStopButton: View {
         Button(action: action) {
             HStack(spacing: compact ? 7 : 8) {
                 RoundedRectangle(cornerRadius: isRecording ? 2 : (compact ? 4 : 4.5))
-                    .fill(isRecording ? Color.white : XMOTheme.Accent.red)
+                    .fill(isRecording ? Color.white : LoreTheme.Accent.red)
                     .frame(width: compact ? 8 : 9, height: compact ? 8 : 9)
                 Text(isRecording ? "Stop recording" : "Start recording")
                     .font(compact ? .system(size: 12.5, weight: .semibold)
-                                  : XMOTheme.Typography.control)
-                    .foregroundStyle(isRecording ? Color.white : XMOTheme.TextColor.primary)
+                                  : LoreTheme.Typography.control)
+                    .foregroundStyle(isRecording ? Color.white : LoreTheme.TextColor.primary)
             }
             .padding(.vertical, compact ? 6 : 10)
             .padding(.horizontal, compact ? 12 : 16)
             .background(
-                isRecording ? XMOTheme.Accent.red
-                            : (compact ? XMOTheme.Surface.card3 : Color.white.opacity(0.07)),
-                in: RoundedRectangle(cornerRadius: compact ? XMOTheme.Radius.chip
-                                                           : XMOTheme.Radius.button)
+                isRecording ? LoreTheme.Accent.red
+                            : (compact ? LoreTheme.Surface.card3 : Color.white.opacity(0.07)),
+                in: RoundedRectangle(cornerRadius: compact ? LoreTheme.Radius.chip
+                                                           : LoreTheme.Radius.button)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
-                    .strokeBorder(compact && !isRecording ? XMOTheme.Surface.line : .clear, lineWidth: 1)
+                RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
+                    .strokeBorder(compact && !isRecording ? LoreTheme.Surface.line : .clear, lineWidth: 1)
             )
             .shadow(
-                color: isRecording ? XMOTheme.Shadow.redGlow.color : .clear,
-                radius: XMOTheme.Shadow.redGlow.radius,
-                x: XMOTheme.Shadow.redGlow.x,
-                y: XMOTheme.Shadow.redGlow.y
+                color: isRecording ? LoreTheme.Shadow.redGlow.color : .clear,
+                radius: LoreTheme.Shadow.redGlow.radius,
+                x: LoreTheme.Shadow.redGlow.x,
+                y: LoreTheme.Shadow.redGlow.y
             )
         }
-        .buttonStyle(XMOPressButtonStyle())
+        .buttonStyle(LorePressButtonStyle())
     }
 }
 
 // MARK: - Transcript speaker row (meetings live + review, MREC-11/MREV-13)
 
 /// 64px speaker-label column ("You" blue, diarized remotes keep the current
-/// palette via `Speaker.xmoColor`) + free-form text content. The content slot
+/// palette via `Speaker.loreColor`) + free-form text content. The content slot
 /// carries the per-screen divergence: live volatile caret, review
 /// cleaning/original dimming.
-struct XMOSpeakerRow<Content: View>: View {
+struct LoreSpeakerRow<Content: View>: View {
     let speaker: Speaker
     @ViewBuilder let content: Content
 
@@ -535,7 +535,7 @@ struct XMOSpeakerRow<Content: View>: View {
         HStack(alignment: .top, spacing: 14) {
             Text(speaker.displayLabel)
                 .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(speaker.xmoColor)
+                .foregroundStyle(speaker.loreColor)
                 .frame(width: 64, alignment: .leading)
                 .padding(.top, 1)
             content
@@ -548,7 +548,7 @@ struct XMOSpeakerRow<Content: View>: View {
 // DictationOnboardingView, RecordingConsentView)
 
 /// Step-progress dots: 6px circles, active blue, inactive white .25.
-struct XMOStepDots: View {
+struct LoreStepDots: View {
     let count: Int
     let current: Int
 
@@ -556,7 +556,7 @@ struct XMOStepDots: View {
         HStack(spacing: 8) {
             ForEach(0..<count, id: \.self) { i in
                 Circle()
-                    .fill(i == current ? XMOTheme.Accent.blue
+                    .fill(i == current ? LoreTheme.Accent.blue
                                        : Color.white.opacity(0.25))
                     .frame(width: 6, height: 6)
             }
@@ -569,7 +569,7 @@ struct XMOStepDots: View {
 /// when `leadingTitle` is nil) + trailing filled primary button. Prominent =
 /// blue Next/Get-Started; non-prominent = the consent sheet's neutral white
 /// fill, dimmed and disabled until `primaryEnabled`.
-struct XMOOnboardingFooter: View {
+struct LoreOnboardingFooter: View {
     var leadingTitle: String?
     let leadingAction: () -> Void
     let primaryTitle: String
@@ -582,35 +582,35 @@ struct XMOOnboardingFooter: View {
             if let leadingTitle {
                 Button(leadingTitle, action: leadingAction)
                     .buttonStyle(.plain)
-                    .font(XMOTheme.Typography.secondary)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.secondary)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             }
 
             Spacer()
 
             Button(action: primaryAction) {
                 Text(primaryTitle)
-                    .font(XMOTheme.Typography.control)
+                    .font(LoreTheme.Typography.control)
                     .foregroundStyle(
                         primaryProminent ? .white
-                            : primaryEnabled ? XMOTheme.TextColor.primary
-                                             : XMOTheme.TextColor.muted
+                            : primaryEnabled ? LoreTheme.TextColor.primary
+                                             : LoreTheme.TextColor.muted
                     )
                     .padding(.horizontal, 20)
                     .padding(.vertical, 8)
                     .background(
-                        primaryProminent ? XMOTheme.Accent.blue
+                        primaryProminent ? LoreTheme.Accent.blue
                             : Color.white.opacity(primaryEnabled ? 0.12 : 0.05),
-                        in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                        in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
                     )
             }
-            .buttonStyle(XMOPressButtonStyle())
+            .buttonStyle(LorePressButtonStyle())
             .disabled(!primaryEnabled)
         }
     }
 }
 
-extension XMOOnboardingFooter {
+extension LoreOnboardingFooter {
     /// Paged convenience: "Next" advancing until the last step, then
     /// "Get Started" finishing.
     init(
@@ -633,17 +633,17 @@ extension XMOOnboardingFooter {
 
 /// Bullet row (• + muted 12px text) shared by the dictation onboarding
 /// instructions and the recording-consent obligations.
-struct XMOBulletRow: View {
+struct LoreBulletRow: View {
     let text: String
 
     var body: some View {
         HStack(alignment: .top, spacing: 6) {
             Text("\u{2022}")
-                .font(XMOTheme.Typography.body)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.body)
+                .foregroundStyle(LoreTheme.TextColor.muted)
             Text(text)
                 .font(.system(size: 12))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .lineSpacing(2)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -660,7 +660,7 @@ struct XMOBulletRow: View {
 /// fully. Under Reduce Motion the wave oscillation is dropped but bar height
 /// still maps directly to the current level (instant, unanimated) — the
 /// live-level information stays.
-struct XMOLiveWaveform: View {
+struct LoreLiveWaveform: View {
     let level: Float
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -685,7 +685,7 @@ struct XMOLiveWaveform: View {
         HStack(spacing: 3) {
             ForEach(0..<Self.barCount, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 3)
-                    .fill(XMOTheme.Accent.red)
+                    .fill(LoreTheme.Accent.red)
                     .frame(width: 3, height: 13)
                     .scaleEffect(y: scales[index], anchor: .center)
             }
@@ -702,7 +702,7 @@ struct XMOLiveWaveform: View {
     /// swing toward the floor when the room is quiet. Duration cycle per the
     /// prototype: `0.55 + (i % 3) * 0.17` → waveDurationMin…waveDurationMax.
     private func scale(bar index: Int, time: Double) -> CGFloat {
-        let duration = XMOTheme.Motion.waveDurationMin + Double(index % 3) * 0.17
+        let duration = LoreTheme.Motion.waveDurationMin + Double(index % 3) * 0.17
         let delay = Double(index) * Self.staggerPerBar
         let phase = sin(2 * .pi * (time - delay) / duration) * 0.5 + 0.5
         return CGFloat(0.35 + phase * 0.65 * envelope)
@@ -711,65 +711,65 @@ struct XMOLiveWaveform: View {
 
 // MARK: - Previews
 
-#Preview("XMO components") {
+#Preview("Lore components") {
     struct PreviewHost: View {
         @State private var on = true
         @State private var off = false
 
         var body: some View {
             VStack(alignment: .leading, spacing: 20) {
-                XMOSectionLabel(text: "General", size: 11)
+                LoreSectionLabel(text: "General", size: 11)
 
-                XMOCard {
+                LoreCard {
                     HStack {
                         Text("Launch at login")
-                            .font(XMOTheme.Typography.control)
-                            .foregroundStyle(XMOTheme.TextColor.primary)
+                            .font(LoreTheme.Typography.control)
+                            .foregroundStyle(LoreTheme.TextColor.primary)
                         Spacer()
-                        Toggle("", isOn: $on).toggleStyle(XMOToggleStyle()).labelsHidden()
+                        Toggle("", isOn: $on).toggleStyle(LoreToggleStyle()).labelsHidden()
                     }
                     .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
-                    XMODivider()
+                    LoreDivider()
                     HStack {
                         Text("Hotkey")
-                            .font(XMOTheme.Typography.control)
-                            .foregroundStyle(XMOTheme.TextColor.primary)
+                            .font(LoreTheme.Typography.control)
+                            .foregroundStyle(LoreTheme.TextColor.primary)
                         Spacer()
-                        XMOMonoValueButton(title: "Fn (Globe)") {}
+                        LoreMonoValueButton(title: "Fn (Globe)") {}
                     }
                     .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
-                    XMODivider()
+                    LoreDivider()
                     HStack {
-                        XMOMonoValueButton(title: "Space", width: 64) {}
+                        LoreMonoValueButton(title: "Space", width: 64) {}
                         Text("Lock")
-                            .font(XMOTheme.Typography.control)
-                            .foregroundStyle(XMOTheme.TextColor.primary)
+                            .font(LoreTheme.Typography.control)
+                            .foregroundStyle(LoreTheme.TextColor.primary)
                         Spacer()
-                        Toggle("", isOn: $off).toggleStyle(XMOToggleStyle()).labelsHidden()
+                        Toggle("", isOn: $off).toggleStyle(LoreToggleStyle()).labelsHidden()
                     }
                     .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
                 }
                 .frame(width: 420)
 
                 HStack(spacing: 6) {
-                    XMOIconButton(systemName: "doc.on.doc", label: "Copy") {}
-                    XMOIconButton(systemName: "sparkles", label: "Clean up", tint: XMOTheme.Accent.amber) {}
-                    XMOIconButton(systemName: "globe", label: "Translate", tint: XMOTheme.Accent.amber) {}
+                    LoreIconButton(systemName: "doc.on.doc", label: "Copy") {}
+                    LoreIconButton(systemName: "sparkles", label: "Clean up", tint: LoreTheme.Accent.amber) {}
+                    LoreIconButton(systemName: "globe", label: "Translate", tint: LoreTheme.Accent.amber) {}
                 }
 
                 VStack(alignment: .leading, spacing: 2) {
-                    XMOSectionLabel(text: "Cleanup method", size: 9, mono: true)
+                    LoreSectionLabel(text: "Cleanup method", size: 9, mono: true)
                         .padding(.init(top: 6, leading: 9, bottom: 5, trailing: 9))
                     Text("Standard")
-                        .font(XMOTheme.Typography.secondary)
-                        .foregroundStyle(XMOTheme.TextColor.primary)
+                        .font(LoreTheme.Typography.secondary)
+                        .foregroundStyle(LoreTheme.TextColor.primary)
                         .padding(.init(top: 8, leading: 9, bottom: 8, trailing: 9))
                 }
                 .frame(width: 214, alignment: .leading)
-                .xmoPopoverChrome()
+                .lorePopoverChrome()
             }
             .padding(40)
-            .background(XMOTheme.Surface.window)
+            .background(LoreTheme.Surface.window)
             .background(Color(red: 0.12, green: 0.13, blue: 0.17))
         }
     }

@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Live transcript in the XMO design (MREC-11/12): speaker rows with a 64px
+/// Live transcript in the Lore design (MREC-11/12): speaker rows with a 64px
 /// label column ("You" blue, diarized remotes keep the current palette),
 /// 13px text, max-width 720. Interim (volatile) partials render as a dimmed
 /// row with a blinking blue caret. Rows are keyed by utterance ID so
@@ -36,7 +36,7 @@ struct TranscriptView: View {
         VStack(spacing: 0) {
             if showSearch {
                 searchBar
-                XMODivider()
+                LoreDivider()
             }
             transcriptScrollView
         }
@@ -46,24 +46,24 @@ struct TranscriptView: View {
         HStack(spacing: 6) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 11))
-                .foregroundStyle(XMOTheme.TextColor.faint)
+                .foregroundStyle(LoreTheme.TextColor.faint)
             TextField("Search transcript…", text: $searchText)
                 .textFieldStyle(.plain)
-                .font(XMOTheme.Typography.secondary)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.secondary)
+                .foregroundStyle(LoreTheme.TextColor.primary)
             if !searchText.isEmpty {
                 Button {
                     searchText = ""
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 11))
-                        .foregroundStyle(XMOTheme.TextColor.faint)
+                        .foregroundStyle(LoreTheme.TextColor.faint)
                 }
                 .buttonStyle(.plain)
                 .help("Clear search")
             }
 
-            XMOTheme.Surface.line
+            LoreTheme.Surface.line
                 .frame(width: 1, height: 14)
 
             Button {
@@ -71,8 +71,8 @@ struct TranscriptView: View {
             } label: {
                 Image(systemName: "arrow.down.to.line")
                     .font(.system(size: 11))
-                    .foregroundStyle(autoScrollEnabled ? XMOTheme.TextColor.muted
-                                                       : XMOTheme.Accent.red)
+                    .foregroundStyle(autoScrollEnabled ? LoreTheme.TextColor.muted
+                                                       : LoreTheme.Accent.red)
             }
             .buttonStyle(.plain)
             .help(autoScrollEnabled ? "Pause auto-scroll" : "Resume auto-scroll")
@@ -87,8 +87,8 @@ struct TranscriptView: View {
                 let visible = filteredUtterances
                 if visible.isEmpty && isSearching {
                     Text("No matches")
-                        .font(XMOTheme.Typography.secondary)
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .font(LoreTheme.Typography.secondary)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                         .frame(maxWidth: .infinity, minHeight: 60)
                 } else {
                     // Anchor from the full list, not the search-filtered one —
@@ -158,7 +158,7 @@ struct TranscriptView: View {
                     } label: {
                         Image(systemName: "arrow.down.circle.fill")
                             .font(.system(size: 20))
-                            .foregroundStyle(.white, XMOTheme.Accent.blue)
+                            .foregroundStyle(.white, LoreTheme.Accent.blue)
                             .shadow(color: .black.opacity(0.2), radius: 2, y: 1)
                     }
                     .buttonStyle(.plain)
@@ -212,15 +212,15 @@ struct TranscriptSpeakerRow: View {
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             Text(ElapsedStamp.label(elapsed))
-                .font(XMOTheme.Typography.mono(10.5))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.mono(10.5))
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .frame(width: timestampColumnWidth, alignment: .leading)
                 .padding(.top, 2)
-            XMOSpeakerRow(speaker: speaker) {
+            LoreSpeakerRow(speaker: speaker) {
                 Text(text)
-                    .font(XMOTheme.Typography.body)
+                    .font(LoreTheme.Typography.body)
                     .lineSpacing(4)
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
                     .textSelection(.enabled)
             }
         }
@@ -237,14 +237,14 @@ private struct InterimRow: View {
     let text: String
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
-    private static let halfBlink = XMOTheme.Motion.blinkDuration / 2
+    private static let halfBlink = LoreTheme.Motion.blinkDuration / 2
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
             // Empty stamp slot: keeps the speaker label column aligned with
             // finalized rows; the stamp lands when the segment finalizes.
             Color.clear.frame(width: timestampColumnWidth, height: 1)
-            XMOSpeakerRow(speaker: speaker) {
+            LoreSpeakerRow(speaker: speaker) {
                 if reduceMotion {
                     interimText(caretOn: true)
                 } else {
@@ -262,9 +262,9 @@ private struct InterimRow: View {
         (Text(text)
             + Text(" ")
             + Text("\u{258D}") // ▍ inline caret block, wraps with the text
-                .foregroundStyle(caretOn ? XMOTheme.Accent.blue : Color.clear))
-            .font(XMOTheme.Typography.body)
+                .foregroundStyle(caretOn ? LoreTheme.Accent.blue : Color.clear))
+            .font(LoreTheme.Typography.body)
             .lineSpacing(4)
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .foregroundStyle(LoreTheme.TextColor.primary)
     }
 }

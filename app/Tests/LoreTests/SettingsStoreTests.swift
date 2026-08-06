@@ -197,7 +197,7 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store2.silenceTimeoutMinutes, 42)
     }
 
-    // MARK: - XMO Settings destination keys (Stage D, additive)
+    // MARK: - Lore Settings destination keys (Stage D, additive)
 
     func testDefaultRecPillEnabled() {
         let store = makeStore()

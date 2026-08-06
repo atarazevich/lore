@@ -25,17 +25,17 @@ struct MenuBarPopoverView: View {
                 .padding(.top, 14)
                 .padding(.bottom, 10)
 
-            XMODivider()
+            LoreDivider()
 
             primaryAction
                 .padding(.horizontal, 12)
                 .padding(.vertical, 10)
 
-            XMODivider()
+            LoreDivider()
 
             VStack(spacing: 2) {
                 PopoverMenuRow(
-                    title: "Show \(XMOTheme.wordmark)",
+                    title: "Show \(LoreTheme.wordmark)",
                     systemImage: "macwindow",
                     action: onShowMainWindow
                 )
@@ -48,10 +48,10 @@ struct MenuBarPopoverView: View {
             .padding(.horizontal, 6)
             .padding(.vertical, 6)
 
-            XMODivider()
+            LoreDivider()
 
             PopoverMenuRow(
-                title: "Quit \(XMOTheme.wordmark)",
+                title: "Quit \(LoreTheme.wordmark)",
                 systemImage: "power",
                 muted: true,
                 action: onQuit
@@ -60,7 +60,7 @@ struct MenuBarPopoverView: View {
             .padding(.vertical, 6)
         }
         .frame(width: 280)
-        .background(XMOTheme.Surface.popover)
+        .background(LoreTheme.Surface.popover)
         .onAppear {
             if coordinator.isRecording {
                 startTimer()
@@ -82,25 +82,25 @@ struct MenuBarPopoverView: View {
         HStack(spacing: 8) {
             if coordinator.isRecording {
                 Circle()
-                    .fill(XMOTheme.Accent.red)
+                    .fill(LoreTheme.Accent.red)
                     .frame(width: 8, height: 8)
                 Text("Recording — \(formattedTime)")
-                    .font(XMOTheme.Typography.control)
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .font(LoreTheme.Typography.control)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
             } else if settings.meetingAutoDetectEnabled {
                 Circle()
-                    .fill(XMOTheme.TextColor.muted)
+                    .fill(LoreTheme.TextColor.muted)
                     .frame(width: 8, height: 8)
                 Text("Listening for meetings…")
-                    .font(XMOTheme.Typography.secondary)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.secondary)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             } else {
                 Circle()
-                    .fill(XMOTheme.TextColor.faint)
+                    .fill(LoreTheme.TextColor.faint)
                     .frame(width: 8, height: 8)
                 Text("Idle")
-                    .font(XMOTheme.Typography.secondary)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.secondary)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             }
             Spacer()
         }
@@ -109,7 +109,7 @@ struct MenuBarPopoverView: View {
     private var primaryAction: some View {
         // Canonical redesign Start/Stop control; behavior preserved (D-031):
         // Stop while recording, otherwise gate on recording consent before Start.
-        XMOStartStopButton(isRecording: coordinator.isRecording) {
+        LoreStartStopButton(isRecording: coordinator.isRecording) {
             if coordinator.isRecording {
                 coordinator.handle(.userStopped, settings: settings)
             } else {
@@ -156,7 +156,7 @@ struct MenuBarPopoverView: View {
     }
 }
 
-/// Full-width popover menu row: leading SF Symbol + label, XMO hover fill.
+/// Full-width popover menu row: leading SF Symbol + label, Lore hover fill.
 /// `muted` renders the destructive/secondary Quit action.
 private struct PopoverMenuRow: View {
     let title: String
@@ -165,7 +165,7 @@ private struct PopoverMenuRow: View {
     let action: () -> Void
 
     var body: some View {
-        let tint = muted ? XMOTheme.TextColor.muted : XMOTheme.TextColor.primary
+        let tint = muted ? LoreTheme.TextColor.muted : LoreTheme.TextColor.primary
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: systemImage)
@@ -173,7 +173,7 @@ private struct PopoverMenuRow: View {
                     .foregroundStyle(tint)
                     .frame(width: 16)
                 Text(title)
-                    .font(XMOTheme.Typography.secondary)
+                    .font(LoreTheme.Typography.secondary)
                     .foregroundStyle(tint)
                 Spacer(minLength: 0)
             }
@@ -182,6 +182,6 @@ private struct PopoverMenuRow: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
-        .xmoHoverFill(cornerRadius: XMOTheme.Radius.button)
+        .loreHoverFill(cornerRadius: LoreTheme.Radius.button)
     }
 }

@@ -2,9 +2,9 @@ import SwiftUI
 
 // MARK: - Chat model
 
-/// Signature of the question→answer transport — `AskXMOClient.ask` in the
+/// Signature of the question→answer transport — `AskLoreClient.ask` in the
 /// app; injectable so tests can control when (and whether) an answer lands.
-typealias AskXMOAskFunction = @Sendable (
+typealias AskLoreAskFunction = @Sendable (
     _ question: String,
     _ transcript: String,
     _ history: [(user: String, assistant: String)],
@@ -12,14 +12,14 @@ typealias AskXMOAskFunction = @Sendable (
     _ isLive: Bool
 ) async throws -> String
 
-/// State for the "Ask XMO" chat — the live-meeting rail (MREC-30/31) and the
+/// State for the "Ask Lore" chat — the live-meeting rail (MREC-30/31) and the
 /// review Chat tab (#62). Chat history is per session: cleared when a new
 /// recording starts, swapped when the review selection changes. D-031:
 /// additive only — nothing here can affect recording, transcription, or
 /// stats; a request failure is just a chat bubble.
 @Observable
 @MainActor
-final class AskXMOChatModel {
+final class AskLoreChatModel {
     enum Role {
         case user, assistant, failure
     }
@@ -41,15 +41,15 @@ final class AskXMOChatModel {
     /// previous session never renders into the wrong chat's view. Whether it
     /// still persists depends on the host — see `send`.
     private var generation = 0
-    private let ask: AskXMOAskFunction
+    private let ask: AskLoreAskFunction
     /// Live rail vs review Chat tab — drives the prompt variant/truncation
-    /// strategy (AskXMOClient) and the post-switch persistence rule (`send`).
+    /// strategy (AskLoreClient) and the post-switch persistence rule (`send`).
     private let isLive: Bool
 
     init(
         isLive: Bool = true,
-        ask: @escaping AskXMOAskFunction = { question, transcript, history, apiKey, isLive in
-            try await AskXMOClient().ask(
+        ask: @escaping AskLoreAskFunction = { question, transcript, history, apiKey, isLive in
+            try await AskLoreClient().ask(
                 question: question,
                 transcript: transcript,
                 history: history,
@@ -169,12 +169,12 @@ final class AskXMOChatModel {
 
 // MARK: - Section view
 
-/// "Ask XMO" contextual chat: the recording rail (MREC-30, rendered only
+/// "Ask Lore" contextual chat: the recording rail (MREC-30, rendered only
 /// while recording) and the review Chat tab (#62, over the stored
-/// transcript). Answers come from `AskXMOClient` over the speaker-labeled
+/// transcript). Answers come from `AskLoreClient` over the speaker-labeled
 /// utterances — not the prototype's canned strings (MREC-31).
-struct AskXMOSection: View {
-    let model: AskXMOChatModel
+struct AskLoreSection: View {
+    let model: AskLoreChatModel
     let utterances: [Utterance]
     let apiKey: String
     /// Same chat, two hosts: live = rail during a recording, review = Chat
@@ -207,10 +207,10 @@ struct AskXMOSection: View {
     var body: some View {
         VStack(spacing: 0) {
             header
-            XMODivider()
+            LoreDivider()
             messagesArea
             if hasKey {
-                XMODivider()
+                LoreDivider()
                 inputBar
             }
         }
@@ -223,15 +223,15 @@ struct AskXMOSection: View {
             HStack(spacing: 7) {
                 Text("\u{2726}")
                     .font(.system(size: 13))
-                    .foregroundStyle(XMOTheme.Accent.amber)
+                    .foregroundStyle(LoreTheme.Accent.amber)
                     .accessibilityHidden(true)
-                Text("Ask \(XMOTheme.wordmark)")
+                Text("Ask \(LoreTheme.wordmark)")
                     .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
             }
             Text("in context of this conversation")
                 .font(.system(size: 11.5))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.init(top: 13, leading: 18, bottom: 11, trailing: 18))
@@ -262,16 +262,16 @@ struct AskXMOSection: View {
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(isLive
-                 ? "Ask anything about what\u{2019}s being said \u{2014} \(XMOTheme.wordmark) answers from the live transcript."
-                 : "Ask anything about this meeting \u{2014} \(XMOTheme.wordmark) answers from its transcript.")
+                 ? "Ask anything about what\u{2019}s being said \u{2014} \(LoreTheme.wordmark) answers from the live transcript."
+                 : "Ask anything about this meeting \u{2014} \(LoreTheme.wordmark) answers from its transcript.")
                 .font(.system(size: 12.5))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
             if !hasKey {
                 Text("Add an OpenAI API key in Settings to ask questions")
                     .font(.system(size: 12))
-                    .foregroundStyle(XMOTheme.TextColor.faint)
+                    .foregroundStyle(LoreTheme.TextColor.faint)
                     .padding(.top, 2)
             } else {
                 if !hasTranscript {
@@ -279,7 +279,7 @@ struct AskXMOSection: View {
                          ? "Waiting for the conversation to start\u{2026}"
                          : "This meeting has no transcript to ask about")
                         .font(.system(size: 12))
-                        .foregroundStyle(XMOTheme.TextColor.faint)
+                        .foregroundStyle(LoreTheme.TextColor.faint)
                 }
                 VStack(alignment: .leading, spacing: 6) {
                     ForEach(chips, id: \.self) { label in
@@ -297,15 +297,15 @@ struct AskXMOSection: View {
         } label: {
             Text(label)
                 .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .padding(.init(top: 9, leading: 12, bottom: 9, trailing: 12))
                 .frame(maxWidth: .infinity, alignment: .leading)
                 .background(
                     Color.white.opacity(0.05),
-                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
                 )
         }
-        .buttonStyle(XMOPressButtonStyle())
+        .buttonStyle(LorePressButtonStyle())
         .disabled(model.isThinking || !hasTranscript)
         .opacity(hasTranscript ? 1 : 0.5)
         .accessibilityLabel("Ask: \(label)")
@@ -314,14 +314,14 @@ struct AskXMOSection: View {
     /// Bubbles cap at ~88% of the rail (design: `max-width:88%`) via the
     /// shared bubble's opposite-side min spacer.
     @ViewBuilder
-    private func bubble(_ message: AskXMOChatModel.Message) -> some View {
+    private func bubble(_ message: AskLoreChatModel.Message) -> some View {
         if message.role == .failure {
             HStack(spacing: 0) {
                 failureBubble(message)
                 Spacer(minLength: bubbleInset)
             }
         } else {
-            XMOChatBubble(
+            LoreChatBubble(
                 text: message.text,
                 isUser: message.role == .user,
                 inset: bubbleInset
@@ -329,18 +329,18 @@ struct AskXMOSection: View {
         }
     }
 
-    private func failureBubble(_ message: AskXMOChatModel.Message) -> some View {
+    private func failureBubble(_ message: AskLoreChatModel.Message) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Text(message.text)
                 .font(.system(size: 12.5))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .fixedSize(horizontal: false, vertical: true)
             Button("Retry") {
                 model.retry(message, transcript: transcriptText, apiKey: apiKey)
             }
-            .buttonStyle(XMOPressButtonStyle())
+            .buttonStyle(LorePressButtonStyle())
             .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .foregroundStyle(LoreTheme.TextColor.primary)
             .disabled(model.isThinking)
             .accessibilityLabel("Retry question")
         }
@@ -355,13 +355,13 @@ struct AskXMOSection: View {
     private var thinkingBubble: some View {
         Text("Thinking\u{2026}")
             .font(.system(size: 13))
-            .foregroundStyle(XMOTheme.TextColor.muted)
+            .foregroundStyle(LoreTheme.TextColor.muted)
             .padding(.init(top: 9, leading: 12, bottom: 9, trailing: 12))
             .background(
                 Color.white.opacity(0.05),
                 in: RoundedRectangle(cornerRadius: 8)
             )
-            .accessibilityLabel("\(XMOTheme.wordmark) is thinking")
+            .accessibilityLabel("\(LoreTheme.wordmark) is thinking")
     }
 
     // MARK: Input
@@ -372,15 +372,15 @@ struct AskXMOSection: View {
                 "",
                 text: $input,
                 prompt: Text("Ask about this meeting\u{2026}")
-                    .foregroundStyle(XMOTheme.TextColor.faint)
+                    .foregroundStyle(LoreTheme.TextColor.faint)
             )
             .textFieldStyle(.plain)
             .font(.system(size: 13))
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .foregroundStyle(LoreTheme.TextColor.primary)
             .padding(.init(top: 9, leading: 12, bottom: 9, trailing: 12))
             .background(
                 Color.white.opacity(0.05),
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
             )
             .onSubmit(sendCurrentInput)
             .accessibilityLabel("Ask about this meeting")
@@ -391,11 +391,11 @@ struct AskXMOSection: View {
                     .foregroundStyle(.white)
                     .frame(width: 34, height: 34)
                     .background(
-                        XMOTheme.Accent.blue,
-                        in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                        LoreTheme.Accent.blue,
+                        in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
                     )
             }
-            .buttonStyle(XMOPressButtonStyle())
+            .buttonStyle(LorePressButtonStyle())
             .disabled(sendDisabled)
             .opacity(sendDisabled ? 0.5 : 1)
             .accessibilityLabel("Send question")

@@ -90,10 +90,10 @@ struct HealthNotchView: View {
         HStack(spacing: 12) {
             Image(systemName: "exclamationmark.triangle.fill")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(XMOTheme.Accent.red)
+                .foregroundStyle(LoreTheme.Accent.red)
             Text(title)
-                .font(XMOTheme.Typography.control)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.control)
+                .foregroundStyle(LoreTheme.TextColor.primary)
             Button("Fix it", action: onFix)
                 .buttonStyle(HealthNotchButtonStyle())
         }
@@ -106,11 +106,11 @@ struct HealthNotchView: View {
 private struct HealthNotchButtonStyle: ButtonStyle {
     func makeBody(configuration: Configuration) -> some View {
         configuration.label
-            .font(XMOTheme.Typography.secondary)
+            .font(LoreTheme.Typography.secondary)
             .foregroundStyle(.white)
             .padding(.horizontal, 12)
             .padding(.vertical, 5)
-            .background(XMOTheme.Accent.blue, in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button))
+            .background(LoreTheme.Accent.blue, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button))
             .opacity(configuration.isPressed ? 0.85 : 1)
     }
 }

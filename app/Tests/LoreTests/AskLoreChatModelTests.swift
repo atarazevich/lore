@@ -5,13 +5,13 @@ import XCTest
 /// the session it was asked in — even if the user switched away before the
 /// answer landed — while the switch keeps it out of the newly shown view.
 @MainActor
-final class AskXMOChatModelTests: XCTestCase {
+final class AskLoreChatModelTests: XCTestCase {
 
     private var repo: SessionRepository!
 
     override func setUp() async throws {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-            .appendingPathComponent("LoreAskXMOChatModelTests", isDirectory: true)
+            .appendingPathComponent("LoreAskLoreChatModelTests", isDirectory: true)
             .appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         repo = SessionRepository(rootDirectory: root)
@@ -22,7 +22,7 @@ final class AskXMOChatModelTests: XCTestCase {
 
     /// Mirrors NotesView.rewireReviewChat: the persistence hook captures the
     /// session ID at bind time.
-    private func wire(_ model: AskXMOChatModel, to sessionID: String) {
+    private func wire(_ model: AskLoreChatModel, to sessionID: String) {
         let repo = repo!
         model.onExchange = { question, answer in
             let exchange = ChatExchange(question: question, answer: answer)
@@ -33,7 +33,7 @@ final class AskXMOChatModelTests: XCTestCase {
     }
 
     func testExchangeAppendsToTheBoundSessionFile() async throws {
-        let model = AskXMOChatModel(isLive: false, ask: { _, _, _, _, _ in "The answer." })
+        let model = AskLoreChatModel(isLive: false, ask: { _, _, _, _, _ in "The answer." })
         wire(model, to: "session_A")
         model.loadPersistedHistory([])
 
@@ -56,7 +56,7 @@ final class AskXMOChatModelTests: XCTestCase {
     func testSessionSwitchPersistsInFlightAnswerToOriginFileOnly() async throws {
         // finish() is sticky: the for-await loop ends whenever it runs.
         let (gate, release) = AsyncStream.makeStream(of: Void.self)
-        let model = AskXMOChatModel(isLive: false, ask: { _, _, _, _, _ in
+        let model = AskLoreChatModel(isLive: false, ask: { _, _, _, _, _ in
             for await _ in gate {}
             return "Late answer for A."
         })
@@ -89,7 +89,7 @@ final class AskXMOChatModelTests: XCTestCase {
     }
 
     func testLoadPersistedHistoryFlattensExchangesAndClearsThinking() {
-        let model = AskXMOChatModel(isLive: false, ask: { _, _, _, _, _ in "unused" })
+        let model = AskLoreChatModel(isLive: false, ask: { _, _, _, _, _ in "unused" })
         model.loadPersistedHistory([
             ChatExchange(question: "Q1", answer: "A1"),
             ChatExchange(question: "Q2", answer: "A2"),

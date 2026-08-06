@@ -68,9 +68,9 @@ struct TranscriptStateIcon: View {
 
     private var barColor: Color {
         switch state {
-        case .whole: XMOTheme.TextColor.faint
-        case .chunked: XMOTheme.Accent.amber.opacity(0.85)
-        case .rebuilding: XMOTheme.Accent.blue
+        case .whole: LoreTheme.TextColor.faint
+        case .chunked: LoreTheme.Accent.amber.opacity(0.85)
+        case .rebuilding: LoreTheme.Accent.blue
         }
     }
 

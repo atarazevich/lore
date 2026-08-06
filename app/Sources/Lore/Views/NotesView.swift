@@ -1,6 +1,6 @@
 import SwiftUI
 
-/// Meetings review (XMO Stage E, MREV-01…40): designed header + 228px meeting
+/// Meetings review (Lore Stage E, MREV-01…40): designed header + 228px meeting
 /// list rail + Transcript/Notes detail pane. Presentation only — all business
 /// logic stays in NotesController (D-031: current behavior wins).
 struct NotesView: View {
@@ -31,7 +31,7 @@ struct NotesView: View {
     @State private var availableTags: [String] = []
     /// Review chat model (#62): one conversation at a time, swapped (with a
     /// generation bump) whenever the selected session changes.
-    @State private var reviewChat = AskXMOChatModel(isLive: false)
+    @State private var reviewChat = AskLoreChatModel(isLive: false)
     /// Dedupe guard: the engine keeps `.completed` while the poll loop resets
     /// and re-copies it, so the same completion arrives more than once.
     @State private var lastHandledBatchCompletion: String?
@@ -102,11 +102,11 @@ struct NotesView: View {
         let state = controller.state
         VStack(spacing: 0) {
             reviewHeader(controller: controller, state: state)
-            XMODivider()
+            LoreDivider()
             HStack(spacing: 0) {
                 sidebar(controller: controller, state: state)
                     .frame(width: 340)
-                XMOTheme.Surface.line.frame(width: 1)
+                LoreTheme.Surface.line.frame(width: 1)
                 detailContent(controller: controller, state: state)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             }
@@ -242,18 +242,18 @@ struct NotesView: View {
     private func reviewHeader(controller: NotesController, state: NotesState) -> some View {
         HStack(spacing: 10) {
             Text("Meetings")
-                .font(XMOTheme.Typography.control)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.control)
+                .foregroundStyle(LoreTheme.TextColor.primary)
             Text("\(state.sessionHistory.count) recorded")
-                .font(XMOTheme.Typography.monoMeta)
-                .foregroundStyle(XMOTheme.TextColor.faint)
+                .font(LoreTheme.Typography.monoMeta)
+                .foregroundStyle(LoreTheme.TextColor.faint)
             Spacer(minLength: 12)
             // Routes into the existing guarded start/stop flows in ContentView.
             // While recording (review side shown via the header switch) the
             // button reads Stop and stops the session — it must never say
             // "Start recording" over a running one.
             let recordingActive = shell.isRecordingActive()
-            XMOStartStopButton(isRecording: recordingActive, compact: true) {
+            LoreStartStopButton(isRecording: recordingActive, compact: true) {
                 (recordingActive ? shell.requestMeetingRecordingStop
                                  : shell.requestMeetingRecordingStart)?()
             }
@@ -291,10 +291,10 @@ struct NotesView: View {
     /// `work · 27 July · 09:58 · 29 min`. No prefix when untyped.
     private func metaLine(type: String?, components: [String]) -> Text {
         let rest = Text(components.joined(separator: " \u{00B7} "))
-            .foregroundStyle(XMOTheme.TextColor.faint)
+            .foregroundStyle(LoreTheme.TextColor.faint)
         guard let type else { return rest }
-        return Text(type).foregroundStyle(XMOTheme.TextColor.muted)
-            + Text(" \u{00B7} ").foregroundStyle(XMOTheme.TextColor.faint)
+        return Text(type).foregroundStyle(LoreTheme.TextColor.muted)
+            + Text(" \u{00B7} ").foregroundStyle(LoreTheme.TextColor.faint)
             + rest
     }
 
@@ -303,10 +303,10 @@ struct NotesView: View {
     private func sparkSummary(_ summary: String, size: CGFloat) -> Text {
         Text("\u{2726} ")
             .font(.system(size: 10))
-            .foregroundStyle(XMOTheme.Accent.amber)
+            .foregroundStyle(LoreTheme.Accent.amber)
             + Text(summary)
             .font(.system(size: size))
-            .foregroundStyle(XMOTheme.TextColor.muted)
+            .foregroundStyle(LoreTheme.TextColor.muted)
     }
 
     // MARK: - Detail header (#107 prototype `.dhead`)
@@ -318,8 +318,8 @@ struct NotesView: View {
     private func detailHeader(controller: NotesController, session: SessionIndex) -> some View {
         VStack(alignment: .leading, spacing: 0) {
             headerTitle(controller: controller, selected: session)
-                .font(XMOTheme.Typography.heading)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.heading)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .lineLimit(1)
 
             // Icon + meta (#109, prototype `.dmeta`); the whole state adds a
@@ -333,7 +333,7 @@ struct NotesView: View {
                     components: metaComponents(session, detail: true)
                         + (transcript == .whole ? ["whole"] : [])
                 )
-                .font(XMOTheme.Typography.monoMeta)
+                .font(LoreTheme.Typography.monoMeta)
                 .lineLimit(1)
             }
             .padding(.top, 4)
@@ -367,11 +367,11 @@ struct NotesView: View {
         Button(action: action) {
             Text(tag)
                 .font(.system(size: 10.5))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .lineLimit(1)
                 .padding(.horizontal, 8)
                 .padding(.vertical, 2)
-                .xmoChipChrome(fill: XMOTheme.Surface.card2)
+                .loreChipChrome(fill: LoreTheme.Surface.card2)
         }
         .buttonStyle(.plain)
         .help("Filter meetings by \(tag)")
@@ -464,7 +464,7 @@ struct NotesView: View {
                     }
                     .font(.system(size: 11))
                     .buttonStyle(.plain)
-                    .foregroundStyle(XMOTheme.Accent.blue)
+                    .foregroundStyle(LoreTheme.Accent.blue)
                     Spacer()
                     if !bulkDeleteSelection.isEmpty {
                         Button("Delete \(bulkDeleteSelection.count)") {
@@ -472,7 +472,7 @@ struct NotesView: View {
                         }
                         .font(.system(size: 11, weight: .medium))
                         .buttonStyle(.plain)
-                        .foregroundStyle(XMOTheme.Accent.red)
+                        .foregroundStyle(LoreTheme.Accent.red)
                     }
                     Button("Done") {
                         bulkDeleteMode = false
@@ -480,11 +480,11 @@ struct NotesView: View {
                     }
                     .font(.system(size: 11))
                     .buttonStyle(.plain)
-                    .foregroundStyle(XMOTheme.Accent.blue)
+                    .foregroundStyle(LoreTheme.Accent.blue)
                 }
                 .padding(.horizontal, 12)
                 .padding(.vertical, 6)
-                XMODivider()
+                LoreDivider()
             }
 
             ScrollView {
@@ -567,9 +567,9 @@ struct NotesView: View {
             isBulkSelected: isBulkSelected
         )
         .frame(maxWidth: .infinity, alignment: .leading)
-        .xmoSelectableRow(
+        .loreSelectableRow(
             isActive: isSelected || isBulkSelected,
-            activeFill: XMOTheme.Surface.card3
+            activeFill: LoreTheme.Surface.card3
         )
 
         Group {
@@ -612,12 +612,12 @@ struct NotesView: View {
                 if bulkDeleteMode {
                     Image(systemName: isBulkSelected ? "checkmark.circle.fill" : "circle")
                         .font(.system(size: 12))
-                        .foregroundStyle(isBulkSelected ? XMOTheme.Accent.green
-                                                        : XMOTheme.TextColor.muted)
+                        .foregroundStyle(isBulkSelected ? LoreTheme.Accent.green
+                                                        : LoreTheme.TextColor.muted)
                 }
                 if isFresh(session) {
                     Circle()
-                        .fill(XMOTheme.Accent.green)
+                        .fill(LoreTheme.Accent.green)
                         .frame(width: 7, height: 7)
                         .accessibilityLabel("New")
                 }
@@ -634,19 +634,19 @@ struct NotesView: View {
                 } else {
                     Text(session.displayTitle)
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(isSelected ? Color.white : XMOTheme.TextColor.primary)
+                        .foregroundStyle(isSelected ? Color.white : LoreTheme.TextColor.primary)
                         .lineLimit(1)
                 }
                 Spacer(minLength: 4)
                 if let snap = session.templateSnapshot {
                     Image(systemName: snap.icon)
                         .font(.system(size: 10))
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                 }
                 if session.hasNotes {
                     Image(systemName: "doc.text.fill")
                         .font(.system(size: 9))
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                         .accessibilityLabel("Has notes")
                 }
             }
@@ -659,7 +659,7 @@ struct NotesView: View {
                     controller.rebuildTranscript(sessionID: session.id, settings: settings)
                 }
                 metaLine(type: typeTag(session)?.rawValue, components: metaComponents(session))
-                    .font(XMOTheme.Typography.monoMeta)
+                    .font(LoreTheme.Typography.monoMeta)
                     .lineLimit(1)
             }
 
@@ -676,7 +676,7 @@ struct NotesView: View {
             if !entities.isEmpty {
                 Text(entities.joined(separator: " \u{00B7} "))
                     .font(.system(size: 11))
-                    .foregroundStyle(XMOTheme.TextColor.faint)
+                    .foregroundStyle(LoreTheme.TextColor.faint)
                     .lineLimit(1)
                     .truncationMode(.tail)
             }
@@ -713,7 +713,7 @@ struct NotesView: View {
             .padding(.horizontal, 12)
             .padding(.vertical, 6)
         }
-        XMODivider()
+        LoreDivider()
     }
 
     @ViewBuilder
@@ -731,10 +731,10 @@ struct NotesView: View {
         Button(action: action) {
             (
                 Text(label)
-                    .foregroundStyle(isActive ? Color.white : XMOTheme.TextColor.muted)
+                    .foregroundStyle(isActive ? Color.white : LoreTheme.TextColor.muted)
                 + Text(count.map { " \($0)" } ?? "")
-                    .font(XMOTheme.Typography.mono(10))
-                    .foregroundStyle(XMOTheme.TextColor.faint)
+                    .font(LoreTheme.Typography.mono(10))
+                    .foregroundStyle(LoreTheme.TextColor.faint)
             )
             .font(.system(size: 11))
             .padding(.horizontal, 9)
@@ -742,7 +742,7 @@ struct NotesView: View {
             .background(isActive ? Color.white.opacity(0.12) : Color.clear)
             .overlay(
                 Capsule()
-                    .strokeBorder(XMOTheme.Surface.line, lineWidth: 1)
+                    .strokeBorder(LoreTheme.Surface.line, lineWidth: 1)
             )
             .clipShape(Capsule())
             .contentShape(Capsule())
@@ -892,10 +892,10 @@ struct NotesView: View {
                         if let session = selectedSession(state) {
                             detailHeader(controller: controller, session: session)
                             transcriptStateBanner(controller: controller, session: session)
-                            XMODivider()
+                            LoreDivider()
                         }
                         detailToolbar(controller: controller, state: state)
-                        XMODivider()
+                        LoreDivider()
                         detailBody(controller: controller, state: state, sessionID: sessionID)
                     }
                 }
@@ -931,11 +931,11 @@ struct NotesView: View {
     private func transcriptStateBanner(controller: NotesController, session: SessionIndex) -> some View {
         switch transcriptState(session) {
         case .chunked(canRebuild: true) where !isBatchFailed(sessionID: session.id):
-            stateBanner(tint: XMOTheme.Accent.amber) {
+            stateBanner(tint: LoreTheme.Accent.amber) {
                 TranscriptStateIcon(state: .chunked(canRebuild: true))
                 Text("Chunked transcript \u{2014} assembled live during the meeting. Audio saved.")
                     .font(.system(size: 12))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 Button {
                     controller.rebuildTranscript(sessionID: session.id, settings: settings)
@@ -945,22 +945,22 @@ struct NotesView: View {
                         .foregroundStyle(.white)
                         .padding(.horizontal, 11)
                         .padding(.vertical, 4)
-                        .xmoChipChrome(fill: Color.white.opacity(0.12))
+                        .loreChipChrome(fill: Color.white.opacity(0.12))
                 }
                 .buttonStyle(.plain)
                 .help("Rebuild the whole transcript from audio")
             }
         case .rebuilding(let progress):
-            stateBanner(tint: XMOTheme.Accent.blue) {
+            stateBanner(tint: LoreTheme.Accent.blue) {
                 TranscriptStateIcon(state: .rebuilding(progress: progress))
                 Text("Rebuilding from the full audio \u{2014} the transcript will update itself.")
                     .font(.system(size: 12))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if let progress, progress > 0 {
                     Text("\(Int(progress * 100))%")
-                        .font(XMOTheme.Typography.monoMeta)
-                        .foregroundStyle(XMOTheme.Accent.blue)
+                        .font(LoreTheme.Typography.monoMeta)
+                        .foregroundStyle(LoreTheme.Accent.blue)
                 }
             }
         default:
@@ -975,10 +975,10 @@ struct NotesView: View {
             .padding(.vertical, 9)
             .background(
                 tint.opacity(0.08),
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.card)
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: XMOTheme.Radius.card)
+                RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
                     .strokeBorder(tint.opacity(0.25), lineWidth: 1)
             )
             .padding(.horizontal, 20)
@@ -989,19 +989,19 @@ struct NotesView: View {
 
     private var processingView: some View {
         VStack(spacing: 10) {
-            XMOPulsingDot(color: XMOTheme.Accent.blue, size: 10)
+            LorePulsingDot(color: LoreTheme.Accent.blue, size: 10)
             Text("Transcribing\u{2026}")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .foregroundStyle(LoreTheme.TextColor.primary)
             Text(coordinator.batchIsImporting
                  ? "Importing \u{2014} the transcript will appear here in a moment"
                  : "The enhanced transcript will appear here in a moment")
-                .font(XMOTheme.Typography.secondary)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.secondary)
+                .foregroundStyle(LoreTheme.TextColor.muted)
             if case .transcribing(let progress, _) = coordinator.batchStatus, progress > 0 {
                 Text("\(Int(progress * 100))%")
-                    .font(XMOTheme.Typography.monoMeta)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.monoMeta)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -1024,7 +1024,7 @@ struct NotesView: View {
                     audioPlaybackButton(controller: controller, state: state)
                 }
 
-                XMOCopyButton {
+                LoreCopyButton {
                     copyCurrentContent(state: state)
                 }
                 .disabled(copyContentIsEmpty(state: state))
@@ -1043,8 +1043,8 @@ struct NotesView: View {
         }
         .padding(3)
         .background(
-            XMOTheme.Surface.hover,
-            in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+            LoreTheme.Surface.hover,
+            in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
         )
     }
 
@@ -1055,27 +1055,27 @@ struct NotesView: View {
         } label: {
             Text(mode.rawValue)
                 .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(isOn ? Color.white : XMOTheme.TextColor.muted)
+                .foregroundStyle(isOn ? Color.white : LoreTheme.TextColor.muted)
                 .padding(.vertical, 6)
                 .padding(.horizontal, 14)
                 .background(
                     isOn ? Color.white.opacity(0.12) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
                 )
-                .contentShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+                .contentShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
         }
         .buttonStyle(.plain)
     }
 
     /// 30×30 icon label for the audio menu.
-    private func iconMenuLabel(systemName: String, tint: Color = XMOTheme.TextColor.muted) -> some View {
+    private func iconMenuLabel(systemName: String, tint: Color = LoreTheme.TextColor.muted) -> some View {
         Image(systemName: systemName)
             .font(.system(size: 12, weight: .medium))
             .foregroundStyle(tint)
             .frame(width: 30, height: 30)
             .background(
-                XMOTheme.Surface.card3,
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                LoreTheme.Surface.card3,
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
             )
     }
 
@@ -1099,7 +1099,7 @@ struct NotesView: View {
         } label: {
             iconMenuLabel(
                 systemName: state.isPlayingAudio ? "pause.fill" : "play.fill",
-                tint: state.isPlayingAudio ? XMOTheme.Accent.blue : XMOTheme.TextColor.muted
+                tint: state.isPlayingAudio ? LoreTheme.Accent.blue : LoreTheme.TextColor.muted
             )
         } primaryAction: {
             controller.toggleAudioPlayback()
@@ -1124,10 +1124,10 @@ struct NotesView: View {
     /// ✦ while the original is shown. Same semantics as before, dictation
     /// row treatment.
     private func showOriginalButton(controller: NotesController, state: NotesState) -> some View {
-        XMOIconButton(
+        LoreIconButton(
             systemName: state.showingOriginal ? "sparkles" : "arrow.uturn.backward",
             label: state.showingOriginal ? "Show cleaned transcript" : "Show original transcript",
-            tint: state.showingOriginal ? XMOTheme.Accent.amber : XMOTheme.TextColor.muted
+            tint: state.showingOriginal ? LoreTheme.Accent.amber : LoreTheme.TextColor.muted
         ) {
             controller.toggleShowingOriginal()
         }
@@ -1218,7 +1218,7 @@ struct NotesView: View {
     /// the STORED transcript of the selected session. Same speaker-labeled
     /// context lines as the live path (`Speaker.displayLabel: displayText`).
     private func chatTab(state: NotesState) -> some View {
-        AskXMOSection(
+        AskLoreSection(
             model: reviewChat,
             utterances: state.loadedTranscript.map {
                 Utterance(
@@ -1264,14 +1264,14 @@ struct NotesView: View {
         HStack(spacing: 8) {
             Text(message)
                 .font(.system(size: 12))
-                .foregroundStyle(XMOTheme.Accent.red)
+                .foregroundStyle(LoreTheme.Accent.red)
                 .frame(maxWidth: .infinity, alignment: .leading)
             if let retryAction {
-                XMOIconButton(
+                LoreIconButton(
                     systemName: "arrow.clockwise",
                     label: "Retry",
-                    tint: XMOTheme.Accent.red,
-                    background: XMOTheme.Accent.red.opacity(0.12),
+                    tint: LoreTheme.Accent.red,
+                    background: LoreTheme.Accent.red.opacity(0.12),
                     action: retryAction
                 )
                 .help("Retry transcript enhancement")
@@ -1334,14 +1334,14 @@ struct NotesView: View {
         switch level {
         case ...1:
             Text(plain)
-                .font(XMOTheme.Typography.heading)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.heading)
+                .foregroundStyle(LoreTheme.TextColor.primary)
         case 2:
-            XMOSectionLabel(text: plain, size: 11, mono: true, trackingEm: 0.07)
+            LoreSectionLabel(text: plain, size: 11, mono: true, trackingEm: 0.07)
         default:
             Text(plain)
                 .font(.system(size: 12, weight: .semibold))
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .foregroundStyle(LoreTheme.TextColor.primary)
         }
     }
 
@@ -1365,11 +1365,11 @@ struct NotesView: View {
                         .resizable()
                         .aspectRatio(contentMode: .fit)
                         .frame(maxWidth: 500, maxHeight: 400)
-                        .clipShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+                        .clipShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
                 } else {
                     Label("Image not found", systemImage: "photo")
                         .font(.system(size: 12))
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                 }
             }
         }
@@ -1387,7 +1387,7 @@ struct NotesView: View {
                 case .bullet(let content, let indent):
                     listRow(indent: indent, content: content) {
                         Circle()
-                            .fill(XMOTheme.Accent.blue)
+                            .fill(LoreTheme.Accent.blue)
                             .frame(width: 6, height: 6)
                             .padding(.top, 6)
                     }
@@ -1395,7 +1395,7 @@ struct NotesView: View {
                     listRow(indent: indent, content: content) {
                         Text("\(number).")
                             .font(.system(size: 12, weight: .semibold))
-                            .foregroundStyle(XMOTheme.Accent.blue)
+                            .foregroundStyle(LoreTheme.Accent.blue)
                             .padding(.top, 1)
                     }
                 }
@@ -1417,9 +1417,9 @@ struct NotesView: View {
 
     private func bodyText(_ content: String) -> some View {
         inlineMarkdownText(content)
-            .font(XMOTheme.Typography.body)
+            .font(LoreTheme.Typography.body)
             .lineSpacing(3)
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .foregroundStyle(LoreTheme.TextColor.primary)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
     }

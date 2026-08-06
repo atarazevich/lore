@@ -1,11 +1,11 @@
 import SwiftUI
 
-/// XMO Stage 1 design tokens (D-031: visual = design wins, additive only).
+/// Stage 1 design tokens (D-031: visual = design wins, additive only).
 ///
 /// Source of truth: `docs/design/xmo-stage1/handoff/README.md` ("Design tokens")
 /// and `docs/design/xmo-stage1/handoff/screens/_shell.css`. Values mirror the
 /// CSS exactly; comments cite the corresponding CSS variable.
-enum XMOTheme {
+enum LoreTheme {
 
     /// Brand wordmark. Single constant — every screen must reference this
     /// instead of hardcoding the name.
@@ -47,7 +47,7 @@ enum XMOTheme {
 
     // MARK: - Meaning colors (one meaning per color)
 
-    /// Fixed dark-appearance macOS system color values on purpose — XMO surfaces
+    /// Fixed dark-appearance macOS system color values on purpose — Lore surfaces
     /// never render light, so do NOT reintroduce semantic `.red`/`.green`/etc.
     /// alongside these.
     enum Accent {
@@ -153,8 +153,8 @@ enum XMOTheme {
 // MARK: - Helpers
 
 extension View {
-    /// Apply a token shadow (e.g. `XMOTheme.Shadow.popover`).
-    func xmoShadow(_ spec: XMOTheme.ShadowSpec) -> some View {
+    /// Apply a token shadow (e.g. `LoreTheme.Shadow.popover`).
+    func loreShadow(_ spec: LoreTheme.ShadowSpec) -> some View {
         shadow(color: spec.color, radius: spec.radius, x: spec.x, y: spec.y)
     }
 }

@@ -29,7 +29,7 @@ final class MenuBarController {
         popover.contentSize = NSSize(width: 280, height: 160)
         popover.behavior = .transient
         popover.animates = true
-        // The popover content renders on XMO dark tokens; force the system chrome
+        // The popover content renders on Lore dark tokens; force the system chrome
         // (arrow + material) dark so it matches instead of adapting to the OS
         // appearance (D-031: visual redesign only).
         popover.appearance = NSAppearance(named: .darkAqua)
@@ -57,7 +57,7 @@ final class MenuBarController {
         popover.contentViewController = NSHostingController(rootView: popoverView)
 
         if let button = statusItem.button {
-            button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: XMOTheme.wordmark)
+            button.image = NSImage(systemSymbolName: "waveform.circle", accessibilityDescription: LoreTheme.wordmark)
             button.image?.isTemplate = true
             button.target = self
             button.action = #selector(togglePopover(_:))
@@ -104,7 +104,7 @@ final class MenuBarController {
         let symbolName = coordinator.isRecording ? "waveform.circle.fill" : "waveform.circle"
         statusItem.button?.image = NSImage(
             systemSymbolName: symbolName,
-            accessibilityDescription: XMOTheme.wordmark
+            accessibilityDescription: LoreTheme.wordmark
         )
         statusItem.button?.image?.isTemplate = true
     }

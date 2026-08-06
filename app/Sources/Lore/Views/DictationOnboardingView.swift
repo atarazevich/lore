@@ -35,10 +35,10 @@ struct DictationOnboardingView: View {
 
             Spacer()
 
-            XMOStepDots(count: totalSteps, current: currentStep)
+            LoreStepDots(count: totalSteps, current: currentStep)
                 .padding(.bottom, 16)
 
-            XMOOnboardingFooter(
+            LoreOnboardingFooter(
                 leadingTitle: currentStep > 0 ? "Back" : nil,
                 leadingAction: {
                     withAnimation(.easeInOut(duration: 0.25)) {
@@ -66,21 +66,21 @@ struct DictationOnboardingView: View {
         VStack(spacing: 0) {
             Image(systemName: "waveform")
                 .font(.system(size: 36, weight: .light))
-                .foregroundStyle(XMOTheme.Accent.blue)
+                .foregroundStyle(LoreTheme.Accent.blue)
                 .frame(height: 44)
 
             Spacer().frame(height: 14)
 
-            Text("Welcome to \(XMOTheme.wordmark)")
-                .font(XMOTheme.Typography.heading)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+            Text("Welcome to \(LoreTheme.wordmark)")
+                .font(LoreTheme.Typography.heading)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .multilineTextAlignment(.center)
 
             Spacer().frame(height: 8)
 
             Text("Hold Fn, speak, release \u{2014} your words appear instantly.")
-                .font(XMOTheme.Typography.body)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.body)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -92,8 +92,8 @@ struct DictationOnboardingView: View {
     private var permissionsStep: some View {
         VStack(spacing: 0) {
             Text("Permissions")
-                .font(XMOTheme.Typography.heading)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.heading)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .multilineTextAlignment(.center)
 
             Spacer().frame(height: 14)
@@ -118,9 +118,9 @@ struct DictationOnboardingView: View {
                     name: "Input Monitoring",
                     granted: inputMonitoringGranted,
                     need: inputMonitoringPaneOpened
-                        ? "After enabling, quit and reopen \(XMOTheme.wordmark)"
+                        ? "After enabling, quit and reopen \(LoreTheme.wordmark)"
                         : "Required to feel the Fn key",
-                    actionTitle: inputMonitoringPaneOpened ? "Restart \(XMOTheme.wordmark)" : "Open Settings",
+                    actionTitle: inputMonitoringPaneOpened ? "Restart \(LoreTheme.wordmark)" : "Open Settings",
                     action: inputMonitoringAction
                 )
             }
@@ -129,8 +129,8 @@ struct DictationOnboardingView: View {
             Spacer().frame(height: 12)
 
             Text("You can grant these later in System Settings if you prefer.")
-                .font(XMOTheme.Typography.meta)
-                .foregroundStyle(XMOTheme.TextColor.faint)
+                .font(LoreTheme.Typography.meta)
+                .foregroundStyle(LoreTheme.TextColor.faint)
                 .multilineTextAlignment(.center)
         }
         .onAppear { refreshPermissions() }
@@ -146,15 +146,15 @@ struct DictationOnboardingView: View {
     private var fnKeyStep: some View {
         VStack(spacing: 0) {
             Text("Fn Key Setup")
-                .font(XMOTheme.Typography.heading)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.heading)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .multilineTextAlignment(.center)
 
             Spacer().frame(height: 12)
 
             Text("To use Fn as your dictation key, set it to \u{201C}Do Nothing\u{201D} in System Settings.")
-                .font(XMOTheme.Typography.body)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.body)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -162,13 +162,13 @@ struct DictationOnboardingView: View {
             Spacer().frame(height: 12)
 
             VStack(alignment: .leading, spacing: 4) {
-                XMOBulletRow(text: "System Settings")
-                XMOBulletRow(text: "Keyboard")
-                XMOBulletRow(text: "\u{201C}Press \u{1F310} fn key to\u{201D} \u{2192} \u{201C}Do Nothing\u{201D}")
+                LoreBulletRow(text: "System Settings")
+                LoreBulletRow(text: "Keyboard")
+                LoreBulletRow(text: "\u{201C}Press \u{1F310} fn key to\u{201D} \u{2192} \u{201C}Do Nothing\u{201D}")
             }
             .padding(10)
-            .background(XMOTheme.Surface.card3,
-                        in: RoundedRectangle(cornerRadius: XMOTheme.Radius.card))
+            .background(LoreTheme.Surface.card3,
+                        in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card))
 
             Spacer().frame(height: 12)
 
@@ -184,8 +184,8 @@ struct DictationOnboardingView: View {
             Spacer().frame(height: 10)
 
             Text("You can also use Right Option as an alternative hotkey (configurable in Settings).")
-                .font(XMOTheme.Typography.meta)
-                .foregroundStyle(XMOTheme.TextColor.faint)
+                .font(LoreTheme.Typography.meta)
+                .foregroundStyle(LoreTheme.TextColor.faint)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -197,21 +197,21 @@ struct DictationOnboardingView: View {
         VStack(spacing: 0) {
             Image(systemName: "checkmark.circle")
                 .font(.system(size: 36, weight: .light))
-                .foregroundStyle(XMOTheme.Accent.green)
+                .foregroundStyle(LoreTheme.Accent.green)
                 .frame(height: 44)
 
             Spacer().frame(height: 14)
 
             Text("You\u{2019}re all set!")
-                .font(XMOTheme.Typography.heading)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.heading)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .multilineTextAlignment(.center)
 
             Spacer().frame(height: 8)
 
             Text("Hold \(settings.hotkeyKey.displayName) and start speaking.")
-                .font(XMOTheme.Typography.body)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.body)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .multilineTextAlignment(.center)
 
             Spacer().frame(height: 14)
@@ -223,14 +223,14 @@ struct DictationOnboardingView: View {
                 cheatSheetRow("T", "translate")
             }
             .padding(10)
-            .background(XMOTheme.Surface.card3,
-                        in: RoundedRectangle(cornerRadius: XMOTheme.Radius.card))
+            .background(LoreTheme.Surface.card3,
+                        in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card))
 
             Spacer().frame(height: 14)
 
-            Text("If you just granted permissions, please quit (\u{2318}Q) and reopen \(XMOTheme.wordmark) for them to take full effect.")
+            Text("If you just granted permissions, please quit (\u{2318}Q) and reopen \(LoreTheme.wordmark) for them to take full effect.")
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(XMOTheme.Accent.amber)
+                .foregroundStyle(LoreTheme.Accent.amber)
                 .multilineTextAlignment(.center)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -250,15 +250,15 @@ struct DictationOnboardingView: View {
         HStack(spacing: 12) {
             Image(systemName: granted ? "checkmark.circle.fill" : "xmark.circle.fill")
                 .font(.system(size: 20))
-                .foregroundStyle(granted ? XMOTheme.Accent.green : XMOTheme.Accent.red)
+                .foregroundStyle(granted ? LoreTheme.Accent.green : LoreTheme.Accent.red)
 
             VStack(alignment: .leading, spacing: 2) {
                 Text(name)
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
                 Text(granted ? "Access granted" : need)
-                    .font(XMOTheme.Typography.meta)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.meta)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             }
 
             Spacer()
@@ -279,15 +279,15 @@ struct DictationOnboardingView: View {
     private func cheatSheetRow(_ key: String, _ action: String) -> some View {
         HStack(spacing: 8) {
             Text(key)
-                .font(XMOTheme.Typography.mono(11, weight: .semibold))
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.mono(11, weight: .semibold))
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .frame(width: 50, alignment: .trailing)
             Text("=")
-                .font(XMOTheme.Typography.meta)
-                .foregroundStyle(XMOTheme.TextColor.faint)
+                .font(LoreTheme.Typography.meta)
+                .foregroundStyle(LoreTheme.TextColor.faint)
             Text(action)
-                .font(XMOTheme.Typography.meta)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.meta)
+                .foregroundStyle(LoreTheme.TextColor.muted)
         }
     }
 

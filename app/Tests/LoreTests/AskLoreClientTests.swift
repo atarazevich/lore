@@ -1,12 +1,12 @@
 import XCTest
 @testable import LoreKit
 
-final class AskXMOClientTests: XCTestCase {
+final class AskLoreClientTests: XCTestCase {
 
     // MARK: - Message assembly
 
     func testBuildMessagesOrdersSystemHistoryQuestion() {
-        let messages = AskXMOClient.buildMessages(
+        let messages = AskLoreClient.buildMessages(
             transcript: "You: hello\nThem: hi there",
             history: [(user: "What was said?", assistant: "A greeting.")],
             question: "Anything else?",
@@ -24,7 +24,7 @@ final class AskXMOClientTests: XCTestCase {
     }
 
     func testSystemPromptContainsTranscript() {
-        let messages = AskXMOClient.buildMessages(
+        let messages = AskLoreClient.buildMessages(
             transcript: "You: unique-marker-line",
             history: [],
             question: "Q",
@@ -39,13 +39,13 @@ final class AskXMOClientTests: XCTestCase {
     /// in progress over the live transcript; review of a meeting that has
     /// ended over the stored one.
     func testSystemPromptTenseFollowsIsLive() {
-        let live = AskXMOClient.buildMessages(
+        let live = AskLoreClient.buildMessages(
             transcript: "You: hi", history: [], question: "Q", isLive: true
         )[0].content
         XCTAssertTrue(live.contains("still in progress"))
         XCTAssertTrue(live.contains("Live transcript:"))
 
-        let review = AskXMOClient.buildMessages(
+        let review = AskLoreClient.buildMessages(
             transcript: "You: hi", history: [], question: "Q", isLive: false
         )[0].content
         XCTAssertTrue(review.contains("has ended"))
@@ -64,9 +64,9 @@ final class AskXMOClientTests: XCTestCase {
         // Variable-length lines: the 8k cut almost surely lands mid-line.
         let lines = (0..<2_000).map { "Speaker 1: utterance number \($0)" }
         let transcript = lines.joined(separator: "\n")
-        XCTAssertGreaterThan(transcript.count, AskXMOClient.transcriptBudget)
+        XCTAssertGreaterThan(transcript.count, AskLoreClient.transcriptBudget)
 
-        let messages = AskXMOClient.buildMessages(
+        let messages = AskLoreClient.buildMessages(
             transcript: transcript,
             history: [],
             question: "Q",
@@ -80,7 +80,7 @@ final class AskXMOClientTests: XCTestCase {
         XCTAssertTrue(system.contains("truncated"))
         let section = transcriptSection(of: messages)
         XCTAssertTrue(section.hasPrefix("Speaker 1: "))
-        XCTAssertLessThanOrEqual(section.count, AskXMOClient.transcriptBudget)
+        XCTAssertLessThanOrEqual(section.count, AskLoreClient.transcriptBudget)
     }
 
     func testTruncationAtExactLineBoundaryKeepsFirstCompleteLine() {
@@ -93,7 +93,7 @@ final class AskXMOClientTests: XCTestCase {
         let transcript = (0..<100).map(line).joined()
         XCTAssertEqual(transcript.count, 10_000)
 
-        let messages = AskXMOClient.buildMessages(
+        let messages = AskLoreClient.buildMessages(
             transcript: transcript,
             history: [],
             question: "Q",
@@ -101,7 +101,7 @@ final class AskXMOClientTests: XCTestCase {
         )
         let section = transcriptSection(of: messages)
         XCTAssertTrue(section.hasPrefix("line0020"))
-        XCTAssertEqual(section.count, AskXMOClient.transcriptBudget)
+        XCTAssertEqual(section.count, AskLoreClient.transcriptBudget)
         XCTAssertTrue(messages[0].content.contains("truncated"))
     }
 
@@ -111,9 +111,9 @@ final class AskXMOClientTests: XCTestCase {
     func testReviewTruncationSamplesHeadAndTailOnLineBoundaries() {
         let lines = (0..<2_000).map { "Speaker 1: utterance number \($0)" }
         let transcript = lines.joined(separator: "\n")
-        XCTAssertGreaterThan(transcript.count, AskXMOClient.transcriptBudget)
+        XCTAssertGreaterThan(transcript.count, AskLoreClient.transcriptBudget)
 
-        let messages = AskXMOClient.buildMessages(
+        let messages = AskLoreClient.buildMessages(
             transcript: transcript,
             history: [],
             question: "Summarise this meeting",
@@ -140,7 +140,7 @@ final class AskXMOClientTests: XCTestCase {
             )
         }
         // Head ≤ 4k + tail ≤ 4k + the marker.
-        XCTAssertLessThanOrEqual(section.count, AskXMOClient.transcriptBudget + 5)
+        XCTAssertLessThanOrEqual(section.count, AskLoreClient.transcriptBudget + 5)
     }
 
     // MARK: - History cap
@@ -149,7 +149,7 @@ final class AskXMOClientTests: XCTestCase {
         // History is complete user→assistant exchanges by construction; the
         // 10-turn cap therefore keeps the last 5 exchanges.
         let history = (0..<25).map { (user: "question \($0)", assistant: "answer \($0)") }
-        let messages = AskXMOClient.buildMessages(
+        let messages = AskLoreClient.buildMessages(
             transcript: "You: hi",
             history: history,
             question: "Q",

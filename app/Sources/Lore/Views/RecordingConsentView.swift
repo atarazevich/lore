@@ -14,27 +14,27 @@ struct RecordingConsentView: View {
             // Recording is the red domain in the token semantics.
             Image(systemName: "exclamationmark.shield")
                 .font(.system(size: 40, weight: .light))
-                .foregroundStyle(XMOTheme.Accent.red)
+                .foregroundStyle(LoreTheme.Accent.red)
                 .frame(height: 52)
 
             Spacer().frame(height: 20)
 
             Text("Recording Consent Notice")
-                .font(XMOTheme.Typography.heading)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.heading)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .multilineTextAlignment(.center)
 
             Spacer().frame(height: 10)
 
             Text("""
-            \(XMOTheme.wordmark) records and transcribes audio from your microphone \
+            \(LoreTheme.wordmark) records and transcribes audio from your microphone \
             and system audio during meetings. Many jurisdictions require \
             all-party consent before recording a conversation.
 
             By using this app, you acknowledge that:
             """)
-                .font(XMOTheme.Typography.body)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.body)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
@@ -42,9 +42,9 @@ struct RecordingConsentView: View {
             Spacer().frame(height: 12)
 
             VStack(alignment: .leading, spacing: 8) {
-                XMOBulletRow(text: "You are solely responsible for obtaining any required consent from all participants before recording.")
-                XMOBulletRow(text: "You will comply with all applicable local, state, and federal laws governing recording and wiretapping.")
-                XMOBulletRow(text: "The developers of \(XMOTheme.wordmark) accept no liability for unauthorized or unlawful recording.")
+                LoreBulletRow(text: "You are solely responsible for obtaining any required consent from all participants before recording.")
+                LoreBulletRow(text: "You will comply with all applicable local, state, and federal laws governing recording and wiretapping.")
+                LoreBulletRow(text: "The developers of \(LoreTheme.wordmark) accept no liability for unauthorized or unlawful recording.")
             }
             .padding(.horizontal, 8)
 
@@ -53,13 +53,13 @@ struct RecordingConsentView: View {
             Toggle(isOn: $acknowledged) {
                 Text("I understand and accept these obligations")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
             }
             .toggleStyle(.checkbox)
 
             Spacer()
 
-            XMOOnboardingFooter(
+            LoreOnboardingFooter(
                 leadingTitle: "Cancel",
                 leadingAction: {
                     withAnimation(.easeOut(duration: 0.2)) {
@@ -78,7 +78,7 @@ struct RecordingConsentView: View {
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(XMOTheme.Surface.window)
+        .background(LoreTheme.Surface.window)
         .background(.ultraThinMaterial)
     }
 }

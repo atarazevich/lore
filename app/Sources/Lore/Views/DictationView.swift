@@ -119,7 +119,7 @@ struct DictationView: View {
     var body: some View {
         VStack(spacing: 0) {
             statusStrip
-            XMODivider()
+            LoreDivider()
             historyTab
         }
         .onDisappear {
@@ -153,45 +153,45 @@ struct DictationView: View {
             case .idle:
                 Image(systemName: "mic")
                     .font(.system(size: 12))
-                    .foregroundStyle(XMOTheme.TextColor.sidebarInactive)
+                    .foregroundStyle(LoreTheme.TextColor.sidebarInactive)
                 Text("Hold \(settings.hotkeyKey.displayName) to talk")
-                    .font(XMOTheme.Typography.body)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.body)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             case .recording:
-                XMOPulsingDot()
+                LorePulsingDot()
                 if coordinator.hotkeyManager.isLocked {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 11))
-                        .foregroundStyle(XMOTheme.Accent.red)
+                        .foregroundStyle(LoreTheme.Accent.red)
                     Text("Locked \u{2014} \(settings.hotkeyKey.displayName) to paste, Esc to discard")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(XMOTheme.Accent.red)
+                        .foregroundStyle(LoreTheme.Accent.red)
                 } else {
                     // Only advertise Space-lock while that modifier is enabled.
                     Text(settings.modifierLockEnabled
                             ? "Recording... Space to lock" : "Recording...")
                         .font(.system(size: 13, weight: .semibold))
-                        .foregroundStyle(XMOTheme.Accent.red)
+                        .foregroundStyle(LoreTheme.Accent.red)
                 }
             case .loadingModel:
                 ProgressView()
                     .controlSize(.mini)
                 Text("Downloading model...")
-                    .font(XMOTheme.Typography.body)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.body)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             case .processing:
                 ProgressView()
                     .controlSize(.mini)
                 Text("Processing...")
-                    .font(XMOTheme.Typography.body)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.body)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             case .done:
                 Image(systemName: "checkmark.circle.fill")
                     .font(.system(size: 12))
-                    .foregroundStyle(XMOTheme.Accent.green)
+                    .foregroundStyle(LoreTheme.Accent.green)
                 Text("Done")
-                    .font(XMOTheme.Typography.body)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.body)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             }
 
             Spacer()
@@ -199,7 +199,7 @@ struct DictationView: View {
             if let error = dictation.lastError {
                 Text(error)
                     .font(.system(size: 11))
-                    .foregroundStyle(XMOTheme.Accent.red)
+                    .foregroundStyle(LoreTheme.Accent.red)
                     .lineLimit(1)
             }
 
@@ -208,7 +208,7 @@ struct DictationView: View {
             if let saveError = dictation.history.lastSaveError {
                 Text(saveError)
                     .font(.system(size: 11))
-                    .foregroundStyle(XMOTheme.Accent.red)
+                    .foregroundStyle(LoreTheme.Accent.red)
                     .lineLimit(1)
             }
 
@@ -218,15 +218,15 @@ struct DictationView: View {
                 Text(searchText.isEmpty
                     ? "\(dictation.history.entries.count) entries"
                     : "\(historyProjection.filtered.count) of \(dictation.history.entries.count)")
-                    .font(XMOTheme.Typography.mono(11.5))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.mono(11.5))
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             }
         }
         .padding(.horizontal, 26)
         .padding(.vertical, 11)
         .background(
             dictation.state == .recording
-                ? XMOTheme.Accent.red.opacity(0.08)
+                ? LoreTheme.Accent.red.opacity(0.08)
                 : Color.white.opacity(0.02)
         )
         .animation(
@@ -241,7 +241,7 @@ struct DictationView: View {
     private var historyTab: some View {
         VStack(spacing: 0) {
             historyList
-            XMODivider()
+            LoreDivider()
             hotkeyCheatSheet
         }
     }
@@ -265,27 +265,27 @@ struct DictationView: View {
                     Spacer()
                     Image(systemName: "text.bubble")
                         .font(.system(size: 28))
-                        .foregroundStyle(XMOTheme.TextColor.faint)
+                        .foregroundStyle(LoreTheme.TextColor.faint)
                     Text("No dictation history yet")
-                        .font(XMOTheme.Typography.body)
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .font(LoreTheme.Typography.body)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                     Text("Hold \(settings.hotkeyKey.displayName) and speak to get started")
-                        .font(XMOTheme.Typography.meta)
-                        .foregroundStyle(XMOTheme.TextColor.faint)
+                        .font(LoreTheme.Typography.meta)
+                        .foregroundStyle(LoreTheme.TextColor.faint)
                     Spacer()
                 }
                 .frame(maxWidth: .infinity)
             } else {
                 VStack(spacing: 0) {
                     searchRow
-                    XMODivider()
+                    LoreDivider()
 
                     if historyProjection.filtered.isEmpty && !searchText.isEmpty {
                         VStack(spacing: 8) {
                             Spacer()
                             Text("Nothing matches \u{201C}\(searchText)\u{201D}")
-                                .font(XMOTheme.Typography.body)
-                                .foregroundStyle(XMOTheme.TextColor.muted)
+                                .font(LoreTheme.Typography.body)
+                                .foregroundStyle(LoreTheme.TextColor.muted)
                             Spacer()
                         }
                         .frame(maxWidth: .infinity)
@@ -296,7 +296,7 @@ struct DictationView: View {
                                     Section {
                                         ForEach(group.entries) { entry in
                                             historyRow(entry)
-                                            XMODivider()
+                                            LoreDivider()
                                         }
                                     } header: {
                                         dayHeader(group.label)
@@ -316,9 +316,9 @@ struct DictationView: View {
         HStack(spacing: 10) {
             Image(systemName: "magnifyingglass")
                 .font(.system(size: 12))
-                .foregroundStyle(XMOTheme.TextColor.sidebarInactive)
+                .foregroundStyle(LoreTheme.TextColor.sidebarInactive)
             TextField("Search history\u{2026}", text: $searchText)
-                .font(XMOTheme.Typography.body)
+                .font(LoreTheme.Typography.body)
                 .textFieldStyle(.plain)
                 .focused($isSearchFocused)
             if !searchText.isEmpty {
@@ -327,7 +327,7 @@ struct DictationView: View {
                 } label: {
                     Image(systemName: "xmark.circle.fill")
                         .font(.system(size: 11))
-                        .foregroundStyle(XMOTheme.TextColor.faint)
+                        .foregroundStyle(LoreTheme.TextColor.faint)
                 }
                 .buttonStyle(.plain)
             }
@@ -339,13 +339,13 @@ struct DictationView: View {
     // MARK: - Day Header (DIC-26)
 
     private func dayHeader(_ label: String) -> some View {
-        XMOSectionLabel(text: label, size: 10.5, mono: true, trackingEm: 0.09)
+        LoreSectionLabel(text: label, size: 10.5, mono: true, trackingEm: 0.09)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 26)
             .padding(.vertical, 6)
             .background(Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255).opacity(0.82))
             .background(.ultraThinMaterial)
-            .overlay(alignment: .bottom) { XMODivider() }
+            .overlay(alignment: .bottom) { LoreDivider() }
     }
 
     // MARK: - History Row (DIC-27)
@@ -359,11 +359,11 @@ struct DictationView: View {
                 // 56px centered mono time + duration column
                 VStack(spacing: 3) {
                     Text(timeString(entry.timestamp))
-                        .font(XMOTheme.Typography.mono(12.5, weight: .semibold))
-                        .foregroundStyle(XMOTheme.TextColor.primary)
+                        .font(LoreTheme.Typography.mono(12.5, weight: .semibold))
+                        .foregroundStyle(LoreTheme.TextColor.primary)
                     Text(durationString(entry.durationSeconds))
-                        .font(XMOTheme.Typography.mono(11))
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .font(LoreTheme.Typography.mono(11))
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                 }
                 .frame(width: 56)
                 .padding(.top, 1)
@@ -385,18 +385,18 @@ struct DictationView: View {
                 Image(systemName: "waveform")
                     .font(.system(size: 12))
                 Text("Audio saved \u{2014} not yet transcribed")
-                    .font(XMOTheme.Typography.body)
+                    .font(LoreTheme.Typography.body)
             }
-            .foregroundStyle(XMOTheme.TextColor.muted)
+            .foregroundStyle(LoreTheme.TextColor.muted)
             .padding(.top, 1)
         case .failed:
             HStack(spacing: 9) {
                 Text("\u{26A0}")
                     .font(.system(size: 13))
                 Text(entry.errorMessage ?? "Transcription failed")
-                    .font(XMOTheme.Typography.body)
+                    .font(LoreTheme.Typography.body)
             }
-            .foregroundStyle(XMOTheme.Accent.red)
+            .foregroundStyle(LoreTheme.Accent.red)
             .padding(.top, 1)
         case .transcribed, .cleaned:
             VStack(alignment: .leading, spacing: 5) {
@@ -406,8 +406,8 @@ struct DictationView: View {
                     } else {
                         // Read mode — double-click to edit (DIC-40)
                         highlightedText(text)
-                            .font(XMOTheme.Typography.body)
-                            .foregroundStyle(XMOTheme.TextColor.primary)
+                            .font(LoreTheme.Typography.body)
+                            .foregroundStyle(LoreTheme.TextColor.primary)
                             .lineSpacing(4) // ≈ line-height 1.55 at 13px
                             .contentShape(Rectangle())
                             .onTapGesture(count: 2) {
@@ -432,15 +432,15 @@ struct DictationView: View {
     private var editControls: some View {
         VStack(alignment: .leading, spacing: 4) {
             TextEditor(text: $editingText)
-                .font(XMOTheme.Typography.body)
+                .font(LoreTheme.Typography.body)
                 .scrollContentBackground(.hidden)
                 .frame(maxHeight: 200)
                 .padding(4)
-                .background(XMOTheme.Accent.blue.opacity(0.05))
-                .clipShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.button))
+                .background(LoreTheme.Accent.blue.opacity(0.05))
+                .clipShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.button))
                 .overlay(
-                    RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
-                        .stroke(XMOTheme.Accent.blue.opacity(0.3), lineWidth: 1)
+                    RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
+                        .stroke(LoreTheme.Accent.blue.opacity(0.3), lineWidth: 1)
                 )
                 .focused($isEditorFocused)
                 .onExitCommand { cancelEdit() }
@@ -458,7 +458,7 @@ struct DictationView: View {
                 } label: {
                     Image(systemName: "checkmark")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(XMOTheme.Accent.green)
+                        .foregroundStyle(LoreTheme.Accent.green)
                 }
                 .buttonStyle(.plain)
                 .help("Save changes")
@@ -468,7 +468,7 @@ struct DictationView: View {
                 } label: {
                     Image(systemName: "xmark")
                         .font(.system(size: 10, weight: .semibold))
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                 }
                 .buttonStyle(.plain)
                 .help("Discard changes")
@@ -484,13 +484,13 @@ struct DictationView: View {
         if entry.hasBothVersions {
             Group {
                 if entry.activeVersion == .cleaned {
-                    Text("\u{2726} ").foregroundStyle(XMOTheme.Accent.amber)
-                        + Text(cleanedMetaLabel(entry)).foregroundStyle(XMOTheme.TextColor.muted)
+                    Text("\u{2726} ").foregroundStyle(LoreTheme.Accent.amber)
+                        + Text(cleanedMetaLabel(entry)).foregroundStyle(LoreTheme.TextColor.muted)
                 } else {
-                    Text("original").foregroundStyle(XMOTheme.TextColor.muted)
+                    Text("original").foregroundStyle(LoreTheme.TextColor.muted)
                 }
             }
-            .font(XMOTheme.Typography.mono(11))
+            .font(LoreTheme.Typography.mono(11))
         }
     }
 
@@ -516,11 +516,11 @@ struct DictationView: View {
         // button that can only log "no audio" is a lie. Hidden, not disabled.
         if (entry.status == .failed || entry.status == .audioSaved) && entry.hasAudio {
             // Retry stays visible without hover, like the design's error row.
-            XMOIconButton(
+            LoreIconButton(
                 systemName: "arrow.clockwise",
                 label: "Retry transcription",
-                tint: XMOTheme.Accent.red,
-                background: XMOTheme.Accent.red.opacity(0.12)
+                tint: LoreTheme.Accent.red,
+                background: LoreTheme.Accent.red.opacity(0.12)
             ) {
                 Task {
                     await dictation.retryTranscription(entryID: entry.id)
@@ -541,7 +541,7 @@ struct DictationView: View {
             .opacity(revealed ? 1 : 0)
             .allowsHitTesting(revealed)
             .animation(
-                reduceMotion ? nil : .easeOut(duration: XMOTheme.Motion.hoverDuration),
+                reduceMotion ? nil : .easeOut(duration: LoreTheme.Motion.hoverDuration),
                 value: revealed
             )
         }
@@ -549,7 +549,7 @@ struct DictationView: View {
 
     /// Copy with green ✓ feedback for ~1.4s (DIC-34).
     private func copyButton(_ entry: DictationHistoryEntry) -> some View {
-        XMOCopyButton {
+        LoreCopyButton {
             guard let text = entry.displayText else { return }
             NSPasteboard.general.clearContents()
             NSPasteboard.general.setString(text, forType: .string)
@@ -562,7 +562,7 @@ struct DictationView: View {
             label: "Clean up",
             popover: .cleanup(entry.id)
         ) {
-            XMOPickerPopover(
+            LorePickerPopover(
                 header: "Cleanup method",
                 items: CleanupMethod.allCases,
                 width: 224,
@@ -578,15 +578,15 @@ struct DictationView: View {
                 itemLabel: { method in
                     Text(method.glyph)
                         .font(.system(size: 12))
-                        .foregroundStyle(XMOTheme.Accent.amber)
+                        .foregroundStyle(LoreTheme.Accent.amber)
                         .frame(width: 15)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(method.displayName)
                             .font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(XMOTheme.TextColor.primary)
+                            .foregroundStyle(LoreTheme.TextColor.primary)
                         Text(method.subtitle)
-                            .font(XMOTheme.Typography.meta)
-                            .foregroundStyle(XMOTheme.TextColor.muted)
+                            .font(LoreTheme.Typography.meta)
+                            .foregroundStyle(LoreTheme.TextColor.muted)
                     }
                 }
             )
@@ -599,7 +599,7 @@ struct DictationView: View {
             label: "Translate",
             popover: .translate(entry.id)
         ) {
-            XMOPickerPopover(
+            LorePickerPopover(
                 header: "Translate to",
                 items: TranslationLanguage.allCases,
                 width: 180,
@@ -626,11 +626,11 @@ struct DictationView: View {
         @ViewBuilder content: @escaping () -> Content
     ) -> some View {
         let isOpen = activePopover == popover
-        return XMOIconButton(
+        return LoreIconButton(
             systemName: systemName,
             label: label,
-            tint: XMOTheme.Accent.amber,
-            background: isOpen ? XMOTheme.Accent.amber.opacity(0.16)
+            tint: LoreTheme.Accent.amber,
+            background: isOpen ? LoreTheme.Accent.amber.opacity(0.16)
                                : Color.white.opacity(0.07)
         ) {
             activePopover = isOpen ? nil : popover
@@ -650,7 +650,7 @@ struct DictationView: View {
     /// shown, ✦ when the raw version is shown. Non-destructive.
     private func versionToggleButton(_ entry: DictationHistoryEntry) -> some View {
         let showingCleaned = entry.activeVersion == .cleaned
-        return XMOIconButton(
+        return LoreIconButton(
             systemName: showingCleaned ? "arrow.uturn.backward" : "sparkles",
             label: showingCleaned ? "Show original" : "Show cleaned"
         ) {
@@ -699,7 +699,7 @@ struct DictationView: View {
             kbdHint("Esc", "discard")
             Spacer()
         }
-        .font(XMOTheme.Typography.mono(11))
+        .font(LoreTheme.Typography.mono(11))
         .padding(.horizontal, 26)
         .padding(.vertical, 11)
     }
@@ -707,9 +707,9 @@ struct DictationView: View {
     private func kbdHint(_ key: String, _ what: String) -> Text {
         Text(key)
             .fontWeight(.semibold)
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .foregroundStyle(LoreTheme.TextColor.primary)
             + Text(" = \(what)")
-            .foregroundStyle(XMOTheme.TextColor.muted)
+            .foregroundStyle(LoreTheme.TextColor.muted)
     }
 
     // MARK: - Inline Editing
@@ -774,7 +774,7 @@ struct DictationView: View {
             : "\(action) failed \u{2014} text unchanged"
         showRowFeedback(
             for: entryID, message: message,
-            color: XMOTheme.Accent.red, duration: 4
+            color: LoreTheme.Accent.red, duration: 4
         )
     }
 
@@ -909,7 +909,7 @@ private struct HoverRevealRow<Content: View>: View {
 
     var body: some View {
         content(isHovered || forceRevealed)
-            .xmoHoverFill(Color.white.opacity(0.035)) { isHovered = $0 }
+            .loreHoverFill(Color.white.opacity(0.035)) { isHovered = $0 }
     }
 }
 

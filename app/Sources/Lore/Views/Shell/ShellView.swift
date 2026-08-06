@@ -1,7 +1,7 @@
 import SwiftUI
 import Sparkle
 
-/// Unified XMO window: 216px sidebar + main pane with a 52px toolbar
+/// Unified Lore window: 216px sidebar + main pane with a 52px toolbar
 /// (SHELL-01/02/06/13). Dark-only frosted per D-031; destination views are
 /// kept alive across switches so per-view state persists and the meeting
 /// polling loop in ContentView never cancels (SHELL-16).
@@ -26,7 +26,7 @@ struct ShellView: View {
             mainPane
         }
         .frame(minWidth: 1000, minHeight: 640)
-        .background(XMOTheme.Surface.window)
+        .background(LoreTheme.Surface.window)
         .background(.ultraThinMaterial)
         .preferredColorScheme(.dark)
         // The toolbar's "N recorded" subtitle needs the index at launch;
@@ -69,7 +69,7 @@ struct ShellView: View {
     private var mainPane: some View {
         VStack(spacing: 0) {
             toolbar
-            XMODivider()
+            LoreDivider()
             content
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -81,14 +81,14 @@ struct ShellView: View {
     private var toolbar: some View {
         HStack(spacing: 12) {
             Text(shell.destination.title)
-                .font(XMOTheme.Typography.control)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.control)
+                .foregroundStyle(LoreTheme.TextColor.primary)
             if shell.destination == .meetings {
                 Text(coordinator.isRecording
                      ? "recording\u{2026}"
                      : "\(coordinator.sessionHistory.count) recorded")
-                    .font(XMOTheme.Typography.monoMeta)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.monoMeta)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             }
             Spacer()
             if let startedAt = recordingStartedAt, showRecPill {
@@ -184,9 +184,9 @@ private struct ShellSidebar: View {
         }
         .frame(width: 216)
         .frame(maxHeight: .infinity)
-        .background(XMOTheme.Surface.sidebar)
+        .background(LoreTheme.Surface.sidebar)
         .overlay(alignment: .trailing) {
-            XMOTheme.Surface.line.frame(width: 1)
+            LoreTheme.Surface.line.frame(width: 1)
         }
     }
 
@@ -195,19 +195,19 @@ private struct ShellSidebar: View {
     private var brandRow: some View {
         HStack(spacing: 10) {
             ZStack {
-                RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
-                    .fill(XMOTheme.Accent.blue)
+                RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
+                    .fill(LoreTheme.Accent.blue)
                     .frame(width: 28, height: 28)
-                    .xmoShadow(XMOTheme.Shadow.blueGlow)
-                Text(String(XMOTheme.wordmark.prefix(1)))
+                    .loreShadow(LoreTheme.Shadow.blueGlow)
+                Text(String(LoreTheme.wordmark.prefix(1)))
                     .font(.system(size: 13, weight: .semibold))
                     .kerning(-0.26)
                     .foregroundStyle(.white)
             }
-            Text(XMOTheme.wordmark)
-                .font(XMOTheme.Typography.control)
+            Text(LoreTheme.wordmark)
+                .font(LoreTheme.Typography.control)
                 .kerning(-0.13) // CSS `.brand .name` letter-spacing -.01em at 13px
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .foregroundStyle(LoreTheme.TextColor.primary)
             Spacer(minLength: 0)
         }
         .padding(.init(top: 16, leading: 16, bottom: 12, trailing: 16))
@@ -251,11 +251,11 @@ private struct ShellSidebar: View {
             ShellHealthFooter(summary: healthMonitor.summary, action: onOpenHealth)
         } else {
             Text(versionString)
-                .font(XMOTheme.Typography.monoMeta)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.monoMeta)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .frame(maxWidth: .infinity, alignment: .trailing)
                 .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
-                .overlay(alignment: .top) { XMODivider() }
+                .overlay(alignment: .top) { LoreDivider() }
         }
     }
 
@@ -278,14 +278,14 @@ private struct ShellHealthFooter: View {
             HStack(spacing: 8) {
                 HealthStatusDot(status: summary.status)
                 Text(summary.text)
-                    .font(XMOTheme.Typography.meta)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.meta)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                     .lineLimit(1)
                 Spacer(minLength: 0)
             }
             .contentShape(Rectangle())
             .padding(.init(top: 13, leading: 16, bottom: 13, trailing: 16))
-            .overlay(alignment: .top) { XMODivider() }
+            .overlay(alignment: .top) { LoreDivider() }
         }
         .buttonStyle(.plain)
         .accessibilityLabel("System health: \(summary.text)")
@@ -309,11 +309,11 @@ private struct ShellNavItem: View {
                     .font(.system(size: 15, weight: .medium))
                     .frame(width: 20, height: 20)
                 Text(title)
-                    .font(isActive ? XMOTheme.Typography.control
-                                   : XMOTheme.Typography.navInactive)
+                    .font(isActive ? LoreTheme.Typography.control
+                                   : LoreTheme.Typography.navInactive)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if isLive {
-                    XMOPulsingDot()
+                    LorePulsingDot()
                 }
                 if let badgeCount, badgeCount > 0 {
                     Text("\(badgeCount)")
@@ -322,12 +322,12 @@ private struct ShellNavItem: View {
                         .padding(.horizontal, 5)
                         .frame(minWidth: 18)
                         .frame(height: 18)
-                        .background(XMOTheme.Accent.amber,
-                                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+                        .background(LoreTheme.Accent.amber,
+                                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
                 }
             }
-            .foregroundStyle(isActive ? Color.white : XMOTheme.TextColor.sidebarInactive)
-            .xmoSelectableRow(isActive: isActive)
+            .foregroundStyle(isActive ? Color.white : LoreTheme.TextColor.sidebarInactive)
+            .loreSelectableRow(isActive: isActive)
         }
         .buttonStyle(.plain)
     }
@@ -343,19 +343,19 @@ private struct ShellRecPill: View {
     var body: some View {
         Button(action: action) {
             HStack(spacing: 7) {
-                XMOPulsingDot()
+                LorePulsingDot()
                 Text("REC ") + Text(startedAt, style: .timer)
             }
-            .font(XMOTheme.Typography.monoControl)
-            .foregroundStyle(XMOTheme.Accent.red)
+            .font(LoreTheme.Typography.monoControl)
+            .foregroundStyle(LoreTheme.Accent.red)
             .padding(.vertical, 7)
             .padding(.horizontal, 12)
             .background(
-                XMOTheme.Accent.red.opacity(0.14),
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                LoreTheme.Accent.red.opacity(0.14),
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
             )
         }
-        .buttonStyle(XMOPressButtonStyle())
+        .buttonStyle(LorePressButtonStyle())
         .accessibilityLabel("Recording — show Meetings")
     }
 }
@@ -364,8 +364,8 @@ private struct ShellRecPill: View {
 
 /// 8px red dot with glow; CSS `pulse` 1.3s opacity .25↔1. Static at full
 /// opacity when Reduce Motion is on ("calm" mode, SHELL-31).
-struct XMOPulsingDot: View {
-    var color: Color = XMOTheme.Accent.red
+struct LorePulsingDot: View {
+    var color: Color = LoreTheme.Accent.red
     var size: CGFloat = 8
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
@@ -377,7 +377,7 @@ struct XMOPulsingDot: View {
             .phaseAnimator([1.0, 0.25]) { view, phase in
                 view.opacity(reduceMotion ? 1 : phase)
             } animation: { _ in
-                .easeInOut(duration: XMOTheme.Motion.pulseDuration / 2)
+                .easeInOut(duration: LoreTheme.Motion.pulseDuration / 2)
             }
     }
 }

@@ -33,7 +33,7 @@ struct DictationIndicatorView: View {
                 if let error = lastError {
                     // Mic stall surfaced by the first-frame watchdog — show it loudly
                     // instead of a normal-looking recording meter.
-                    statusRow(icon: "xmark.circle.fill", iconColor: XMOTheme.Accent.red, text: error, wrap: true)
+                    statusRow(icon: "xmark.circle.fill", iconColor: LoreTheme.Accent.red, text: error, wrap: true)
                 } else {
                     recordingContent
                 }
@@ -45,9 +45,9 @@ struct DictationIndicatorView: View {
                 if showUpgradeButtons {
                     upgradeContent
                 } else if let error = lastError {
-                    statusRow(icon: "xmark.circle.fill", iconColor: XMOTheme.Accent.red, text: error, wrap: true)
+                    statusRow(icon: "xmark.circle.fill", iconColor: LoreTheme.Accent.red, text: error, wrap: true)
                 } else {
-                    statusRow(icon: "checkmark.circle.fill", iconColor: XMOTheme.Accent.green, text: "Done")
+                    statusRow(icon: "checkmark.circle.fill", iconColor: LoreTheme.Accent.green, text: "Done")
                 }
             case .idle:
                 EmptyView()
@@ -67,36 +67,36 @@ struct DictationIndicatorView: View {
             Circle()
                 // No-signal keeps its distinct dimmed look (not a token color
                 // — it must read as "not recording red").
-                .fill(noSignal ? Color.white.opacity(0.3) : XMOTheme.Accent.red)
+                .fill(noSignal ? Color.white.opacity(0.3) : LoreTheme.Accent.red)
                 .frame(width: 8, height: 8)
             if isLocked {
                 Image(systemName: "lock.fill")
                     .font(.system(size: 11))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             }
             waveform
             if noSignal {
                 Text("No signal from microphone")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
             } else {
                 Text(timerString)
-                    .font(XMOTheme.Typography.mono(13))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.mono(13))
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                     .monospacedDigit()
             }
             if bluetoothRedirected {
                 Group {
                     if showBluetoothInfo {
                         Text("Using laptop mic — AirPods mic compresses audio below what speech recognition needs")
-                            .font(XMOTheme.Typography.meta)
-                            .foregroundStyle(XMOTheme.TextColor.muted)
+                            .font(LoreTheme.Typography.meta)
+                            .foregroundStyle(LoreTheme.TextColor.muted)
                             .lineLimit(2)
                             .fixedSize(horizontal: false, vertical: true)
                     } else {
                         Image(systemName: "laptopcomputer.and.arrow.down")
                             .font(.system(size: 11))
-                            .foregroundStyle(XMOTheme.TextColor.muted)
+                            .foregroundStyle(LoreTheme.TextColor.muted)
                     }
                 }
                 .onTapGesture { showBluetoothInfo.toggle() }
@@ -105,25 +105,25 @@ struct DictationIndicatorView: View {
             if let mode = pendingMode {
                 Text("+ \(mode == .cleanup ? "Cleanup" : "Translate")")
                     .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
             }
             if operatorAddressed {
                 // Fn+K armed (#122) — small keycap badge, same idiom as the
                 // C/T keycaps in the upgrade panel.
                 Text("K")
-                    .font(XMOTheme.Typography.mono(11, weight: .semibold))
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .font(LoreTheme.Typography.mono(11, weight: .semibold))
+                    .foregroundStyle(LoreTheme.TextColor.primary)
                     .padding(.horizontal, 5)
                     .padding(.vertical, 2)
                     .background(
-                        RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                        RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
                             .fill(Color.white.opacity(0.07))
                     )
             }
         }
     }
 
-    /// Shared XMO waveform while live; the no-signal state keeps its distinct
+    /// Shared Lore waveform while live; the no-signal state keeps its distinct
     /// flat dimmed bars. Fixed 18pt frame preserves the pre-Stage-H panel
     /// height (`.fixedSize()` sizing is load-bearing — see the manager).
     private var waveform: some View {
@@ -137,7 +137,7 @@ struct DictationIndicatorView: View {
                     }
                 }
             } else {
-                XMOLiveWaveform(level: audioLevel)
+                LoreLiveWaveform(level: audioLevel)
             }
         }
         .frame(height: 18)
@@ -156,12 +156,12 @@ struct DictationIndicatorView: View {
             ProgressView()
                 .controlSize(.small)
             Text("Processing...")
-                .font(XMOTheme.Typography.body)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.body)
+                .foregroundStyle(LoreTheme.TextColor.primary)
         }
     }
 
-    private func statusRow(icon: String, iconColor: Color = XMOTheme.TextColor.muted, text: String, wrap: Bool = false) -> some View {
+    private func statusRow(icon: String, iconColor: Color = LoreTheme.TextColor.muted, text: String, wrap: Bool = false) -> some View {
         HStack(spacing: 10) {
             Image(systemName: icon)
                 .foregroundStyle(iconColor)
@@ -174,8 +174,8 @@ struct DictationIndicatorView: View {
             // it wraps; `fixedSize(vertical:)` then reports the true multi-line height the panel
             // grows to. No line limit on wrap so the full message always shows.
             Text(text)
-                .font(XMOTheme.Typography.body)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.body)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .lineLimit(wrap ? nil : 1)
                 .multilineTextAlignment(.leading)
                 .frame(width: wrap ? 260 : nil, alignment: .leading)
@@ -193,21 +193,21 @@ struct DictationIndicatorView: View {
                 // red row states what happened; C/T stay available as retry.
                 if let error = lastError {
                     Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(XMOTheme.Accent.red)
+                        .foregroundStyle(LoreTheme.Accent.red)
                         .font(.system(size: 12))
                     Text(error)
-                        .font(XMOTheme.Typography.body)
-                        .foregroundStyle(XMOTheme.TextColor.primary)
+                        .font(LoreTheme.Typography.body)
+                        .foregroundStyle(LoreTheme.TextColor.primary)
                 } else {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(XMOTheme.Accent.green)
+                        .foregroundStyle(LoreTheme.Accent.green)
                         .font(.system(size: 12))
                     Text("Pasted")
-                        .font(XMOTheme.Typography.body)
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .font(LoreTheme.Typography.body)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                 }
 
-                XMOTheme.Surface.line
+                LoreTheme.Surface.line
                     .frame(width: 1, height: 14)
 
                 if !hideCleanupButton {
@@ -239,20 +239,20 @@ struct DictationIndicatorView: View {
         HStack(spacing: 4) {
             if showUpgradeKeycaps {
                 Text(label)
-                    .font(XMOTheme.Typography.mono(11, weight: .semibold))
-                    .foregroundStyle(highlighted ? XMOTheme.TextColor.primary : XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.mono(11, weight: .semibold))
+                    .foregroundStyle(highlighted ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
             }
             Text(subtitle)
                 .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .foregroundStyle(LoreTheme.TextColor.primary)
         }
         .padding(.horizontal, 8)
         .padding(.vertical, 3)
         .background(
-            // Design `.ibtn` fill — same white .07 as XMOIconButton; the
+            // Design `.ibtn` fill — same white .07 as LoreIconButton; the
             // highlighted (flagged) state fills with the selection accent.
-            RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
-                .fill(highlighted ? XMOTheme.Accent.blue.opacity(0.35) : Color.white.opacity(0.07))
+            RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
+                .fill(highlighted ? LoreTheme.Accent.blue.opacity(0.35) : Color.white.opacity(0.07))
         )
         .contentShape(Rectangle())
         .onTapGesture(perform: action)

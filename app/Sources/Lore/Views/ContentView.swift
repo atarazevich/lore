@@ -6,7 +6,7 @@ struct ContentView: View {
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(ShellModel.self) private var shell
     @State private var liveSessionController: LiveSessionController?
-    @State private var askXMO = AskXMOChatModel()
+    @State private var askLore = AskLoreChatModel()
     @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
     @State private var showOnboarding = false
     @State private var showConsentSheet = false
@@ -48,7 +48,7 @@ struct ContentView: View {
             // (processing pane + fresh dot), which is always reachable via
             // the recording-time Live/Meetings switch.
 
-            XMODivider()
+            LoreDivider()
 
             HStack(spacing: 0) {
                 transcriptPane(state: controllerState, startedAt: startedAt)
@@ -76,21 +76,21 @@ struct ContentView: View {
     private func header(state: LiveSessionState, startedAt: Date?) -> some View {
         // No "Recording N:NN" meta line — the red banner is the one ticking
         // recording indicator (#57).
-        XMOScreenHeader {
+        LoreScreenHeader {
             Text("New recording")
         } meta: {
         } trailing: {
             // Transcript affordances stay while the finished session's
             // transcript is still showing, not only mid-recording.
             if state.showLiveTranscript, !state.liveTranscript.isEmpty {
-                XMOCopyButton(label: "Copy transcript") {
+                LoreCopyButton(label: "Copy transcript") {
                     copyTranscript()
                 }
             }
 
             // Label and action key off the same coordinator-phase source
             // (recordingStartedAt): a "Stop" can never route to start.
-            XMOStartStopButton(isRecording: startedAt != nil) {
+            LoreStartStopButton(isRecording: startedAt != nil) {
                 if startedAt != nil {
                     stopSession()
                 } else {
@@ -107,24 +107,24 @@ struct ContentView: View {
     /// bars driven by the real audio level, mute toggle, right-aligned hint.
     private func recordingBanner(state: LiveSessionState, startedAt: Date) -> some View {
         HStack(spacing: 12) {
-            XMOPulsingDot(size: 10)
+            LorePulsingDot(size: 10)
             Text("Recording")
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(XMOTheme.Accent.red)
+                .foregroundStyle(LoreTheme.Accent.red)
             Text(startedAt, style: .timer)
-                .font(XMOTheme.Typography.mono(12.5))
-                .foregroundStyle(XMOTheme.TextColor.primary)
-            XMOLiveWaveform(level: state.isMicMuted ? 0 : state.audioLevel)
+                .font(LoreTheme.Typography.mono(12.5))
+                .foregroundStyle(LoreTheme.TextColor.primary)
+            LoreLiveWaveform(level: state.isMicMuted ? 0 : state.audioLevel)
                 .frame(height: 16)
                 .opacity(state.isMicMuted ? 0.35 : 1)
             muteToggle(isMuted: state.isMicMuted)
             Spacer(minLength: 20)
             Text("Live transcription \u{2014} notes when you stop")
                 .font(.system(size: 11.5))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .lineLimit(1)
         }
-        .xmoBanner(tint: XMOTheme.Accent.red)
+        .loreBanner(tint: LoreTheme.Accent.red)
     }
 
     /// Mic mute (MREC-06) — the only pause-like control; restyled into the
@@ -135,14 +135,14 @@ struct ContentView: View {
         } label: {
             Image(systemName: isMuted ? "mic.slash.fill" : "mic.fill")
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(isMuted ? XMOTheme.Accent.red : XMOTheme.TextColor.muted)
+                .foregroundStyle(isMuted ? LoreTheme.Accent.red : LoreTheme.TextColor.muted)
                 .frame(width: 24, height: 24)
                 .background(
                     Color.white.opacity(0.07),
-                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
                 )
         }
-        .buttonStyle(XMOPressButtonStyle())
+        .buttonStyle(LorePressButtonStyle())
         .help(isMuted ? "Unmute microphone" : "Mute microphone")
         .accessibilityLabel(isMuted ? "Unmute microphone" : "Mute microphone")
         .accessibilityIdentifier("app.controlBar.muteToggle")
@@ -154,7 +154,7 @@ struct ContentView: View {
     private func errorBanner(_ message: String) -> some View {
         Text(message)
             .font(.system(size: 12))
-            .foregroundStyle(XMOTheme.Accent.red)
+            .foregroundStyle(LoreTheme.Accent.red)
             .textSelection(.enabled)
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 26)
@@ -164,14 +164,14 @@ struct ContentView: View {
     private var downloadPrompt: some View {
         HStack(spacing: 12) {
             Text("Transcription requires a one-time model download.")
-                .font(XMOTheme.Typography.secondary)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.secondary)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .frame(maxWidth: .infinity, alignment: .leading)
-            pillButton("Download Now", tint: XMOTheme.Accent.blue) {
+            pillButton("Download Now", tint: LoreTheme.Accent.blue) {
                 confirmDownload()
             }
         }
-        .xmoBanner()
+        .loreBanner()
     }
 
     private func statusBanner(status: String, progress: Double?) -> some View {
@@ -183,13 +183,13 @@ struct ContentView: View {
                 }
                 Text(status)
                     .font(.system(size: 12))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                     .accessibilityIdentifier("app.controlBar.status")
             }
             if let progress {
                 ProgressView(value: progress)
                     .progressViewStyle(.linear)
-                    .tint(XMOTheme.Accent.blue)
+                    .tint(LoreTheme.Accent.blue)
                     .accessibilityIdentifier("app.controlBar.downloadProgress")
             }
         }
@@ -206,8 +206,8 @@ struct ContentView: View {
         if let lastSession = state.lastEndedSession, lastSession.utteranceCount > 0 {
             HStack(spacing: 12) {
                 Text("Session ended \u{00B7} \(lastSession.utteranceCount) utterances")
-                    .font(XMOTheme.Typography.secondary)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.secondary)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                     .accessibilityIdentifier("app.sessionEndedBanner")
                 Spacer()
                 pillButton("View meeting") {
@@ -215,7 +215,7 @@ struct ContentView: View {
                 }
                 .accessibilityIdentifier("app.viewMeetingButton")
             }
-            .xmoBanner()
+            .loreBanner()
         }
     }
 
@@ -228,15 +228,15 @@ struct ContentView: View {
         Button(action: action) {
             Text(title)
                 .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(tint == nil ? XMOTheme.TextColor.primary : .white)
+                .foregroundStyle(tint == nil ? LoreTheme.TextColor.primary : .white)
                 .padding(.vertical, 7)
                 .padding(.horizontal, 13)
                 .background(
                     tint ?? Color.white.opacity(0.06),
-                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
                 )
         }
-        .buttonStyle(XMOPressButtonStyle())
+        .buttonStyle(LorePressButtonStyle())
     }
 
     // MARK: - Transcript pane (MREC-11/12/13)
@@ -255,8 +255,8 @@ struct ContentView: View {
             // Live display off (MREC-13): recording still runs; the
             // transcript appears after processing.
             Text("Live transcription is off \u{2014} the transcript appears after the recording stops.")
-                .font(XMOTheme.Typography.secondary)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.secondary)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .multilineTextAlignment(.center)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .padding(24)
@@ -268,15 +268,15 @@ struct ContentView: View {
 
     // MARK: - Rail (MREC-20/21)
 
-    /// 344px right rail, left hairline: MEETING STATS on top and Ask XMO
+    /// 344px right rail, left hairline: MEETING STATS on top and Ask Lore
     /// (MREC-30, Stage G) filling the rest — visible only while recording;
     /// chat history clears when a new recording starts.
     private func rail(state: LiveSessionState, startedAt: Date) -> some View {
         VStack(spacing: 0) {
             statsSection(state: state, startedAt: startedAt)
-            XMODivider()
-            AskXMOSection(
-                model: askXMO,
+            LoreDivider()
+            AskLoreSection(
+                model: askLore,
                 utterances: state.liveTranscript,
                 apiKey: settings.openaiApiKey
             )
@@ -285,13 +285,13 @@ struct ContentView: View {
         .frame(width: 344)
         .frame(maxHeight: .infinity)
         .overlay(alignment: .leading) {
-            XMOTheme.Surface.line.frame(width: 1)
+            LoreTheme.Surface.line.frame(width: 1)
         }
     }
 
     private func statsSection(state: LiveSessionState, startedAt: Date) -> some View {
         VStack(alignment: .leading, spacing: 0) {
-            XMOSectionLabel(text: "Meeting stats", size: 11)
+            LoreSectionLabel(text: "Meeting stats", size: 11)
                 .padding(.bottom, 12)
             HStack(spacing: 10) {
                 statCard(
@@ -310,14 +310,14 @@ struct ContentView: View {
                 talkSplitRow(
                     label: "You \(split.you)%",
                     percent: split.you,
-                    labelColor: XMOTheme.Accent.blue,
-                    fill: XMOTheme.Accent.blue
+                    labelColor: LoreTheme.Accent.blue,
+                    fill: LoreTheme.Accent.blue
                 )
                 .padding(.bottom, 7)
                 talkSplitRow(
                     label: "Them \(split.them)%",
                     percent: split.them,
-                    labelColor: XMOTheme.TextColor.muted,
+                    labelColor: LoreTheme.TextColor.muted,
                     fill: Color.white.opacity(0.32)
                 )
             }
@@ -330,17 +330,17 @@ struct ContentView: View {
     private func statCard(value: Text, label: String) -> some View {
         VStack(alignment: .leading, spacing: 2) {
             value
-                .font(XMOTheme.Typography.mono(15, weight: .semibold))
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.mono(15, weight: .semibold))
+                .foregroundStyle(LoreTheme.TextColor.primary)
             Text(label)
-                .font(XMOTheme.Typography.meta)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.meta)
+                .foregroundStyle(LoreTheme.TextColor.muted)
         }
         .padding(.init(top: 9, leading: 11, bottom: 9, trailing: 11))
         .frame(maxWidth: .infinity, alignment: .leading)
         .background(
-            XMOTheme.Surface.card2,
-            in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+            LoreTheme.Surface.card2,
+            in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
         )
     }
 
@@ -488,7 +488,7 @@ struct ContentView: View {
             // exchange so the chat survives crashes and stop. If the answer
             // lands in the narrow stop→finalize window, the just-ended
             // session is still the right target.
-            askXMO.onExchange = { [weak controller, weak coordinator] question, answer in
+            askLore.onExchange = { [weak controller, weak coordinator] question, answer in
                 guard let coordinator else { return }
                 guard let sessionID = controller?.activeSessionID
                         ?? coordinator.lastEndedSession?.id else { return }
@@ -515,14 +515,14 @@ struct ContentView: View {
             // Start the 100ms polling loop (runs until task cancelled)
             await controller.runPollingLoop(settings: settings)
         }
-        // Ask XMO lifecycle (Stage G): chat is per recording session — clear
+        // Ask Lore lifecycle (Stage G): chat is per recording session — clear
         // when a new one starts (any start path: manual, detection, external
         // command). The clear also bumps the generation guard, so responses
         // from the previous session are dropped; the section itself unmounts
         // at stop, so no explicit end handling is needed.
         .onChange(of: recordingStartedAt) { _, new in
             if new != nil {
-                askXMO.startNewSession()
+                askLore.startNewSession()
             }
         }
         .onChange(of: settings.meetingAutoDetectEnabled) {
@@ -581,16 +581,16 @@ private extension View {
     /// Full-width banner under the header: 8×16 inner padding, 7px-radius
     /// card, 1px border, 26px horizontal inset. `tint` (the recording red)
     /// colors fill (.09) and border (.32); default is card-2 + line.
-    func xmoBanner(tint: Color? = nil) -> some View {
+    func loreBanner(tint: Color? = nil) -> some View {
         padding(.init(top: 8, leading: 16, bottom: 8, trailing: 16))
             .background(
-                tint?.opacity(0.09) ?? XMOTheme.Surface.card2,
-                in: RoundedRectangle(cornerRadius: XMOTheme.Radius.card)
+                tint?.opacity(0.09) ?? LoreTheme.Surface.card2,
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
             )
             .overlay(
-                RoundedRectangle(cornerRadius: XMOTheme.Radius.card)
+                RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
                     .strokeBorder(
-                        tint?.opacity(0.32) ?? XMOTheme.Surface.line,
+                        tint?.opacity(0.32) ?? LoreTheme.Surface.line,
                         lineWidth: 1
                     )
             )

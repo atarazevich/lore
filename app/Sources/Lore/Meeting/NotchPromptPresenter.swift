@@ -237,7 +237,7 @@ struct NotchPromptCompactIcon: View {
     var body: some View {
         Image(systemName: "waveform")
             .font(.system(size: 12, weight: .semibold))
-            .foregroundStyle(XMOTheme.Accent.blue)
+            .foregroundStyle(LoreTheme.Accent.blue)
     }
 }
 
@@ -246,8 +246,8 @@ struct NotchPromptCompactLabel: View {
 
     var body: some View {
         Text(appName ?? "Meeting?")
-            .font(XMOTheme.Typography.secondary)
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .font(LoreTheme.Typography.secondary)
+            .foregroundStyle(LoreTheme.TextColor.primary)
             .lineLimit(1)
     }
 }
@@ -258,8 +258,8 @@ struct NotchPromptExpandedView: View {
     var body: some View {
         VStack(spacing: 10) {
             Text("Meeting detected — start transcribing?")
-                .font(XMOTheme.Typography.control)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.control)
+                .foregroundStyle(LoreTheme.TextColor.primary)
             HStack(spacing: 8) {
                 NotchPromptButton(
                     title: "Start transcribing",
@@ -290,22 +290,22 @@ private struct NotchPromptButton: View {
     var body: some View {
         Button(action: action) {
             Text(title)
-                .font(XMOTheme.Typography.secondary)
-                .foregroundStyle(isPrimary ? .white : XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.secondary)
+                .foregroundStyle(isPrimary ? .white : LoreTheme.TextColor.primary)
                 .padding(.horizontal, 10)
                 .padding(.vertical, 5)
                 .background(
-                    isPrimary ? XMOTheme.Accent.blue : XMOTheme.Surface.card3,
-                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                    isPrimary ? LoreTheme.Accent.blue : LoreTheme.Surface.card3,
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
                 )
-                .brightness(hovering ? XMOTheme.Motion.hoverBrightness - 1 : 0)
+                .brightness(hovering ? LoreTheme.Motion.hoverBrightness - 1 : 0)
         }
-        .buttonStyle(XMOPressButtonStyle())
+        .buttonStyle(LorePressButtonStyle())
         .onHover { hovering = $0 }
         // Hover brighten switches statically under Reduce Motion (same
-        // convention as XMOHoverFill).
+        // convention as LoreHoverFill).
         .animation(
-            reduceMotion ? nil : .easeOut(duration: XMOTheme.Motion.hoverDuration),
+            reduceMotion ? nil : .easeOut(duration: LoreTheme.Motion.hoverDuration),
             value: hovering
         )
     }

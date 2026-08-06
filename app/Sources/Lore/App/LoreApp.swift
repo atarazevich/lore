@@ -72,7 +72,7 @@ public struct LoreRootApp: App {
     }
 
     public var body: some Scene {
-        Window(XMOTheme.wordmark, id: "main") {
+        Window(LoreTheme.wordmark, id: "main") {
             ShellView(settings: settings, updater: updaterController.updater)
                 .environment(container)
                 .environment(coordinator)

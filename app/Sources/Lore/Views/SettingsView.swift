@@ -4,7 +4,7 @@ import CoreAudio
 import LaunchAtLogin
 import Sparkle
 
-/// XMO Settings destination (Stage D): one scrollable screen of grouped cards
+/// Lore Settings destination (Stage D): one scrollable screen of grouped cards
 /// that consolidates every setting previously split across the macOS Settings
 /// scene and the Dictation window's settings tab (SET-06). Sections:
 /// GENERAL / TALK / MODIFIERS / MEETINGS / NOTES / ADVANCED.
@@ -131,14 +131,14 @@ struct SettingsView: View {
         SettingsSection(label: "General") {
             SettingsRow(
                 name: "Launch at login",
-                sub: "Start \(XMOTheme.wordmark) when your Mac starts"
+                sub: "Start \(LoreTheme.wordmark) when your Mac starts"
             ) {
                 // Existing SMAppService wrapper — semantics and default unchanged.
                 LaunchAtLogin.Toggle("Launch at login")
-                    .toggleStyle(XMOToggleStyle())
+                    .toggleStyle(LoreToggleStyle())
                     .labelsHidden()
             }
-            XMODivider()
+            LoreDivider()
             toggleRow(
                 "Recording status in toolbar",
                 sub: "Show the red REC timer while recording",
@@ -153,19 +153,19 @@ struct SettingsView: View {
         SettingsSection(label: "Talk") {
             SettingsRow(name: "Hotkey", sub: "Hold to talk, anywhere") {
                 // Cycles the current option set only (Fn / Right Option, DSET-03).
-                XMOMonoValueButton(title: settings.hotkeyKey.displayName) {
+                LoreMonoValueButton(title: settings.hotkeyKey.displayName) {
                     settings.hotkeyKey = nextCase(after: settings.hotkeyKey)
                 }
             }
-            XMODivider()
+            LoreDivider()
             toggleRow(
                 "Sound on start",
                 sub: "Chime when the mic goes live",
                 isOn: $settings.soundOnDictationStart
             )
-            XMODivider()
+            LoreDivider()
             keepAudioRow
-            XMODivider()
+            LoreDivider()
             // Cleanup/translation mutual coupling preserved (DSET-13):
             // cleanup off forces translation off; translation on forces cleanup on.
             toggleRow(
@@ -181,7 +181,7 @@ struct SettingsView: View {
                     }
                 )
             )
-            XMODivider()
+            LoreDivider()
             toggleRow(
                 "Translation by default",
                 sub: settings.translationByDefault
@@ -197,14 +197,14 @@ struct SettingsView: View {
                     }
                 )
             )
-            XMODivider()
+            LoreDivider()
             cleanupPromptRows
-            XMODivider()
+            LoreDivider()
             // API key lives next to its consumer (cleanup/translate) per SET-47/Q7.
             SettingsRow(
                 name: "OpenAI API key",
                 sub: openAIKeySub,
-                subColor: openAIKeySubIsRed ? XMOTheme.Accent.red : XMOTheme.TextColor.muted
+                subColor: openAIKeySubIsRed ? LoreTheme.Accent.red : LoreTheme.TextColor.muted
             ) {
                 chipField("sk-...", text: $settings.openaiApiKey, isSecure: true)
             }
@@ -278,28 +278,28 @@ struct SettingsView: View {
             name: "Cleanup prompt",
             sub: "Used by defaults, chords, and upgrade keys"
         ) {
-            XMOMonoValueButton(title: settings.cleanupPreset.displayName) {
+            LoreMonoValueButton(title: settings.cleanupPreset.displayName) {
                 settings.cleanupPreset = nextCase(after: settings.cleanupPreset)
             }
         }
         Group {
             if settings.cleanupPreset == .custom {
                 TextEditor(text: $settings.customCleanupPrompt)
-                    .font(XMOTheme.Typography.mono(11))
+                    .font(LoreTheme.Typography.mono(11))
                     .scrollContentBackground(.hidden)
                     .frame(height: 80)
                     .padding(6)
-                    .background(XMOTheme.Surface.card3)
-                    .clipShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+                    .background(LoreTheme.Surface.card3)
+                    .clipShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
             } else {
                 Text(settings.activeCleanupPrompt)
-                    .font(XMOTheme.Typography.mono(11))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.mono(11))
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .frame(height: 80)
                     .padding(6)
-                    .background(XMOTheme.Surface.card2)
-                    .clipShape(RoundedRectangle(cornerRadius: XMOTheme.Radius.chip))
+                    .background(LoreTheme.Surface.card2)
+                    .clipShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
             }
         }
         .padding(EdgeInsets(top: 0, leading: 16, bottom: 13, trailing: 16))
@@ -323,19 +323,19 @@ struct SettingsView: View {
             }
             Link("Get API key", destination: URL(string: "https://console.sws.speechify.com")!)
                 .font(.system(size: 11))
-                .foregroundStyle(XMOTheme.Accent.blue)
+                .foregroundStyle(LoreTheme.Accent.blue)
                 .padding(EdgeInsets(top: 0, leading: 16, bottom: 13, trailing: 16))
-            XMODivider()
+            LoreDivider()
             if hasSpeechifyKey {
                 SettingsRow(
                     name: "Voices",
                     sub: "One voice per detected language, or one for everything"
                 ) {
-                    XMOMonoValueButton(title: settings.readAloudVoiceMode.displayName) {
+                    LoreMonoValueButton(title: settings.readAloudVoiceMode.displayName) {
                         settings.readAloudVoiceMode = nextCase(after: settings.readAloudVoiceMode)
                     }
                 }
-                XMODivider()
+                LoreDivider()
             }
             if hasSpeechifyKey && settings.readAloudVoiceMode == .singleVoice {
                 voiceRow(
@@ -353,7 +353,7 @@ struct SettingsView: View {
                     systemPrefix: "ru",
                     includeAuto: true
                 )
-                XMODivider()
+                LoreDivider()
                 voiceRow(
                     "English voice", sub: "For texts detected as English",
                     selection: $settings.readAloudVoiceEn,
@@ -361,7 +361,7 @@ struct SettingsView: View {
                     systemPrefix: "en",
                     includeAuto: true
                 )
-                XMODivider()
+                LoreDivider()
                 voiceRow(
                     "Other languages", sub: "System voice matches the detected language",
                     selection: $settings.readAloudVoiceOther,
@@ -370,13 +370,13 @@ struct SettingsView: View {
                     includeAuto: true
                 )
             }
-            XMODivider()
+            LoreDivider()
             SettingsRow(name: "Playback speed", sub: "Starting rate for each reading") {
-                XMOMonoValueButton(title: ReadAloudController.speedLabel(settings.readAloudSpeed)) {
+                LoreMonoValueButton(title: ReadAloudController.speedLabel(settings.readAloudSpeed)) {
                     settings.readAloudSpeed = ReadAloudController.nextSpeed(after: settings.readAloudSpeed)
                 }
             }
-            XMODivider()
+            LoreDivider()
             SettingsRow(
                 name: "Max text length",
                 sub: "Longer selections are refused, never billed"
@@ -394,15 +394,15 @@ struct SettingsView: View {
                     unit: "chars", width: 72
                 )
             }
-            XMODivider()
+            LoreDivider()
             toggleRow(
                 "Resume reading after dictation",
                 sub: "Continue playback when a dictation recording ends",
                 isOn: $settings.readAloudResumeAfterDictation
             )
-            XMODivider()
+            LoreDivider()
             shortcutRow(key: "fn R", name: "Read selection aloud", sub: "Replaces the current reading")
-            XMODivider()
+            LoreDivider()
             shortcutRow(key: "fn Q", name: "Add selection to queue", sub: "Reads after the current text")
         }
     }
@@ -410,7 +410,7 @@ struct SettingsView: View {
     /// Static shortcut chip row — same `.keybtn` idiom as the Modifiers rows.
     private func shortcutRow(key: String, name: String, sub: String) -> some View {
         SettingsRow(name: name, sub: sub) {
-            XMOMonoValueButton(title: key, width: 64)
+            LoreMonoValueButton(title: key, width: 64)
         } trailing: {
             EmptyView()
         }
@@ -428,7 +428,7 @@ struct SettingsView: View {
         includeAuto: Bool
     ) -> some View {
         SettingsRow(name: name, sub: sub) {
-            XMOMonoValueButton(title: selection.wrappedValue.name) {
+            LoreMonoValueButton(title: selection.wrappedValue.name) {
                 openVoicePicker = openVoicePicker == name ? nil : name
             }
             .popover(
@@ -493,11 +493,11 @@ struct SettingsView: View {
         }
         .frame(width: 300)
         .frame(maxHeight: 380)
-        .xmoPopoverChrome()
+        .lorePopoverChrome()
     }
 
     private func voicePickerHeader(_ text: String) -> some View {
-        XMOSectionLabel(text: text, size: 9, mono: true)
+        LoreSectionLabel(text: text, size: 9, mono: true)
             .padding(EdgeInsets(top: 8, leading: 9, bottom: 4, trailing: 9))
     }
 
@@ -517,12 +517,12 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 1) {
                         Text(choice.name)
                             .font(.system(size: 12.5, weight: .medium))
-                            .foregroundStyle(XMOTheme.TextColor.primary)
+                            .foregroundStyle(LoreTheme.TextColor.primary)
                             .lineLimit(1)
                         if let detail {
                             Text(detail)
                                 .font(.system(size: 10))
-                                .foregroundStyle(XMOTheme.TextColor.faint)
+                                .foregroundStyle(LoreTheme.TextColor.faint)
                                 .lineLimit(1)
                         }
                     }
@@ -530,19 +530,19 @@ struct SettingsView: View {
                     if selection.wrappedValue == choice {
                         Text("\u{2713}")
                             .font(.system(size: 12))
-                            .foregroundStyle(XMOTheme.Accent.amber)
+                            .foregroundStyle(LoreTheme.Accent.amber)
                     }
                 }
                 .padding(EdgeInsets(top: 6, leading: 9, bottom: 6, trailing: 0))
                 .contentShape(Rectangle())
             }
             .buttonStyle(.plain)
-            XMOIconButton(systemName: "play.fill", label: "Preview \(choice.name)") {
+            LoreIconButton(systemName: "play.fill", label: "Preview \(choice.name)") {
                 previewVoice(choice, previewURL: previewURL, samplePrefix: samplePrefix)
             }
             .padding(.trailing, 6)
         }
-        .xmoHoverFill(cornerRadius: XMOTheme.Radius.chip)
+        .loreHoverFill(cornerRadius: LoreTheme.Radius.chip)
     }
 
     /// ▶ preview on a picker row: Speechify voices play their CDN preview
@@ -603,7 +603,7 @@ struct SettingsView: View {
     /// deleted audio can come back.
     private var keepAudioRow: some View {
         SettingsRow(name: "Keep audio", sub: keepAudioSub) {
-            XMOMonoValueButton(title: audioRetentionTitle) {
+            LoreMonoValueButton(title: audioRetentionTitle) {
                 cycleAudioRetention()
             }
         }
@@ -718,21 +718,21 @@ struct SettingsView: View {
                 sub: "Keep the mic open without holding",
                 isOn: $settings.modifierLockEnabled
             )
-            XMODivider()
+            LoreDivider()
             modifierRow(
                 key: "V",
                 name: "Cleanup",
                 sub: "Remove fillers and false starts before inserting",
                 isOn: $settings.modifierCleanupEnabled
             )
-            XMODivider()
+            LoreDivider()
             modifierRow(
                 key: "T",
                 name: "Translate",
                 sub: "Translate to English before inserting",
                 isOn: $settings.modifierTranslateEnabled
             )
-            XMODivider()
+            LoreDivider()
             modifierRow(
                 key: "C/T",
                 name: "Upgrade keys",
@@ -748,10 +748,10 @@ struct SettingsView: View {
         key: String, name: String, sub: String, isOn: Binding<Bool>
     ) -> some View {
         SettingsRow(name: name, sub: sub) {
-            XMOMonoValueButton(title: key, width: 64)
+            LoreMonoValueButton(title: key, width: 64)
         } trailing: {
             Toggle(name, isOn: isOn)
-                .toggleStyle(XMOToggleStyle())
+                .toggleStyle(LoreToggleStyle())
                 .labelsHidden()
         }
     }
@@ -774,21 +774,21 @@ struct SettingsView: View {
                 }
             }
             if settings.meetingAutoDetectEnabled {
-                XMODivider()
+                LoreDivider()
                 SettingsRow(
                     name: "Silence timeout",
                     sub: "Auto-detected sessions stop after this much silence"
                 ) {
                     numberField(value: $settings.silenceTimeoutMinutes, unit: "min", width: 56)
                 }
-                XMODivider()
+                LoreDivider()
                 customMeetingAppsRows
             }
             if !settings.ignoredAppBundleIDs.isEmpty {
-                XMODivider()
+                LoreDivider()
                 ignoredAppsRows
             }
-            XMODivider()
+            LoreDivider()
             // Current semantics kept honest (SET-21/Q4): hides the panel only;
             // transcription keeps running for notes.
             toggleRow(
@@ -796,14 +796,14 @@ struct SettingsView: View {
                 sub: "Hide the panel only \u{2014} transcription keeps running for notes",
                 isOn: $settings.showLiveTranscript
             )
-            XMODivider()
+            LoreDivider()
             SettingsRow(name: "Microphone", sub: "Input device for recordings") {
-                XMOMonoValueButton(title: currentMicName) {
+                LoreMonoValueButton(title: currentMicName) {
                     showMicPicker.toggle()
                 }
                 .accessibilityIdentifier("settings.microphonePicker")
                 .popover(isPresented: $showMicPicker, arrowEdge: .bottom) {
-                    XMOPickerPopover(
+                    LorePickerPopover(
                         header: "Microphone",
                         items: micOptions,
                         width: 260,
@@ -816,19 +816,19 @@ struct SettingsView: View {
                     )
                 }
             }
-            XMODivider()
+            LoreDivider()
             toggleRow(
                 "Save audio recording",
                 sub: "Keep a local .m4a alongside each transcript",
                 isOn: $settings.saveAudioRecording
             )
-            XMODivider()
+            LoreDivider()
             toggleRow(
                 "Clean up transcript during recording",
                 sub: "Removes fillers and fixes punctuation as you record",
                 isOn: $settings.enableTranscriptRefinement
             )
-            XMODivider()
+            LoreDivider()
             toggleRow(
                 "Enhance transcript after meeting",
                 sub: "Re-transcribes the recording with full context in the background",
@@ -859,23 +859,23 @@ struct SettingsView: View {
     private var ignoredAppsRows: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Ignored apps")
-                .font(XMOTheme.Typography.control)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.control)
+                .foregroundStyle(LoreTheme.TextColor.primary)
             Text("These apps won't trigger meeting detection notifications")
                 .font(.system(size: 12))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
             ForEach(settings.ignoredAppBundleIDs, id: \.self) { bundleID in
                 HStack {
                     Text(bundleID)
-                        .font(XMOTheme.Typography.mono(12))
-                        .foregroundStyle(XMOTheme.TextColor.primary)
+                        .font(LoreTheme.Typography.mono(12))
+                        .foregroundStyle(LoreTheme.TextColor.primary)
                     Spacer()
                     Button {
                         settings.ignoredAppBundleIDs.removeAll { $0 == bundleID }
                     } label: {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 12))
-                            .foregroundStyle(XMOTheme.TextColor.muted)
+                            .foregroundStyle(LoreTheme.TextColor.muted)
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel("Stop ignoring \(bundleID)")
@@ -896,7 +896,7 @@ struct SettingsView: View {
                 .font(.headline)
 
             VStack(alignment: .leading, spacing: 10) {
-                Label("\(XMOTheme.wordmark) watches for microphone activation by meeting apps (Zoom, Teams, FaceTime, etc.)", systemImage: "mic")
+                Label("\(LoreTheme.wordmark) watches for microphone activation by meeting apps (Zoom, Teams, FaceTime, etc.)", systemImage: "mic")
                 Label("Only activation status is checked. No audio is captured or recorded until you accept.", systemImage: "lock.shield")
                 Label("When a meeting is detected, you get a macOS notification to start transcribing.", systemImage: "bell")
                 Label("You can always dismiss the notification or mark it as \"not a meeting\".", systemImage: "hand.raised")
@@ -932,13 +932,13 @@ struct SettingsView: View {
                 sub: settings.notesFolderPath,
                 subLineLimit: 1
             ) {
-                XMOMonoValueButton(title: "Choose\u{2026}") {
+                LoreMonoValueButton(title: "Choose\u{2026}") {
                     chooseNotesFolder()
                 }
             }
-            XMODivider()
+            LoreDivider()
             templatesRows
-            XMODivider()
+            LoreDivider()
             SettingsRow(
                 name: "Granola import",
                 sub: "API key from the Granola desktop app settings"
@@ -964,28 +964,28 @@ struct SettingsView: View {
                     HStack {
                         Image(systemName: template.icon)
                             .frame(width: 20)
-                            .foregroundStyle(XMOTheme.TextColor.muted)
+                            .foregroundStyle(LoreTheme.TextColor.muted)
                         Text(template.name)
                             .font(.system(size: 12))
-                            .foregroundStyle(XMOTheme.TextColor.primary)
+                            .foregroundStyle(LoreTheme.TextColor.primary)
                         Spacer()
                         if template.isBuiltIn {
                             Image(systemName: "lock")
                                 .font(.system(size: 10))
-                                .foregroundStyle(XMOTheme.TextColor.faint)
+                                .foregroundStyle(LoreTheme.TextColor.faint)
                             Button("Reset") {
                                 resetTemplate(id: template.id)
                             }
                             .font(.system(size: 11))
                             .buttonStyle(.plain)
-                            .foregroundStyle(XMOTheme.Accent.blue)
+                            .foregroundStyle(LoreTheme.Accent.blue)
                         } else {
                             Button {
                                 deleteTemplate(id: template.id)
                             } label: {
                                 Image(systemName: "trash")
                                     .font(.system(size: 11))
-                                    .foregroundStyle(XMOTheme.Accent.red)
+                                    .foregroundStyle(LoreTheme.Accent.red)
                             }
                             .buttonStyle(.plain)
                             .accessibilityLabel("Delete \(template.name)")
@@ -1016,7 +1016,7 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Name")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                 TextField("e.g. Sprint Planning", text: $newTemplateName)
                     .font(.system(size: 12))
                     .textFieldStyle(.roundedBorder)
@@ -1027,17 +1027,17 @@ struct SettingsView: View {
             VStack(alignment: .leading, spacing: 3) {
                 Text("Icon")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                 IconPickerGrid(selected: $newTemplateIcon)
             }
 
             VStack(alignment: .leading, spacing: 3) {
                 Text("Notes Prompt")
                     .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                 Text("Instructions for how the AI should format notes for this meeting type.")
                     .font(.system(size: 10))
-                    .foregroundStyle(XMOTheme.TextColor.faint)
+                    .foregroundStyle(LoreTheme.TextColor.faint)
                 placeholderTextEditor(
                     "e.g. You are a meeting notes assistant. Given a transcript, produce structured notes with sections for...",
                     text: $newTemplatePrompt,
@@ -1076,33 +1076,33 @@ struct SettingsView: View {
                 sub: "The app is invisible during screen sharing and recording",
                 isOn: $settings.hideFromScreenShare
             )
-            XMODivider()
+            LoreDivider()
             toggleRow(
                 "Automatically check for updates",
                 sub: nil,
                 isOn: $automaticallyChecksForUpdates
             )
-            XMODivider()
+            LoreDivider()
             SettingsRow(name: "Check for updates", sub: nil) {
-                XMOMonoValueButton(title: "Check Now") {
+                LoreMonoValueButton(title: "Check Now") {
                     updater.checkForUpdates()
                 }
                 .disabled(!updatesViewModel.canCheckForUpdates)
                 .opacity(updatesViewModel.canCheckForUpdates ? 1 : 0.4)
             }
-            XMODivider()
+            LoreDivider()
             SettingsRow(
                 name: "Locale",
                 sub: "Parakeet TDT v3 auto-detects speech language. Use this field to set your expected meeting language for metadata and export."
             ) {
                 chipField("e.g. en-US", text: $settings.transcriptionLocale, width: 120)
             }
-            XMODivider()
+            LoreDivider()
             SettingsRow(
                 name: "Report a problem",
                 sub: "Send a diagnostic report — you'll see exactly what leaves your Mac"
             ) {
-                XMOMonoValueButton(title: "Report\u{2026}") {
+                LoreMonoValueButton(title: "Report\u{2026}") {
                     showProblemReport = true
                 }
                 .accessibilityIdentifier("settings.reportProblem")
@@ -1145,7 +1145,7 @@ struct SettingsView: View {
     ) -> some View {
         SettingsRow(name: name, sub: sub) {
             Toggle(name, isOn: isOn)
-                .toggleStyle(XMOToggleStyle())
+                .toggleStyle(LoreToggleStyle())
                 .labelsHidden()
         }
     }
@@ -1165,14 +1165,14 @@ struct SettingsView: View {
                 TextField("", text: text, prompt: Text(prompt))
             }
         }
-        .font(XMOTheme.Typography.mono(12))
+        .font(LoreTheme.Typography.mono(12))
         .textFieldStyle(.plain)
         .padding(.vertical, 6)
         .padding(.horizontal, 10)
         .frame(width: width)
         .background(
             Color.white.opacity(0.06),
-            in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+            in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
         )
     }
 
@@ -1181,7 +1181,7 @@ struct SettingsView: View {
     private func numberField(value: Binding<Int>, unit: String, width: CGFloat) -> some View {
         HStack(spacing: 6) {
             TextField("", value: value, format: .number)
-                .font(XMOTheme.Typography.mono(12))
+                .font(LoreTheme.Typography.mono(12))
                 .textFieldStyle(.plain)
                 .multilineTextAlignment(.trailing)
                 .padding(.vertical, 6)
@@ -1189,11 +1189,11 @@ struct SettingsView: View {
                 .frame(width: width)
                 .background(
                     Color.white.opacity(0.06),
-                    in: RoundedRectangle(cornerRadius: XMOTheme.Radius.chip)
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
                 )
             Text(unit)
                 .font(.system(size: 12))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
         }
     }
 
@@ -1206,20 +1206,20 @@ struct SettingsView: View {
             if text.wrappedValue.isEmpty {
                 Text(placeholder)
                     .font(.system(size: 11))
-                    .foregroundStyle(XMOTheme.TextColor.faint)
+                    .foregroundStyle(LoreTheme.TextColor.faint)
                     .padding(.top, 6)
                     .padding(.leading, 4)
                     .allowsHitTesting(false)
             }
             TextEditor(text: text)
-                .font(XMOTheme.Typography.mono(11))
+                .font(LoreTheme.Typography.mono(11))
                 .frame(height: height)
                 .frame(maxWidth: .infinity)
                 .scrollContentBackground(.hidden)
         }
         .overlay(
-            RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
-                .stroke(XMOTheme.Surface.line)
+            RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
+                .stroke(LoreTheme.Surface.line)
         )
     }
 
@@ -1303,15 +1303,15 @@ private struct SettingsSection<Rows: View>: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            XMOSectionLabel(text: label, size: 11)
+            LoreSectionLabel(text: label, size: 11)
                 .padding(.bottom, 9)
             if let note {
                 Text(note)
-                    .font(XMOTheme.Typography.secondary)
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .font(LoreTheme.Typography.secondary)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                     .padding(.bottom, 9)
             }
-            XMOCard { rows }
+            LoreCard { rows }
         }
         .frame(maxWidth: 640, alignment: .leading)
     }
@@ -1332,7 +1332,7 @@ private struct SettingsRow<Leading: View, Trailing: View>: View {
     init(
         name: String,
         sub: String? = nil,
-        subColor: Color = XMOTheme.TextColor.muted,
+        subColor: Color = LoreTheme.TextColor.muted,
         subLineLimit: Int? = nil,
         @ViewBuilder leading: () -> Leading,
         @ViewBuilder trailing: () -> Trailing
@@ -1350,8 +1350,8 @@ private struct SettingsRow<Leading: View, Trailing: View>: View {
             leading
             VStack(alignment: .leading, spacing: 1) {
                 Text(name)
-                    .font(XMOTheme.Typography.control)
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .font(LoreTheme.Typography.control)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
                 if let sub, !sub.isEmpty {
                     Text(sub)
                         .font(.system(size: 12))
@@ -1371,7 +1371,7 @@ extension SettingsRow where Leading == EmptyView {
     init(
         name: String,
         sub: String? = nil,
-        subColor: Color = XMOTheme.TextColor.muted,
+        subColor: Color = LoreTheme.TextColor.muted,
         subLineLimit: Int? = nil,
         @ViewBuilder trailing: () -> Trailing
     ) {
@@ -1405,7 +1405,7 @@ private struct ExpandableRow<Content: View>: View {
                 SettingsRow(name: name, sub: sub) {
                     Image(systemName: "chevron.right")
                         .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(XMOTheme.TextColor.muted)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
                         .rotationEffect(.degrees(isExpanded ? 90 : 0))
                 }
                 .contentShape(Rectangle())
@@ -1503,7 +1503,7 @@ private struct GranolaImportButton: View {
             case .completed(let imported, let skipped):
                 HStack(spacing: 4) {
                     Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(XMOTheme.Accent.green)
+                        .foregroundStyle(LoreTheme.Accent.green)
                         .font(.system(size: 12))
                     Text("Imported \(imported) meeting\(imported == 1 ? "" : "s")\(skipped > 0 ? ", \(skipped) already existed" : "")")
                         .font(.system(size: 11))
@@ -1512,11 +1512,11 @@ private struct GranolaImportButton: View {
             case .failed(let error):
                 HStack(spacing: 4) {
                     Image(systemName: "exclamationmark.triangle.fill")
-                        .foregroundStyle(XMOTheme.Accent.red)
+                        .foregroundStyle(LoreTheme.Accent.red)
                         .font(.system(size: 12))
                     Text(error)
                         .font(.system(size: 11))
-                        .foregroundStyle(XMOTheme.Accent.red)
+                        .foregroundStyle(LoreTheme.Accent.red)
                 }
             }
 

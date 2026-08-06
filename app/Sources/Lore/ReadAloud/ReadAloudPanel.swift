@@ -66,12 +66,12 @@ struct ReadAloudPanelView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text(controller.currentSnippet ?? "")
                     .font(.system(size: 12, weight: .medium))
-                    .foregroundStyle(XMOTheme.TextColor.primary)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
                     .lineLimit(1)
                     .truncationMode(.tail)
                 Text(subtitle)
                     .font(.system(size: 11))
-                    .foregroundStyle(XMOTheme.TextColor.muted)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
                     .lineLimit(1)
             }
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -84,7 +84,7 @@ struct ReadAloudPanelView: View {
     private var avatar: some View {
         Text(controller.currentVoice?.initial ?? "·")
             .font(.system(size: 14, weight: .semibold))
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .foregroundStyle(LoreTheme.TextColor.primary)
             .frame(width: 32, height: 32)
             .background(
                 RoundedRectangle(cornerRadius: 7)
@@ -117,7 +117,7 @@ struct ReadAloudPanelView: View {
     private var closeButton: some View {
         Image(systemName: "xmark")
             .font(.system(size: 10, weight: .bold))
-            .foregroundStyle(XMOTheme.TextColor.muted)
+            .foregroundStyle(LoreTheme.TextColor.muted)
             .frame(width: 22, height: 22)
             .contentShape(Rectangle())
             .onTapGesture { controller.stop() }
@@ -147,8 +147,8 @@ struct ReadAloudPanelView: View {
                     .monospacedDigit()
             }
         }
-        .font(XMOTheme.Typography.mono(10))
-        .foregroundStyle(XMOTheme.TextColor.muted)
+        .font(LoreTheme.Typography.mono(10))
+        .foregroundStyle(LoreTheme.TextColor.muted)
         .accessibilityLabel("Progress")
     }
 
@@ -204,7 +204,7 @@ struct ReadAloudPanelView: View {
     ) -> some View {
         Image(systemName: systemName)
             .font(.system(size: 11, weight: .semibold))
-            .foregroundStyle(XMOTheme.TextColor.muted)
+            .foregroundStyle(LoreTheme.TextColor.muted)
             .opacity(enabled ? 1 : 0.3)
             .frame(width: 24, height: 24)
             .contentShape(Rectangle())
@@ -214,13 +214,13 @@ struct ReadAloudPanelView: View {
 
     private var speedChip: some View {
         Text(ReadAloudController.speedLabel(controller.rate))
-            .font(XMOTheme.Typography.mono(11, weight: .semibold))
+            .font(LoreTheme.Typography.mono(11, weight: .semibold))
             .monospacedDigit()
-            .foregroundStyle(XMOTheme.TextColor.primary)
+            .foregroundStyle(LoreTheme.TextColor.primary)
             .padding(.horizontal, 8)
             .padding(.vertical, 4)
             .background(
-                RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+                RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
                     .fill(Color.white.opacity(0.07))
             )
             .contentShape(Rectangle())
@@ -233,14 +233,14 @@ struct ReadAloudPanelView: View {
             Image(systemName: "list.bullet")
                 .font(.system(size: 9, weight: .semibold))
             Text("\(controller.pendingCount)")
-                .font(XMOTheme.Typography.mono(11, weight: .semibold))
+                .font(LoreTheme.Typography.mono(11, weight: .semibold))
                 .monospacedDigit()
         }
-        .foregroundStyle(isQueueExpanded ? XMOTheme.TextColor.primary : XMOTheme.TextColor.muted)
+        .foregroundStyle(isQueueExpanded ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
         .padding(.horizontal, 7)
         .padding(.vertical, 4)
         .background(
-            RoundedRectangle(cornerRadius: XMOTheme.Radius.button)
+            RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
                 .fill(Color.white.opacity(isQueueExpanded ? 0.12 : 0.07))
         )
         .contentShape(Rectangle())
@@ -256,7 +256,7 @@ struct ReadAloudPanelView: View {
         VStack(alignment: .leading, spacing: 2) {
             Text("Next up")
                 .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(XMOTheme.TextColor.faint)
+                .foregroundStyle(LoreTheme.TextColor.faint)
                 .textCase(.uppercase)
                 .padding(.top, 2)
                 .padding(.bottom, 2)
@@ -271,25 +271,25 @@ struct ReadAloudPanelView: View {
             // Drag handle — reorder within the queue.
             Image(systemName: "line.3.horizontal")
                 .font(.system(size: 9, weight: .semibold))
-                .foregroundStyle(XMOTheme.TextColor.faint)
+                .foregroundStyle(LoreTheme.TextColor.faint)
                 .frame(width: 16, height: Self.queueRowHeight)
                 .contentShape(Rectangle())
                 .gesture(dragGesture(for: text.id, offset: offset))
                 .accessibilityLabel("Reorder")
             Text(text.snippet)
                 .font(.system(size: 11))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .lineLimit(1)
                 .truncationMode(.tail)
             Spacer(minLength: 6)
             Text(ReadAloudController.estimateLabel(chars: text.chars, rate: controller.rate))
-                .font(XMOTheme.Typography.mono(10))
+                .font(LoreTheme.Typography.mono(10))
                 .monospacedDigit()
-                .foregroundStyle(XMOTheme.TextColor.faint)
+                .foregroundStyle(LoreTheme.TextColor.faint)
             // Play now — stops the current text, this one leaves the queue.
             Image(systemName: "play.fill")
                 .font(.system(size: 9))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .frame(width: 18, height: Self.queueRowHeight)
                 .contentShape(Rectangle())
                 .onTapGesture { controller.playQueuedNow(id: text.id) }
@@ -297,7 +297,7 @@ struct ReadAloudPanelView: View {
             // Remove — trash, never ✕ (that's the panel close).
             Image(systemName: "trash")
                 .font(.system(size: 9))
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .frame(width: 18, height: Self.queueRowHeight)
                 .contentShape(Rectangle())
                 .onTapGesture { controller.removeQueued(id: text.id) }
@@ -330,11 +330,11 @@ struct ReadAloudPanelView: View {
     private func noticeRow(_ text: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: "xmark.circle.fill")
-                .foregroundStyle(XMOTheme.Accent.red)
+                .foregroundStyle(LoreTheme.Accent.red)
                 .font(.system(size: 12))
             Text(text)
-                .font(XMOTheme.Typography.body)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.body)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .multilineTextAlignment(.leading)
                 .fixedSize(horizontal: false, vertical: true)
         }

@@ -7,7 +7,7 @@ struct OnboardingView: View {
     private let steps: [(icon: String, title: String, body: String)] = [
         (
             "waveform.circle",
-            "Welcome to \(XMOTheme.wordmark)",
+            "Welcome to \(LoreTheme.wordmark)",
             "A real-time meeting companion that transcribes your conversations and writes meeting notes — all running locally on your Mac."
         ),
         (
@@ -24,7 +24,7 @@ struct OnboardingView: View {
             // Icon
             Image(systemName: steps[currentStep].icon)
                 .font(.system(size: 40, weight: .light))
-                .foregroundStyle(XMOTheme.Accent.blue)
+                .foregroundStyle(LoreTheme.Accent.blue)
                 .frame(height: 52)
                 .id(currentStep) // force transition on change
 
@@ -32,26 +32,26 @@ struct OnboardingView: View {
 
             // Title
             Text(steps[currentStep].title)
-                .font(XMOTheme.Typography.heading)
-                .foregroundStyle(XMOTheme.TextColor.primary)
+                .font(LoreTheme.Typography.heading)
+                .foregroundStyle(LoreTheme.TextColor.primary)
                 .multilineTextAlignment(.center)
 
             Spacer().frame(height: 10)
 
             // Body
             Text(steps[currentStep].body)
-                .font(XMOTheme.Typography.body)
-                .foregroundStyle(XMOTheme.TextColor.muted)
+                .font(LoreTheme.Typography.body)
+                .foregroundStyle(LoreTheme.TextColor.muted)
                 .multilineTextAlignment(.center)
                 .lineSpacing(3)
                 .fixedSize(horizontal: false, vertical: true)
 
             Spacer()
 
-            XMOStepDots(count: steps.count, current: currentStep)
+            LoreStepDots(count: steps.count, current: currentStep)
                 .padding(.bottom, 20)
 
-            XMOOnboardingFooter(
+            LoreOnboardingFooter(
                 leadingTitle: "Skip",
                 leadingAction: finish,
                 step: currentStep,
@@ -66,7 +66,7 @@ struct OnboardingView: View {
         }
         .padding(28)
         .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .background(XMOTheme.Surface.window)
+        .background(LoreTheme.Surface.window)
         .background(.ultraThinMaterial)
     }
 
