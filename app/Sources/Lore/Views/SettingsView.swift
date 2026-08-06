@@ -292,14 +292,22 @@ struct SettingsView: View {
                     .background(LoreTheme.Surface.card3)
                     .clipShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
             } else {
-                Text(settings.activeCleanupPrompt)
-                    .font(LoreTheme.Typography.mono(11))
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                    .frame(height: 80)
-                    .padding(6)
-                    .background(LoreTheme.Surface.card2)
-                    .clipShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
+                // Full prompt, un-clipped and selectable, with a copy chip in
+                // the card footer (#146) — read, copy, switch to Custom, paste.
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(settings.activeCleanupPrompt)
+                        .font(LoreTheme.Typography.mono(11))
+                        .foregroundStyle(LoreTheme.TextColor.muted)
+                        .textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    HStack {
+                        Spacer()
+                        CleanupPromptCopyChip(text: settings.activeCleanupPrompt)
+                    }
+                }
+                .padding(6)
+                .background(LoreTheme.Surface.card2)
+                .clipShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
             }
         }
         .padding(EdgeInsets(top: 0, leading: 16, bottom: 13, trailing: 16))
@@ -1427,6 +1435,47 @@ private func nextCase<T: CaseIterable & Equatable>(after value: T) -> T {
     let all = Array(T.allCases)
     guard let index = all.firstIndex(of: value) else { return all[0] }
     return all[(index + 1) % all.count]
+}
+
+// MARK: - Cleanup prompt copy chip (#146)
+
+/// "Copy" chip in the default-preset prompt preview footer: writes the active
+/// prompt to the pasteboard and flashes "✓ Copied" in green for 1.4s — the
+/// `LoreCopyButton` flash pattern (rapid re-copy restarts the window). The
+/// hidden wider label fixes the chip width so the swap causes no layout shift.
+private struct CleanupPromptCopyChip: View {
+    let text: String
+
+    @State private var copied = false
+    @State private var flashID = 0
+
+    var body: some View {
+        Button {
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(text, forType: .string)
+            copied = true
+            flashID += 1
+        } label: {
+            ZStack {
+                Text("✓ Copied").hidden()
+                Text(copied ? "✓ Copied" : "Copy")
+            }
+            .font(LoreTheme.Typography.mono(11, weight: .semibold))
+            .foregroundStyle(copied ? LoreTheme.Accent.green : LoreTheme.TextColor.muted)
+            .padding(.vertical, 4)
+            .padding(.horizontal, 10)
+            .loreChipChrome(fill: Color.white.opacity(0.06))
+        }
+        .buttonStyle(LorePressButtonStyle())
+        .task(id: flashID) {
+            guard copied else { return }
+            try? await Task.sleep(for: .seconds(1.4))
+            if !Task.isCancelled {
+                copied = false
+            }
+        }
+        .help("Copy to clipboard")
+    }
 }
 
 // MARK: - Icon Picker
