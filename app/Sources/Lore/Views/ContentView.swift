@@ -512,7 +512,7 @@ struct ContentView: View {
                 await container.detectionController?.evaluateImmediate()
             }
 
-            // Start the 100ms polling loop (runs until task cancelled)
+            // Start the adaptive polling loop (runs until task cancelled)
             await controller.runPollingLoop(settings: settings)
         }
         // Ask Lore lifecycle (Stage G): chat is per recording session — clear

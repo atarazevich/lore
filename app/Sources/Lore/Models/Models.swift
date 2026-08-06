@@ -46,7 +46,7 @@ struct MeetingTemplate: Identifiable, Codable, Sendable, Hashable {
     var isBuiltIn: Bool
 }
 
-struct TemplateSnapshot: Codable, Sendable {
+struct TemplateSnapshot: Codable, Sendable, Equatable {
     let id: UUID
     let name: String
     let icon: String
@@ -59,7 +59,7 @@ struct EnhancedNotes: Codable, Sendable {
     let markdown: String
 }
 
-struct SessionIndex: Identifiable, Codable, Sendable {
+struct SessionIndex: Identifiable, Codable, Sendable, Equatable {
     let id: String
     let startedAt: Date
     var endedAt: Date?

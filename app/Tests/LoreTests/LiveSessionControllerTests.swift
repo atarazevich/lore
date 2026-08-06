@@ -1,4 +1,5 @@
 import XCTest
+import Observation
 @testable import LoreKit
 
 @MainActor
@@ -167,5 +168,104 @@ final class LiveSessionControllerTests: XCTestCase {
         XCTAssertEqual(h.coordinator.state, .idle)
         XCTAssertNotNil(h.coordinator.lastEndedSession)
         XCTAssertEqual(h.coordinator.lastEndedSession?.utteranceCount, 2)
+    }
+
+    // MARK: - Change-gated publish (#142)
+
+    /// Sendable flag for `withObservationTracking`'s onChange; the mutation
+    /// happens synchronously on the main actor in these tests.
+    private final class PublishFlag: @unchecked Sendable {
+        var published = false
+    }
+
+    /// Registers observation of `controller.state` and reports whether the
+    /// next `refreshState` published it.
+    private func statePublished(
+        by h: MeetingHarness, during mutate: () -> Void
+    ) -> Bool {
+        let flag = PublishFlag()
+        withObservationTracking {
+            _ = h.controller.state
+        } onChange: {
+            flag.published = true
+        }
+        mutate()
+        return flag.published
+    }
+
+    func testRefreshDoesNotPublishOnIdenticalSnapshot() {
+        let h = MeetingHarness.make()
+        h.controller.refreshState(settings: h.settings)
+
+        let published = statePublished(by: h) {
+            h.controller.refreshState(settings: h.settings)
+        }
+
+        XCTAssertFalse(published, "Identical snapshot must not publish state")
+    }
+
+    func testRefreshPublishesOnChangedSnapshot() {
+        let h = MeetingHarness.make()
+        h.controller.refreshState(settings: h.settings)
+
+        let published = statePublished(by: h) {
+            h.coordinator.batchStatus = .transcribing(progress: 0.5, sessionID: "s1")
+            h.controller.refreshState(settings: h.settings)
+        }
+
+        XCTAssertTrue(published, "A changed snapshot must publish state")
+        XCTAssertEqual(
+            h.controller.state.batchStatus,
+            .transcribing(progress: 0.5, sessionID: "s1")
+        )
+    }
+
+    // MARK: - Adaptive poll cadence (#142)
+
+    func testPollIntervalSwitchesWithRunningSession() async {
+        let h = await MeetingHarness.makeStarted(scripted: [Utterance(text: "Hello", speaker: .you)])
+        h.controller.refreshState(settings: h.settings)
+
+        XCTAssertEqual(h.controller.pollInterval, .milliseconds(250))
+
+        h.controller.stopSession(settings: h.settings)
+        await waitUntil { h.coordinator.state == .idle }
+        h.controller.refreshState(settings: h.settings)
+
+        XCTAssertEqual(
+            h.controller.pollInterval, .seconds(2),
+            "Cadence must drop back to the heartbeat once the session ends"
+        )
+    }
+
+    func testPollIntervalSwitchesWithBatchStatus() {
+        let h = MeetingHarness.make()
+
+        h.coordinator.batchStatus = .transcribing(progress: 0.1, sessionID: "s1")
+        h.controller.refreshState(settings: h.settings)
+        XCTAssertEqual(h.controller.pollInterval, .milliseconds(250))
+
+        h.coordinator.batchStatus = .idle
+        h.controller.refreshState(settings: h.settings)
+        XCTAssertEqual(h.controller.pollInterval, .seconds(2))
+
+        h.coordinator.batchIsImporting = true
+        h.controller.refreshState(settings: h.settings)
+        XCTAssertEqual(h.controller.pollInterval, .milliseconds(250))
+
+        h.coordinator.batchIsImporting = false
+        h.controller.refreshState(settings: h.settings)
+        XCTAssertEqual(h.controller.pollInterval, .seconds(2))
+    }
+
+    /// A `lore://` deep link queued while the app is otherwise idle must
+    /// switch the loop to the fast cadence — a remote start waiting out the
+    /// 2 s heartbeat widens the lost-audio window 8×.
+    func testPollIntervalFastWithPendingExternalCommand() {
+        let h = MeetingHarness.make()
+        h.controller.refreshState(settings: h.settings)
+
+        h.coordinator.queueExternalCommand(.startSession)
+        XCTAssertEqual(h.controller.pollInterval, .milliseconds(250))
     }
 }

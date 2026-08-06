@@ -6,7 +6,10 @@ import CoreAudio
 private let liveLog = Logger(subsystem: "com.lore.app", category: "LiveSession")
 
 /// Published state for the live session, projected by ContentView.
-struct LiveSessionState {
+/// Equatable so the polling loop publishes only on actual change (#142) —
+/// Array `==` short-circuits on identical COW buffers, so comparing the
+/// transcript is cheap when unchanged.
+struct LiveSessionState: Equatable {
     var isRunning: Bool = false
     var sessionPhase: MeetingState = .idle
     var audioLevel: Float = 0
@@ -68,13 +71,16 @@ final class LiveSessionController {
 
     // MARK: - Polling Loop
 
-    /// Call from a `.task` modifier to start the 250ms polling loop.
+    /// Call from a `.task` modifier to start the polling loop. Adaptive
+    /// cadence (#142): 250 ms while anything is in flight, 2 s heartbeat
+    /// when fully idle — a transition that begins while idle is picked up
+    /// within one heartbeat and the loop speeds up.
     func runPollingLoop(settings: AppSettings) async {
         refreshState(settings: settings)
         synchronizeDerivedState(settings: settings)
 
         while !Task.isCancelled {
-            try? await Task.sleep(for: .milliseconds(250))
+            try? await Task.sleep(for: pollInterval)
 
             // Poll batch engine status (actor-isolated)
             if let engine = coordinator.batchEngine {
@@ -143,6 +149,20 @@ final class LiveSessionController {
             refreshState(settings: settings)
             synchronizeDerivedState(settings: settings)
         }
+    }
+
+    /// 250 ms while a session is live (running engine or an in-flight
+    /// start/stop phase), the batch engine is busy, or an external command
+    /// (`lore://` deep link) awaits pickup — a remote start must not wait
+    /// out the 2 s heartbeat, that widens the lost-audio window 8×.
+    /// 2 s otherwise. Internal for tests.
+    var pollInterval: Duration {
+        let busy = state.isRunning
+            || state.sessionPhase != .idle
+            || state.batchStatus != .idle
+            || state.batchIsImporting
+            || coordinator.pendingExternalCommand != nil
+        return busy ? .milliseconds(250) : .seconds(2)
     }
 
     // MARK: - Session Actions
@@ -511,8 +531,10 @@ final class LiveSessionController {
 
     // MARK: - State Refresh
 
+    /// Rebuilds the state snapshot; publishes only when it differs (#142).
+    /// Internal for tests.
     @MainActor
-    private func refreshState(settings: AppSettings) {
+    func refreshState(settings: AppSettings) {
         var next = LiveSessionState()
         next.isRunning = coordinator.transcriptionEngine?.isRunning ?? false
         next.sessionPhase = coordinator.state
@@ -530,7 +552,9 @@ final class LiveSessionController {
         next.showLiveTranscript = settings.showLiveTranscript
         next.isMicMuted = coordinator.transcriptionEngine?.isMicMuted ?? false
 
-        state = next
+        if next != state {
+            state = next
+        }
     }
 
     // MARK: - Derived State Synchronization
