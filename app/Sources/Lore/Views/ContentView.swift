@@ -7,9 +7,6 @@ struct ContentView: View {
     @Environment(ShellModel.self) private var shell
     @State private var liveSessionController: LiveSessionController?
     @State private var askLore = AskLoreChatModel()
-    @AppStorage("hasCompletedOnboarding") private var hasCompletedOnboarding = false
-    @State private var showOnboarding = false
-    @State private var showConsentSheet = false
 
     var body: some View {
         bodyWithModifiers
@@ -401,54 +398,9 @@ struct ContentView: View {
             .frame(maxWidth: .infinity, maxHeight: .infinity)
     }
 
-    private var contentWithOverlay: some View {
-        sizedRootContent.overlay {
-            if showOnboarding {
-                OnboardingView(isPresented: $showOnboarding)
-                    .transition(.opacity)
-            }
-            if showConsentSheet {
-                RecordingConsentView(
-                    isPresented: $showConsentSheet,
-                    settings: settings
-                )
-                .transition(.opacity)
-            }
-        }
-    }
-
     private var contentWithLifecycle: some View {
-        contentWithOverlay
-        .onChange(of: showOnboarding) { _, isShowing in
-            if isShowing {
-                // The overlay renders inside this (possibly hidden) section —
-                // bring it on screen; a gate must never block invisibly.
-                shell.pinMeetingsLive()
-            } else {
-                hasCompletedOnboarding = true
-                // Gate dismissed without a recording — back to the review layout.
-                if !coordinator.isRecording {
-                    shell.meetingsPinnedLive = false
-                }
-            }
-        }
-        .onChange(of: showConsentSheet) { _, isShowing in
-            if isShowing {
-                shell.pinMeetingsLive()
-            }
-            if !isShowing && settings.hasAcknowledgedRecordingConsent
-                && !(liveSessionController?.state.isRunning ?? false) {
-                liveSessionController?.startSession(settings: settings)
-            }
-            if !isShowing && !settings.hasAcknowledgedRecordingConsent {
-                // Consent declined — no recording will start; show review again.
-                shell.meetingsPinnedLive = false
-            }
-        }
+        sizedRootContent
         .task {
-            if !hasCompletedOnboarding {
-                showOnboarding = true
-            }
             // Idempotent: AppContainer guards with its own
             // didInitializeServices flag, so re-runs are no-ops.
             container.ensureServicesInitialized(settings: settings, coordinator: coordinator)
@@ -459,21 +411,23 @@ struct ContentView: View {
                 shell.showMeetingsReview()
             }
 
-            // The review header's "Start recording" button (Stage E) reuses
-            // the existing consent-gated start flow. The live view is pinned
-            // only when a gate (consent, model download) needs to render
+            // The review header's "Start recording" button (Stage E). The live
+            // view is pinned only when the model-download gate needs to render
             // there — otherwise the recording state itself brings it up, and
-            // a request that starts nothing leaves no stale pin behind.
+            // a request that starts nothing leaves no stale pin behind. The
+            // consent gate that used to pin here is gone (#150): it now happens
+            // once, in setup.
             shell.requestMeetingRecordingStart = {
                 guard let controller = liveSessionController else { return }
                 // Boundary reset at dispatch: covers the narrow case where
                 // the review flip is still true from a previous recording
                 // whose end MeetingsDestination never observed (destination
-                // unmounted at the time) and this start is ungated (#43).
+                // unmounted at the time) and this start is ungated (#43). It
+                // clears the flip the retired `pinMeetingsLive()` cleared.
                 shell.resetMeetingsForRecordingBoundary()
-                if !settings.hasAcknowledgedRecordingConsent
-                    || controller.state.needsDownload {
-                    shell.pinMeetingsLive()
+                if controller.state.needsDownload {
+                    shell.destination = .meetings
+                    shell.meetingsPinnedLive = true
                 }
                 startSession()
             }
@@ -540,12 +494,6 @@ struct ContentView: View {
     // MARK: - Actions
 
     private func startSession() {
-        guard settings.hasAcknowledgedRecordingConsent else {
-            withAnimation(.easeInOut(duration: 0.25)) {
-                showConsentSheet = true
-            }
-            return
-        }
         liveSessionController?.startSession(settings: settings)
     }
 
@@ -565,12 +513,6 @@ struct ContentView: View {
     }
 
     private func confirmDownload() {
-        guard settings.hasAcknowledgedRecordingConsent else {
-            withAnimation(.easeInOut(duration: 0.25)) {
-                showConsentSheet = true
-            }
-            return
-        }
         liveSessionController?.confirmDownloadAndStart(settings: settings)
     }
 }

@@ -82,7 +82,10 @@ final class HotkeyManager {
     private(set) var tapLiveness = TapLiveness()
 
     /// Enabled/existence only — NOT event flow. Feeds `TapLiveness.isAlive`.
-    private var isEventTapAlive: Bool {
+    /// Read live by the health probe and by the onboarding Try-it step (#150),
+    /// which offers its one recovery card off it. Deliberately not a stored
+    /// verdict: the card withdraws itself if the tap comes back.
+    var isEventTapAlive: Bool {
         guard let eventTap else { return false }
         return CGEvent.tapIsEnabled(tap: eventTap)
     }
@@ -780,7 +783,8 @@ final class HotkeyManager {
     /// actually fix: a post-wake WindowServer refusal, a tap lost to a session
     /// switch.
     private func repairEventTap() {
-        guard AXIsProcessTrusted(), CGPreflightListenEventAccess() else { return }
+        guard PermissionReader.accessibilityGranted(),
+              PermissionReader.inputMonitoringGranted() else { return }
         guard tapRepairs.allowsAttempt else { return }
         reinstallEventTap()
         if eventTap != nil {
@@ -825,8 +829,8 @@ final class HotkeyManager {
         // 2. Permissions check. Each permission carries its own edge: a combined
         //    `permOK` flag reported both as restored when only one had dropped, and
         //    went deaf to the second one dropping while the first was already down.
-        let axOK = AXIsProcessTrusted()
-        let inputOK = CGPreflightListenEventAccess()
+        let axOK = PermissionReader.accessibilityGranted()
+        let inputOK = PermissionReader.inputMonitoringGranted()
         if axOK != lastAccessibilityOK {
             DiagStore.record(.permissionTransition(permission: .accessibility, granted: axOK))
             if axOK {
@@ -843,7 +847,7 @@ final class HotkeyManager {
                 refillTapRepairBudget()
                 HotkeyManager.hkLog.info("[HK] Health: Input Monitoring permission restored")
             } else {
-                HotkeyManager.hkLog.error("[HK] Health: Input Monitoring permission lost (CGPreflightListenEventAccess = false)")
+                HotkeyManager.hkLog.error("[HK] Health: Input Monitoring permission lost (IOHIDCheckAccess and the preflight both say no)")
             }
             lastInputMonitoringOK = inputOK
         }

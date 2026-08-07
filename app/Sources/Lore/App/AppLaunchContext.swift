@@ -19,11 +19,12 @@ struct AppServices {
 }
 
 struct AppLaunchContext {
-    let isFirstLaunch: Bool
     let uiTestScenario: UITestScenario?
     let runtimeMode: AppRuntimeMode
     let container: AppContainer
     let settings: AppSettings
     let coordinator: AppCoordinator
     let updaterController: AppUpdaterController
+    /// Which world this launch runs in (#150) — setup or configured.
+    let boot: AppBoot
 }

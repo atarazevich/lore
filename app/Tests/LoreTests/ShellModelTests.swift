@@ -51,15 +51,17 @@ final class ShellModelTests: XCTestCase {
         XCTAssertTrue(shell.meetingsShowsLive())
     }
 
-    /// (c) Pinned-live gate flow unchanged: a gate pins the live UI while
-    /// idle; dismissal without a recording returns to review; a recording
-    /// start resets the pin and the live side shows via the recording state.
+    /// (c) Pinned-live gate flow unchanged for the one gate that survives #150
+    /// (the model download): the pin shows the live UI while idle; clearing it
+    /// without a recording returns to review; a recording start resets the pin
+    /// and the live side shows via the recording state.
     func testPinnedLiveGateFlowUnchanged() {
         let shell = ShellModel()
         var recording = false
         shell.isRecordingActive = { recording }
 
-        shell.pinMeetingsLive()
+        shell.destination = .meetings
+        shell.meetingsPinnedLive = true
         XCTAssertEqual(shell.destination, .meetings)
         XCTAssertTrue(shell.meetingsShowsLive())
         XCTAssertFalse(shell.meetingsReviewWhileRecording)
@@ -69,7 +71,7 @@ final class ShellModelTests: XCTestCase {
         XCTAssertFalse(shell.meetingsShowsLive())
 
         // Gate led to a start: boundary reset, recording state drives live.
-        shell.pinMeetingsLive()
+        shell.meetingsPinnedLive = true
         recording = true
         shell.handleRecordingStateChange(.recording(.manual()))
         XCTAssertFalse(shell.meetingsPinnedLive)

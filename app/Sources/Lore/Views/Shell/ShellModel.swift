@@ -46,9 +46,10 @@ final class ShellModel {
 
     /// Stage E: the Meetings destination shows the designed review layout
     /// (NotesView) while idle. This flag pins the live UI (ContentView) on
-    /// screen for its gate overlays — onboarding, recording consent, model
-    /// download — which would otherwise block invisibly. Cleared on every
-    /// recording start/stop transition and whenever review is requested.
+    /// screen for the model-download gate — now its only remaining reason,
+    /// which is why the pin is set at that one call site rather than through a
+    /// helper. Cleared on every recording start/stop transition and whenever
+    /// review is requested.
     var meetingsPinnedLive = false
 
     /// While recording the Meetings destination defaults to the live UI;
@@ -93,8 +94,8 @@ final class ShellModel {
     }
 
     /// Set by ContentView. The review header's "Start recording" button routes
-    /// through this so the existing consent-gated start flow (and its overlays
-    /// inside ContentView) is reused unchanged (MREV-05, D-031).
+    /// through this so it reuses the one start path — and the model-download
+    /// gate that still renders inside ContentView (MREV-05, D-031).
     @ObservationIgnored var requestMeetingRecordingStart: (() -> Void)?
 
     /// Set by ContentView. The review header's "Stop recording" button routes
@@ -116,12 +117,5 @@ final class ShellModel {
         destination = .meetings
         meetingsPinnedLive = false
         meetingsReviewWhileRecording = isRecordingActive()
-    }
-
-    /// Pin the live meeting UI on screen (gate overlays need it visible).
-    func pinMeetingsLive() {
-        destination = .meetings
-        meetingsPinnedLive = true
-        meetingsReviewWhileRecording = false
     }
 }

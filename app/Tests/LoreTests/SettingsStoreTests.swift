@@ -120,18 +120,23 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertEqual(store.customMeetingAppBundleIDs, ["com.example.app"])
     }
 
+    // MARK: - Setup gate (#150)
+
+    /// A store built on an empty domain is a fresh install: setup incomplete.
+    func testDefaultDidCompleteSetup() {
+        let store = makeStore()
+        XCTAssertFalse(store.didCompleteSetup)
+    }
+
+    func testMarkSetupCompletedPersists() {
+        let suite = makeSuite()
+        let store = makeStore(defaults: suite)
+        store.markSetupCompleted()
+        XCTAssertTrue(store.didCompleteSetup)
+        XCTAssertTrue(suite.bool(forKey: SetupState.completedKey))
+    }
+
     // MARK: - Privacy Settings Group
-
-    func testDefaultHasAcknowledgedRecordingConsent() {
-        let store = makeStore()
-        XCTAssertFalse(store.hasAcknowledgedRecordingConsent)
-    }
-
-    func testHasAcknowledgedRecordingConsentRoundTrip() {
-        let store = makeStore()
-        store.hasAcknowledgedRecordingConsent = true
-        XCTAssertTrue(store.hasAcknowledgedRecordingConsent)
-    }
 
     func testDefaultHideFromScreenShare() {
         let store = makeStore()

@@ -107,16 +107,13 @@ struct MenuBarPopoverView: View {
     }
 
     private var primaryAction: some View {
-        // Canonical redesign Start/Stop control; behavior preserved (D-031):
-        // Stop while recording, otherwise gate on recording consent before Start.
+        // Canonical redesign Start/Stop control; behavior preserved (D-031).
+        // The consent detour is gone (#150): the menu bar only exists once setup
+        // completed, and completing it is the acknowledgement.
         LoreStartStopButton(isRecording: coordinator.isRecording) {
             if coordinator.isRecording {
                 coordinator.handle(.userStopped, settings: settings)
             } else {
-                guard settings.hasAcknowledgedRecordingConsent else {
-                    onShowMeetings()
-                    return
-                }
                 coordinator.handle(.userStarted(.manual()), settings: settings)
             }
         }

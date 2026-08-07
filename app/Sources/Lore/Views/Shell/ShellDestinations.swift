@@ -5,19 +5,15 @@ import Sparkle
 /// unified shell (D-031 — functional behavior unchanged). Stage C/D restyle
 /// and restructure their internals.
 
-/// Dictation destination — existing DictationView behind the onboarding gate
-/// (SHELL-20; was `DictationWindowContent` on the old Dictation window).
+/// Dictation destination. The per-destination onboarding gate is gone (#150):
+/// the shell is not mounted until setup completes, so by the time this renders
+/// the world is already configured.
 struct DictationDestination: View {
     @Bindable var settings: AppSettings
     let isActive: Bool
-    @AppStorage("completedDictationOnboarding") private var completedDictationOnboarding = false
 
     var body: some View {
-        if completedDictationOnboarding {
-            DictationView(settings: settings, isActiveInShell: isActive)
-        } else {
-            DictationOnboardingView(settings: settings)
-        }
+        DictationView(settings: settings, isActiveInShell: isActive)
     }
 }
 

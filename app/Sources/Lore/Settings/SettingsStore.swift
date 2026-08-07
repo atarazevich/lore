@@ -125,18 +125,31 @@ final class SettingsStore {
         }
     }
 
-    // MARK: - Privacy Settings
+    // MARK: - Setup
 
-    @ObservationIgnored nonisolated(unsafe) private var _hasAcknowledgedRecordingConsent: Bool
-    var hasAcknowledgedRecordingConsent: Bool {
-        get { access(keyPath: \.hasAcknowledgedRecordingConsent); return _hasAcknowledgedRecordingConsent }
+    /// The #150 gate: false ⟹ this process runs the onboarding window and
+    /// nothing else. Written once, by "Start using lore".
+    ///
+    /// Replaces `hasCompletedOnboarding`, `completedDictationOnboarding` and
+    /// `hasAcknowledgedRecordingConsent` — see `SetupState` for the migration
+    /// table and why the consent flag folded in here rather than surviving
+    /// beside it.
+    @ObservationIgnored nonisolated(unsafe) private var _didCompleteSetup: Bool
+    private(set) var didCompleteSetup: Bool {
+        get { access(keyPath: \.didCompleteSetup); return _didCompleteSetup }
         set {
-            withMutation(keyPath: \.hasAcknowledgedRecordingConsent) {
-                _hasAcknowledgedRecordingConsent = newValue
-                defaults.set(newValue, forKey: "hasAcknowledgedRecordingConsent")
+            withMutation(keyPath: \.didCompleteSetup) {
+                _didCompleteSetup = newValue
+                defaults.set(newValue, forKey: SetupState.completedKey)
             }
         }
     }
+
+    func markSetupCompleted() {
+        didCompleteSetup = true
+    }
+
+    // MARK: - Privacy Settings
 
     @ObservationIgnored nonisolated(unsafe) private var _hideFromScreenShare: Bool
     var hideFromScreenShare: Bool {
@@ -466,17 +479,6 @@ final class SettingsStore {
         }
     }
 
-    @ObservationIgnored nonisolated(unsafe) private var _hasSeenLaunchAtLoginSuggestion: Bool
-    var hasSeenLaunchAtLoginSuggestion: Bool {
-        get { access(keyPath: \.hasSeenLaunchAtLoginSuggestion); return _hasSeenLaunchAtLoginSuggestion }
-        set {
-            withMutation(keyPath: \.hasSeenLaunchAtLoginSuggestion) {
-                _hasSeenLaunchAtLoginSuggestion = newValue
-                defaults.set(newValue, forKey: "hasSeenLaunchAtLoginSuggestion")
-            }
-        }
-    }
-
     // MARK: - Initialization
 
     init(storage: SettingsStorage = .live()) {
@@ -541,8 +543,13 @@ final class SettingsStore {
             ? defaults.integer(forKey: "silenceTimeoutMinutes") : 15
         self._hasShownAutoDetectExplanation = defaults.bool(forKey: "hasShownAutoDetectExplanation")
 
+        // Setup gate (#150). Resolved *after* the migration block above: the
+        // legacy completion keys it reads are also `NotesFolderMigration`'s
+        // fresh-install evidence, and the bundle migrations copy them across
+        // from an OpenGranola install.
+        self._didCompleteSetup = SetupState.resolve(defaults: defaults)
+
         // Privacy Settings
-        self._hasAcknowledgedRecordingConsent = defaults.bool(forKey: "hasAcknowledgedRecordingConsent")
         if defaults.object(forKey: "hideFromScreenShare") == nil {
             self._hideFromScreenShare = true
         } else {
@@ -608,7 +615,6 @@ final class SettingsStore {
         }
         let defaultNotesPath = storage.defaultNotesDirectory.path
         self._notesFolderPath = defaults.string(forKey: NotesFolderMigration.notesPathKey) ?? defaultNotesPath
-        self._hasSeenLaunchAtLoginSuggestion = defaults.bool(forKey: "hasSeenLaunchAtLoginSuggestion")
 
         // #148: the notes folder is created at first use, not here — creating
         // it at launch is what asked for Documents access. A legacy folder to
@@ -666,7 +672,7 @@ extension SettingsStore {
         let keysToMigrate = [
             "transcriptionLocale", "inputDeviceID",
             "hideFromScreenShare",
-            "hasCompletedOnboarding",
+            SetupState.tourCompletedKey,
         ]
         for key in keysToMigrate {
             if let value = oldDefaults.object(forKey: key), defaults.object(forKey: key) == nil {
@@ -689,8 +695,8 @@ extension SettingsStore {
         let keysToMigrate = [
             "transcriptionLocale", "inputDeviceID",
             "hideFromScreenShare",
-            "hasCompletedOnboarding",
-            "hasAcknowledgedRecordingConsent",
+            SetupState.tourCompletedKey,
+            SetupState.consentAcknowledgedKey,
         ]
         for key in keysToMigrate {
             if let value = oldDefaults.object(forKey: key), defaults.object(forKey: key) == nil {

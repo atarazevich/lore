@@ -8,7 +8,9 @@ final class AppUpdaterController {
     private let delegateProxy: AppUpdaterDelegateProxy
     private var shouldRestoreAccessoryModeAfterUpdateCycle = false
 
-    init(startUpdater: Bool = true) {
+    private var didStart = false
+
+    init() {
         let hostBundle = Bundle.main
         delegateProxy = AppUpdaterDelegateProxy()
         userDriver = LoreUserDriver(hostBundle: hostBundle, delegate: nil)
@@ -19,8 +21,15 @@ final class AppUpdaterController {
             delegate: delegateProxy
         )
         delegateProxy.owner = self
+    }
 
-        guard startUpdater else { return }
+    /// Begin update checks. Called from the boot gate, never from `init` (#150):
+    /// during setup no Sparkle prompt may appear over the onboarding window, and
+    /// on a configured machine this runs at the same moment as every other
+    /// subsystem. Idempotent — `SPUUpdater.start()` throws on a second call.
+    func start() {
+        guard !didStart else { return }
+        didStart = true
 
         do {
             try updater.start()

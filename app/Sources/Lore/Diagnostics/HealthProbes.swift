@@ -119,8 +119,11 @@ struct HealthProber {
         switch id {
         case .signing: return signingReading()
         case .diskSpace: return diskReading()
-        case .accessibility: return plain(id, AXIsProcessTrusted() ? .ok : .failed)
-        case .inputMonitoring: return plain(id, CGPreflightListenEventAccess() ? .ok : .failed)
+        // Both grants through `PermissionReader`, the app's one reader (#150):
+        // the panel is the only repair surface once setup is done, and it must
+        // not disagree with the flow that collected the grant.
+        case .accessibility: return plain(id, PermissionReader.accessibilityGranted() ? .ok : .failed)
+        case .inputMonitoring: return plain(id, PermissionReader.inputMonitoringGranted() ? .ok : .failed)
         case .tap: return tapReading(secureInput)
         case .secureInput: return secureInputReading(secureInput)
         case .microphone: return plain(id, Self.microphoneStatus())

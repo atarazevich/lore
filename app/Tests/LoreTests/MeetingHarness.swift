@@ -44,7 +44,9 @@ struct MeetingHarness {
         let defaults = UserDefaults(suiteName: suiteName) ?? .standard
         defaults.removePersistentDomain(forName: suiteName)
         defaults.set(notesDirectory.path, forKey: "notesFolderPath")
-        defaults.set(true, forKey: "hasAcknowledgedRecordingConsent")
+        // #150: the harness models a configured machine, so the meeting paths
+        // it exercises are the post-setup ones.
+        defaults.set(true, forKey: SetupState.completedKey)
 
         let storage = AppSettingsStorage(
             defaults: defaults,
@@ -110,7 +112,6 @@ struct MeetingHarness {
             transcriptStore: TranscriptStore()
         )
         return AppLaunchContext(
-            isFirstLaunch: false,
             uiTestScenario: .launchSmoke,
             runtimeMode: .uiTest(.launchSmoke),
             container: AppContainer(
@@ -121,7 +122,8 @@ struct MeetingHarness {
             ),
             settings: settings,
             coordinator: coordinator,
-            updaterController: AppUpdaterController(startUpdater: false)
+            updaterController: AppUpdaterController(),
+            boot: AppBoot(needsSetup: false)
         )
     }
 }

@@ -65,6 +65,17 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case notifications
     }
 
+    /// Which screen of the first-run flow was reached (#150). A closed enum, so
+    /// the timeline can say where a machine stopped setting itself up without
+    /// any of the flow's copy entering the event stream.
+    enum OnboardingStep: String, Codable, Sendable, CaseIterable {
+        case welcome
+        case permissions
+        case fnKey
+        case tryIt
+        case ready
+    }
+
     /// Which API call was made — never the prompt, never the response. Also
     /// names which dictation upgrade ran (`.cleanup` / `.translate`): an
     /// upgrade *is* one of these calls, so it needs no parallel enum.
@@ -201,6 +212,17 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// corrupt — the same reason `tapEventsStalled` survives.
     case healthSummonCleared
 
+    /// The exclusive setup state opened (#150) — the boundary that says this
+    /// launch had no subsystems running, so an absence of capture/detection
+    /// events after it is the design rather than a fault.
+    case onboardingStarted
+    case onboardingStepShown(step: OnboardingStep)
+    /// The guided dictation actually put text at the cursor: mic, event tap and
+    /// insertion confirmed by one act.
+    case onboardingDictationLanded
+    /// Setup finished and the app booted its subsystems.
+    case onboardingCompleted
+
     // MARK: - Input (hotkey, permissions, paste)
 
     case permissionTransition(permission: Permission, granted: Bool)
@@ -318,7 +340,9 @@ enum DiagEvent: Codable, Sendable, Equatable {
 extension DiagEvent {
     var subsystem: DiagSubsystem {
         switch self {
-        case .appLaunched, .healthSummonFired, .healthSummonWithdrawn, .healthSummonCleared:
+        case .appLaunched, .healthSummonFired, .healthSummonWithdrawn, .healthSummonCleared,
+             .onboardingStarted, .onboardingStepShown, .onboardingDictationLanded,
+             .onboardingCompleted:
             return .app
 
         case .permissionTransition, .tapCreate, .tapReinstall, .tapDisabledByOS,
@@ -366,6 +390,10 @@ extension DiagEvent {
         case .healthSummonFired: return "healthSummonFired"
         case .healthSummonWithdrawn: return "healthSummonWithdrawn"
         case .healthSummonCleared: return "healthSummonCleared"
+        case .onboardingStarted: return "onboardingStarted"
+        case .onboardingStepShown: return "onboardingStepShown"
+        case .onboardingDictationLanded: return "onboardingDictationLanded"
+        case .onboardingCompleted: return "onboardingCompleted"
         case .permissionTransition: return "permissionTransition"
         case .tapCreate: return "tapCreate"
         case .tapReinstall: return "tapReinstall"

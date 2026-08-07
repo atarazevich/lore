@@ -87,8 +87,8 @@ enum NotesFolderMigration {
     private static let priorLaunchKeys = [
         "didMigrateFromOnTheSpot",
         "didMigrateFromOpenGranola",
-        "hasCompletedOnboarding",
-        "hasAcknowledgedRecordingConsent",
+        SetupState.tourCompletedKey,
+        SetupState.consentAcknowledgedKey,
     ]
 
     struct Result: Equatable {

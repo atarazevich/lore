@@ -46,6 +46,8 @@ final class DiagEventPrivacyTests: XCTestCase {
     private enum CaseKey: String, CaseIterable {
         case appLaunched
         case healthSummonFired, healthSummonWithdrawn, healthSummonCleared
+        case onboardingStarted, onboardingStepShown, onboardingDictationLanded
+        case onboardingCompleted
         case permissionTransition, tapCreate, tapReinstall, tapDisabledByOS
         case tapDiedDuringRecording, tapEventsStalled, tapEventsResumed, tapGaveUp
         case secureInputChanged, pasteAttempt
@@ -73,6 +75,10 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .healthSummonFired: return .healthSummonFired
         case .healthSummonWithdrawn: return .healthSummonWithdrawn
         case .healthSummonCleared: return .healthSummonCleared
+        case .onboardingStarted: return .onboardingStarted
+        case .onboardingStepShown: return .onboardingStepShown
+        case .onboardingDictationLanded: return .onboardingDictationLanded
+        case .onboardingCompleted: return .onboardingCompleted
         case .permissionTransition: return .permissionTransition
         case .tapCreate: return .tapCreate
         case .tapReinstall: return .tapReinstall
@@ -139,6 +145,10 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .healthSummonWithdrawn:
             return .healthSummonWithdrawn(trigger: .systemAudioFailed, reason: .sweptGhost)
         case .healthSummonCleared: return .healthSummonCleared
+        case .onboardingStarted: return .onboardingStarted
+        case .onboardingStepShown: return .onboardingStepShown(step: .permissions)
+        case .onboardingDictationLanded: return .onboardingDictationLanded
+        case .onboardingCompleted: return .onboardingCompleted
 
         case .permissionTransition:
             return .permissionTransition(permission: .accessibility, granted: false)
@@ -237,6 +247,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         allowed.formUnion(DiagEvent.SummonTrigger.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.NotesMigration.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.SummonWithdrawal.allCases.map(\.rawValue))
+        allowed.formUnion(DiagEvent.OnboardingStep.allCases.map(\.rawValue))
         allowed.formUnion(DictationState.allCases.map(\.rawValue))
         return allowed
     }()

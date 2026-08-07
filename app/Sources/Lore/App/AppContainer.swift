@@ -62,13 +62,16 @@ final class AppContainer {
             let coordinator = AppCoordinator()
             let updaterController = AppUpdaterController()
             return AppLaunchContext(
-                isFirstLaunch: false,
                 uiTestScenario: nil,
                 runtimeMode: .live,
                 container: container,
                 settings: settings,
                 coordinator: coordinator,
-                updaterController: updaterController
+                updaterController: updaterController,
+                // The #150 gate. Nothing here has started a subsystem yet —
+                // `AppUpdaterController.init` no longer starts Sparkle, and the
+                // audio bus is inert until something subscribes.
+                boot: AppBoot(needsSetup: !settings.didCompleteSetup)
             )
 
         case .uiTest(let scenario):
@@ -84,8 +87,9 @@ final class AppContainer {
             let suiteName = "com.lore.uitests.\(runID)"
             let defaults = UserDefaults(suiteName: suiteName) ?? .standard
             defaults.removePersistentDomain(forName: suiteName)
-            defaults.set(true, forKey: "hasCompletedOnboarding")
-            defaults.set(true, forKey: "hasAcknowledgedRecordingConsent")
+            // #150: one preset instead of the two retired flags — a UI test
+            // starts in the configured world, never in the setup state.
+            defaults.set(true, forKey: SetupState.completedKey)
             defaults.set(false, forKey: "meetingAutoDetectEnabled")
             defaults.set(false, forKey: "hasShownAutoDetectExplanation")
             defaults.set(false, forKey: "hideFromScreenShare")
@@ -113,15 +117,15 @@ final class AppContainer {
                 appSupportDirectory: appSupportDirectory,
                 notesDirectory: notesDirectory
             )
-            let updaterController = AppUpdaterController(startUpdater: false)
+            let updaterController = AppUpdaterController()
             return AppLaunchContext(
-                isFirstLaunch: false,
                 uiTestScenario: scenario,
                 runtimeMode: .uiTest(scenario),
                 container: container,
                 settings: settings,
                 coordinator: coordinator,
-                updaterController: updaterController
+                updaterController: updaterController,
+                boot: AppBoot(needsSetup: false)
             )
         }
     }

@@ -1,8 +1,9 @@
 import Foundation
 
 /// A System Settings pane a remedy can deep-link to. The URL is the documented
-/// `x-apple.systempreferences:` scheme; `DictationOnboardingView` links through here too.
-enum SettingsPane: String, Equatable, Sendable {
+/// `x-apple.systempreferences:` scheme; the onboarding permission cards
+/// (`RequiredGrant.pane`, #150) link through here too.
+enum SettingsPane: String, CaseIterable, Equatable, Sendable {
     case accessibility
     case inputMonitoring
     case microphone
@@ -11,6 +12,9 @@ enum SettingsPane: String, Equatable, Sendable {
     /// answers to; the pane's *title* gained "& System Audio" in macOS 15, and
     /// the button below uses that title so the user reads what they will see.
     case screenRecording
+    /// Not a privacy grant but the same kind of round trip: the Fn-key behaviour
+    /// the onboarding step watches lives here (#150).
+    case keyboard
 
     var settingsURL: URL? {
         switch self {
@@ -22,6 +26,8 @@ enum SettingsPane: String, Equatable, Sendable {
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
         case .screenRecording:
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
+        case .keyboard:
+            return URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension")
         }
     }
 
@@ -31,6 +37,7 @@ enum SettingsPane: String, Equatable, Sendable {
         case .inputMonitoring: return "Open Input Monitoring"
         case .microphone: return "Open Microphone"
         case .screenRecording: return "Open Screen & System Audio Recording"
+        case .keyboard: return "Open Keyboard Settings"
         }
     }
 }

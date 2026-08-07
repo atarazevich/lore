@@ -14,6 +14,7 @@ public struct LoreRootApp: App {
     @State var coordinator: AppCoordinator
     @State private var container: AppContainer
     @State var shell: ShellModel
+    @State private var boot: AppBoot
     private let updaterController: AppUpdaterController
     private let defaults: UserDefaults
 
@@ -58,6 +59,7 @@ public struct LoreRootApp: App {
         self._settings = State(initialValue: context.settings)
         self._coordinator = State(initialValue: context.coordinator)
         self._container = State(initialValue: context.container)
+        self._boot = State(initialValue: context.boot)
         self.updaterController = context.updaterController
         self.defaults = context.container.defaults
 
@@ -73,58 +75,42 @@ public struct LoreRootApp: App {
 
     public var body: some Scene {
         Window(LoreTheme.wordmark, id: "main") {
-            ShellView(settings: settings, updater: updaterController.updater)
-                .environment(container)
-                .environment(coordinator)
-                .environment(coordinator.dictationCoordinator)
-                .environment(shell)
-                .defaultAppStorage(defaults)
-                .onAppear {
-                    appDelegate.coordinator = coordinator
-                    appDelegate.settings = settings
-                    appDelegate.container = container
-                    // Real presenter (fronts the window, or re-creates it via
-                    // openWindow) — the delegate cannot build this closure
-                    // itself because openWindow only works from the installed
-                    // scene graph. If applicationDidFinishLaunching already
-                    // wanted the window, wiring this presents it (didSet).
-                    appDelegate.onShowMainWindow = { [self] in showMainWindow() }
-                    // Notch "Fix it" (#83) fronts the window and raises the
-                    // health panel via the shell signal.
-                    appDelegate.onShowHealthPanel = { [self] in
-                        shell.wantsHealthPanel = true
-                        showMainWindow()
-                    }
-                    if case .live = container.mode {
-                        appDelegate.setupMenuBarIfNeeded(
-                            coordinator: coordinator,
-                            settings: settings,
-                            showMainWindow: { [self] in showMainWindow() },
-                            showMeetings: { [self] in
-                                // As-is: live while recording, review otherwise.
-                                shell.showMeetings()
-                                showMainWindow()
-                            },
-                            checkForUpdates: { updaterController.checkForUpdatesFromMenuBar() }
-                        )
-                        appDelegate.setupDictationIfNeeded(
-                            coordinator: coordinator,
-                            settings: settings
-                        )
-                    }
-                    // Screen-share visibility is applied by the delegate at
-                    // didFinishLaunching (and re-applied on didBecomeKey), so
-                    // no per-appearance pass is needed here.
+            // The #150 gate at its sharpest point: before setup completes the
+            // shell is not mounted, so no destination's `.task` runs — that is
+            // what started meeting detection from a window nobody had opened.
+            Group {
+                if boot.phase == .running {
+                    ShellView(settings: settings, updater: updaterController.updater)
+                        .environment(container)
+                        .environment(coordinator)
+                        .environment(coordinator.dictationCoordinator)
+                        .environment(shell)
+                        .defaultAppStorage(defaults)
+                } else {
+                    // Never ordered in; sized so the swap does not resize the
+                    // window at the moment setup completes.
+                    Color.clear.frame(minWidth: 1000, minHeight: 640)
                 }
+            }
+            .onAppear {
+                wireDelegate()
+                startSubsystemsIfRunning()
+            }
         }
         .windowStyle(.hiddenTitleBar)
         .windowResizability(.contentSize)
         .defaultSize(width: 1240, height: 832)
+        // A keyboard shortcut is not stopped by an unmounted window, so the gate
+        // has to hold against it too: during `.setup` Cmd+Shift+L reached
+        // `toggleMeeting` and opened a capture with no microphone grant (#150).
+        // Each handler asks at invocation time, which no re-evaluation of this
+        // builder can get wrong.
         .commands {
             // The macOS Settings scene is retired (SET-06): Cmd+, opens the
             // unified window at the Settings destination instead.
             CommandGroup(replacing: .appSettings) {
                 Button("Settings\u{2026}") {
+                    guard isRunning else { return }
                     shell.destination = .settings
                     showMainWindow()
                 }
@@ -132,29 +118,35 @@ public struct LoreRootApp: App {
             }
 
             CommandGroup(after: .appInfo) {
-                if case .live = container.mode {
+                // Sparkle is not started during setup, so this would target a
+                // never-started updater.
+                if case .live = container.mode, boot.phase == .running {
                     CheckForUpdatesView(updater: updaterController.updater)
 
                     Divider()
                 }
 
                 Button("Toggle Meeting") {
+                    guard isRunning else { return }
                     appDelegate.toggleMeeting()
                 }
                 .keyboardShortcut("l", modifiers: [.command, .shift])
 
                 Button("Past Meetings") {
+                    guard isRunning else { return }
                     showPastMeetings()
                 }
                 .keyboardShortcut("m", modifiers: [.command, .shift])
 
                 Button("Import Meeting Recording...") {
+                    guard isRunning else { return }
                     importMeetingRecording()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
                 .disabled(coordinator.isRecording || isBatchEngineBusy)
 
                 Button("Dictation") {
+                    guard isRunning else { return }
                     shell.destination = .dictation
                     showMainWindow()
                 }
@@ -172,6 +164,44 @@ public struct LoreRootApp: App {
 
 extension LoreRootApp {
     static let mainWindowID = "main"
+
+    /// The gate, as the menu commands ask it: nothing outside the onboarding
+    /// window may act while setup is unfinished.
+    private var isRunning: Bool { boot.phase == .running }
+
+    /// Hand the delegate the objects and presenters only the scene graph can
+    /// build. Runs in both phases — the onboarding window needs the same
+    /// coordinator and container, and `openWindow` works only from here.
+    private func wireDelegate() {
+        appDelegate.coordinator = coordinator
+        appDelegate.settings = settings
+        appDelegate.container = container
+        appDelegate.updaterController = updaterController
+        // Real presenter (fronts the window, or re-creates it via openWindow) —
+        // the delegate cannot build this closure itself because openWindow only
+        // works from the installed scene graph. If applicationDidFinishLaunching
+        // already wanted the window, wiring this presents it (didSet).
+        appDelegate.onShowMainWindow = { [self] in showMainWindow() }
+        // Notch "Fix it" (#83) fronts the window and raises the health panel via
+        // the shell signal.
+        appDelegate.onShowHealthPanel = { [self] in
+            shell.wantsHealthPanel = true
+            showMainWindow()
+        }
+        appDelegate.onShowMeetings = { [self] in
+            // As-is: live while recording, review otherwise.
+            shell.showMeetings()
+            showMainWindow()
+        }
+    }
+
+    /// The one place every subsystem starts, exactly once, and only in the
+    /// configured world (#150). The other call site is `completeSetup()`.
+    private func startSubsystemsIfRunning() {
+        boot.startSubsystemsOnce {
+            appDelegate.startSubsystems()
+        }
+    }
 
     /// The unified main window, if AppKit has materialized it.
     static var mainWindow: NSWindow? {
@@ -301,10 +331,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     var settings: AppSettings?
     var container: AppContainer?
+    var updaterController: AppUpdaterController?
     // Shared container's defaults from launch — applicationDidFinishLaunching
     // reads this before onAppear runs any handoff, so .standard would be wrong
     // in UI-test mode.
     var defaults: UserDefaults = LoreRootApp.sharedContext.container.defaults
+
+    /// Navigate the shell to Meetings and front the window (menu bar action).
+    var onShowMeetings: (() -> Void)?
+
+    /// The exclusive setup surface (#150) — nil once setup is complete.
+    private var onboardingWindow: OnboardingWindowController?
+    private var onboardingModel: OnboardingModel?
 
     /// The SwiftUI-layer presenter (fronts the main window, or re-creates it
     /// via openWindow), wired in onAppear. onAppear/didFinishLaunching order
@@ -322,24 +360,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
     private var shouldShowMainWindowOnWire = false
 
-    func setupMenuBarIfNeeded(
-        coordinator: AppCoordinator,
-        settings: AppSettings,
-        showMainWindow: @escaping () -> Void,
-        showMeetings: @escaping () -> Void,
-        checkForUpdates: @escaping () -> Void
-    ) {
-        guard menuBarController == nil else { return }
+    /// Start the configured world — menu bar, dictation, health, updates, the
+    /// global meeting hotkey — exactly once (#150), so no subsystem needs a
+    /// first-run conditional of its own. Returns whether it actually started
+    /// anything: that, not the attempt, is what the latch is burned on.
+    @discardableResult
+    func startSubsystems() -> Bool {
+        // `completeSetup()` can arrive before the scene's onAppear handed these
+        // over — during setup the main window was never presented — so resolve
+        // from the launch context rather than returning empty-handed.
+        let context = LoreRootApp.sharedContext
+        if coordinator == nil { coordinator = context.coordinator }
+        if settings == nil { settings = context.settings }
+        if container == nil { container = context.container }
+        if updaterController == nil { updaterController = context.updaterController }
 
-        container?.ensureServicesInitialized(settings: settings, coordinator: coordinator)
+        // UI-test runs drive the shell directly and must not get a menu bar, an
+        // event tap or an updater — the one place that question is asked.
+        guard let coordinator, let settings, let container, case .live = container.mode
+        else { return false }
+
+        container.ensureServicesInitialized(settings: settings, coordinator: coordinator)
+        setupMenuBar(coordinator: coordinator, settings: settings)
+        setupDictation(coordinator: coordinator, settings: settings)
+        setupHealthMonitor(coordinator: coordinator, settings: settings)
+        registerGlobalHotkey()
+        updaterController?.start()
+        return true
+    }
+
+    private func setupMenuBar(coordinator: AppCoordinator, settings: AppSettings) {
+        guard menuBarController == nil else { return }
 
         let controller = MenuBarController(
             coordinator: coordinator,
             settings: settings,
-            onCheckForUpdates: checkForUpdates
+            onCheckForUpdates: { [weak self] in
+                self?.updaterController?.checkForUpdatesFromMenuBar()
+            }
         )
-        controller.onShowMainWindow = showMainWindow
-        controller.onShowMeetings = showMeetings
+        controller.onShowMainWindow = { [weak self] in self?.onShowMainWindow?() }
+        controller.onShowMeetings = { [weak self] in self?.onShowMeetings?() }
         controller.onQuitApp = { [weak self] in
             self?.handleQuit()
         }
@@ -354,6 +415,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var globalHotkeyMonitor: Any?
     private var localHotkeyMonitor: Any?
     private var didSetupDictation = false
+    private var didStartDictationPipeline = false
 
     /// Opens the health panel (fronts the window, raises the panel via the shell
     /// signal). Wired from the scene's onAppear, where the shell is reachable.
@@ -397,12 +459,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             // Set delegate on main window for close-to-background behavior
             LoreRootApp.mainWindow?.delegate = self
 
-            // LSUIElement launches the process as .accessory; flipping to
-            // .regular above does not activate the app, so the main window
-            // would sit unfocused on an inactive Space (launch looks
-            // windowless). Present it explicitly — except for login-item
-            // launches, which must stay quiet in the background.
-            if !isLoginItemLaunch {
+            if LoreRootApp.sharedContext.boot.phase == .setup {
+                // The exclusive state (#150): the setup window is the only
+                // surface, and even a login-item launch has to show it — a
+                // background process with nothing configured can do nothing.
+                presentOnboarding()
+            } else if !isLoginItemLaunch {
+                // LSUIElement launches the process as .accessory; flipping to
+                // .regular above does not activate the app, so the main window
+                // would sit unfocused on an inactive Space (launch looks
+                // windowless). Present it explicitly — except for login-item
+                // launches, which must stay quiet in the background.
                 if let onShowMainWindow {
                     onShowMainWindow()
                 } else {
@@ -424,7 +491,70 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             }
         }
 
-        registerGlobalHotkey()
+        // Cmd+Shift+L and every other subsystem now start behind the boot gate
+        // (`startSubsystems`), not here.
+    }
+
+    // MARK: - Setup state (#150)
+
+    /// Build and show the onboarding window. Everything the flow needs is
+    /// injected here; the flow itself reaches no subsystem directly.
+    private func presentOnboarding() {
+        guard onboardingWindow == nil else { return }
+        let coordinator = LoreRootApp.sharedContext.coordinator
+        let settings = LoreRootApp.sharedContext.settings
+
+        let model = OnboardingModel()
+        let window = OnboardingWindowController(defaults: defaults)
+
+        model.startDictationForTryIt = { [weak self] in
+            self?.startDictationPipeline(coordinator: coordinator, settings: settings)
+        }
+        // One seam onto the dictation subsystem, read from the flow's body as
+        // well as its poll — that is how the waveform keeps observing the
+        // coordinator's own level.
+        model.readDictation = {
+            OnboardingModel.DictationReading(
+                tapAlive: coordinator.hotkeyManager.isEventTapAlive,
+                state: coordinator.dictationCoordinator.state,
+                audioLevel: coordinator.dictationCoordinator.audioLevel,
+                lastPasted: coordinator.dictationCoordinator.lastTranscript
+            )
+        }
+        model.onClosableChanged = { [weak window] in window?.setClosable($0) }
+        model.onWantsFront = { [weak window] in window?.front() }
+        model.onFinish = { [weak self] in self?.completeSetup() }
+        // Closing before "Start using lore" leaves no surface at all, so it is a
+        // quit; the next launch resumes the flow from the same reading.
+        window.onAbandon = { NSApp.terminate(nil) }
+
+        onboardingModel = model
+        onboardingWindow = window
+        window.present(model: model)
+        model.start()
+    }
+
+    /// The single transition into the configured world.
+    private func completeSetup() {
+        LoreRootApp.sharedContext.settings.markSetupCompleted()
+        onboardingWindow?.dismiss()
+        onboardingWindow = nil
+        onboardingModel = nil
+
+        // Flipping the phase swaps ShellView into the scene. The boot is driven
+        // from here because a scene whose content never appeared observes
+        // nothing; the shared latch makes the scene's own later call a no-op.
+        let boot = LoreRootApp.sharedContext.boot
+        boot.markSetupComplete()
+        boot.startSubsystemsOnce { [weak self] in self?.startSubsystems() ?? false }
+
+        // Same on-wire handshake launch uses: if the scene never wired its
+        // presenter, present as soon as it does.
+        if let onShowMainWindow {
+            onShowMainWindow()
+        } else {
+            shouldShowMainWindowOnWire = true
+        }
     }
 
     // MARK: - Deep Links (lore:// scheme)
@@ -545,9 +675,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     // MARK: - Dictation Setup
 
-    func setupDictationIfNeeded(coordinator: AppCoordinator, settings: AppSettings) {
-        guard !didSetupDictation else { return }
-        didSetupDictation = true
+    /// The dictation pipeline itself: coordinator wiring, the CGEvent tap, the
+    /// model warm-up. Split out of `setupDictation` for the Try-it step (#150),
+    /// which needs hold-to-talk and nothing else — no indicator panel over the
+    /// onboarding window, no Read Aloud chords, no health summons.
+    func startDictationPipeline(coordinator: AppCoordinator, settings: AppSettings) {
+        guard !didStartDictationPipeline else { return }
+        didStartDictationPipeline = true
 
         coordinator.dictationCoordinator.settings = settings
         coordinator.dictationCoordinator.audioBus = container?.audioBus
@@ -556,6 +690,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             coordinator: coordinator.dictationCoordinator,
             settings: settings
         )
+
+        // Preload models so the first use is instant. Detached; launch never
+        // blocks. Two loads cover the common warm set: the shared cache (meeting
+        // mic reuses it) and dictation's private backend (its own decoder state).
+        // The meeting system-audio backend is left lazy on purpose — it's a
+        // second decoder only a meeting recording needs, so preloading it would
+        // hold a third model resident for users who only ever dictate.
+        Task {
+            try? await coordinator.sharedBackendCache.prepare()
+        }
+        Task {
+            await coordinator.dictationCoordinator.prewarm()
+        }
+    }
+
+    private func setupDictation(coordinator: AppCoordinator, settings: AppSettings) {
+        guard !didSetupDictation else { return }
+        didSetupDictation = true
+
+        startDictationPipeline(coordinator: coordinator, settings: settings)
+
         coordinator.dictationIndicator.start(
             coordinator: coordinator.dictationCoordinator,
             hotkeyManager: coordinator.hotkeyManager
@@ -574,21 +729,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
         coordinator.dictationCoordinator.onCaptureEnded = { [weak readAloud] cancelled in
             readAloud?.dictationEnded(cancelled: cancelled)
-        }
-
-        setupHealthMonitor(coordinator: coordinator, settings: settings)
-
-        // Preload models so the first use is instant. Detached; launch never
-        // blocks. Two loads cover the common warm set: the shared cache (meeting
-        // mic reuses it) and dictation's private backend (its own decoder state).
-        // The meeting system-audio backend is left lazy on purpose — it's a
-        // second decoder only a meeting recording needs, so preloading it would
-        // hold a third model resident for users who only ever dictate.
-        Task {
-            try? await coordinator.sharedBackendCache.prepare()
-        }
-        Task {
-            await coordinator.dictationCoordinator.prewarm()
         }
     }
 
@@ -719,8 +859,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func toggleMeeting() {
+        // No consent branch: the app only runs once setup completed, and setup
+        // completing *is* the acknowledgement (#150).
         guard let coordinator, let settings else { return }
-        guard settings.hasAcknowledgedRecordingConsent else { return }
 
         if coordinator.isRecording {
             coordinator.handle(.userStopped, settings: settings)

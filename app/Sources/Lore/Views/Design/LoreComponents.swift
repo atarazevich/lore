@@ -269,6 +269,54 @@ struct LorePressButtonStyle: ButtonStyle {
     }
 }
 
+// MARK: - Primary action button
+
+/// The filled blue action button: `.regular` is the footer size, `.compact` the
+/// one that sits inline in a card's header row. Disabled drops to a white .06
+/// fill with muted text rather than dimming the blue, so a button that cannot be
+/// pressed does not read as one that can.
+struct LorePrimaryButton: View {
+    enum Size {
+        case regular
+        case compact
+
+        var font: Font {
+            switch self {
+            case .regular: return LoreTheme.Typography.control
+            case .compact: return .system(size: 12, weight: .semibold)
+            }
+        }
+
+        var padding: (horizontal: CGFloat, vertical: CGFloat) {
+            switch self {
+            case .regular: return (22, 9)
+            case .compact: return (14, 6)
+            }
+        }
+    }
+
+    let title: String
+    var size: Size = .regular
+    var enabled = true
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text(title)
+                .font(size.font)
+                .foregroundStyle(enabled ? .white : LoreTheme.TextColor.muted)
+                .padding(.horizontal, size.padding.horizontal)
+                .padding(.vertical, size.padding.vertical)
+                .background(
+                    enabled ? LoreTheme.Accent.blue : Color.white.opacity(0.06),
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
+                )
+        }
+        .buttonStyle(LorePressButtonStyle())
+        .disabled(!enabled)
+    }
+}
+
 // MARK: - Popover chrome (dictation `.pop`, transform menu)
 
 extension View {
@@ -559,112 +607,6 @@ struct LoreSpeakerRow<Content: View>: View {
                 .padding(.top, 1)
             content
                 .frame(maxWidth: .infinity, alignment: .leading)
-        }
-    }
-}
-
-// MARK: - Onboarding scaffold (Stage H — shared by OnboardingView,
-// DictationOnboardingView, RecordingConsentView)
-
-/// Step-progress dots: 6px circles, active blue, inactive white .25.
-struct LoreStepDots: View {
-    let count: Int
-    let current: Int
-
-    var body: some View {
-        HStack(spacing: 8) {
-            ForEach(0..<count, id: \.self) { i in
-                Circle()
-                    .fill(i == current ? LoreTheme.Accent.blue
-                                       : Color.white.opacity(0.25))
-                    .frame(width: 6, height: 6)
-            }
-        }
-        .accessibilityLabel("Step \(current + 1) of \(count)")
-    }
-}
-
-/// Onboarding footer: leading plain text button (Skip/Back/Cancel — hidden
-/// when `leadingTitle` is nil) + trailing filled primary button. Prominent =
-/// blue Next/Get-Started; non-prominent = the consent sheet's neutral white
-/// fill, dimmed and disabled until `primaryEnabled`.
-struct LoreOnboardingFooter: View {
-    var leadingTitle: String?
-    let leadingAction: () -> Void
-    let primaryTitle: String
-    var primaryEnabled = true
-    var primaryProminent = true
-    let primaryAction: () -> Void
-
-    var body: some View {
-        HStack {
-            if let leadingTitle {
-                Button(leadingTitle, action: leadingAction)
-                    .buttonStyle(.plain)
-                    .font(LoreTheme.Typography.secondary)
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-            }
-
-            Spacer()
-
-            Button(action: primaryAction) {
-                Text(primaryTitle)
-                    .font(LoreTheme.Typography.control)
-                    .foregroundStyle(
-                        primaryProminent ? .white
-                            : primaryEnabled ? LoreTheme.TextColor.primary
-                                             : LoreTheme.TextColor.muted
-                    )
-                    .padding(.horizontal, 20)
-                    .padding(.vertical, 8)
-                    .background(
-                        primaryProminent ? LoreTheme.Accent.blue
-                            : Color.white.opacity(primaryEnabled ? 0.12 : 0.05),
-                        in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
-                    )
-            }
-            .buttonStyle(LorePressButtonStyle())
-            .disabled(!primaryEnabled)
-        }
-    }
-}
-
-extension LoreOnboardingFooter {
-    /// Paged convenience: "Next" advancing until the last step, then
-    /// "Get Started" finishing.
-    init(
-        leadingTitle: String?,
-        leadingAction: @escaping () -> Void,
-        step: Int,
-        count: Int,
-        advance: @escaping () -> Void,
-        finish: @escaping () -> Void
-    ) {
-        let isLast = step >= count - 1
-        self.init(
-            leadingTitle: leadingTitle,
-            leadingAction: leadingAction,
-            primaryTitle: isLast ? "Get Started" : "Next",
-            primaryAction: { isLast ? finish() : advance() }
-        )
-    }
-}
-
-/// Bullet row (• + muted 12px text) shared by the dictation onboarding
-/// instructions and the recording-consent obligations.
-struct LoreBulletRow: View {
-    let text: String
-
-    var body: some View {
-        HStack(alignment: .top, spacing: 6) {
-            Text("\u{2022}")
-                .font(LoreTheme.Typography.body)
-                .foregroundStyle(LoreTheme.TextColor.muted)
-            Text(text)
-                .font(.system(size: 12))
-                .foregroundStyle(LoreTheme.TextColor.muted)
-                .lineSpacing(2)
-                .fixedSize(horizontal: false, vertical: true)
         }
     }
 }

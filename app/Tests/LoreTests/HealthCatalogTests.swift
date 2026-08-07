@@ -205,7 +205,7 @@ final class HealthCatalogTests: XCTestCase {
     // MARK: - Settings panes deep-link to the documented scheme
 
     func testSettingsPanesResolveToSystemSettingsURLs() {
-        for pane in [SettingsPane.accessibility, .inputMonitoring, .microphone, .screenRecording] {
+        for pane in SettingsPane.allCases {
             let url = try! XCTUnwrap(pane.settingsURL)
             XCTAssertEqual(url.scheme, "x-apple.systempreferences")
         }
