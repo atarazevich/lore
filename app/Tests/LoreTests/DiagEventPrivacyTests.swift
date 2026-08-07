@@ -45,14 +45,15 @@ final class DiagEventPrivacyTests: XCTestCase {
     /// is added here; `CaseIterable` then grows the expected set for free.
     private enum CaseKey: String, CaseIterable {
         case appLaunched
-        case healthSummonFired, healthSummonCleared
+        case healthSummonFired, healthSummonWithdrawn, healthSummonCleared
         case permissionTransition, tapCreate, tapReinstall, tapDisabledByOS
-        case tapDiedDuringRecording, tapEventsStalled, tapEventsResumed
+        case tapDiedDuringRecording, tapEventsStalled, tapEventsResumed, tapGaveUp
         case secureInputChanged, pasteAttempt
         case captureStart, captureFailed, captureStopped, captureRetryScheduled
         case captureGaveUp, captureReconfigured, inputDeviceSelected, deviceSwitched
-        case noFramesRecovery, micStalled, micRecovered, systemAudioCapture
-        case recordingSaved
+        case noFramesRecovery, micStalled, micRecovered, micFramesFlowing
+        case systemAudioCapture
+        case systemAudioGaveUp, recordingSaved
         case modelLoad, modelCacheCleared, transcribed, echoSuppressed
         case apiCall
         case dictationRecorded, dictationZeroFrames, dictationPasted
@@ -70,6 +71,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         switch event {
         case .appLaunched: return .appLaunched
         case .healthSummonFired: return .healthSummonFired
+        case .healthSummonWithdrawn: return .healthSummonWithdrawn
         case .healthSummonCleared: return .healthSummonCleared
         case .permissionTransition: return .permissionTransition
         case .tapCreate: return .tapCreate
@@ -78,6 +80,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .tapDiedDuringRecording: return .tapDiedDuringRecording
         case .tapEventsStalled: return .tapEventsStalled
         case .tapEventsResumed: return .tapEventsResumed
+        case .tapGaveUp: return .tapGaveUp
         case .secureInputChanged: return .secureInputChanged
         case .pasteAttempt: return .pasteAttempt
         case .captureStart: return .captureStart
@@ -91,7 +94,9 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .noFramesRecovery: return .noFramesRecovery
         case .micStalled: return .micStalled
         case .micRecovered: return .micRecovered
+        case .micFramesFlowing: return .micFramesFlowing
         case .systemAudioCapture: return .systemAudioCapture
+        case .systemAudioGaveUp: return .systemAudioGaveUp
         case .recordingSaved: return .recordingSaved
         case .modelLoad: return .modelLoad
         case .modelCacheCleared: return .modelCacheCleared
@@ -130,6 +135,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         switch key {
         case .appLaunched: return .appLaunched(build: .max)
         case .healthSummonFired: return .healthSummonFired(trigger: .pasteFailed)
+        case .healthSummonWithdrawn:
+            return .healthSummonWithdrawn(trigger: .systemAudioFailed, reason: .sweptGhost)
         case .healthSummonCleared: return .healthSummonCleared
 
         case .permissionTransition:
@@ -140,6 +147,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .tapDiedDuringRecording: return .tapDiedDuringRecording
         case .tapEventsStalled: return .tapEventsStalled(seconds: .max)
         case .tapEventsResumed: return .tapEventsResumed
+        case .tapGaveUp: return .tapGaveUp(attempts: .max)
         case .secureInputChanged: return .secureInputChanged(active: true, holderPID: .max)
         case .pasteAttempt:
             return .pasteAttempt(kind: .undoAndPaste, eventsCreated: false, accessibilityTrusted: false)
@@ -155,7 +163,9 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .noFramesRecovery: return .noFramesRecovery(attempt: 2, maxAttempts: 2)
         case .micStalled: return .micStalled(seconds: .max)
         case .micRecovered: return .micRecovered
+        case .micFramesFlowing: return .micFramesFlowing
         case .systemAudioCapture: return .systemAudioCapture(outcome: .failed, osStatus: .min)
+        case .systemAudioGaveUp: return .systemAudioGaveUp(attempts: .max)
         case .recordingSaved: return .recordingSaved(outcome: .ok, frames: .max)
 
         case .modelLoad:
@@ -223,6 +233,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         allowed.formUnion(DiagEvent.Artifact.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.SummonTrigger.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.NotesMigration.allCases.map(\.rawValue))
+        allowed.formUnion(DiagEvent.SummonWithdrawal.allCases.map(\.rawValue))
         allowed.formUnion(DictationState.allCases.map(\.rawValue))
         return allowed
     }()

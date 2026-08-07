@@ -192,6 +192,11 @@ final class TranscriptionEngine {
         guard await ensureMicrophonePermission() else { return }
 
         isRunning = true
+        // The user starting a meeting is the fresh signal that refills the
+        // system-audio retry budget (#149) — they may have granted the permission
+        // since the last session. The device-change restart path deliberately
+        // does not: an unattended re-drive is what the budget bounds.
+        systemCapture.resetFailureBudget()
         // Mic-restart requests are deferred while start is in flight (#64 review) —
         // restartMic() records pendingMicDeviceID and the tail of start() applies it.
         isStarting = true
@@ -695,6 +700,13 @@ final class TranscriptionEngine {
             sysStreams = try await systemCapture.bufferStream()
             DiagStore.record(.systemAudioCapture(outcome: .ok, osStatus: nil))
             clearSystemAudioErrorIfPresent()
+        } catch SystemAudioCapture.CaptureError.givenUp {
+            // No HAL call happened, so there is no new fact to record — the last
+            // real failure is still the standing report (#149).
+            let error = SystemAudioCapture.CaptureError.givenUp(attempts: SystemAudioCapture.maxStartAttempts)
+            engineLog.error("system audio not retried — the budget is spent")
+            lastError = error.localizedDescription
+            return
         } catch {
             let msg = "Failed to start system audio: \(error.localizedDescription)"
             DiagStore.record(.systemAudioCapture(

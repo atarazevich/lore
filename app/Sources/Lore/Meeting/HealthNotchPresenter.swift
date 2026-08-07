@@ -46,6 +46,12 @@ final class HealthNotchPresenter {
     /// to remove Lore from both permission panes).
     private(set) var onScreen: HealthSummon?
 
+    /// The trigger whose copy `model` is currently holding — which outlives
+    /// `onScreen` by the length of one hide animation, and is the whole reason a
+    /// ghost can render something (#149). Internal so tests can see what a
+    /// rebuild would have shown.
+    private(set) var latchedTrigger: DiagEvent.SummonTrigger?
+
     init(timeout: Duration = .seconds(30)) {
         self.timeout = timeout
     }
@@ -53,12 +59,15 @@ final class HealthNotchPresenter {
     func present(_ summon: HealthSummon) {
         if let onScreen {
             guard summon.isCritical, !onScreen.isCritical else { return }
-            // Displacement takes the migration notice down: record its clear so
-            // every fired summon has a matching cleared in events.json (#144).
-            DiagStore.record(.healthSummonCleared)
+            // Displacement takes the migration notice down: record its exit so
+            // every fired summon has a matching withdrawal in events.json (#144).
+            DiagStore.record(.healthSummonWithdrawn(trigger: onScreen.trigger, reason: .displaced))
         }
         let alreadyUp = onScreen != nil
         onScreen = summon
+        // Content is derived here and only here, every time — never carried over
+        // from the last summon (#149).
+        latchedTrigger = summon.trigger
         model.title = summon.title
         // The summon's observable trace (#140): before these, events.json held
         // no record that a summon ever fired, so history was unrecoverable.
@@ -82,7 +91,7 @@ final class HealthNotchPresenter {
         timeoutTask = Task { [weak self, timeout] in
             try? await Task.sleep(for: timeout)
             guard !Task.isCancelled else { return }
-            self?.dismiss()
+            self?.dismiss(reason: .timedOut)
         }
     }
 
@@ -91,32 +100,54 @@ final class HealthNotchPresenter {
         onFix?()
     }
 
-    func dismiss() {
+    func dismiss(reason: DiagEvent.SummonWithdrawal = .dismissed) {
         timeoutTask?.cancel()
         timeoutTask = nil
-        guard onScreen != nil else { return }
+        guard let summon = onScreen else { return }
         onScreen = nil
-        DiagStore.record(.healthSummonCleared)
+        DiagStore.record(.healthSummonWithdrawn(trigger: summon.trigger, reason: reason))
         guard let notch else { return }
         // The reference is deliberately kept (see `notch`): `hide()` closes the
         // library's panel only at the end of its animation, so the presenter
         // must not forget the window before that completes.
-        windowOps.enqueue { [weak self, model] in
+        windowOps.enqueue { [weak self] in
             await notch.hide()
-            // Un-latch the title once the closing animation is done (#144): a
+            // Un-latch the content once the closing animation is done (#144): a
             // later screen-parameter rebuild must have nothing to re-show.
             // Skipped when a new summon was presented behind this hide.
-            if self?.onScreen == nil { model.title = "" }
+            if self?.onScreen == nil { self?.dropLatchedContent() }
         }
     }
 
-    /// Self-clear (#144): the signing ledger acknowledged — wired from
-    /// `SigningIdentityLedger.onMigrationClosed` — so the migration notice's
-    /// claim is stale and it withdraws itself. A failure summon is untouched:
-    /// it reports its own event, not the ledger.
-    func clearIdentitySummon() {
-        guard onScreen?.trigger == .identityMigration else { return }
-        dismiss()
+    /// Self-clear (#144, #149): the condition behind the summon on screen just
+    /// cleared, so its claim is stale and it withdraws itself. Only the matching
+    /// summon goes — every other one reports its own condition, not this one.
+    /// Driven by facts: the signing ledger's acknowledge for `.identityMigration`,
+    /// and the recovery half of `HealthMonitor.summonSignal` for the rest.
+    func clearSummon(trigger: DiagEvent.SummonTrigger) {
+        guard onScreen?.trigger == trigger else { return }
+        dismiss(reason: .recovered)
+    }
+
+    /// Forget what a rebuild could re-show. Cheap and idempotent — the sweeper
+    /// calls it twice per screen-parameter notification.
+    private func dropLatchedContent() {
+        latchedTrigger = nil
+        model.title = ""
+    }
+
+    /// The library re-fronted a panel nobody presented (#149). The window is
+    /// ordered out by the sweeper; this drops the content first, so a rebuild
+    /// landing after the sweep has nothing to render either — and leaves the
+    /// trace that made this diagnosable at all (no-false-positives §5), since a
+    /// ghost otherwise shows a summon with no `healthSummonFired` behind it.
+    private func sweepGhostContent() {
+        guard let trigger = latchedTrigger else { return }
+        DiagStore.record(.healthSummonWithdrawn(trigger: trigger, reason: .sweptGhost))
+        healthNotchLog.error(
+            "swept a ghost health notch: \(trigger.rawValue, privacy: .public) had no live summon"
+        )
+        dropLatchedContent()
     }
 
     private func ensureNotch() -> DynamicNotch<HealthNotchView, EmptyView, EmptyView> {
@@ -136,7 +167,8 @@ final class HealthNotchPresenter {
         self.notch = notch
         screenChangeSweeper = NotchScreenChangeSweeper(
             isLive: { [weak self] in self?.onScreen != nil },
-            window: { [weak self] in self?.notch?.windowController?.window }
+            window: { [weak self] in self?.notch?.windowController?.window },
+            onGhost: { [weak self] in self?.sweepGhostContent() }
         )
         return notch
     }

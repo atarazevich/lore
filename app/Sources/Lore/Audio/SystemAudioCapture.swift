@@ -22,24 +22,87 @@ final class SystemAudioCapture: @unchecked Sendable {
         qos: .userInteractive
     )
 
+    /// One attempt per fresh signal (#149). The tap is the step a missing Screen &
+    /// System Audio Recording grant kills, and the output-device listener re-drives
+    /// a start on every device flap — unbounded, with no user in it. A failed start
+    /// is therefore reported once and not retried until the user starts another
+    /// meeting (`resetFailureBudget`) or a start succeeds.
+    static let maxStartAttempts = 1
+
+    /// The budget plus the signal it belongs to. One lock over both, so a meeting
+    /// starting mid-flight cannot have its fresh budget spent by an older start's
+    /// failure landing after the await.
+    private struct Attempts {
+        var budget = RetryBudget(limit: maxStartAttempts)
+        var generation = 0
+    }
+    private let _attempts = OSAllocatedUnfairLock<Attempts>(uncheckedState: Attempts())
+
+    /// The HAL half of a start, injectable so the give-up bound can be exercised
+    /// without revoking a TCC grant (a test cannot). `nil` — production — creates
+    /// the real process tap.
+    private let startOverride: (@Sendable (AudioDeviceID?) async throws -> Void)?
+
+    init(startOverride: (@Sendable (AudioDeviceID?) async throws -> Void)? = nil) {
+        self.startOverride = startOverride
+    }
+
     struct CaptureStreams {
         let systemAudio: AsyncStream<AVAudioPCMBuffer>
     }
 
+    /// A fresh user signal — the user started a meeting — refills the budget.
+    /// Never called from a timer or the device-change listener: those are exactly
+    /// the unattended re-drives the budget exists to bound.
+    func resetFailureBudget() {
+        _attempts.withLock {
+            $0.budget.reset()
+            $0.generation += 1
+        }
+    }
+
     func bufferStream(outputDeviceID: AudioDeviceID? = nil) async throws -> CaptureStreams {
+        // Claim the attempt and the generation it belongs to in one step.
+        let generation = _attempts.withLock { attempts -> Int? in
+            attempts.budget.allowsAttempt ? attempts.generation : nil
+        }
+        guard let generation else {
+            throw CaptureError.givenUp(attempts: Self.maxStartAttempts)
+        }
+
         await stop()
 
         let sysStream = AsyncStream<AVAudioPCMBuffer> { continuation in
             self._sysContinuation.withLock { $0 = continuation }
         }
 
-        // All tap/aggregate/IOProc control calls are HAL IPC — they serialize on the
-        // process-wide HAL queue with AudioBus's own start/stop (#64), entered through
-        // the async door (never sync). IOProc delivery stays on callbackQueue.
-        try await AudioBus.onHALQueue { [self] in
-            try startCaptureOnHALQueue(outputDeviceID: outputDeviceID)
+        do {
+            if let startOverride {
+                try await startOverride(outputDeviceID)
+            } else {
+                // All tap/aggregate/IOProc control calls are HAL IPC — they serialize on
+                // the process-wide HAL queue with AudioBus's own start/stop (#64), entered
+                // through the async door (never sync). IOProc delivery stays on callbackQueue.
+                try await AudioBus.onHALQueue { [self] in
+                    try startCaptureOnHALQueue(outputDeviceID: outputDeviceID)
+                }
+            }
+        } catch {
+            // Every in-HAL guard already finishes the stream; this covers the
+            // injected seam so a caller's `for await` never hangs on a dead start.
+            _sysContinuation.withLock { $0?.finish(); $0 = nil }
+            // A failure from a superseded generation spends nothing.
+            let exhausted = _attempts.withLock { attempts -> Bool in
+                guard attempts.generation == generation else { return false }
+                return attempts.budget.noteFailure()
+            }
+            if exhausted {
+                DiagStore.record(.systemAudioGaveUp(attempts: Self.maxStartAttempts))
+            }
+            throw error
         }
 
+        _attempts.withLock { $0.budget.reset() }
         return CaptureStreams(systemAudio: sysStream)
     }
 
@@ -336,15 +399,20 @@ final class SystemAudioCapture: @unchecked Sendable {
         case invalidTapFormat
         case ioProcCreationFailed(OSStatus)
         case startFailed(OSStatus)
+        /// The retry budget is spent (#149) — no HAL call was made, and the last
+        /// real failure is still the standing report.
+        case givenUp(attempts: Int)
 
         var errorDescription: String? {
             switch self {
+            case .givenUp:
+                return "System audio capture failed and stopped retrying. Enable \(LoreTheme.wordmark) in System Settings > Privacy & Security > Screen & System Audio Recording, then start the meeting again."
             case .noOutputDevice:
                 return "No audio output device is currently available."
             case .outputDeviceUIDUnavailable(let status):
                 return "Unable to inspect the system output device (OSStatus \(status))."
             case .tapCreationFailed(let status):
-                return "System audio capture could not start. Enable System Audio Recording for \(LoreTheme.wordmark) in System Settings > Privacy & Security (OSStatus \(status))."
+                return "System audio capture could not start. Enable \(LoreTheme.wordmark) in System Settings > Privacy & Security > Screen & System Audio Recording (OSStatus \(status))."
             case .aggregateDeviceCreationFailed(let status):
                 return "Unable to create the Core Audio aggregate device (OSStatus \(status))."
             case .tapFormatUnavailable(let status):
@@ -362,7 +430,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         /// `nil` where the failure carries no OSStatus of its own.
         var osStatus: OSStatus? {
             switch self {
-            case .noOutputDevice, .invalidTapFormat:
+            case .noOutputDevice, .invalidTapFormat, .givenUp:
                 return nil
             case .outputDeviceUIDUnavailable(let status),
                  .tapCreationFailed(let status),

@@ -231,8 +231,12 @@ final class AudioRecorderTests: XCTestCase {
 
     // MARK: - recordingSaved is latched, once per recording (#82)
 
+    /// Occurrences, not slots (#149): the latch these tests guard is about how
+    /// many times the event happened, and repeats fold into one record.
     private func recordingSavedCount() -> Int {
-        DiagStore.shared.recent(DiagStore.capacity).filter { $0.event.caseName == "recordingSaved" }.count
+        DiagStore.shared.recent(DiagStore.capacity)
+            .filter { $0.event.caseName == "recordingSaved" }
+            .occurrences
     }
 
     /// Block the temp CAF paths so `AVAudioFile(forWriting:)` throws, driving the

@@ -56,17 +56,18 @@ final class AudioBus: @unchecked Sendable {
     /// Whether a stream-format listener is currently installed on `currentDeviceID`.
     private var formatListenerDeviceID: AudioDeviceID = AudioDeviceID(kAudioObjectUnknown)
 
-    /// Retry tracking for a failed start. Bounded at 3 attempts before giving up loudly.
-    private var startRetryAttempt = 0
+    /// Retry tracking for a failed start. Bounded at 3 attempts before giving up
+    /// loudly; `failures` doubles as the backoff index (1s, 2s, 3s).
     private static let maxStartRetries = 3
+    private var startRetries = RetryBudget(limit: maxStartRetries)
     private var pendingRetryItem: DispatchWorkItem?
 
     /// When the current capture started (halQueue only). Drives the no-frames-ever
     /// recovery: a live IOProc delivers buffers even for digital silence, so zero
     /// callbacks after start means the IOProc is wedged (#64 precursor).
     private var captureStartDate: Date?
-    private var noFrameRecoveryAttempts = 0
     private static let maxNoFrameRecoveries = 2
+    private var noFrameRecoveries = RetryBudget(limit: maxNoFrameRecoveries)
 
     /// Whether the mic is currently in the "no frames for >5s" state (halQueue only).
     /// The health timer ticks every 5s; this makes the store see one `micStalled` on
@@ -147,7 +148,7 @@ final class AudioBus: @unchecked Sendable {
             guard let self else { return }
             switch Self.subscribeDecision(captureRunning: self._running.value) {
             case .startCapture:
-                self.noFrameRecoveryAttempts = 0
+                self.noFrameRecoveries.reset()
                 self.startCaptureLocked(deviceID: requestedDevice)
             case .joinPinnedDevice:
                 busLog.debug("joining pinned device \(self.currentDeviceID, privacy: .public)")
@@ -307,7 +308,7 @@ final class AudioBus: @unchecked Sendable {
         // Success.
         _running.value = true
         _error.value = nil
-        startRetryAttempt = 0
+        startRetries.reset()
         captureStartDate = Date()
         // `isStalled` is deliberately NOT cleared here. A stall is closed by frames
         // arriving again (checkHealthLocked's `else if isStalled` branch), not by the
@@ -357,8 +358,8 @@ final class AudioBus: @unchecked Sendable {
 
         pendingRetryItem?.cancel()
         pendingRetryItem = nil
-        startRetryAttempt = 0
-        noFrameRecoveryAttempts = 0
+        startRetries.reset()
+        noFrameRecoveries.reset()
         captureStartDate = nil
         isStalled = false
 
@@ -415,8 +416,8 @@ final class AudioBus: @unchecked Sendable {
         dispatchPrecondition(condition: .onQueue(halQueue))
 
         // Intentional device change — reset retry state.
-        startRetryAttempt = 0
-        noFrameRecoveryAttempts = 0
+        startRetries.reset()
+        noFrameRecoveries.reset()
         pendingRetryItem?.cancel()
         pendingRetryItem = nil
 
@@ -438,7 +439,10 @@ final class AudioBus: @unchecked Sendable {
         pendingRetryItem?.cancel()
         pendingRetryItem = nil
 
-        guard startRetryAttempt < Self.maxStartRetries else {
+        // The give-up rides the *next* entry, not `noteFailure()`'s return: an
+        // exhausting failure only means the last retry was scheduled, and whether
+        // it worked is not known until it comes back here.
+        guard startRetries.allowsAttempt else {
             let msg = "Audio capture failed after \(Self.maxStartRetries) attempts"
             DiagStore.record(.captureGaveUp(attempts: Self.maxStartRetries))
             busLog.error("capture gave up after \(Self.maxStartRetries, privacy: .public) attempts")
@@ -446,10 +450,10 @@ final class AudioBus: @unchecked Sendable {
             return
         }
 
-        startRetryAttempt += 1
-        let delay = Double(startRetryAttempt) // 1s, 2s, 3s
+        startRetries.noteFailure()
+        let delay = Double(startRetries.failures) // 1s, 2s, 3s
         DiagStore.record(.captureRetryScheduled(
-            attempt: startRetryAttempt,
+            attempt: startRetries.failures,
             maxAttempts: Self.maxStartRetries
         ))
 
@@ -594,7 +598,13 @@ final class AudioBus: @unchecked Sendable {
         let rms = Self.normalizedRMS(from: pcmBuffer)
 
         _lastFrameTime.value = Date()
-        _hasCapturedFrames.value = true
+        // The one fact that proves this device is delivering (#149). `captureStart`
+        // is `AudioDeviceStart` returning noErr, which a wedged IOProc also does —
+        // the no-frames watchdog below fires on exactly such a started device — so
+        // the panel and the notch read recovery from here, not from the start.
+        if _hasCapturedFrames.markTrue() {
+            DiagStore.record(.micFramesFlowing)
+        }
         _hasSignal.value = rms > 1e-6
         _audioLevel.value = min(rms * 25, 1.0)
 
@@ -650,10 +660,10 @@ final class AudioBus: @unchecked Sendable {
         // coreaudiod (#64 precursor: micSamples=0 while system audio flowed). Rebuild it
         // through the serialized path, bounded; then surface the failure loudly.
         guard let started = captureStartDate, Date().timeIntervalSince(started) > 10 else { return }
-        if noFrameRecoveryAttempts < Self.maxNoFrameRecoveries {
-            noFrameRecoveryAttempts += 1
+        if noFrameRecoveries.allowsAttempt {
+            noFrameRecoveries.noteFailure()
             DiagStore.record(.noFramesRecovery(
-                attempt: noFrameRecoveryAttempts,
+                attempt: noFrameRecoveries.failures,
                 maxAttempts: Self.maxNoFrameRecoveries
             ))
             reconfigureLocked(reason: .noFramesEver)

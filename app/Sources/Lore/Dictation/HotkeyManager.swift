@@ -63,6 +63,14 @@ final class HotkeyManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
 
+    /// How many consecutive rebuilds of a dead tap the 5 s health cycle may
+    /// attempt (#149). Three, then it stops until something actually changes.
+    private static let maxTapRepairs = 3
+    /// The live repair budget. Refilled by a real signal only — never by the
+    /// cycle that spends it. See `refillTapRepairBudget`.
+    private var tapRepairs = RetryBudget(limit: maxTapRepairs)
+    private var wakeObserver: NSObjectProtocol?
+
     /// Read-only liveness of the existing tap, for the health panel (#83, #97).
     /// Never creates a tap — reports on the one this manager already owns, so the
     /// panel reads the same tap the hotkey uses rather than installing a second.
@@ -237,7 +245,17 @@ final class HotkeyManager {
             return event
         }
 
+        // A fresh install is a fresh signal (#149).
+        tapRepairs.reset()
         installEventTap()
+
+        // Wake is the other genuine signal (#149): the tap can be refused while
+        // WindowServer is still coming back, and nothing else would try again.
+        wakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated { self?.refillTapRepairBudget() }
+        }
 
         healthMonitorTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -262,6 +280,11 @@ final class HotkeyManager {
 
         healthMonitorTask?.cancel()
         healthMonitorTask = nil
+
+        if let wakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(wakeObserver)
+        }
+        wakeObserver = nil
 
         teardownEventTap()
 
@@ -747,6 +770,38 @@ final class HotkeyManager {
         DiagStore.record(.tapReinstall(outcome: .init(success: eventTap != nil)))
     }
 
+    /// Rebuild a dead tap, bounded (#149; rationale in diagnostics.md §6).
+    ///
+    /// A missing grant is not a fault to retry: `CGEvent.tapCreate` cannot succeed
+    /// without Accessibility and Input Monitoring, so while either reads off we
+    /// attempt nothing at all — no budget spent, no give-up claimed, and the
+    /// permission edge already watched in `runHealthCheck` resumes us the moment
+    /// it flips. The budget then covers only the transient class that a retry can
+    /// actually fix: a post-wake WindowServer refusal, a tap lost to a session
+    /// switch.
+    private func repairEventTap() {
+        guard AXIsProcessTrusted(), CGPreflightListenEventAccess() else { return }
+        guard tapRepairs.allowsAttempt else { return }
+        reinstallEventTap()
+        if eventTap != nil {
+            tapRepairs.reset()
+        } else if tapRepairs.noteFailure() {
+            DiagStore.record(.tapGaveUp(attempts: Self.maxTapRepairs))
+            HotkeyManager.hkLog.error(
+                "[HK] Health: tap rebuild gave up after \(Self.maxTapRepairs, privacy: .public) attempts"
+            )
+        }
+    }
+
+    /// Something changed that a retry could now get past: a permission came back,
+    /// the Mac woke, or the user opened the health panel at the row that says the
+    /// tap is dead. Each is a real signal, never a timer — refill and try at once
+    /// rather than making the user wait out a cycle.
+    func refillTapRepairBudget() {
+        tapRepairs.reset()
+        if eventTap == nil { repairEventTap() }
+    }
+
     // MARK: - Health Monitor
 
     private func runHealthCheck() {
@@ -759,12 +814,12 @@ final class HotkeyManager {
                 // Verify re-enable stuck
                 if !CGEvent.tapIsEnabled(tap: tap) {
                     HotkeyManager.hkLog.error("[HK] Health: re-enable failed, reinstalling tap")
-                    reinstallEventTap()
+                    repairEventTap()
                 }
             }
         } else {
             HotkeyManager.hkLog.error("[HK] Health: event tap is nil, reinstalling")
-            reinstallEventTap()
+            repairEventTap()
         }
 
         // 2. Permissions check. Each permission carries its own edge: a combined
@@ -775,6 +830,7 @@ final class HotkeyManager {
         if axOK != lastAccessibilityOK {
             DiagStore.record(.permissionTransition(permission: .accessibility, granted: axOK))
             if axOK {
+                refillTapRepairBudget()
                 HotkeyManager.hkLog.info("[HK] Health: Accessibility permission restored")
             } else {
                 HotkeyManager.hkLog.error("[HK] Health: Accessibility permission lost (AXIsProcessTrusted = false)")
@@ -784,6 +840,7 @@ final class HotkeyManager {
         if inputOK != lastInputMonitoringOK {
             DiagStore.record(.permissionTransition(permission: .inputMonitoring, granted: inputOK))
             if inputOK {
+                refillTapRepairBudget()
                 HotkeyManager.hkLog.info("[HK] Health: Input Monitoring permission restored")
             } else {
                 HotkeyManager.hkLog.error("[HK] Health: Input Monitoring permission lost (CGPreflightListenEventAccess = false)")

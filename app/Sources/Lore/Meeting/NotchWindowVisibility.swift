@@ -42,10 +42,18 @@ extension NSWindow {
 /// re-fronted ghost is ordered back out (#144); it must never be raised.
 /// Wrapper-side by design: the SPM checkout stays untouched.
 ///
-/// The 500 ms settle assumes the library's rebuild lands within it. Residual:
-/// a rebuild landing later leaves the panel captured (or the ghost fronted)
-/// until the next screen-parameter event or the next present/hover transition
-/// corrects it.
+/// The sweep runs **twice** per notification: once immediately, once after a
+/// 500 ms settle. A ghost is content the user can read, so waiting out the
+/// settle before dealing with one leaves a stale alert on screen for half a
+/// second; the second pass catches a rebuild that lands inside the settle
+/// (#149 — a stale "Recording failed" summon appeared on a healthy process
+/// that had recorded no failure). Residual: a rebuild landing after the settle
+/// waits for the next screen-parameter event or present/hover transition.
+///
+/// `onGhost` runs before the window is touched — and therefore even when the
+/// panel does not exist yet — because dropping the surface's *content* is what
+/// makes a later rebuild harmless. It may fire twice per notification, so the
+/// surface must make it idempotent.
 @MainActor
 final class NotchScreenChangeSweeper {
     /// Written once in init, read only in deinit — never touched concurrently.
@@ -54,9 +62,11 @@ final class NotchScreenChangeSweeper {
     /// - Parameters:
     ///   - isLive: whether the surface currently has content on screen.
     ///   - window: the library panel, or nil before the first show.
+    ///   - onGhost: drop whatever content a rebuild could re-show.
     init(
         isLive: @escaping @MainActor () -> Bool,
-        window: @escaping @MainActor () -> NSWindow?
+        window: @escaping @MainActor () -> NSWindow?,
+        onGhost: @escaping @MainActor () -> Void = {}
     ) {
         observer = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -64,15 +74,24 @@ final class NotchScreenChangeSweeper {
             queue: .main
         ) { _ in
             Task { @MainActor in
+                Self.sweep(isLive: isLive, window: window, onGhost: onGhost)
                 try? await Task.sleep(for: .milliseconds(500))
-                guard let window = window() else { return }
-                if isLive() {
-                    window.applyFullscreenAuxiliaryVisibility()
-                } else {
-                    window.orderOut(nil)
-                }
+                Self.sweep(isLive: isLive, window: window, onGhost: onGhost)
             }
         }
+    }
+
+    private static func sweep(
+        isLive: @MainActor () -> Bool,
+        window: @MainActor () -> NSWindow?,
+        onGhost: @MainActor () -> Void
+    ) {
+        guard isLive() else {
+            onGhost()
+            window()?.orderOut(nil)
+            return
+        }
+        window()?.applyFullscreenAuxiliaryVisibility()
     }
 
     deinit {

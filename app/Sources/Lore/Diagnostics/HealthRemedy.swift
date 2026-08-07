@@ -6,6 +6,11 @@ enum SettingsPane: String, Equatable, Sendable {
     case accessibility
     case inputMonitoring
     case microphone
+    /// "Screen & System Audio Recording" — the pane that gates the Core Audio
+    /// process tap (#149). `Privacy_ScreenCapture` is still the anchor macOS
+    /// answers to; the pane's *title* gained "& System Audio" in macOS 15, and
+    /// the button below uses that title so the user reads what they will see.
+    case screenRecording
 
     var settingsURL: URL? {
         switch self {
@@ -15,6 +20,8 @@ enum SettingsPane: String, Equatable, Sendable {
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ListenEvent")
         case .microphone:
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone")
+        case .screenRecording:
+            return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
         }
     }
 
@@ -23,6 +30,7 @@ enum SettingsPane: String, Equatable, Sendable {
         case .accessibility: return "Open Accessibility"
         case .inputMonitoring: return "Open Input Monitoring"
         case .microphone: return "Open Microphone"
+        case .screenRecording: return "Open Screen & System Audio Recording"
         }
     }
 }
@@ -330,7 +338,13 @@ enum HealthCatalog {
     /// Per-id labels for the expensive-probe card. Exhaustive: a new probe does
     /// not compile until it is given labels here or listed as cheap.
     private struct ExpensiveLabels {
-        let title, okDetail, failDetail, warnDetail, sideEffect: String
+        let title, okDetail, failDetail, warnDetail: String
+        /// What a "Test now" would do to the machine — `nil` for a probe that has
+        /// no on-demand test, whose card then offers no button anywhere.
+        var sideEffect: String? = nil
+        /// A failure with a known cause the panel cannot re-test gets its own
+        /// remedy instead of the shared "Test now" (#149).
+        var failureRemedy: Remedy? = nil
     }
 
     private static func expensiveLabels(_ id: HealthProbeID) -> ExpensiveLabels {
@@ -348,11 +362,14 @@ enum HealthCatalog {
                          failDetail: "Key rejected (HTTP 401)", warnDetail: "Not checked yet.",
                          sideEffect: "makes a network request")
         case .systemAudio:
-            // sideEffect is unused for systemAudio — it has no on-demand test, so
-            // its card never renders a Test-now instruction (see expensiveCopy).
+            // No sideEffect: observable only during a real meeting, so the card
+            // offers no button a press could honour. A failure, though, has one
+            // overwhelmingly likely cause and a remedy to act on now (#149).
             return .init(title: "System-audio capture", okDetail: "Last capture succeeded",
                          failDetail: "Last capture failed", warnDetail: "No meeting recorded yet.",
-                         sideEffect: "observable only during a meeting recording")
+                         failureRemedy: Remedy(
+                            instruction: "macOS gates system-audio capture behind Screen & System Audio Recording — a separate grant from the microphone, and the one a fresh install is missing. Enable \(LoreTheme.wordmark) under Privacy & Security → Screen & System Audio Recording, then start the meeting again.",
+                            actions: [.openSettings(.screenRecording)]))
         case .signing, .diskSpace, .accessibility, .inputMonitoring,
              .tap, .secureInput, .microphone, .asrModel, .vadModel, .openAIKey,
              .notesFolder:
@@ -362,17 +379,16 @@ enum HealthCatalog {
 
     /// Shared shape for the expensive probes: the panel shows the last real
     /// outcome from the event stream plus a "Test now" that warns about the side
-    /// effect. systemAudio is the one exception — it is observable only during a
-    /// real meeting recording (`HealthMonitor.testNow` has no case for it), so its
-    /// card shows the last real outcome with NO button; a button that can't run is
-    /// not honest. It stays `.expensive` in cost — the cost split (#83) is
-    /// unchanged; it simply lacks an on-demand test.
+    /// effect. A probe with no `sideEffect` has no on-demand test — systemAudio is
+    /// observable only during a real meeting (`HealthMonitor.testNow` has no case
+    /// for it), and a button that can't run is not honest. It stays `.expensive`
+    /// in cost — the #83 split is unchanged; it simply lacks a test.
     private static func expensiveCopy(_ result: HealthResult) -> (String, String, Remedy?) {
         let labels = expensiveLabels(result.id)
-        let testable = result.id != .systemAudio
         func remedy(_ lead: String) -> Remedy? {
-            testable ? Remedy(instruction: "\(lead) — \(labels.sideEffect).",
-                              actions: [.testNow(result.id)]) : nil
+            labels.sideEffect.map {
+                Remedy(instruction: "\(lead) — \($0).", actions: [.testNow(result.id)])
+            }
         }
         guard let last = result.lastAttempt else {
             return (labels.title, labels.warnDetail, remedy("Test now"))
@@ -389,7 +405,8 @@ enum HealthCatalog {
         case .unknown:
             return (labels.title, "Inconclusive \(age) — no verdict.", remedy("Test now"))
         case .failed:
-            return (labels.title, "\(labels.failDetail) \(age).", remedy("Test now to re-check"))
+            return (labels.title, "\(labels.failDetail) \(age).",
+                    labels.failureRemedy ?? remedy("Test now to re-check"))
         }
     }
 

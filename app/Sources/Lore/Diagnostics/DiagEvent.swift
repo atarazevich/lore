@@ -161,8 +161,24 @@ enum DiagEvent: Codable, Sendable, Equatable {
     enum SummonTrigger: String, Codable, Sendable, CaseIterable {
         case identityMigration
         case captureFailed
+        /// The system-audio tap, not the microphone (#149) — different remedy,
+        /// so a different sentence.
+        case systemAudioFailed
         case pasteFailed
         case modelLoadFailed
+    }
+
+    /// Why a summon left the screen (#149). Every exit is traced, not only the
+    /// fact of one, because a summon that appeared with no `healthSummonFired`
+    /// behind it is exactly the incident this pays for: `.sweptGhost` is the
+    /// only reason nobody in this app chose — the notch library re-fronted a
+    /// panel on a screen-parameter change and it rendered latched content.
+    enum SummonWithdrawal: String, Codable, Sendable, CaseIterable {
+        case recovered
+        case timedOut
+        case dismissed
+        case displaced
+        case sweptGhost
     }
 
     // MARK: - App
@@ -171,6 +187,12 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// The health notch went up / came down (#140) — without these, summon
     /// history was unrecoverable from events.json.
     case healthSummonFired(trigger: SummonTrigger)
+    /// Which summon left, and why (#149).
+    case healthSummonWithdrawn(trigger: SummonTrigger, reason: SummonWithdrawal)
+    /// Retired (#149): superseded by `healthSummonWithdrawn`, which names the
+    /// trigger and the reason instead of only the fact. Kept so a persisted
+    /// events.json carrying it still decodes rather than being moved aside as
+    /// corrupt — the same reason `tapEventsStalled` survives.
     case healthSummonCleared
 
     // MARK: - Input (hotkey, permissions, paste)
@@ -187,6 +209,9 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// Notification Center's removal).
     case tapEventsStalled(seconds: Int)
     case tapEventsResumed
+    /// The health cycle stopped rebuilding a tap that will not install (#149) —
+    /// otherwise a retry run's end is indistinguishable from the app being quit.
+    case tapGaveUp(attempts: Int)
     case secureInputChanged(active: Bool, holderPID: Int32?)
     /// `eventsCreated` is the only fact this attempt can observe: `CGEvent.post`
     /// returns nothing, so a paste that reached no app is indistinguishable from
@@ -211,6 +236,12 @@ enum DiagEvent: Codable, Sendable, Equatable {
     case micStalled(seconds: Int)
     case micRecovered
     case systemAudioCapture(outcome: Outcome, osStatus: Int32?)
+    /// The mic delivered its first buffer of this capture — the only proof the
+    /// device is live, and so the evidence `.micCapture` reads as ok (#149).
+    case micFramesFlowing
+    /// The system-audio capture stopped retrying (#149). Kept apart from the
+    /// mic's `captureGaveUp` so a summon can name the side that failed.
+    case systemAudioGaveUp(attempts: Int)
     /// Latched: at most one per recording, never one per audio buffer.
     case recordingSaved(outcome: Outcome, frames: Int)
 
@@ -275,18 +306,18 @@ enum DiagEvent: Codable, Sendable, Equatable {
 extension DiagEvent {
     var subsystem: DiagSubsystem {
         switch self {
-        case .appLaunched, .healthSummonFired, .healthSummonCleared:
+        case .appLaunched, .healthSummonFired, .healthSummonWithdrawn, .healthSummonCleared:
             return .app
 
         case .permissionTransition, .tapCreate, .tapReinstall, .tapDisabledByOS,
              .tapDiedDuringRecording, .tapEventsStalled, .tapEventsResumed,
-             .secureInputChanged, .pasteAttempt:
+             .tapGaveUp, .secureInputChanged, .pasteAttempt:
             return .input
 
         case .captureStart, .captureFailed, .captureStopped, .captureRetryScheduled,
              .captureGaveUp, .captureReconfigured, .inputDeviceSelected, .deviceSwitched,
-             .noFramesRecovery, .micStalled, .micRecovered, .systemAudioCapture,
-             .recordingSaved:
+             .noFramesRecovery, .micStalled, .micRecovered, .micFramesFlowing,
+             .systemAudioCapture, .systemAudioGaveUp, .recordingSaved:
             return .audio
 
         case .modelLoad, .modelCacheCleared, .transcribed, .echoSuppressed:
@@ -320,6 +351,7 @@ extension DiagEvent {
         switch self {
         case .appLaunched: return "appLaunched"
         case .healthSummonFired: return "healthSummonFired"
+        case .healthSummonWithdrawn: return "healthSummonWithdrawn"
         case .healthSummonCleared: return "healthSummonCleared"
         case .permissionTransition: return "permissionTransition"
         case .tapCreate: return "tapCreate"
@@ -328,6 +360,7 @@ extension DiagEvent {
         case .tapDiedDuringRecording: return "tapDiedDuringRecording"
         case .tapEventsStalled: return "tapEventsStalled"
         case .tapEventsResumed: return "tapEventsResumed"
+        case .tapGaveUp: return "tapGaveUp"
         case .secureInputChanged: return "secureInputChanged"
         case .pasteAttempt: return "pasteAttempt"
         case .captureStart: return "captureStart"
@@ -341,7 +374,9 @@ extension DiagEvent {
         case .noFramesRecovery: return "noFramesRecovery"
         case .micStalled: return "micStalled"
         case .micRecovered: return "micRecovered"
+        case .micFramesFlowing: return "micFramesFlowing"
         case .systemAudioCapture: return "systemAudioCapture"
+        case .systemAudioGaveUp: return "systemAudioGaveUp"
         case .recordingSaved: return "recordingSaved"
         case .modelLoad: return "modelLoad"
         case .modelCacheCleared: return "modelCacheCleared"
@@ -381,14 +416,37 @@ extension DiagEvent.Outcome {
 
 /// One event plus when it happened. The subsystem is derived, never stored —
 /// it cannot drift from the event it describes.
+///
+/// A record can stand for a *run* of the identical event rather than one
+/// occurrence (#149, diagnostics.md §4). Both fold fields are optional and
+/// therefore absent from a single occurrence's JSON — synthesized `Codable` uses
+/// `encodeIfPresent`/`decodeIfPresent` — so events.json is unchanged for the
+/// ordinary case and a pre-#149 file still decodes.
 struct DiagRecord: Codable, Sendable, Equatable {
     let at: Date
     let event: DiagEvent
+    /// Occurrences folded in; `nil` means the plain one.
+    private(set) var count: Int?
+    /// When the last of them happened; `nil` alongside `count`.
+    private(set) var until: Date?
 
     var subsystem: DiagSubsystem { event.subsystem }
+
+    var occurrences: Int { count ?? 1 }
+
+    /// The most recent occurrence — what an age is measured from.
+    var lastAt: Date { until ?? at }
 
     init(at: Date = Date(), event: DiagEvent) {
         self.at = at
         self.event = event
+    }
+
+    /// Fold another record of the same event into this one. Takes `other`'s
+    /// occurrences rather than assuming one, so re-loading an already-folded
+    /// events.json cannot drop a run's tally.
+    mutating func merge(_ other: DiagRecord) {
+        count = occurrences + other.occurrences
+        until = Swift.max(lastAt, other.lastAt)
     }
 }

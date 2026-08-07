@@ -81,6 +81,97 @@ final class DiagStoreTests: XCTestCase {
         XCTAssertEqual(store.recent(1).first?.subsystem, .input)
     }
 
+    // MARK: - Coalescing (#149)
+
+    /// Three hours of an event firing every five seconds costs one slot, and the
+    /// history before it survives (#149).
+    func testARepeatingEventDoesNotEvictTheHistoryBeforeIt() {
+        let store = DiagStore(directory: directory)
+        store.record(.appLaunched(build: 283))
+        store.record(.modelLoad(model: .asr, outcome: .ok, seconds: 0.78, fromCache: false))
+        store.record(.permissionTransition(permission: .inputMonitoring, granted: false))
+
+        // Three hours at the observed cadence.
+        for _ in 0..<2160 { store.record(.tapCreate(outcome: .failed, osStatus: nil)) }
+
+        let all = store.recent(DiagStore.capacity)
+        XCTAssertEqual(all.count, 4, "three pre-failure facts plus one slot for the loop")
+        XCTAssertEqual(all[0].event, .appLaunched(build: 283))
+        XCTAssertEqual(all[1].event, .modelLoad(model: .asr, outcome: .ok, seconds: 0.78, fromCache: false))
+        XCTAssertEqual(all[2].event, .permissionTransition(permission: .inputMonitoring, granted: false))
+        XCTAssertEqual(all[3].occurrences, 2160)
+    }
+
+    /// Only the newest record folds, so the ring stays a timeline.
+    func testARepeatAfterADifferentEventTakesANewSlot() {
+        let store = DiagStore(directory: directory)
+        store.record(.micRecovered)
+        store.record(.tapDisabledByOS)
+        store.record(.micRecovered)
+
+        XCTAssertEqual(store.recent(DiagStore.capacity).map(\.event),
+                       [.micRecovered, .tapDisabledByOS, .micRecovered])
+    }
+
+    /// A fold keeps the first occurrence's slot and timestamp and carries the
+    /// last — the span, not just a tally.
+    func testACoalescedRecordCarriesFirstAndLastTimestamps() {
+        let store = DiagStore(directory: directory)
+        store.record(.dictationZeroFrames)
+        let first = store.recent(1)[0].at
+        store.record(.dictationZeroFrames)
+        store.record(.dictationZeroFrames)
+
+        let record = store.recent(1)[0]
+        XCTAssertEqual(record.occurrences, 3)
+        XCTAssertEqual(record.at, first, "the record stays at its first occurrence")
+        let last = try! XCTUnwrap(record.until)
+        XCTAssertGreaterThanOrEqual(last, first)
+        XCTAssertEqual(record.lastAt, last)
+    }
+
+    /// A single occurrence stays exactly what it was — no count, no until, and
+    /// events.json unchanged for the ordinary case.
+    func testASingleOccurrenceCarriesNoCoalescingFields() throws {
+        let store = DiagStore(directory: directory)
+        store.record(.micRecovered)
+        let record = store.recent(1)[0]
+        XCTAssertEqual(record.occurrences, 1)
+        XCTAssertNil(record.until)
+        XCTAssertEqual(record.lastAt, record.at)
+
+        store.flush()
+        let json = try String(contentsOf: eventsURL, encoding: .utf8)
+        XCTAssertFalse(json.contains("\"count\""))
+        XCTAssertFalse(json.contains("\"until\""))
+    }
+
+    /// A count survives the disk round trip, and re-loading an already-coalesced
+    /// file does not silently drop a run's tally.
+    func testCoalescedCountsSurviveAReload() {
+        let store = DiagStore(directory: directory)
+        store.record(.appLaunched(build: 7))
+        for _ in 0..<40 { store.record(.historyWriteFailed) }
+        store.flush()
+
+        let reloaded = DiagStore(directory: directory).recent(DiagStore.capacity)
+        XCTAssertEqual(reloaded.count, 2)
+        XCTAssertEqual(reloaded[1].event, .historyWriteFailed)
+        XCTAssertEqual(reloaded[1].occurrences, 40)
+    }
+
+    /// A folded run stays the newest record, so the health panel still reads the
+    /// state the machine is actually in.
+    func testLastWhereStillFindsAFoldedRunAsTheLatest() {
+        let store = DiagStore(directory: directory)
+        store.record(.systemAudioCapture(outcome: .ok, osStatus: nil))
+        for _ in 0..<5 { store.record(.systemAudioCapture(outcome: .failed, osStatus: -1)) }
+
+        let latest = store.last { $0.event.caseName == "systemAudioCapture" }
+        XCTAssertEqual(latest?.event, .systemAudioCapture(outcome: .failed, osStatus: -1))
+        XCTAssertEqual(latest?.occurrences, 5)
+    }
+
     // MARK: - Persistence
 
     func testPersistenceRoundTripSurvivesRestart() {
@@ -215,9 +306,12 @@ final class DiagStoreTests: XCTestCase {
         }
         XCTAssertEqual(group.wait(timeout: .now() + 30), .success)
 
+        // Eight queues emit the same payloads, so occurrences fold into fewer
+        // records (#149). "Nothing lost" is therefore the sum of the counts, not
+        // the number of slots — which is the whole point of the fold.
         let total = queues.count * perQueue
         XCTAssertLessThanOrEqual(total, DiagStore.capacity)
-        XCTAssertEqual(store.recent(DiagStore.capacity).count, total)
+        XCTAssertEqual(store.recent(DiagStore.capacity).occurrences, total)
     }
 
     func testConcurrentRecordAndReadDoNotDeadlock() {
@@ -249,6 +343,6 @@ final class DiagStoreTests: XCTestCase {
             }
         }
         XCTAssertEqual(group.wait(timeout: .now() + 30), .success)
-        XCTAssertEqual(store.recent(DiagStore.capacity * 2).count, DiagStore.capacity)
+        XCTAssertLessThanOrEqual(store.recent(DiagStore.capacity * 2).count, DiagStore.capacity)
     }
 }

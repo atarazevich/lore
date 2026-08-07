@@ -640,15 +640,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             self.healthNotch.onFix = { [weak self] in self?.onShowHealthPanel?() }
             self.healthNotch.present(summon)
         }
+        monitor.onRecovery = { [weak self] trigger in
+            self?.healthNotch.clearSummon(trigger: trigger)
+        }
+        // Opening the panel is a fresh signal for a tap blocked on a permission
+        // the user may have just granted (#149).
+        monitor.refillTapRepairs = { [weak hotkeyManager] in
+            hotkeyManager?.refillTapRepairBudget()
+        }
 
         coordinator.healthMonitor = monitor
 
         // The summon trigger (#140): a summon fires only when a user action just
         // failed, delivered by the event stream itself — no verdict loop. The
         // filter runs on the recording thread; only a match hops to main.
+        // One filter, one hop, in the order the events were recorded (#149): a
+        // failure and the recovery behind it must not race each other onto the
+        // notch, which two independent Tasks would allow.
         DiagStore.shared.setObserver { [weak monitor] event in
-            guard let trigger = HealthMonitor.failureTrigger(for: event) else { return }
-            Task { @MainActor in monitor?.noteFailure(trigger) }
+            guard let signal = HealthMonitor.summonSignal(for: event) else { return }
+            Task { @MainActor in monitor?.note(signal) }
         }
 
         // The #135 acknowledge rode the deleted 5 s cycle; now it rides its own
@@ -661,7 +672,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // screen withdraws itself the same moment — no polling, the ack site
         // drives it.
         signingLedger.onMigrationClosed = { [weak self] in
-            self?.healthNotch.clearIdentitySummon()
+            self?.healthNotch.clearSummon(trigger: .identityMigration)
         }
 
         // Proactive summon (#135): the identity changed since the last launch in

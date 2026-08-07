@@ -33,6 +33,10 @@ struct HealthSummon: Equatable, Sendable {
             return explanation == .microphone
                 ? "Recording failed — microphone access is off"
                 : "Recording failed — the microphone produced no audio"
+        // Never folded into `.captureFailed` (#149): a different grant, so a
+        // different sentence.
+        case .systemAudioFailed:
+            return "Meeting audio incomplete — system audio wasn't captured"
         case .pasteFailed:
             return explanation == .accessibility
                 ? "Paste failed — Accessibility permission is off"
@@ -69,6 +73,15 @@ final class HealthMonitor {
     /// wired to the notch.
     @ObservationIgnored var onSummon: (HealthSummon) -> Void = { _ in }
 
+    /// The same door in reverse: the condition behind a summon just cleared, so
+    /// a notch still claiming it withdraws (#149).
+    @ObservationIgnored var onRecovery: (DiagEvent.SummonTrigger) -> Void = { _ in }
+
+    /// A fresh signal that a tap blocked on a permission may install now — the
+    /// user opened the health panel to fix exactly that (#149). Wired to
+    /// `HotkeyManager`; the timer-driven repair path never calls it.
+    @ObservationIgnored var refillTapRepairs: () -> Void = {}
+
     /// The three expensive "Test now" actions, injected because they reach for
     /// the mic, the model cache and the network. Each records a `DiagEvent`;
     /// `refresh()` afterwards reads the new last-attempt.
@@ -93,6 +106,7 @@ final class HealthMonitor {
     /// publish. The split exists because `refresh()` also runs at launch, and
     /// the notes-leftover check reads a TCC-protected folder (#148).
     func refreshForPanel() {
+        refillTapRepairs()
         verifyNotesLeftover()
         refresh()
     }
@@ -120,28 +134,53 @@ final class HealthMonitor {
         }
     }
 
-    /// The events that mean a user action just failed — the only things allowed
-    /// to summon besides the launch migration. `nonisolated` and cheap: the
-    /// `DiagStore` observer runs this filter on the recording thread and hops to
-    /// the main actor only for a match.
-    nonisolated static func failureTrigger(for event: DiagEvent) -> DiagEvent.SummonTrigger? {
+    /// One event's bearing on one summon: which condition it speaks to, and
+    /// whether it says the condition is over.
+    struct SummonSignal: Equatable, Sendable {
+        let trigger: DiagEvent.SummonTrigger
+        let succeeded: Bool
+    }
+
+    /// The only events that move a summon — a user action that just failed, or
+    /// the one that proves it works again. One table, so a trigger cannot gain a
+    /// failure without a way to clear (rule 2 of `no-false-positives`) and the two
+    /// halves cannot drift. `nonisolated` and cheap: the `DiagStore` observer runs
+    /// it on the recording thread and hops to the main actor only for a match.
+    nonisolated static func summonSignal(for event: DiagEvent) -> SummonSignal? {
         switch event {
+        // AudioBus is mic-only, so its give-up is unambiguously the microphone —
+        // and the system-audio tap next to it is unambiguously not (#149).
         case .captureGaveUp:
-            return .captureFailed
-        case .pasteAttempt(_, false, _):
-            return .pasteFailed
-        case .modelLoad(.asr, .failed, _, _):
-            return .modelLoadFailed
+            return SummonSignal(trigger: .captureFailed, succeeded: false)
+        // Frames arriving, never `captureStart`: `AudioDeviceStart` returns noErr
+        // for the wedged device the no-frames watchdog then gives up on (#149).
+        case .micFramesFlowing:
+            return SummonSignal(trigger: .captureFailed, succeeded: true)
+        // The give-up edge only, so one cause produces one report however many
+        // times an unattended re-drive retried it (#149).
+        case .systemAudioGaveUp:
+            return SummonSignal(trigger: .systemAudioFailed, succeeded: false)
+        case .systemAudioCapture(.ok, _):
+            return SummonSignal(trigger: .systemAudioFailed, succeeded: true)
+        case .pasteAttempt(_, let created, _):
+            return SummonSignal(trigger: .pasteFailed, succeeded: created)
+        case .modelLoad(.asr, let outcome, _, _) where outcome != .unknown:
+            return SummonSignal(trigger: .modelLoadFailed, succeeded: outcome == .ok)
         default:
             return nil
         }
     }
 
-    /// A user action failed: re-probe so the panel is fresh when "Fix it" opens
-    /// it, name the failure, and attach the state bit that explains it.
-    func noteFailure(_ trigger: DiagEvent.SummonTrigger) {
+    /// The single ordered path both halves take: re-probe so the panel is fresh
+    /// behind whatever happens next, then either summon or withdraw. One hop, so
+    /// a present and a clear can never race each other onto the notch.
+    func note(_ signal: SummonSignal) {
         refresh()
-        onSummon(HealthSummon(trigger: trigger, explanation: explanation(for: trigger)))
+        guard !signal.succeeded else {
+            onRecovery(signal.trigger)
+            return
+        }
+        onSummon(HealthSummon(trigger: signal.trigger, explanation: explanation(for: signal.trigger)))
     }
 
     /// The most likely chain link behind a failed action, iff it reads `.failed`
@@ -152,13 +191,15 @@ final class HealthMonitor {
         switch trigger {
         case .captureFailed: candidate = .microphone
         case .pasteFailed: candidate = .accessibility
-        case .modelLoadFailed, .identityMigration: candidate = nil
+        // `.systemAudioFailed` names its own subject already (#149).
+        case .systemAudioFailed, .modelLoadFailed, .identityMigration: candidate = nil
         }
         guard let candidate,
               snapshot.results.first(where: { $0.id == candidate })?.status == .failed
         else { return nil }
         return candidate
     }
+
 
     /// Perform an expensive probe on the user's explicit request, then refresh
     /// so its fresh last-attempt shows. `testing` is held for the row's spinner

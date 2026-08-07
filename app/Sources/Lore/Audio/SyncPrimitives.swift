@@ -31,6 +31,16 @@ final class SyncBool: @unchecked Sendable {
         get { lock.withLock { _value } }
         set { lock.withLock { _value = newValue } }
     }
+
+    /// Set to true, reporting whether this call was the transition. One lock, so
+    /// an edge can be recorded exactly once from the audio IO thread.
+    @discardableResult
+    func markTrue() -> Bool {
+        lock.withLock {
+            defer { _value = true }
+            return !_value
+        }
+    }
 }
 
 /// Simple thread-safe optional Date holder.

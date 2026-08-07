@@ -248,7 +248,13 @@ struct HealthProber {
     private func lastAttempt(_ outcomeOf: (DiagEvent) -> DiagEvent.Outcome?) -> HealthLastAttempt? {
         guard let record = store.last(where: { outcomeOf($0.event) != nil }),
               let outcome = outcomeOf(record.event) else { return nil }
-        return HealthLastAttempt(outcome: outcome, ageSeconds: max(0, Int(now().timeIntervalSince(record.at))))
+        // `lastAt`, not `at`: a coalesced run of identical attempts (#149) is
+        // dated from its first, and the 24 h staleness ceiling would then read a
+        // failure that is still happening as "not tested recently".
+        return HealthLastAttempt(
+            outcome: outcome,
+            ageSeconds: max(0, Int(now().timeIntervalSince(record.lastAt)))
+        )
     }
 
     // MARK: - Event → outcome extractors (static: pure, no captured state)
@@ -265,9 +271,14 @@ struct HealthProber {
         .systemAudio: systemAudioOutcome,
     ]
 
+    /// `.ok` is frames arriving, never `captureStart` (#149): `AudioDeviceStart`
+    /// returns noErr for a wedged IOProc too — that is the device the no-frames
+    /// watchdog gives up on — so a start would certify a mic that delivers
+    /// nothing, and the panel would read green while the notch said it failed.
+    /// The notch reads the same rule in `HealthMonitor.summonSignal`.
     nonisolated private static func micCaptureOutcome(_ event: DiagEvent) -> DiagEvent.Outcome? {
         switch event {
-        case .captureStart: return .ok
+        case .micFramesFlowing: return .ok
         case .captureFailed, .captureGaveUp: return .failed
         default: return nil
         }

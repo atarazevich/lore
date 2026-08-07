@@ -185,10 +185,27 @@ final class HealthCatalogTests: XCTestCase {
         XCTAssertEqual(HealthCatalog.relativeAge(60), "1 min ago")
     }
 
+    /// #149: the row reported "Last capture failed" and named no way out. A
+    /// failed system-audio capture now points at the grant that gates the tap —
+    /// and still offers no Test-now, which it genuinely cannot run.
+    func testSystemAudioFailureExplainsTheGrantInsteadOfOfferingATestItCannotRun() {
+        let attempt = HealthLastAttempt(outcome: .failed, ageSeconds: 60)
+        let remedy = try! XCTUnwrap(item(.systemAudio, .failed, lastAttempt: attempt).remedy)
+        XCTAssertEqual(remedy.actions, [.openSettings(.screenRecording)])
+        XCTAssertTrue(remedy.instruction.contains("Screen & System Audio Recording"))
+        XCTAssertFalse(remedy.actions.contains(.testNow(.systemAudio)))
+    }
+
+    /// A system-audio capture that has never run is still not an accusation: no
+    /// remedy, no button, just "no meeting recorded yet".
+    func testSystemAudioWithoutHistoryStillOffersNothing() {
+        XCTAssertNil(item(.systemAudio, .warning, lastAttempt: nil).remedy)
+    }
+
     // MARK: - Settings panes deep-link to the documented scheme
 
     func testSettingsPanesResolveToSystemSettingsURLs() {
-        for pane in [SettingsPane.accessibility, .inputMonitoring, .microphone] {
+        for pane in [SettingsPane.accessibility, .inputMonitoring, .microphone, .screenRecording] {
             let url = try! XCTUnwrap(pane.settingsURL)
             XCTAssertEqual(url.scheme, "x-apple.systempreferences")
         }

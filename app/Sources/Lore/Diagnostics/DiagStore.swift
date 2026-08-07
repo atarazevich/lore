@@ -12,6 +12,10 @@ import os
 /// background serial queue, at most one write per `flushInterval`, so a burst of
 /// events costs one `asyncAfter` rather than one per event.
 ///
+/// **Repeats do not evict history** (#149, diagnostics.md §4): an event identical
+/// to the newest record folds into it as a count plus a last-seen timestamp
+/// instead of taking a slot. Still typed, still no free-form string (#82).
+///
 /// **Initialization.** The lazy `static let shared` decodes the persisted ring —
 /// real disk I/O. `DiagStore.prepare()` forces that to happen on the main thread
 /// at launch, *before* any capture path exists, so no `record()` from `halQueue`
@@ -56,7 +60,19 @@ final class DiagStore: @unchecked Sendable {
         /// True while a coalesced flush is already scheduled.
         var flushScheduled = false
 
+        /// Fold a consecutive repeat into the newest record, or take a fresh slot.
+        ///
+        /// Only the newest record, so a fold always touches the tail and slot
+        /// order stays last-seen order — reaching further back would let a repeat
+        /// land behind an unrelated newer event, and "what happened after this
+        /// point" is what the ring is for. A repeating *cycle* of distinct events
+        /// is bounded at its source (`RetryBudget`) instead.
         mutating func append(_ record: DiagRecord) {
+            let newest = (next - 1 + slots.count) % slots.count
+            if count > 0, slots[newest]?.event == record.event {
+                slots[newest]?.merge(record)
+                return
+            }
             slots[next] = record
             next = (next + 1) % slots.count
             count = Swift.min(count + 1, slots.count)
@@ -147,7 +163,8 @@ final class DiagStore: @unchecked Sendable {
     }
 
     /// The latest event matching `predicate` — how the health panel asks
-    /// "what happened the last time we tried to capture?".
+    /// "what happened the last time we tried to capture?". Slot order is
+    /// last-seen order (see `append`), so the last match is the latest one.
     func last(where predicate: (DiagRecord) -> Bool) -> DiagRecord? {
         state.withLock { $0.chronological }.last(where: predicate)
     }

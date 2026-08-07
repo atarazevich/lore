@@ -396,16 +396,23 @@ final class HealthProberTests: XCTestCase {
         XCTAssertNil(summoned, "state bits explain failures; they must not trigger summons")
     }
 
-    /// A failed user action does: `noteFailure` re-probes and summons, naming
-    /// the trigger.
-    func testAFailedUserActionSummonsWithItsTrigger() {
+    /// A failed user action does: `note` re-probes and summons, naming the
+    /// trigger — and the same door in reverse withdraws instead of summoning.
+    func testAFailedUserActionSummonsWithItsTriggerAndARecoveryWithdraws() {
         let monitor = HealthMonitor(prober: prober(alive: true, stalled: false))
         var summoned: HealthSummon?
+        var cleared: DiagEvent.SummonTrigger?
         monitor.onSummon = { summoned = $0 }
+        monitor.onRecovery = { cleared = $0 }
 
-        monitor.noteFailure(.captureFailed)
-
+        monitor.note(.init(trigger: .captureFailed, succeeded: false))
         XCTAssertEqual(summoned?.trigger, .captureFailed)
+        XCTAssertNil(cleared)
+
+        summoned = nil
+        monitor.note(.init(trigger: .captureFailed, succeeded: true))
+        XCTAssertEqual(cleared, .captureFailed)
+        XCTAssertNil(summoned, "a recovery must never summon")
     }
 
     // MARK: - #140: the age ceiling on expensive outcomes
