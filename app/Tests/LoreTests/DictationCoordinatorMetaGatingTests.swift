@@ -47,6 +47,7 @@ final class DictationCoordinatorMetaGatingTests: XCTestCase {
             secretStore: .ephemeral,
             defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("DictationCoordinatorMetaGatingTests"),
+            legacyNotesDirectories: [],
             runMigrations: false
         )
         let settings = SettingsStore(storage: storage)

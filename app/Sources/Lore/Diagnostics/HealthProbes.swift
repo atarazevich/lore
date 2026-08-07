@@ -36,7 +36,7 @@ struct HealthProber {
     /// filesystem: the folder it names is in `~/Documents`, and probing runs at
     /// launch. `HealthMonitor.verifyNotesLeftover` does the real check when the
     /// panel is on screen. Unwired defaults to silence, never to a claim.
-    var readNotesLeftover: () -> String?
+    var readNotesLeftover: () -> NotesLeftover?
     var store: DiagStore
     var now: () -> Date
 
@@ -45,7 +45,7 @@ struct HealthProber {
         readSecureInput: @escaping () -> SecureInput.State = SecureInput.read,
         hasOpenAIKey: @escaping () -> Bool,
         signingLedger: SigningIdentityLedger? = nil,
-        readNotesLeftover: @escaping () -> String? = { nil },
+        readNotesLeftover: @escaping () -> NotesLeftover? = { nil },
         store: DiagStore = .shared,
         now: @escaping () -> Date = Date.init
     ) {
@@ -64,9 +64,10 @@ struct HealthProber {
         let result: HealthResult
         var holder: SecureInput.Attribution?
         var teamID: String?
-        /// The leftover folder's path (#148) — the row names it and its button
-        /// reveals it, and like the holder name it never reaches the snapshot.
-        var notesLeftover: String?
+        /// The leftover folder and its cause (#148) — the row names it, its
+        /// button reveals it, and its remedy differs by cause. Like the holder
+        /// name, none of it reaches the snapshot.
+        var notesLeftover: NotesLeftover?
     }
 
     /// The snapshot and the renderable items in one pass — the monitor uses this
@@ -92,7 +93,7 @@ struct HealthProber {
                 secureInputHolder: reading.holder,
                 teamID: reading.teamID,
                 secureInputActive: [.tap, .secureInput].contains(reading.result.id) && secureInput.active,
-                notesLeftoverPath: reading.notesLeftover
+                notesLeftover: reading.notesLeftover
             )
         }
         return (snapshot, items)

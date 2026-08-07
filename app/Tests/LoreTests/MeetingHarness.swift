@@ -50,6 +50,7 @@ struct MeetingHarness {
             defaults: defaults,
             secretStore: .ephemeral,
             defaultNotesDirectory: notesDirectory,
+            legacyNotesDirectories: [],
             runMigrations: false
         )
         return (root, notesDirectory, defaults, AppSettings(storage: storage))

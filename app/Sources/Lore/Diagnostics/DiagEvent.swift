@@ -149,6 +149,12 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// event per launch forever would evict the trace it belongs to.
     enum NotesMigration: String, Codable, Sendable, CaseIterable {
         case alreadyDone
+        /// The setting already names the app's own folder while the marker is
+        /// still down — a launch killed between the move's repoint and its
+        /// marker. Recorded (unlike `alreadyDone`, which is every later launch)
+        /// and deliberately not `customPathRespected`: the app's own folder is
+        /// never traced as the user's choice.
+        case alreadyAtTarget
         case freshInstall
         case customPathRespected
         case nothingToMove
@@ -284,12 +290,18 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// recording one per dictation would crowd the ring.
     case historyWriteFailed
     case historyMigrated(entries: Int, written: Int)
+    /// The move began, with the number of entries it is about to walk (#148).
+    /// The pair to `notesFolderMigrated`: a move that blocks — a directory of
+    /// iCloud placeholders is accepted as able to — leaves this and no
+    /// completion, which is the only way to tell a stuck move from a launch
+    /// that had nothing to do (`no-false-positives.md` §5).
+    case notesFolderMoveStarted(entries: Int)
     /// The one-time notes-folder move into the app's domain (#148), on every
     /// branch that decided something — a migration that cannot be re-run has
     /// to stay answerable afterwards. A disposition and counts; never the
     /// folder, which embeds the user's home directory.
     case notesFolderMigrated(
-        disposition: NotesMigration, moved: Int, leftBehind: Int, unverified: Int
+        disposition: NotesMigration, moved: Int, leftBehind: Int, unverified: Int, evicted: Int
     )
     /// The leftovers the move reported are gone, so the health row withdraws
     /// itself. The clear half of the fire/clear pair the no-false-positives
@@ -335,8 +347,9 @@ extension DiagEvent {
              .notificationAuthorization, .notificationPosted:
             return .meetings
 
-        case .historyWriteFailed, .historyMigrated, .notesFolderMigrated,
-             .notesFolderLeftoverCleared, .corruptFileAside, .sessionImportFailed:
+        case .historyWriteFailed, .historyMigrated, .notesFolderMoveStarted,
+             .notesFolderMigrated, .notesFolderLeftoverCleared, .corruptFileAside,
+             .sessionImportFailed:
             return .storage
         }
     }
@@ -398,6 +411,7 @@ extension DiagEvent {
         case .notificationPosted: return "notificationPosted"
         case .historyWriteFailed: return "historyWriteFailed"
         case .historyMigrated: return "historyMigrated"
+        case .notesFolderMoveStarted: return "notesFolderMoveStarted"
         case .notesFolderMigrated: return "notesFolderMigrated"
         case .notesFolderLeftoverCleared: return "notesFolderLeftoverCleared"
         case .corruptFileAside: return "corruptFileAside"

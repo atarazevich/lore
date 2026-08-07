@@ -614,7 +614,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             readTapLiveness: { hotkeyManager.tapLiveness },
             hasOpenAIKey: { !settings.openaiApiKey.isEmpty },
             signingLedger: signingLedger,
-            readNotesLeftover: { NotesFolderMigration.pendingLeftoverPath(defaults: defaults) }
+            readNotesLeftover: { NotesFolderMigration.pendingLeftover(defaults: defaults) }
         )
         let monitor = HealthMonitor(prober: prober)
         monitor.verifyNotesLeftover = { NotesFolderMigration.verifyLeftover(defaults: defaults) }

@@ -486,10 +486,13 @@ final class SettingsStore {
         let defaults = storage.defaults
 
         // One-time migrations from previous bundle IDs. The notes move (#148)
-        // runs FIRST, load-bearing: it reads a fresh install off the *absence*
-        // of keys the two below write on every launch.
+        // *decides* FIRST, load-bearing: it reads a fresh install off the
+        // *absence* of keys the two below write on every launch. The decision is
+        // UserDefaults-only; the folder move it may return starts at the end of
+        // this init and finishes off the launch path.
+        var notesMove: NotesFolderMigration.PendingMove?
         if storage.runMigrations {
-            NotesFolderMigration.run(
+            notesMove = NotesFolderMigration.decide(
                 defaults: defaults,
                 target: storage.defaultNotesDirectory,
                 legacyDefaults: storage.legacyNotesDirectories
@@ -608,7 +611,10 @@ final class SettingsStore {
         self._hasSeenLaunchAtLoginSuggestion = defaults.bool(forKey: "hasSeenLaunchAtLoginSuggestion")
 
         // #148: the notes folder is created at first use, not here — creating
-        // it at launch is what asked for Documents access.
+        // it at launch is what asked for Documents access. A legacy folder to
+        // empty starts moving now and lands off the launch path, repointing
+        // this setting when it does.
+        notesMove?.start { [weak self] path in self?.notesFolderPath = path }
     }
 
     // MARK: - Computed Properties

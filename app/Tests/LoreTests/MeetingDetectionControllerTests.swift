@@ -14,6 +14,7 @@ final class MeetingDetectionControllerTests: XCTestCase {
             secretStore: .ephemeral,
             defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent(suiteName),
+            legacyNotesDirectories: [],
             runMigrations: false
         ))
     }

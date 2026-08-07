@@ -69,6 +69,7 @@ final class DictationRetryTests: XCTestCase {
             secretStore: .ephemeral,
             defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("DictationRetryTests"),
+            legacyNotesDirectories: [],
             runMigrations: false
         )
         let settings = SettingsStore(storage: storage)

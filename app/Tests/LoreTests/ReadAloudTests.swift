@@ -463,6 +463,7 @@ final class ReadAloudTests: XCTestCase {
             secretStore: secretStore,
             defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("ReadAloudTests"),
+            legacyNotesDirectories: [],
             runMigrations: false
         )
         return SettingsStore(storage: storage)

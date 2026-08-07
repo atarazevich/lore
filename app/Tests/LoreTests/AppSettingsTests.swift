@@ -16,6 +16,7 @@ final class AppSettingsTests: XCTestCase {
             secretStore: .ephemeral,
             defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("AppSettingsTests"),
+            legacyNotesDirectories: [],
             runMigrations: false
         )
         return AppSettings(storage: storage)

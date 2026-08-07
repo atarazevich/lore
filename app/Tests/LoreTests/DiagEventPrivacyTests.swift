@@ -62,7 +62,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case detectionSignal, detectionAppScan, detectionPrompt
         case notificationAuthorization, notificationPosted
         case historyWriteFailed, historyMigrated, corruptFileAside, sessionImportFailed
-        case notesFolderMigrated, notesFolderLeftoverCleared
+        case notesFolderMoveStarted, notesFolderMigrated, notesFolderLeftoverCleared
     }
 
     /// Exhaustive over `DiagEvent`. The compile-time forcing function in the test
@@ -118,6 +118,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .notificationPosted: return .notificationPosted
         case .historyWriteFailed: return .historyWriteFailed
         case .historyMigrated: return .historyMigrated
+        case .notesFolderMoveStarted: return .notesFolderMoveStarted
         case .notesFolderMigrated: return .notesFolderMigrated
         case .notesFolderLeftoverCleared: return .notesFolderLeftoverCleared
         case .corruptFileAside: return .corruptFileAside
@@ -203,9 +204,11 @@ final class DiagEventPrivacyTests: XCTestCase {
 
         case .historyWriteFailed: return .historyWriteFailed
         case .historyMigrated: return .historyMigrated(entries: .max, written: 0)
+        case .notesFolderMoveStarted: return .notesFolderMoveStarted(entries: .max)
         case .notesFolderMigrated:
             return .notesFolderMigrated(
-                disposition: .customPathRespected, moved: .max, leftBehind: .max, unverified: .max
+                disposition: .customPathRespected, moved: .max, leftBehind: .max,
+                unverified: .max, evicted: .max
             )
         case .notesFolderLeftoverCleared: return .notesFolderLeftoverCleared
         case .corruptFileAside: return .corruptFileAside(artifact: .chatJSON)

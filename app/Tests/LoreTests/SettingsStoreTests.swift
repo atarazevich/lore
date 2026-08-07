@@ -28,6 +28,7 @@ final class SettingsStoreTests: XCTestCase {
             secretStore: secretStore,
             defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
                 .appendingPathComponent("SettingsStoreTests"),
+            legacyNotesDirectories: [],
             runMigrations: false
         )
         return SettingsStore(storage: storage)
@@ -281,6 +282,7 @@ final class SettingsStoreTests: XCTestCase {
             defaults: makeSuite(),
             secretStore: .ephemeral,
             defaultNotesDirectory: folder,
+            legacyNotesDirectories: [],
             runMigrations: false
         )
 
@@ -291,25 +293,33 @@ final class SettingsStoreTests: XCTestCase {
                        "launching must not create the notes folder — first use does")
     }
 
-    /// The same invariant with the migrations actually running — the path that
-    /// *can* break it. The legacy folders are temp (injected), and the two
-    /// bundle-migration markers are pre-set so nothing outside this test's
-    /// directories is read: they double as the earlier-install evidence the
-    /// notes move needs, so this is the upgrade case end to end.
-    func testInitWithMigrationsMovesTheLegacyFolderAndCreatesNothingElse() throws {
+    /// One legacy-folder upgrade wired the way the app wires it: temp folders
+    /// injected as the legacy defaults, an ephemeral suite, migrations on.
+    /// `storedNotesPath` picks the two shapes an upgrade comes in — the setting
+    /// naming the legacy folder, or no setting at all with the app's old
+    /// default in force (where the bundle markers are the earlier-install
+    /// evidence the move needs).
+    private func migratingStore(
+        legacyName: String,
+        storedNotesPath: Bool
+    ) throws -> (store: SettingsStore, suite: UserDefaults, legacy: URL, target: URL, untouched: URL) {
         let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
             .appendingPathComponent("SettingsStoreMigration-\(UUID().uuidString)", isDirectory: true)
-        let legacy = root.appendingPathComponent("Documents-Lore", isDirectory: true)
+        let legacy = root.appendingPathComponent(legacyName, isDirectory: true)
         let target = root.appendingPathComponent("AppSupport-Notes", isDirectory: true)
-        let untouched = root.appendingPathComponent("Documents-OpenGranola", isDirectory: true)
-        defer { try? FileManager.default.removeItem(at: root) }
+        let untouched = root.appendingPathComponent("Documents-Unused", isDirectory: true)
+        addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
         try "# Standup".write(to: legacy.appendingPathComponent("2026-08-01-standup.md"),
                               atomically: true, encoding: .utf8)
 
         let suite = makeSuite()
-        suite.set(true, forKey: "didMigrateFromOnTheSpot")
-        suite.set(true, forKey: "didMigrateFromOpenGranola")
+        if storedNotesPath {
+            suite.set(legacy.path, forKey: NotesFolderMigration.notesPathKey)
+        } else {
+            suite.set(true, forKey: "didMigrateFromOnTheSpot")
+            suite.set(true, forKey: "didMigrateFromOpenGranola")
+        }
         let store = SettingsStore(storage: SettingsStorage(
             defaults: suite,
             secretStore: .ephemeral,
@@ -317,14 +327,44 @@ final class SettingsStoreTests: XCTestCase {
             legacyNotesDirectories: [legacy, untouched],
             runMigrations: true
         ))
+        return (store, suite, legacy, target, untouched)
+    }
 
-        XCTAssertEqual(store.notesFolderPath, target.path)
+    /// The launch-path invariant with the migrations actually running — the
+    /// path that *can* break it. Nothing outside this test's own directories is
+    /// read, so this is the upgrade case end to end.
+    func testInitWithMigrationsMovesTheLegacyFolderAndCreatesNothingElse() async throws {
+        let f = try migratingStore(legacyName: "Documents-Lore", storedNotesPath: false)
+
+        XCTAssertEqual(f.store.notesFolderPath, f.target.path)
+        let migrated = await waitUntil { f.suite.bool(forKey: NotesFolderMigration.markerKey) }
+        XCTAssertTrue(migrated, "the move runs after launch, but it does run")
         XCTAssertTrue(FileManager.default.fileExists(
-            atPath: target.appendingPathComponent("2026-08-01-standup.md").path))
-        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path),
-                       "moved, not copied")
-        XCTAssertFalse(FileManager.default.fileExists(atPath: untouched.path),
+            atPath: f.target.appendingPathComponent("2026-08-01-standup.md").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.legacy.path), "moved, not copied")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: f.untouched.path),
                        "a legacy folder that was not in use is never created")
+    }
+
+    /// The 2026-08-07 field failure, pinned: `init` used to move the folder
+    /// inline and blocked there for minutes on iCloud-evicted files.
+    ///
+    /// The assertion is an ordering one, and exact rather than timed:
+    /// `notesFolderPath` is read once in `init`, and the only thing that can
+    /// change it afterwards is the move's repoint, which runs on the main actor
+    /// — the actor this test holds until it awaits. Seeing the *old* path here
+    /// means `init` returned without the move; the new one would mean it waited.
+    func testInitReturnsBeforeTheMoveAndRepointsWhenItLands() async throws {
+        let f = try migratingStore(legacyName: "Documents-OpenGranola", storedNotesPath: true)
+
+        XCTAssertEqual(f.store.notesFolderPath, f.legacy.path,
+                       "init returned with the pre-move path: it did not wait for the move")
+
+        let repointed = await waitUntil { f.store.notesFolderPath == f.target.path }
+        XCTAssertTrue(repointed, "the move lands off the launch path and repoints the setting")
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: f.target.appendingPathComponent("2026-08-01-standup.md").path))
+        XCTAssertTrue(f.suite.bool(forKey: NotesFolderMigration.markerKey))
     }
 
     func testLiveStorageDefaultsToTheAppsOwnFolder() {

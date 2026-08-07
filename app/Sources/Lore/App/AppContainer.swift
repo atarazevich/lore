@@ -98,6 +98,7 @@ final class AppContainer {
                 defaults: defaults,
                 secretStore: .ephemeral,
                 defaultNotesDirectory: notesDirectory,
+                legacyNotesDirectories: [],
                 runMigrations: false
             )
             let settings = AppSettings(storage: storage)

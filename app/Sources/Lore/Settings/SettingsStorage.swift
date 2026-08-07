@@ -37,10 +37,10 @@ struct SettingsStorage {
     let defaults: UserDefaults
     let secretStore: AppSecretStore
     let defaultNotesDirectory: URL
-    /// The folders the #148 move may take notes *from*. Injected like every
-    /// other location here so a test drives the migration through the real
-    /// `SettingsStore.init` without the user's `~/Documents` as a hidden input.
-    var legacyNotesDirectories: [URL] = NotesFolder.legacyDefaults
+    /// The folders the #148 move may take notes *from*. No default on purpose:
+    /// the real value is the owner's `~/Documents`, so a test that forgot to
+    /// name its own would list it. Required here, it cannot be forgotten.
+    let legacyNotesDirectories: [URL]
     let runMigrations: Bool
 
     static func live(defaults: UserDefaults = .standard) -> SettingsStorage {
@@ -51,6 +51,7 @@ struct SettingsStorage {
             // app created at launch, which is what made a fresh install ask
             // for Documents access before the user had done anything.
             defaultNotesDirectory: NotesFolder.applicationSupportDefault,
+            legacyNotesDirectories: NotesFolder.legacyDefaults,
             runMigrations: true
         )
     }

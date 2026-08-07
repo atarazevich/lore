@@ -25,7 +25,7 @@ final class HealthProberTests: XCTestCase {
     /// override them.
     private func prober(
         alive: Bool, stalled: Bool, secureInput: Bool = false,
-        notesLeftover: String? = nil,
+        notesLeftover: NotesLeftover? = nil,
         store: DiagStore? = nil, now: @escaping () -> Date = Date.init
     ) -> HealthProber {
         HealthProber(
@@ -457,7 +457,8 @@ final class HealthProberTests: XCTestCase {
         XCTAssertEqual(clean.status, .ok)
 
         let (snapshot, items) = prober(
-            alive: true, stalled: false, notesLeftover: "/Users/x/Documents/Lore"
+            alive: true, stalled: false,
+            notesLeftover: NotesLeftover(path: "/Users/x/Documents/Lore", hasEvicted: false)
         ).probe()
         let row = snapshot.results.first { $0.id == .notesFolder }!
         // A warning, not a failure: both copies of every file still exist.
@@ -467,11 +468,31 @@ final class HealthProberTests: XCTestCase {
         XCTAssertNotNil(item.remedy)
     }
 
+    /// The cause picks the instruction. An iCloud placeholder is this Mac's only
+    /// reference to the recording behind it, so its remedy must never propose
+    /// deleting anything — the collision remedy, which does, must not be reused.
+    func testEvictedLeftoverGetsARemedyThatNeverSaysDelete() throws {
+        func instruction(hasEvicted: Bool) -> String {
+            let items = prober(
+                alive: true, stalled: false,
+                notesLeftover: NotesLeftover(path: "/Users/x/Documents/Lore", hasEvicted: hasEvicted)
+            ).probe().items
+            return items.first { $0.id == .notesFolder }?.remedy?.instruction ?? ""
+        }
+
+        let evicted = instruction(hasEvicted: true)
+        XCTAssertTrue(evicted.contains("iCloud"), evicted)
+        XCTAssertFalse(evicted.lowercased().contains("delete"), evicted)
+        XCTAssertTrue(instruction(hasEvicted: false).lowercased().contains("delete"),
+                      "a duplicate left by a name collision may still be deleted")
+    }
+
     /// The row is not PII-carrying: the leftover *path* drives the verdict but
     /// never rides on the serializable result (design §4).
     func testNotesFolderRowCarriesNoPathInTheSnapshot() throws {
         let snapshot = prober(
-            alive: true, stalled: false, notesLeftover: "~/Documents/Lore"
+            alive: true, stalled: false,
+            notesLeftover: NotesLeftover(path: "~/Documents/Lore", hasEvicted: false)
         ).probe().snapshot
         let json = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
         XCTAssertFalse(json.contains("sam"), json)

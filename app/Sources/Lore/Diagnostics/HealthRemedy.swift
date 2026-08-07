@@ -105,19 +105,19 @@ enum HealthCatalog {
     ///     (#94). The tap remedy points at it instead of offering a useless
     ///     restart. Also set for the `.secureInput` row itself, whose ok copy must
     ///     not read "Inactive" while the flag is up (benign locked console, #98).
-    ///   - notesLeftoverPath: the folder the #148 move could not empty — named
-    ///     in the detail line and revealed by the remedy's button, machine-local
-    ///     like the holder name and never serialized.
+    ///   - notesLeftover: the folder the #148 move could not empty and why —
+    ///     named in the detail line, revealed by the remedy's button, and the
+    ///     cause picks the remedy. Machine-local, never serialized.
     static func describe(
         _ result: HealthResult,
         secureInputHolder: SecureInput.Attribution? = nil,
         teamID: String? = nil,
         secureInputActive: Bool = false,
-        notesLeftoverPath: String? = nil
+        notesLeftover: NotesLeftover? = nil
     ) -> HealthItem {
         let (title, detail, remedy) = copy(
             for: result, holder: secureInputHolder, teamID: teamID,
-            secureInputActive: secureInputActive, notesLeftoverPath: notesLeftoverPath
+            secureInputActive: secureInputActive, notesLeftover: notesLeftover
         )
         return HealthItem(result: result, title: title, detail: detail, remedy: remedy)
     }
@@ -127,7 +127,7 @@ enum HealthCatalog {
         holder: SecureInput.Attribution?,
         teamID: String?,
         secureInputActive: Bool,
-        notesLeftoverPath: String?
+        notesLeftover: NotesLeftover?
     ) -> (title: String, detail: String, remedy: Remedy?) {
         // Expensive probes share one card shape (last outcome + Test now),
         // dispatched by `cost` so a new expensive probe can't land in the cheap
@@ -319,13 +319,18 @@ enum HealthCatalog {
         case .notesFolder:
             let title = "Notes folder"
             if ok { return (title, "Meeting notes are stored inside \(LoreTheme.wordmark)'s own folder.", nil) }
-            // Never phrased as loss: both copies of every file still exist, and
-            // the row withdraws itself once that folder is empty.
-            let folder = notesLeftoverPath.map { " (\(($0 as NSString).abbreviatingWithTildeInPath))" } ?? ""
+            // Never phrased as loss: nothing was deleted, and the row withdraws
+            // itself once that folder is empty. The cause picks the instruction —
+            // an iCloud placeholder is this Mac's only handle on the recording,
+            // so that copy never suggests deleting anything.
+            let folder = notesLeftover.map { " (\(($0.path as NSString).abbreviatingWithTildeInPath))" } ?? ""
+            let instruction = notesLeftover?.hasEvicted == true
+                ? "Those files are stored in iCloud and haven't been downloaded to this Mac, so \(LoreTheme.wordmark) left them where they are rather than pulling them down. Open the folder and download them, then move them into the new notes folder — or leave them; nothing else is waiting on it."
+                : "\(LoreTheme.wordmark) now keeps meeting notes in its own folder. A few files there had the same name as files already in the new one, so both copies were kept. Move or delete the leftovers and this row clears itself."
             return (title,
                     "Some meeting files couldn't be moved out of your old notes folder\(folder) — they're still there, nothing was deleted.",
-                    Remedy(instruction: "\(LoreTheme.wordmark) now keeps meeting notes in its own folder. A few files in the old location had the same name as files in the new one, so both copies were kept. Move or delete the leftovers and this row clears itself.",
-                           actions: notesLeftoverPath.map { [.revealInFinder($0)] } ?? []))
+                    Remedy(instruction: instruction,
+                           actions: notesLeftover.map { [.revealInFinder($0.path)] } ?? []))
 
         // Expensive probes are dispatched by cost at the top of `copy`; this arm
         // is unreachable but keeps the switch exhaustive, so a new expensive
