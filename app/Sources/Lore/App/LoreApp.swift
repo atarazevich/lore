@@ -605,13 +605,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // The signing-identity migration (#135, rationale on
         // `SigningIdentityLedger`) rides on the prober; the monitor reads it
         // from there.
-        let signingLedger = SigningIdentityLedger(defaults: container?.defaults ?? .standard)
+        // One defaults domain for the whole seam — the same one `AppSettings`
+        // was built on, so the notes-migration marker (#148) is read from where
+        // the migration wrote it, and the row and its clear cannot disagree.
+        let defaults = container?.defaults ?? .standard
+        let signingLedger = SigningIdentityLedger(defaults: defaults)
         let prober = HealthProber(
             readTapLiveness: { hotkeyManager.tapLiveness },
             hasOpenAIKey: { !settings.openaiApiKey.isEmpty },
-            signingLedger: signingLedger
+            signingLedger: signingLedger,
+            readNotesLeftover: { NotesFolderMigration.pendingLeftoverPath(defaults: defaults) }
         )
         let monitor = HealthMonitor(prober: prober)
+        monitor.verifyNotesLeftover = { NotesFolderMigration.verifyLeftover(defaults: defaults) }
 
         let audioBus = container?.audioBus
         monitor.runMicCaptureTest = {

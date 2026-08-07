@@ -75,6 +75,10 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
     case openAILiveness
     // Meetings
     case systemAudio
+    /// The #148 notes move could not empty the legacy folder — some meeting
+    /// files are still in ~/Documents. Silent (and filesystem-free) unless the
+    /// migration actually left something behind.
+    case notesFolder
 
     var section: HealthSection {
         switch self {
@@ -83,7 +87,7 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
         case .microphone, .micCapture: return .audio
         case .asrModel, .vadModel, .modelWarmup: return .transcription
         case .openAIKey, .openAILiveness: return .cleanup
-        case .systemAudio: return .meetings
+        case .systemAudio, .notesFolder: return .meetings
         }
     }
 
@@ -133,6 +137,7 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
         case .openAIKey: return "OpenAI key"
         case .openAILiveness: return "OpenAI"
         case .systemAudio: return "System audio"
+        case .notesFolder: return "Notes folder"
         }
     }
 }

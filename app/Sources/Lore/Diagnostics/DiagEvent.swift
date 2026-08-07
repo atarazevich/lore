@@ -144,6 +144,17 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case eventsJSON
     }
 
+    /// How the one-time notes-folder move (#148) ended. `alreadyDone` is the
+    /// one value never emitted: it is every launch after the first, and one
+    /// event per launch forever would evict the trace it belongs to.
+    enum NotesMigration: String, Codable, Sendable, CaseIterable {
+        case alreadyDone
+        case freshInstall
+        case customPathRespected
+        case nothingToMove
+        case moved
+    }
+
     /// What summoned the health notch (#140): a user action that just failed, or
     /// the launch identity migration (#135). Never a bare state bit — permission
     /// flags and secure input are explanations, not triggers.
@@ -242,6 +253,17 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// recording one per dictation would crowd the ring.
     case historyWriteFailed
     case historyMigrated(entries: Int, written: Int)
+    /// The one-time notes-folder move into the app's domain (#148), on every
+    /// branch that decided something — a migration that cannot be re-run has
+    /// to stay answerable afterwards. A disposition and counts; never the
+    /// folder, which embeds the user's home directory.
+    case notesFolderMigrated(
+        disposition: NotesMigration, moved: Int, leftBehind: Int, unverified: Int
+    )
+    /// The leftovers the move reported are gone, so the health row withdraws
+    /// itself. The clear half of the fire/clear pair the no-false-positives
+    /// rule requires: without it, a row's disappearance is undebuggable.
+    case notesFolderLeftoverCleared
     case corruptFileAside(artifact: Artifact)
     /// Failure only. A *preempted* import (`.cancelled`, #43) is the normal
     /// "a recording started" path and is not recorded at all.
@@ -282,7 +304,8 @@ extension DiagEvent {
              .notificationAuthorization, .notificationPosted:
             return .meetings
 
-        case .historyWriteFailed, .historyMigrated, .corruptFileAside, .sessionImportFailed:
+        case .historyWriteFailed, .historyMigrated, .notesFolderMigrated,
+             .notesFolderLeftoverCleared, .corruptFileAside, .sessionImportFailed:
             return .storage
         }
     }
@@ -340,6 +363,8 @@ extension DiagEvent {
         case .notificationPosted: return "notificationPosted"
         case .historyWriteFailed: return "historyWriteFailed"
         case .historyMigrated: return "historyMigrated"
+        case .notesFolderMigrated: return "notesFolderMigrated"
+        case .notesFolderLeftoverCleared: return "notesFolderLeftoverCleared"
         case .corruptFileAside: return "corruptFileAside"
         case .sessionImportFailed: return "sessionImportFailed"
         }

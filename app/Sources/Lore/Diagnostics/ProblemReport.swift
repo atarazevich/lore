@@ -164,6 +164,7 @@ extension HealthResult {
         case .openAIKey: return "No OpenAI key is set — cleanup, translation and Ask \(LoreTheme.wordmark) are off."
         case .openAILiveness: return "The last OpenAI check failed."
         case .systemAudio: return "The last system-audio capture failed."
+        case .notesFolder: return "Some meeting files couldn't be moved out of the Documents folder — both copies were kept."
         }
     }
 }

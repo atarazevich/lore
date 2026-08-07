@@ -39,7 +39,8 @@ enum MarkdownMeetingWriter {
     ///   - metadata: Session metadata (title, dates, app, engine).
     ///   - records: The transcript records from the JSONL session store.
     ///   - notesMarkdown: Optional LLM-generated notes markdown to include before the transcript.
-    ///   - outputDirectory: The directory to write into (e.g. `~/Documents/Lore/`).
+    ///   - outputDirectory: The directory to write into (the notes folder —
+    ///     `~/Library/Application Support/Lore/Notes` by default, #148).
     /// - Returns: The URL of the written file, or `nil` on failure.
     @discardableResult
     static func write(
@@ -53,8 +54,9 @@ enum MarkdownMeetingWriter {
             return nil
         }
 
+        // #148: created at first use, not at launch.
         let fm = FileManager.default
-        try? fm.createDirectory(at: outputDirectory, withIntermediateDirectories: true)
+        NotesFolder.prepare(outputDirectory)
 
         // Build the Markdown content
         let content = buildMarkdown(metadata: metadata, records: records, notesMarkdown: notesMarkdown)

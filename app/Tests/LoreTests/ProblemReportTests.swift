@@ -17,24 +17,11 @@ import XCTest
 ///    URLProtocol — never the network.
 final class ProblemReportTests: XCTestCase {
 
-    // MARK: - Fixtures a report must never contain (mirrors the #82/#83 discipline)
+    // MARK: - Fixtures a report must never contain (`PrivacyFixtures`, #82/#83)
 
-    private static let transcript =
-        "Remind me to email Sam about the Q3 revenue projections before Friday"
-    private static let deviceName = "Sam's AirPods Pro"
-    private static let filePath = "~/Downloads/private_notes_final.m4a"
-    private static let apiKey = "sk-proj-abcdef1234567890"
-
-    private static var fixtures: [String] {
-        [transcript, deviceName, filePath, apiKey]
-    }
-
-    private static var fixtureTokens: [String] {
-        fixtures
-            .flatMap { $0.split(whereSeparator: { " /_-".contains($0) }) }
-            .map(String.init)
-            .filter { $0.count >= 4 && $0.contains(where: \.isLetter) }
-    }
+    private static let transcript = PrivacyFixtures.transcript
+    private static let fixtures = PrivacyFixtures.all
+    private static let fixtureTokens = PrivacyFixtures.tokens
 
     /// A report over a session that recorded on a named wireless device and
     /// transcribed the fixture transcript. The device *name* only ever existed

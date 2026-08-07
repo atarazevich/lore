@@ -938,8 +938,15 @@ struct SettingsView: View {
                 sub: settings.notesFolderPath,
                 subLineLimit: 1
             ) {
-                LoreMonoValueButton(title: "Choose\u{2026}") {
-                    chooseNotesFolder()
+                // The default now lives in Application Support, which Finder
+                // hides — so the row carries the way there (#148).
+                HStack(spacing: 8) {
+                    LoreMonoValueButton(title: "Show in Finder") {
+                        revealNotesFolder()
+                    }
+                    LoreMonoValueButton(title: "Choose\u{2026}") {
+                        chooseNotesFolder()
+                    }
                 }
             }
             LoreDivider()
@@ -1265,6 +1272,15 @@ struct SettingsView: View {
             coordinator.templateStore.delete(id: id)
             templates = coordinator.templateStore.templates
         }
+    }
+
+    /// A user asking to see the folder is a first use: create it if a meeting
+    /// never has, then open it. Revealing a folder that isn't there yet would
+    /// show nothing (#148).
+    private func revealNotesFolder() {
+        let url = URL(fileURLWithPath: settings.notesFolderPath)
+        NotesFolder.prepare(url)
+        NSWorkspace.shared.open(url)
     }
 
     private func chooseNotesFolder() {

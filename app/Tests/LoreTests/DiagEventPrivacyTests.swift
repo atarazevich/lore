@@ -32,30 +32,12 @@ import XCTest
 /// - **Fixtures**: no substring of a synthetic transcript, device name, path or key.
 final class DiagEventPrivacyTests: XCTestCase {
 
-    // MARK: - Fixtures a report must never contain
+    // MARK: - Fixtures a report must never contain (`PrivacyFixtures`)
 
-    private static let transcript =
-        "Remind me to email Sam about the Q3 revenue projections before Friday"
-    private static let deviceName = "Sam's AirPods Pro"
-    /// Deliberately avoids the words "Lore", "session", "dictation" and "meetings":
-    /// those are legitimate case names and enum raw values in the event vocabulary,
-    /// and a fixture must only match a *leak*, never the schema.
-    private static let filePath = "~/Downloads/private_notes_final.m4a"
-    private static let apiKey = "sk-proj-abcdef1234567890"
-    private static let bundleID = "us.zoom.xos"
-
-    private static var fixtures: [String] {
-        [transcript, deviceName, filePath, apiKey, bundleID]
-    }
-
-    /// Individual words too — a leak of "AirPods" is a leak. Purely numeric tokens
-    /// are dropped: they collide with timestamps and counts, which are not PII.
-    private static var fixtureTokens: [String] {
-        fixtures
-            .flatMap { $0.split(whereSeparator: { " /_-".contains($0) }) }
-            .map(String.init)
-            .filter { $0.count >= 4 && $0.contains(where: \.isLetter) }
-    }
+    private static let transcript = PrivacyFixtures.transcript
+    private static let fixtures = PrivacyFixtures.all
+    private static let fixtureTokens = PrivacyFixtures.tokens
+    private static let stringValues = PrivacyFixtures.stringValues(in:)
 
     // MARK: - Link 1: exhaustive over DiagEvent (compile-time)
 
@@ -79,6 +61,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case detectionSignal, detectionAppScan, detectionPrompt
         case notificationAuthorization, notificationPosted
         case historyWriteFailed, historyMigrated, corruptFileAside, sessionImportFailed
+        case notesFolderMigrated, notesFolderLeftoverCleared
     }
 
     /// Exhaustive over `DiagEvent`. The compile-time forcing function in the test
@@ -130,6 +113,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .notificationPosted: return .notificationPosted
         case .historyWriteFailed: return .historyWriteFailed
         case .historyMigrated: return .historyMigrated
+        case .notesFolderMigrated: return .notesFolderMigrated
+        case .notesFolderLeftoverCleared: return .notesFolderLeftoverCleared
         case .corruptFileAside: return .corruptFileAside
         case .sessionImportFailed: return .sessionImportFailed
         }
@@ -208,6 +193,11 @@ final class DiagEventPrivacyTests: XCTestCase {
 
         case .historyWriteFailed: return .historyWriteFailed
         case .historyMigrated: return .historyMigrated(entries: .max, written: 0)
+        case .notesFolderMigrated:
+            return .notesFolderMigrated(
+                disposition: .customPathRespected, moved: .max, leftBehind: .max, unverified: .max
+            )
+        case .notesFolderLeftoverCleared: return .notesFolderLeftoverCleared
         case .corruptFileAside: return .corruptFileAside(artifact: .chatJSON)
         case .sessionImportFailed: return .sessionImportFailed
         }
@@ -232,6 +222,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         allowed.formUnion(DiagEvent.PromptDisposition.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.Artifact.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.SummonTrigger.allCases.map(\.rawValue))
+        allowed.formUnion(DiagEvent.NotesMigration.allCases.map(\.rawValue))
         allowed.formUnion(DictationState.allCases.map(\.rawValue))
         return allowed
     }()
@@ -305,7 +296,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         for event in Self.allSamples {
             let data = try JSONEncoder().encode(event)
             let object = try JSONSerialization.jsonObject(with: data)
-            for string in Self.stringValues(in: object) {
+            for string in Self.stringValues(object) {
                 XCTAssertTrue(
                     Self.closedVocabulary.contains(string),
                     "\(event.caseName) encoded the free-form string '\(string)'"
@@ -337,7 +328,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         XCTAssertEqual(records.count, Self.allSamples.count)
         for record in records {
             let event = try XCTUnwrap(record["event"])
-            for string in Self.stringValues(in: event) {
+            for string in Self.stringValues(event) {
                 XCTAssertTrue(
                     Self.closedVocabulary.contains(string),
                     "persisted events.json carries the free-form string '\(string)'"
@@ -399,20 +390,5 @@ final class DiagEventPrivacyTests: XCTestCase {
 
     private static func encodedJSON(_ event: DiagEvent) throws -> String {
         String(decoding: try JSONEncoder().encode(event), as: UTF8.self)
-    }
-
-    /// All string *values* (never keys) reachable in a decoded JSON object graph.
-    private static func stringValues(in object: Any) -> [String] {
-        switch object {
-        case let string as String:
-            return [string]
-        case let array as [Any]:
-            return array.flatMap { stringValues(in: $0) }
-        case let dictionary as [String: Any]:
-            // Keys are Swift-synthesized (case names, label names) — not payload.
-            return dictionary.values.flatMap { stringValues(in: $0) }
-        default:
-            return []
-        }
     }
 }

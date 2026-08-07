@@ -45,15 +45,18 @@ final class AppContainer {
 
         switch mode {
         case .live:
+            let appSupportDirectory = FileManager.default.urls(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask
+            ).first!.appendingPathComponent("Lore", isDirectory: true)
             let container = AppContainer(
                 mode: .live,
                 defaults: .standard,
-                appSupportDirectory: FileManager.default.urls(
-                    for: .applicationSupportDirectory,
-                    in: .userDomainMask
-                ).first!.appendingPathComponent("Lore", isDirectory: true),
-                notesDirectory: FileManager.default.homeDirectoryForCurrentUser
-                    .appendingPathComponent("Documents/Lore", isDirectory: true)
+                appSupportDirectory: appSupportDirectory,
+                // #148: the app's own domain, same location `SettingsStorage.live`
+                // defaults to. Seed value only — `LiveSessionController` re-points
+                // the recorder at `notesFolderPath` once settings are observed.
+                notesDirectory: NotesFolder.notes(in: appSupportDirectory)
             )
             let settings = AppSettings()
             let coordinator = AppCoordinator()
@@ -89,7 +92,7 @@ final class AppContainer {
             defaults.set(true, forKey: "showLiveTranscript")
             defaults.set(false, forKey: "saveAudioRecording")
             defaults.set(false, forKey: "enableTranscriptRefinement")
-            defaults.set(notesDirectory.path, forKey: "notesFolderPath")
+            defaults.set(notesDirectory.path, forKey: NotesFolderMigration.notesPathKey)
 
             let storage = AppSettingsStorage(
                 defaults: defaults,

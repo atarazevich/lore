@@ -415,6 +415,9 @@ final class AudioRecorder: @unchecked Sendable {
         let length = max(micSamples.count, sysSamples.count)
         guard length > 0 else { return }
 
+        // #148: created at first use, not at launch.
+        NotesFolder.prepare(dir)
+
         let outputURL = dir.appendingPathComponent("\(timestamp).m4a")
         guard let outputFile = try? AVAudioFile(
             forWriting: outputURL,

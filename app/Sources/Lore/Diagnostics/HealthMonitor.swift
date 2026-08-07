@@ -76,11 +76,25 @@ final class HealthMonitor {
     @ObservationIgnored var runModelWarmupTest: () async -> Void = {}
     @ObservationIgnored var runOpenAITest: () async -> Void = {}
 
+    /// Re-checks the folder the #148 move could not empty, clearing its marker
+    /// when the files are gone. Injected and side-effecting for the same reason
+    /// the three tests above are: it reads a TCC-protected folder, so it may
+    /// run only with the panel on screen — never from `init`, which is launch.
+    @ObservationIgnored var verifyNotesLeftover: () -> Void = {}
+
     init(prober: HealthProber) {
         self.prober = prober
         let initial = prober.probe()
         self.snapshot = initial.snapshot
         self.items = initial.items
+    }
+
+    /// The panel just opened: verify what only a visible panel may verify, then
+    /// publish. The split exists because `refresh()` also runs at launch, and
+    /// the notes-leftover check reads a TCC-protected folder (#148).
+    func refreshForPanel() {
+        verifyNotesLeftover()
+        refresh()
     }
 
     /// Re-run the cheap chain and publish. Called at launch (init), on panel

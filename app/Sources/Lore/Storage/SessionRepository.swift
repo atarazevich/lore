@@ -158,7 +158,8 @@ actor SessionRepository {
     private var onWriteError: (@Sendable (String) -> Void)?
     private var hasReportedWriteError = false
 
-    /// User-facing notes folder for mirroring (e.g. ~/Documents/Lore).
+    /// The notes folder artifacts are mirrored into — `Application
+    /// Support/Lore/Notes` by default since #148, or the folder the user picked.
     private var notesFolderPath: URL?
 
     init(rootDirectory: URL? = nil) {
@@ -180,8 +181,9 @@ actor SessionRepository {
         decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
 
-        try? FileManager.default.createDirectory(at: sessionsDirectory, withIntermediateDirectories: true)
-        Self.dropMetadataNeverIndex(in: sessionsDirectory)
+        // Create + keep Spotlight out, one implementation (#148). This is the
+        // app's own Application Support tree, so it is safe at launch.
+        NotesFolder.prepare(sessionsDirectory)
 
         Self.cleanupOrphanedBatchAudio(in: sessionsDirectory)
     }
@@ -1282,14 +1284,6 @@ actor SessionRepository {
         )
     }
 
-    // MARK: - Spotlight
-
-    private static func dropMetadataNeverIndex(in directory: URL) {
-        let sentinel = directory.appendingPathComponent(".metadata_never_index")
-        if !FileManager.default.fileExists(atPath: sentinel.path) {
-            FileManager.default.createFile(atPath: sentinel.path, contents: nil)
-        }
-    }
 
     // MARK: - Orphan Cleanup
 

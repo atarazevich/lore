@@ -25,12 +25,14 @@ final class HealthProberTests: XCTestCase {
     /// override them.
     private func prober(
         alive: Bool, stalled: Bool, secureInput: Bool = false,
+        notesLeftover: String? = nil,
         store: DiagStore? = nil, now: @escaping () -> Date = Date.init
     ) -> HealthProber {
         HealthProber(
             readTapLiveness: { Self.liveness(alive: alive, stalled: stalled) },
             readSecureInput: { Self.secureInputState(active: secureInput) },
             hasOpenAIKey: { true },
+            readNotesLeftover: { notesLeftover },
             store: store ?? Self.emptyStore(),
             now: now
         )
@@ -435,5 +437,36 @@ final class HealthProberTests: XCTestCase {
         let row = prober(alive: true, stalled: false, store: store)
             .probe().snapshot.results.first { $0.id == .openAILiveness }!
         XCTAssertEqual(row.status, .failed)
+    }
+
+    // MARK: - Notes folder (#148)
+
+    /// The row exists for one situation — the notes move could not empty the
+    /// legacy folder — and says nothing in every other one, which is every
+    /// install that never had a legacy folder at all.
+    func testNotesFolderRowIsSilentUnlessTheMoveLeftFilesBehind() {
+        let clean = prober(alive: true, stalled: false)
+            .probe().snapshot.results.first { $0.id == .notesFolder }!
+        XCTAssertEqual(clean.status, .ok)
+
+        let (snapshot, items) = prober(
+            alive: true, stalled: false, notesLeftover: "/Users/x/Documents/Lore"
+        ).probe()
+        let row = snapshot.results.first { $0.id == .notesFolder }!
+        // A warning, not a failure: both copies of every file still exist.
+        XCTAssertEqual(row.status, .warning)
+        let item = items.first { $0.id == .notesFolder }!
+        XCTAssertTrue(item.detail.contains("nothing was deleted"), item.detail)
+        XCTAssertNotNil(item.remedy)
+    }
+
+    /// The row is not PII-carrying: the leftover *path* drives the verdict but
+    /// never rides on the serializable result (design §4).
+    func testNotesFolderRowCarriesNoPathInTheSnapshot() throws {
+        let snapshot = prober(
+            alive: true, stalled: false, notesLeftover: "~/Documents/Lore"
+        ).probe().snapshot
+        let json = String(decoding: try JSONEncoder().encode(snapshot), as: UTF8.self)
+        XCTAssertFalse(json.contains("sam"), json)
     }
 }

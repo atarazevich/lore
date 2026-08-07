@@ -32,6 +32,11 @@ struct HealthProber {
     /// reads it from here — one owner, so the row and the acknowledge cannot
     /// disagree about which ledger they mean.
     var signingLedger: SigningIdentityLedger?
+    /// The notes-folder leftover the move reported (#148) — a marker read, no
+    /// filesystem: the folder it names is in `~/Documents`, and probing runs at
+    /// launch. `HealthMonitor.verifyNotesLeftover` does the real check when the
+    /// panel is on screen. Unwired defaults to silence, never to a claim.
+    var readNotesLeftover: () -> String?
     var store: DiagStore
     var now: () -> Date
 
@@ -40,6 +45,7 @@ struct HealthProber {
         readSecureInput: @escaping () -> SecureInput.State = SecureInput.read,
         hasOpenAIKey: @escaping () -> Bool,
         signingLedger: SigningIdentityLedger? = nil,
+        readNotesLeftover: @escaping () -> String? = { nil },
         store: DiagStore = .shared,
         now: @escaping () -> Date = Date.init
     ) {
@@ -47,6 +53,7 @@ struct HealthProber {
         self.readSecureInput = readSecureInput
         self.hasOpenAIKey = hasOpenAIKey
         self.signingLedger = signingLedger
+        self.readNotesLeftover = readNotesLeftover
         self.store = store
         self.now = now
     }
@@ -57,6 +64,9 @@ struct HealthProber {
         let result: HealthResult
         var holder: SecureInput.Attribution?
         var teamID: String?
+        /// The leftover folder's path (#148) — the row names it and its button
+        /// reveals it, and like the holder name it never reaches the snapshot.
+        var notesLeftover: String?
     }
 
     /// The snapshot and the renderable items in one pass — the monitor uses this
@@ -81,7 +91,8 @@ struct HealthProber {
                 reading.result,
                 secureInputHolder: reading.holder,
                 teamID: reading.teamID,
-                secureInputActive: [.tap, .secureInput].contains(reading.result.id) && secureInput.active
+                secureInputActive: [.tap, .secureInput].contains(reading.result.id) && secureInput.active,
+                notesLeftoverPath: reading.notesLeftover
             )
         }
         return (snapshot, items)
@@ -115,6 +126,7 @@ struct HealthProber {
         case .asrModel: return plain(id, ParakeetBackend().checkStatus() == .ready ? .ok : .failed)
         case .vadModel: return plain(id, Self.vadModelPresent() ? .ok : .failed)
         case .openAIKey: return plain(id, hasOpenAIKey() ? .ok : .failed)
+        case .notesFolder: return notesFolderReading()
         case .micCapture, .modelWarmup, .openAILiveness, .systemAudio:
             preconditionFailure("expensive probe \(id.rawValue) routed to cheapReading — check id.cost")
         }
@@ -169,6 +181,19 @@ struct HealthProber {
             result: HealthResult(id: .signing, status: status, signingCert: info.certKind,
                                  signingIdentityChanged: changed ? true : nil),
             teamID: info.teamID
+        )
+    }
+
+    /// The migration's own count of what it could not move (#148), carried on
+    /// the reading so the row can name the folder and offer to reveal it. The
+    /// folder itself is re-read only when the panel opens
+    /// (`HealthMonitor.verifyNotesLeftover`), which is what keeps a probe that
+    /// also runs at launch clear of `~/Documents`.
+    private func notesFolderReading() -> Reading {
+        let leftover = readNotesLeftover()
+        return Reading(
+            result: HealthResult(id: .notesFolder, status: leftover == nil ? .ok : .warning),
+            notesLeftover: leftover
         )
     }
 

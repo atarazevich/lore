@@ -36,8 +36,9 @@ struct HealthPanelView: View {
         .background(.ultraThinMaterial)
         .preferredColorScheme(.dark)
         // The panel is an on-open fact sheet (#140): probes run when it opens,
-        // not on a background cycle.
-        .onAppear { monitor.refresh() }
+        // not on a background cycle. On screen is also the only moment a probe
+        // may read a TCC-protected folder (#148) — hence `refreshForPanel`.
+        .onAppear { monitor.refreshForPanel() }
     }
 
     // MARK: - Header
@@ -124,6 +125,8 @@ struct HealthPanelView: View {
             onOpenSettings()
         case .testNow(let id):
             Task { await monitor.testNow(id) }
+        case .revealInFinder(let path):
+            NSWorkspace.shared.open(URL(fileURLWithPath: path))
         }
     }
 }

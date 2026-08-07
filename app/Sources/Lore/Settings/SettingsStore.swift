@@ -461,7 +461,7 @@ final class SettingsStore {
         set {
             withMutation(keyPath: \.notesFolderPath) {
                 _notesFolderPath = newValue
-                defaults.set(newValue, forKey: "notesFolderPath")
+                defaults.set(newValue, forKey: NotesFolderMigration.notesPathKey)
             }
         }
     }
@@ -485,8 +485,15 @@ final class SettingsStore {
 
         let defaults = storage.defaults
 
-        // One-time migrations from previous bundle IDs
+        // One-time migrations from previous bundle IDs. The notes move (#148)
+        // runs FIRST, load-bearing: it reads a fresh install off the *absence*
+        // of keys the two below write on every launch.
         if storage.runMigrations {
+            NotesFolderMigration.run(
+                defaults: defaults,
+                target: storage.defaultNotesDirectory,
+                legacyDefaults: storage.legacyNotesDirectories
+            )
             Self.migrateFromOldBundleIfNeeded(defaults: defaults)
             Self.migrateFromOpenGranolaIfNeeded(defaults: defaults)
 
@@ -597,17 +604,11 @@ final class SettingsStore {
             self._showLiveTranscript = defaults.bool(forKey: "showLiveTranscript")
         }
         let defaultNotesPath = storage.defaultNotesDirectory.path
-        self._notesFolderPath = defaults.string(forKey: "notesFolderPath") ?? defaultNotesPath
+        self._notesFolderPath = defaults.string(forKey: NotesFolderMigration.notesPathKey) ?? defaultNotesPath
         self._hasSeenLaunchAtLoginSuggestion = defaults.bool(forKey: "hasSeenLaunchAtLoginSuggestion")
 
-        // Ensure notes folder exists
-        try? FileManager.default.createDirectory(
-            atPath: notesFolderPath,
-            withIntermediateDirectories: true
-        )
-
-        // Prevent Spotlight from indexing transcript contents
-        Self.dropMetadataNeverIndex(atPath: notesFolderPath)
+        // #148: the notes folder is created at first use, not here — creating
+        // it at launch is what asked for Documents access.
     }
 
     // MARK: - Computed Properties
@@ -642,15 +643,6 @@ final class SettingsStore {
         }
     }
 
-    // MARK: - Spotlight Indexing
-
-    /// Place a .metadata_never_index sentinel so Spotlight skips the directory.
-    private static func dropMetadataNeverIndex(atPath directoryPath: String) {
-        let sentinel = URL(fileURLWithPath: directoryPath).appendingPathComponent(".metadata_never_index")
-        if !FileManager.default.fileExists(atPath: sentinel.path) {
-            FileManager.default.createFile(atPath: sentinel.path, contents: nil)
-        }
-    }
 }
 
 // MARK: - Migration
@@ -684,7 +676,7 @@ extension SettingsStore {
         defer { defaults.set(true, forKey: migrationKey) }
 
         guard let oldDefaults = UserDefaults(suiteName: "com.opengranola.app") else {
-            migrateFilesFromOpenGranola(defaults: defaults)
+            migrateFilesFromOpenGranola()
             return
         }
 
@@ -700,15 +692,18 @@ extension SettingsStore {
             }
         }
 
-        migrateFilesFromOpenGranola(defaults: defaults)
+        migrateFilesFromOpenGranola()
     }
 
-    /// Migrate file-backed state (sessions, templates, KB cache, transcripts)
-    /// from ~/Library/Application Support/OpenGranola/ to OpenOats/ and
-    /// handle the implicit KB folder default.
-    private static func migrateFilesFromOpenGranola(defaults: UserDefaults) {
+    /// Migrate file-backed state (sessions, templates) from
+    /// ~/Library/Application Support/OpenGranola/ to Lore/.
+    ///
+    /// Application Support only, since #148: the ~/Documents/OpenGranola half
+    /// ran on the launch path of every install whose marker key was absent —
+    /// exactly a fresh one — and legacy Documents folders are now
+    /// `NotesFolderMigration`'s job.
+    private static func migrateFilesFromOpenGranola() {
         let fm = FileManager.default
-        let home = fm.homeDirectoryForCurrentUser
         let appSupport = fm.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
 
         let oldAppSupportDir = appSupport.appendingPathComponent("OpenGranola")
@@ -727,31 +722,6 @@ extension SettingsStore {
             let newTemplates = newAppSupportDir.appendingPathComponent("templates.json")
             if fm.fileExists(atPath: oldTemplates.path) && !fm.fileExists(atPath: newTemplates.path) {
                 try? fm.moveItem(at: oldTemplates, to: newTemplates)
-            }
-        }
-
-        let oldDocDir = home.appendingPathComponent("Documents/OpenGranola")
-        let newDocDir = home.appendingPathComponent("Documents/Lore")
-
-        if defaults.string(forKey: "notesFolderPath") == nil {
-            if fm.fileExists(atPath: oldDocDir.path) {
-                let contents = (try? fm.contentsOfDirectory(atPath: oldDocDir.path)) ?? []
-                if !contents.isEmpty {
-                    defaults.set(oldDocDir.path, forKey: "notesFolderPath")
-                }
-            }
-        }
-
-        let activeNotes = defaults.string(forKey: "notesFolderPath") ?? ""
-        if fm.fileExists(atPath: oldDocDir.path) && oldDocDir.path != activeNotes {
-            try? fm.createDirectory(at: newDocDir, withIntermediateDirectories: true)
-            if let files = try? fm.contentsOfDirectory(at: oldDocDir, includingPropertiesForKeys: nil) {
-                for file in files where file.pathExtension == "txt" {
-                    let dest = newDocDir.appendingPathComponent(file.lastPathComponent)
-                    if !fm.fileExists(atPath: dest.path) {
-                        try? fm.moveItem(at: file, to: dest)
-                    }
-                }
             }
         }
     }

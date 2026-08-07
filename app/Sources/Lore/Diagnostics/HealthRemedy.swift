@@ -37,6 +37,9 @@ enum HealthRemedyAction: Equatable, Sendable {
     case restartApp
     case openLoreSettings
     case testNow(HealthProbeID)
+    /// Open Finder on a folder the row names (#148). The path is machine-local
+    /// and rides on the action, not on the serialized result.
+    case revealInFinder(String)
 
     var buttonLabel: String {
         switch self {
@@ -44,6 +47,7 @@ enum HealthRemedyAction: Equatable, Sendable {
         case .restartApp: return "Restart \(LoreTheme.wordmark)"
         case .openLoreSettings: return "Open Settings"
         case .testNow: return "Test now"
+        case .revealInFinder: return "Show in Finder"
         }
     }
 }
@@ -93,14 +97,19 @@ enum HealthCatalog {
     ///     (#94). The tap remedy points at it instead of offering a useless
     ///     restart. Also set for the `.secureInput` row itself, whose ok copy must
     ///     not read "Inactive" while the flag is up (benign locked console, #98).
+    ///   - notesLeftoverPath: the folder the #148 move could not empty — named
+    ///     in the detail line and revealed by the remedy's button, machine-local
+    ///     like the holder name and never serialized.
     static func describe(
         _ result: HealthResult,
         secureInputHolder: SecureInput.Attribution? = nil,
         teamID: String? = nil,
-        secureInputActive: Bool = false
+        secureInputActive: Bool = false,
+        notesLeftoverPath: String? = nil
     ) -> HealthItem {
         let (title, detail, remedy) = copy(
-            for: result, holder: secureInputHolder, teamID: teamID, secureInputActive: secureInputActive
+            for: result, holder: secureInputHolder, teamID: teamID,
+            secureInputActive: secureInputActive, notesLeftoverPath: notesLeftoverPath
         )
         return HealthItem(result: result, title: title, detail: detail, remedy: remedy)
     }
@@ -109,7 +118,8 @@ enum HealthCatalog {
         for result: HealthResult,
         holder: SecureInput.Attribution?,
         teamID: String?,
-        secureInputActive: Bool
+        secureInputActive: Bool,
+        notesLeftoverPath: String?
     ) -> (title: String, detail: String, remedy: Remedy?) {
         // Expensive probes share one card shape (last outcome + Test now),
         // dispatched by `cost` so a new expensive probe can't land in the cheap
@@ -294,6 +304,21 @@ enum HealthCatalog {
                     Remedy(instruction: "Add your OpenAI API key in Settings to enable cleanup and Ask \(LoreTheme.wordmark).",
                            actions: [.openLoreSettings]))
 
+        // MARK: Meetings
+
+        // Retires with `NotesFolderMigration`: when the one-time move is
+        // deleted, this row goes with it.
+        case .notesFolder:
+            let title = "Notes folder"
+            if ok { return (title, "Meeting notes are stored inside \(LoreTheme.wordmark)'s own folder.", nil) }
+            // Never phrased as loss: both copies of every file still exist, and
+            // the row withdraws itself once that folder is empty.
+            let folder = notesLeftoverPath.map { " (\(($0 as NSString).abbreviatingWithTildeInPath))" } ?? ""
+            return (title,
+                    "Some meeting files couldn't be moved out of your old notes folder\(folder) — they're still there, nothing was deleted.",
+                    Remedy(instruction: "\(LoreTheme.wordmark) now keeps meeting notes in its own folder. A few files in the old location had the same name as files in the new one, so both copies were kept. Move or delete the leftovers and this row clears itself.",
+                           actions: notesLeftoverPath.map { [.revealInFinder($0)] } ?? []))
+
         // Expensive probes are dispatched by cost at the top of `copy`; this arm
         // is unreachable but keeps the switch exhaustive, so a new expensive
         // probe forces a categorization decision here as well.
@@ -329,7 +354,8 @@ enum HealthCatalog {
                          failDetail: "Last capture failed", warnDetail: "No meeting recorded yet.",
                          sideEffect: "observable only during a meeting recording")
         case .signing, .diskSpace, .accessibility, .inputMonitoring,
-             .tap, .secureInput, .microphone, .asrModel, .vadModel, .openAIKey:
+             .tap, .secureInput, .microphone, .asrModel, .vadModel, .openAIKey,
+             .notesFolder:
             preconditionFailure("cheap probe \(id.rawValue) has no expensive labels")
         }
     }

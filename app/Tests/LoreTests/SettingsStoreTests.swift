@@ -266,6 +266,73 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(store2.modifierUpgradeKeysEnabled)
     }
 
+    // MARK: - Notes folder (#148)
+
+    /// The launch-path invariant, pinned where it broke: constructing the
+    /// settings must not create — or otherwise touch — the notes folder.
+    /// Before #148 this `init` ran `createDirectory` on `notesFolderPath`, and
+    /// since that path defaulted into `~/Documents`, launching the app raised a
+    /// Documents-access dialog on a fresh install. The folder is created at
+    /// first use instead (`NotesFolder.prepare`).
+    func testInitDoesNotCreateOrTouchTheNotesFolder() {
+        let folder = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("SettingsStoreNotes-\(UUID().uuidString)", isDirectory: true)
+        let storage = SettingsStorage(
+            defaults: makeSuite(),
+            secretStore: .ephemeral,
+            defaultNotesDirectory: folder,
+            runMigrations: false
+        )
+
+        let store = SettingsStore(storage: storage)
+
+        XCTAssertEqual(store.notesFolderPath, folder.path)
+        XCTAssertFalse(FileManager.default.fileExists(atPath: folder.path),
+                       "launching must not create the notes folder — first use does")
+    }
+
+    /// The same invariant with the migrations actually running — the path that
+    /// *can* break it. The legacy folders are temp (injected), and the two
+    /// bundle-migration markers are pre-set so nothing outside this test's
+    /// directories is read: they double as the earlier-install evidence the
+    /// notes move needs, so this is the upgrade case end to end.
+    func testInitWithMigrationsMovesTheLegacyFolderAndCreatesNothingElse() throws {
+        let root = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            .appendingPathComponent("SettingsStoreMigration-\(UUID().uuidString)", isDirectory: true)
+        let legacy = root.appendingPathComponent("Documents-Lore", isDirectory: true)
+        let target = root.appendingPathComponent("AppSupport-Notes", isDirectory: true)
+        let untouched = root.appendingPathComponent("Documents-OpenGranola", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: legacy, withIntermediateDirectories: true)
+        try "# Standup".write(to: legacy.appendingPathComponent("2026-08-01-standup.md"),
+                              atomically: true, encoding: .utf8)
+
+        let suite = makeSuite()
+        suite.set(true, forKey: "didMigrateFromOnTheSpot")
+        suite.set(true, forKey: "didMigrateFromOpenGranola")
+        let store = SettingsStore(storage: SettingsStorage(
+            defaults: suite,
+            secretStore: .ephemeral,
+            defaultNotesDirectory: target,
+            legacyNotesDirectories: [legacy, untouched],
+            runMigrations: true
+        ))
+
+        XCTAssertEqual(store.notesFolderPath, target.path)
+        XCTAssertTrue(FileManager.default.fileExists(
+            atPath: target.appendingPathComponent("2026-08-01-standup.md").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: legacy.path),
+                       "moved, not copied")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: untouched.path),
+                       "a legacy folder that was not in use is never created")
+    }
+
+    func testLiveStorageDefaultsToTheAppsOwnFolder() {
+        let storage = SettingsStorage.live(defaults: makeSuite())
+        XCTAssertEqual(storage.defaultNotesDirectory, NotesFolder.applicationSupportDefault)
+        XCTAssertEqual(storage.legacyNotesDirectories, NotesFolder.legacyDefaults)
+    }
+
     // MARK: - AppSettings Typealias Compatibility
 
     func testTypealiasCompiles() {

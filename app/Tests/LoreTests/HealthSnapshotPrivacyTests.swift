@@ -9,19 +9,12 @@ import XCTest
 /// closed-vocabulary enum value or the (non-personal) version identifiers.
 final class HealthSnapshotPrivacyTests: XCTestCase {
 
-    // Strings a snapshot must never contain — a leaked process name, device
-    // name, path or key. (A secure-input *holder name* is the realistic leak
-    // vector, since the panel shows it.)
-    private static let fixtures = [
-        "1Password", "Sam's AirPods Pro",
-        "~/Downloads/private_notes_final.m4a",
-        "sk-proj-abcdef1234567890", "us.zoom.xos",
-    ]
-
-    private static let fixtureTokens: [String] = fixtures
-        .flatMap { $0.split(whereSeparator: { " /_-".contains($0) }) }
-        .map(String.init)
-        .filter { $0.count >= 4 && $0.contains(where: \.isLetter) }
+    // Strings a snapshot must never contain (`PrivacyFixtures`) — a leaked
+    // process name, device name, path or key. A secure-input *holder name* is
+    // the realistic leak vector here, since the panel shows it.
+    private static let fixtures = PrivacyFixtures.all
+    private static let fixtureTokens = PrivacyFixtures.tokens
+    private static let stringValues = PrivacyFixtures.stringValues(in:)
 
     /// The tap's measurement (#97) at its most-revealing legal value. It is Bools
     /// and counts, so it contributes no strings to the wire at all — which is the
@@ -91,25 +84,11 @@ final class HealthSnapshotPrivacyTests: XCTestCase {
     func testEveryStringInEncodedSnapshotIsFromTheClosedVocabulary() throws {
         let data = try JSONEncoder().encode(Self.worstCase)
         let object = try JSONSerialization.jsonObject(with: data)
-        for string in Self.stringValues(in: object) {
+        for string in Self.stringValues(object) {
             XCTAssertTrue(
                 Self.closedVocabulary.contains(string),
                 "snapshot carried the free-form string '\(string)'"
             )
-        }
-    }
-
-    /// All string *values* (never keys) reachable in a decoded JSON graph.
-    private static func stringValues(in object: Any) -> [String] {
-        switch object {
-        case let string as String:
-            return [string]
-        case let array as [Any]:
-            return array.flatMap { stringValues(in: $0) }
-        case let dictionary as [String: Any]:
-            return dictionary.values.flatMap { stringValues(in: $0) }
-        default:
-            return []
         }
     }
 }
