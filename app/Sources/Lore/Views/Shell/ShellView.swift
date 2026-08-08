@@ -21,6 +21,7 @@ struct ShellView: View {
             ShellSidebar(
                 activeDestination: shell.destination,
                 isMeetingRecording: coordinator.isRecording,
+                isMeetingPaused: coordinator.isPaused,
                 isDictationLocked: coordinator.dictationIndicator.model.isLocked,
                 healthMonitor: coordinator.healthMonitor,
                 onSelect: { shell.destination = $0 },
@@ -75,20 +76,19 @@ struct ShellView: View {
     /// REC pill right (SHELL-13/14). The whole strip drags the window (#71);
     /// the REC pill button takes hit-testing priority over the drag gesture.
     private var toolbar: some View {
-        HStack(spacing: 12) {
+        let paused = coordinator.isPaused
+        return HStack(spacing: 12) {
             Text(shell.destination.title)
                 .font(LoreTheme.Typography.control)
                 .foregroundStyle(LoreTheme.TextColor.primary)
             if shell.destination == .meetings {
-                Text(coordinator.isRecording
-                     ? "recording\u{2026}"
-                     : "\(coordinator.sessionHistory.count) recorded")
+                Text(meetingsSubtitle(paused: paused))
                     .font(LoreTheme.Typography.monoMeta)
-                    .foregroundStyle(LoreTheme.TextColor.muted)
+                    .foregroundStyle(paused ? LoreTheme.Accent.amber : LoreTheme.TextColor.muted)
             }
             Spacer()
             if let startedAt = recordingStartedAt, showRecPill {
-                ShellRecPill(startedAt: startedAt) {
+                ShellRecPill(startedAt: startedAt, isPaused: paused) {
                     shell.destination = .meetings
                 }
             }
@@ -99,13 +99,19 @@ struct ShellView: View {
         .gesture(WindowDragGesture())
     }
 
-    /// True recording start so the clock is correct when the pill appears
-    /// mid-recording (SHELL-15).
+    private func meetingsSubtitle(paused: Bool) -> String {
+        if paused { return "paused" }
+        if coordinator.isRecording { return "recording\u{2026}" }
+        return "\(coordinator.sessionHistory.count) recorded"
+    }
+
+    /// True session start so the clock is correct when the pill appears
+    /// mid-recording (SHELL-15). Covers `.paused` too (#153) — the pill is how
+    /// the other destinations know a meeting is open, and a pause must not
+    /// make it vanish as if the meeting had ended.
     private var recordingStartedAt: Date? {
-        if case .recording(let metadata) = coordinator.state {
-            return metadata.startedAt
-        }
-        return nil
+        guard coordinator.state.isLive else { return nil }
+        return coordinator.state.metadata?.startedAt
     }
 
     /// SET-11/50: pill shows only while recording (caller guards), the
@@ -157,6 +163,7 @@ extension View {
 private struct ShellSidebar: View {
     let activeDestination: ShellDestination
     let isMeetingRecording: Bool
+    let isMeetingPaused: Bool
     let isDictationLocked: Bool
     let healthMonitor: HealthMonitor?
     let onSelect: (ShellDestination) -> Void
@@ -207,10 +214,13 @@ private struct ShellSidebar: View {
             ForEach(ShellModel.enabledDestinations) { destination in
                 ShellNavItem(
                     title: destination.title,
-                    icon: destination == .meetings && isMeetingRecording
+                    icon: destination == .meetings && (isMeetingRecording || isMeetingPaused)
                         ? "video.fill" : destination.icon,
                     isActive: destination == activeDestination,
                     isLive: isLive(destination),
+                    liveTint: destination == .meetings && isMeetingPaused
+                        ? LoreTheme.Accent.amber : LoreTheme.Accent.red,
+                    livePulses: !(destination == .meetings && isMeetingPaused),
                     badgeCount: nil, // SHELL-11 slot; Tasks uses it in Stage 2
                     action: { onSelect(destination) }
                 )
@@ -221,10 +231,11 @@ private struct ShellSidebar: View {
     }
 
     /// Red pulsing dot: Meetings while recording, Dictation while Space-locked
-    /// (SHELL-10, prototype dc.html:689).
+    /// (SHELL-10, prototype dc.html:689). A paused meeting keeps the dot —
+    /// the session is still open — in steady amber (#153).
     private func isLive(_ destination: ShellDestination) -> Bool {
         switch destination {
-        case .meetings: return isMeetingRecording
+        case .meetings: return isMeetingRecording || isMeetingPaused
         case .dictation: return isDictationLocked
         default: return false
         }
@@ -288,6 +299,8 @@ private struct ShellNavItem: View {
     let icon: String
     let isActive: Bool
     let isLive: Bool
+    var liveTint: Color = LoreTheme.Accent.red
+    var livePulses = true
     let badgeCount: Int?
     let action: () -> Void
 
@@ -302,7 +315,7 @@ private struct ShellNavItem: View {
                                    : LoreTheme.Typography.navInactive)
                     .frame(maxWidth: .infinity, alignment: .leading)
                 if isLive {
-                    LorePulsingDot()
+                    LorePulsingDot(color: liveTint, pulses: livePulses)
                 }
                 if let badgeCount, badgeCount > 0 {
                     Text("\(badgeCount)")
@@ -325,51 +338,66 @@ private struct ShellNavItem: View {
 // MARK: - REC pill (SHELL-14/15)
 
 /// Red mono "REC m:ss" pill with pulsing dot; clicking navigates to Meetings.
+/// Paused (#153) is the same pill in amber, with a steady dot and the word
+/// "PAUSED" where the running clock was — a clock still ticking beside a
+/// paused meeting is the one thing this surface must not imply.
 private struct ShellRecPill: View {
     let startedAt: Date
+    var isPaused = false
     let action: () -> Void
+
+    private var tint: Color { isPaused ? LoreTheme.Accent.amber : LoreTheme.Accent.red }
 
     var body: some View {
         Button(action: action) {
             HStack(spacing: 7) {
-                LorePulsingDot()
-                Text("REC ") + Text(startedAt, style: .timer)
+                LorePulsingDot(color: tint, pulses: !isPaused)
+                if isPaused {
+                    Text("PAUSED")
+                } else {
+                    Text("REC ") + Text(startedAt, style: .timer)
+                }
             }
             .font(LoreTheme.Typography.monoControl)
-            .foregroundStyle(LoreTheme.Accent.red)
+            .foregroundStyle(tint)
             .padding(.vertical, 7)
             .padding(.horizontal, 12)
             .background(
-                LoreTheme.Accent.red.opacity(0.14),
+                tint.opacity(0.14),
                 in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
             )
         }
         .buttonStyle(LorePressButtonStyle())
-        .accessibilityLabel("Recording — show Meetings")
+        .accessibilityLabel(isPaused ? "Meeting paused — show Meetings"
+                                     : "Recording — show Meetings")
     }
 }
 
 // MARK: - Pulsing dot (SHELL-10/31)
 
 /// 8px red dot with glow; CSS `pulse` 1.3s opacity .25↔1. Static at full
-/// opacity when Reduce Motion is on ("calm" mode, SHELL-31).
+/// opacity when Reduce Motion is on ("calm" mode, SHELL-31) — and when
+/// `pulses` is false, which is how a paused meeting shows itself (#153): the
+/// pulse is the "capturing right now" signal, so a paused surface keeps the
+/// dot's shape and glow and drops only its heartbeat.
 struct LorePulsingDot: View {
     var color: Color = LoreTheme.Accent.red
     var size: CGFloat = 8
     /// Off for a *standing* state rather than a live one — the menu bar's amber
-    /// health bead (#151), which marks a fact that has already held for a
-    /// minute. Pulsing at it would be the interruption that surface replaced.
-    /// The glow rule stays here either way, so both beads keep one definition.
+    /// health bead (#151) and a paused meeting (#153), both facts rather than
+    /// live activity. Pulsing at either would be the interruption that surface
+    /// replaced. The glow rule stays here either way, so every bead keeps one
+    /// definition.
     var pulses = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        // CSS `drop-shadow(0 0 <diameter>)`: a blur equal to the dot's own
+        // size, and SwiftUI's radius is half the CSS blur. Proportional, not
+        // the literal 4, so the 3.2pt menu-bar bead glows like the 8pt one.
         Circle()
             .fill(color)
             .frame(width: size, height: size)
-            // CSS `drop-shadow(0 0 <diameter>)`: a blur equal to the dot's own
-            // size, and SwiftUI's radius is half the CSS blur. Proportional, not
-            // the literal 4, so the 3.2pt menu-bar bead glows like the 8pt one.
             .shadow(color: color, radius: size / 2)
             .phaseAnimator([1.0, 0.25]) { view, phase in
                 view.opacity(pulses && !reduceMotion ? phase : 1)

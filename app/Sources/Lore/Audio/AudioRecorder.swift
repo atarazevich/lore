@@ -46,6 +46,13 @@ final class AudioRecorder: @unchecked Sendable {
     private(set) var micAnchors: [(frame: Int64, date: Date)] = []
     private(set) var sysAnchors: [(frame: Int64, date: Date)] = []
 
+    /// A pause is over and this track has not yet filled its gap (#153). The
+    /// only pause state the recorder keeps — the gap's *length* is never
+    /// stored, it is derived at write time from the track's own last-write
+    /// date.
+    private var micNeedsPauseFill = false
+    private var sysNeedsPauseFill = false
+
     /// A capture outage appends no silence: wall time advances while file
     /// frames don't. True when the wall-clock delta since the last write
     /// exceeds the audio duration written since then by more than the
@@ -82,6 +89,8 @@ final class AudioRecorder: @unchecked Sendable {
             micEndFrame = 0
             micAnchors = []
             sysAnchors = []
+            micNeedsPauseFill = false
+            sysNeedsPauseFill = false
 
             let fmt = DateFormatter()
             fmt.dateFormat = Self.exportTimestampFormat
@@ -91,6 +100,76 @@ final class AudioRecorder: @unchecked Sendable {
             micTempURL = tmp.appendingPathComponent("lore_mic_\(sessionTimestamp).caf")
             sysTempURL = tmp.appendingPathComponent("lore_sys_\(sessionTimestamp).caf")
         }
+    }
+
+    // MARK: - Pause / Resume (#153)
+
+    /// Capture is coming back after a user pause: each track fills its own gap
+    /// with silence on its next write.
+    ///
+    /// Nothing about *when* the pause started or how long it ran is recorded.
+    /// Each gap is derived at write time from that track's own last-write date,
+    /// which buys three things a stored duration cannot: it is frame-exact per
+    /// track (the two legs come back at different instants), it self-heals (a
+    /// failed fill leaves the date untouched, so the next buffer retries), and
+    /// it needs no accounting when a resume fails or a second pause follows —
+    /// whenever audio lands, the gap it measures is the whole span since real
+    /// audio last did. Why the gap must be filled at all:
+    /// `docs/features/meeting-pause-resume.md`.
+    func noteResumedFromPause() {
+        lock.withLock {
+            micNeedsPauseFill = true
+            sysNeedsPauseFill = true
+        }
+    }
+
+    /// One second of silence per write call. Bounds both the buffer allocation
+    /// and each individual `write`, so a long pause is filled by many small
+    /// writes instead of one multi-hundred-megabyte one.
+    private static let pauseFillChunk: TimeInterval = 1.0
+
+    /// Fill one track's pause gap with silence. Caller holds `lock`; returns
+    /// whether the fill is finished (and the pending flag can be cleared).
+    ///
+    /// A track with no audio yet — `lastWrite` nil — has nothing to stay
+    /// aligned with, and its own first-write date is already the truth, so
+    /// nothing is written and the gap is considered closed. Leading silence
+    /// there would push the whole track late by the pause.
+    private static func fillPauseGap(
+        in file: AVAudioFile?,
+        lastWrite: Date?,
+        now: Date
+    ) -> Bool {
+        guard let file, let lastWrite else { return true }
+
+        let format = file.processingFormat
+        let gap = now.timeIntervalSince(lastWrite)
+        var remaining = Int64(gap * format.sampleRate)
+        guard remaining > 0 else { return true }
+
+        let chunkFrames = AVAudioFrameCount(pauseFillChunk * format.sampleRate)
+        guard let silence = AudioUtils.silentBuffer(
+            format: format,
+            frames: AVAudioFrameCount(min(remaining, Int64(chunkFrames)))
+        ) else {
+            recorderLog.error("pause fill skipped: cannot allocate buffer")
+            return true
+        }
+
+        while remaining > 0 {
+            silence.frameLength = AVAudioFrameCount(min(remaining, Int64(silence.frameCapacity)))
+            do {
+                try file.write(from: silence)
+            } catch {
+                // Retried on the next buffer against an unchanged last-write
+                // date, so nothing is lost by giving up here.
+                recorderLog.error("pause fill write error: \(error.localizedDescription, privacy: .private)")
+                return false
+            }
+            remaining -= Int64(silence.frameLength)
+        }
+        recorderLog.debug("filled \(gap, privacy: .public)s of pause with silence")
+        return true
     }
 
     func writeMicBuffer(_ buffer: AVAudioPCMBuffer) {
@@ -118,6 +197,13 @@ final class AudioRecorder: @unchecked Sendable {
             }
 
             let now = Date()
+
+            // Before `preWriteFrame` is read, so the frame delta below spans
+            // the fill too and the pause reads as continuous audio rather than
+            // a capture gap needing a new anchor (#153/#128).
+            if micNeedsPauseFill {
+                micNeedsPauseFill = !Self.fillPauseGap(in: micFile, lastWrite: micEndDate, now: now)
+            }
 
             // Downmix to mono inline — handle float32, int16, and int32 formats
             guard let monoFormat = AVAudioFormat(
@@ -241,6 +327,13 @@ final class AudioRecorder: @unchecked Sendable {
             }
 
             let now = Date()
+
+            // Same as the mic track, and load-bearing here: `sysEndFrame` feeds
+            // the effective-sample-rate correction in `mergeAndEncode` (#153).
+            if sysNeedsPauseFill {
+                sysNeedsPauseFill = !Self.fillPauseGap(in: sysFile, lastWrite: sysEndDate, now: now)
+            }
+
             let preWriteFrame = sysFile?.length ?? 0
             do {
                 try sysFile?.write(from: buffer)

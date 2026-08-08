@@ -133,12 +133,19 @@ struct NotesView: View {
                 }
             }
         }
-        .onChange(of: coordinator.state) { _, newState in
+        .onChange(of: coordinator.state) { oldState, newState in
             // Keyed to the full state, not a derived `== .idle` Bool — a
             // coalesced .ending → .idle → .recording frame would leave the
             // Bool unchanged and carry a stale "don't auto-select" into the
             // next recording.
-            if case .recording = newState { userNavigatedDuringRecording = false }
+            //
+            // The arrival has to be from outside a live session (#153): a
+            // resume lands on `.recording` too, and clearing the flag there
+            // would let auto-select yank the meeting the user had opened
+            // mid-session.
+            if case .recording = newState, !oldState.isLive {
+                userNavigatedDuringRecording = false
+            }
         }
         // Review chat lifecycle (#62): a selection change immediately swaps
         // (and generation-guards) the conversation and rebinds persistence to

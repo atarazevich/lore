@@ -8,15 +8,29 @@ enum MenuBarBead: Equatable, Sendable {
     case none
     /// The pulsing red dot — a recording is running.
     case recording
+    /// The steady amber dot (#153) — a meeting is paused. The session is open,
+    /// so the slot stays claimed; only the pulse, which means "capturing right
+    /// now", goes.
+    case paused
     /// The quiet amber dot (#151) — a health failure has stood past
     /// `HealthMonitor.sustainedFailureDelay`.
     case health
 
-    /// Recording wins: it is the rarer and the time-critical of the two, and the
-    /// one the user is actively watching. Losing the slot is not losing the
-    /// condition — it keeps its own clock, so amber returns when recording ends.
-    static func resolve(recording: Bool, sustainedFailure: Bool) -> MenuBarBead {
-        recording ? .recording : (sustainedFailure ? .health : .none)
+    /// Precedence: recording > paused > health.
+    ///
+    /// The session states win because they are the rarer and the time-critical
+    /// claims, and the ones the user is actively watching. Losing the slot is
+    /// not losing the condition — health keeps its own clock, so amber returns
+    /// when the meeting ends.
+    ///
+    /// `.paused` and `.health` paint the same steady amber; they are told apart
+    /// by the tooltip and accessibility label, not by the dot. That is
+    /// deliberate — the slot has one pixel budget, and inventing a second amber
+    /// would make two rare states hard to tell apart instead of one.
+    static func resolve(recording: Bool, paused: Bool, sustainedFailure: Bool) -> MenuBarBead {
+        if recording { return .recording }
+        if paused { return .paused }
+        return sustainedFailure ? .health : .none
     }
 }
 
@@ -31,7 +45,7 @@ struct MenuBarBeadView: View {
             EmptyView()
         case .recording:
             LorePulsingDot(size: LoreMarkGeometry.beadSize)
-        case .health:
+        case .paused, .health:
             LorePulsingDot(color: LoreTheme.Accent.amber,
                            size: LoreMarkGeometry.beadSize,
                            pulses: false)
@@ -146,7 +160,9 @@ final class MenuBarController {
                 applyScreenShareVisibility()
                 await withCheckedContinuation { continuation in
                     withObservationTracking {
-                        _ = self.coordinator.isRecording
+                        // The whole state, not `isRecording`: the slot also has
+                        // to wake on the pause and resume edges (#153).
+                        _ = self.coordinator.state
                         _ = self.settings.hideFromScreenShare
                         // Both the arrival of the monitor (it is built after this
                         // controller) and every amber transition it publishes.
@@ -168,14 +184,16 @@ final class MenuBarController {
     private func updateIcon() {
         let standing = coordinator.healthMonitor?.sustainedSubjects ?? []
         let bead = MenuBarBead.resolve(recording: coordinator.isRecording,
+                                       paused: coordinator.state.isLive && !coordinator.isRecording,
                                        sustainedFailure: !standing.isEmpty)
         guard let button = statusItem.button else { return }
         let label = Self.label(for: bead, standing: standing)
         // On the button, not on the image: the image is a shared instance.
         button.setAccessibilityLabel(label)
         // One string for both, so what the dot means cannot differ between
-        // VoiceOver and the pointer — an unexplained amber dot is a puzzle.
-        button.toolTip = bead == .health ? label : nil
+        // VoiceOver and the pointer — and an amber dot carries it for both of
+        // its states, since the pixels alone cannot say which one it is.
+        button.toolTip = (bead == .health || bead == .paused) ? label : nil
         beadView?.rootView = MenuBarBeadView(bead: bead)
     }
 
@@ -187,6 +205,7 @@ final class MenuBarController {
         switch bead {
         case .none: return LoreTheme.wordmark
         case .recording: return "\(LoreTheme.wordmark) \u{2014} recording"
+        case .paused: return "\(LoreTheme.wordmark) \u{2014} meeting paused"
         case .health:
             let what = standing.count == 1
                 ? "\(standing.first!.subject) needs a look"

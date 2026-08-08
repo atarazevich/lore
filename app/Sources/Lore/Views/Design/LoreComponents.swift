@@ -588,6 +588,35 @@ struct LoreStartStopButton: View {
     }
 }
 
+// MARK: - Resume control for a paused meeting (#153)
+
+/// The counterpart to `LoreStartStopButton` while a meeting is paused: amber
+/// fill at .14 and amber label, in the tint every paused surface is named in.
+struct LoreResumeButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            HStack(spacing: 6) {
+                Image(systemName: "play.fill")
+                    .font(.system(size: 10, weight: .semibold))
+                Text("Resume")
+                    .font(.system(size: 12.5, weight: .semibold))
+            }
+            .foregroundStyle(LoreTheme.Accent.amber)
+            .padding(.vertical, 6)
+            .padding(.horizontal, 12)
+            .background(
+                LoreTheme.Accent.amber.opacity(0.14),
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
+            )
+        }
+        .buttonStyle(LorePressButtonStyle())
+        .help("Resume recording")
+        .accessibilityLabel("Resume recording")
+    }
+}
+
 // MARK: - Transcript speaker row (meetings live + review, MREC-11/MREV-13)
 
 /// 64px speaker-label column ("You" blue, diarized remotes keep the current

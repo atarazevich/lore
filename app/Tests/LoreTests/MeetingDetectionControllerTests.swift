@@ -196,8 +196,10 @@ final class MeetingDetectionControllerTests: XCTestCase {
     // MARK: - Session-Active Suppression (#77)
 
     // These tests pin the isSessionActive guard in handleMeetingDetected; the
-    // AppContainer closure wiring (isRecording || dictationCoordinator.state
-    // == .recording) is verified by inspection.
+    // AppContainer closure wiring (meeting state != .idle — which since #153
+    // includes a paused meeting, whose free mic would otherwise draw a prompt
+    // for the meeting already open — or dictationCoordinator.state ==
+    // .recording) is verified by inspection.
 
     func testMeetingDetectedSuppressedWhileSessionActive() async {
         let controller = MeetingDetectionController()

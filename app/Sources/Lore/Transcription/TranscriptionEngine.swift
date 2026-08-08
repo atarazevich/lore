@@ -90,6 +90,23 @@ final class TranscriptionEngine {
         }
     }
 
+    /// Capture is actually up: a mic stream is subscribed *and* the engine
+    /// still considers itself running.
+    ///
+    /// Not the same as `isRunning` alone, which is set the moment `start()`
+    /// commits — before the model load, which can be a multi-minute download.
+    /// Anything asking "can this be paused / is audio flowing" must read this
+    /// instead, or it offers a Pause for a session that was never capturing and
+    /// lands the user in a paused banner over a still-loading engine (#153).
+    ///
+    /// Both halves are needed: `startMicStream` clears `isRunning` when the
+    /// transcriber cannot be built, and it does so *after* subscribing, so a
+    /// live consumer alone does not mean audio is being transcribed.
+    var isCapturing: Bool {
+        if case .scripted = mode { return isRunning }
+        return isRunning && micConsumerID != nil
+    }
+
     /// Engine-local mic mute (#66). Consulted only in THIS engine's mic sink: while
     /// muted, the recorder's mic track records silence (file keeps full duration) and
     /// VAD/[you] transcription sees nothing; the reported audio level reads 0. Other
@@ -321,9 +338,30 @@ final class TranscriptionEngine {
 
         guard let vadManager else { return }
 
-        // 2. Start mic capture. Device resolution is HAL enumeration — it runs on the
-        // shared HAL queue, never on the main thread (#64: main blocked on HALB_Mutex
-        // here was one leg of the stop→start deadlock triangle).
+        await bringUpCapture(vadManager: vadManager)
+    }
+
+    /// Bring both capture legs up against the current settings: resolve and
+    /// subscribe the mic, arm the no-audio health check, start the system tap,
+    /// install the output-device listener, and drain a device change that
+    /// arrived meanwhile.
+    ///
+    /// Shared by `start()` (once models are loaded) and `resume()` (#153),
+    /// whose whole point is to reach this without re-entering `start()` —
+    /// that would restart the recorder's session, orphaning the pre-pause
+    /// audio and wiping its timing anchors.
+    ///
+    /// Assumes `isRunning` is already true and `isStarting` is set by the
+    /// caller, so a `restartMic` arriving mid-flight defers instead of racing
+    /// the first subscription (#64 review).
+    ///
+    /// Returns whether the mic came up. A failed system tap is not a failure
+    /// here — the mic leg still records, exactly as on the start path.
+    @discardableResult
+    private func bringUpCapture(vadManager: VadManager) async -> Bool {
+        // Device resolution is HAL enumeration — it runs on the shared HAL
+        // queue, never on the main thread (#64: main blocked on HALB_Mutex here
+        // was one leg of the stop→start deadlock triangle).
         userSelectedDeviceID = settings.inputDeviceID
         guard let targetMicID = await resolvedMicDeviceID(for: settings.inputDeviceID) else {
             let msg = Self.unavailableMicMessage
@@ -331,13 +369,13 @@ final class TranscriptionEngine {
             lastError = msg
             assetStatus = "Ready"
             isRunning = false
-            return
+            return false
         }
         // stop() may have run while resolution was in flight — don't subscribe a mic
         // stream for a session that is already torn down (#64 review).
         guard isRunning else {
-            engineLog.debug("stopped during device resolution — aborting start")
-            return
+            engineLog.debug("stopped during device resolution — aborting capture bring-up")
+            return false
         }
         currentMicDeviceID = targetMicID
         engineLog.debug("starting mic capture, targetMicID=\(targetMicID, privacy: .public)")
@@ -364,7 +402,6 @@ final class TranscriptionEngine {
             }
         }
 
-        // 3. Start system audio capture
         await startSystemAudioStream(vadManager: vadManager)
 
         // Back to the no-status sentinel: a persistent "Transcribing (model)"
@@ -380,6 +417,73 @@ final class TranscriptionEngine {
         isStarting = false
         if pendingMicDeviceID != nil {
             startMicRestartLoopIfNeeded()
+        }
+        // `startMicStream` clears `isRunning` when the transcriber cannot be
+        // built, so the answer is read back rather than assumed — a resume
+        // whose mic stream failed must take its failure branch.
+        return isRunning
+    }
+
+    // MARK: - Pause / Resume (#153)
+
+    /// Suspend capture in place. Tears down exactly what `finalize()` tears
+    /// down — the mic subscription and the system tap, both awaited so each
+    /// transcriber flushes its tail as a final utterance, which is why no
+    /// utterance ever splices across the gap — and keeps everything a resume
+    /// needs: loaded backends, the VAD, and the recorder's open files and
+    /// timing anchors.
+    ///
+    /// `isRunning` goes false because capture really has stopped; the paused
+    /// *session* is `AppCoordinator.state`, which stays the single truth source
+    /// for "a meeting exists".
+    func pause() async {
+        if clearForNonCapturingState() { return }
+
+        guard isCapturing else { return }
+        isRunning = false
+        await tearDownCaptureLegs()
+        engineLog.debug("capture paused")
+    }
+
+    /// Continue the paused session: fresh transcribers over fresh streams, the
+    /// same backends, the same recorder files. Never routes through `start()`.
+    func resume() async {
+        if case .scripted = mode {
+            isRunning = true
+            return
+        }
+
+        // Already capturing — a duplicate resume is a no-op, not a failure.
+        guard !isCapturing else { return }
+        // Paused implies a started engine, so this is defensive. It still has
+        // to name itself: a Resume that quietly does nothing is the worst of
+        // the possible outcomes.
+        guard let vadManager else {
+            engineLog.error("resume ignored: no VAD — the engine never started")
+            lastError = "Could not resume. Stop this meeting and start a new one."
+            return
+        }
+
+        lastError = nil
+        isRunning = true
+        // The user asking for the session back is a fresh signal, exactly like
+        // starting a meeting is (#149) — they may have granted screen recording
+        // during the pause. An unattended re-drive is what the budget bounds.
+        systemCapture.resetFailureBudget()
+        isStarting = true
+        defer { isStarting = false }
+
+        // Armed before any buffer can arrive, so each track fills its own gap
+        // on its first post-resume write. Idempotent, so a failed resume needs
+        // no undo — the gap simply measures longer next time.
+        audioRecorder?.noteResumedFromPause()
+
+        if await bringUpCapture(vadManager: vadManager) {
+            engineLog.debug("capture resumed")
+        } else {
+            // `lastError` is set by the bring-up and the banner shows it beside
+            // a stoppable session — a failed resume is never a silent one.
+            engineLog.error("resume failed to bring capture back")
         }
     }
 
@@ -492,16 +596,22 @@ final class TranscriptionEngine {
         }
     }
 
-    func finalize() async {
-        clearMicMuteForSessionEnd()
-        if case .scripted = mode {
-            isRunning = false
-            assetStatus = "Ready"
-            transcriptStore.volatileYouText = ""
-            transcriptStore.volatileThemText = ""
-            return
-        }
+    /// The scripted engine has no capture to tear down — flip the flags the UI
+    /// reads and clear the volatile lines. Returns true when it handled the
+    /// call, so each live path opens with `if clearForNonCapturingState() { return }`.
+    private func clearForNonCapturingState() -> Bool {
+        guard case .scripted = mode else { return false }
+        isRunning = false
+        assetStatus = "Ready"
+        transcriptStore.volatileYouText = ""
+        transcriptStore.volatileThemText = ""
+        return true
+    }
 
+    /// Cancel the restart machinery and stop the output-device listener from
+    /// driving it. Shared by every path that gives up the capture legs — the
+    /// one part `stop()` can use, since it must stay synchronous.
+    private func cancelCaptureRestartWork() {
         removeDefaultOutputDeviceListener()
         micRestartTask?.cancel()
         sysRestartTask?.cancel()
@@ -509,9 +619,21 @@ final class TranscriptionEngine {
         sysRestartTask = nil
         pendingMicDeviceID = nil
         pendingSystemAudioRestart = false
+    }
 
-        // Unsubscribe from audio bus. Capture keeps running only if another consumer
-        // (e.g. dictation) remains; otherwise the bus tears down and frees the mic (#30).
+    /// Give up both capture legs and wait for them to drain.
+    ///
+    /// Unsubscribing frees the mic only if no other consumer (e.g. dictation)
+    /// remains; otherwise the bus keeps running for them (#30). Awaiting the
+    /// two transcriber tasks is what makes each flush its tail as a final
+    /// utterance — the reason a pause splices nothing.
+    ///
+    /// Deliberately leaves the backends, the VAD and the recorder alone: this
+    /// is the part `pause()` and `finalize()` agree on, and everything a resume
+    /// would need survives it.
+    private func tearDownCaptureLegs() async {
+        cancelCaptureRestartWork()
+
         if let id = micConsumerID {
             audioBus.unsubscribe(id)
             micConsumerID = nil
@@ -525,8 +647,19 @@ final class TranscriptionEngine {
 
         micTask = nil
         sysTask = nil
-        pendingMicDeviceID = nil
         currentMicDeviceID = 0
+
+        // After the tails have landed, so nothing that was still coming is
+        // dropped — and no half-recognized word hangs on screen afterwards.
+        transcriptStore.volatileYouText = ""
+        transcriptStore.volatileThemText = ""
+    }
+
+    func finalize() async {
+        clearMicMuteForSessionEnd()
+        if clearForNonCapturingState() { return }
+
+        await tearDownCaptureLegs()
 
         // NOTE: cachedMicBackend/cachedSystemBackend are intentionally preserved
         // across sessions to avoid model reload. Call invalidateBackendCache() to release.
@@ -538,21 +671,9 @@ final class TranscriptionEngine {
 
     func stop() {
         clearMicMuteForSessionEnd()
-        if case .scripted = mode {
-            isRunning = false
-            assetStatus = "Ready"
-            transcriptStore.volatileYouText = ""
-            transcriptStore.volatileThemText = ""
-            return
-        }
+        if clearForNonCapturingState() { return }
 
-        removeDefaultOutputDeviceListener()
-        micRestartTask?.cancel()
-        sysRestartTask?.cancel()
-        micRestartTask = nil
-        sysRestartTask = nil
-        pendingMicDeviceID = nil
-        pendingSystemAudioRestart = false
+        cancelCaptureRestartWork()
         micTask?.cancel()
         sysTask?.cancel()
         micTask = nil
@@ -803,16 +924,7 @@ final class TranscriptionEngine {
 
     /// A zeroed buffer matching the given buffer's format and frame length.
     private nonisolated static func silentBuffer(like buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        guard buffer.frameLength > 0,
-              let silent = AVAudioPCMBuffer(pcmFormat: buffer.format, frameCapacity: buffer.frameLength)
-        else { return nil }
-        silent.frameLength = buffer.frameLength
-        for audioBuffer in UnsafeMutableAudioBufferListPointer(silent.mutableAudioBufferList) {
-            if let data = audioBuffer.mData {
-                memset(data, 0, Int(audioBuffer.mDataByteSize))
-            }
-        }
-        return silent
+        AudioUtils.silentBuffer(format: buffer.format, frames: buffer.frameLength)
     }
 
     /// Wrap an audio stream to forward each buffer to a synchronous tap before yielding it downstream.

@@ -255,4 +255,107 @@ final class AppCoordinatorIntegrationTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .idle)
         XCTAssertNil(coordinator.lastEndedSession)
     }
+
+    // MARK: - Pause / Resume (#153)
+
+    /// Pause suspends capture and leaves the session open; resume brings it
+    /// back without a second session appearing anywhere.
+    func testPauseSuspendsCaptureAndResumeContinuesTheSameSession() async {
+        let h = await MeetingHarness.makeStarted()
+        let sessionID = await h.sessionRepository.getCurrentSessionID()
+        XCTAssertNotNil(sessionID)
+
+        h.controller.pauseSession(settings: h.settings)
+        let paused = await waitUntil {
+            h.coordinator.isPaused && h.coordinator.transcriptionEngine?.isCapturing == false
+        }
+        XCTAssertTrue(paused, "Pause must stop capture while the session stays open")
+        XCTAssertFalse(h.coordinator.isRecording, "A paused meeting is not recording")
+        XCTAssertTrue(h.coordinator.state.isLive, "…but it is still a live session")
+
+        h.controller.resumeSession(settings: h.settings)
+        let resumed = await waitUntil {
+            h.coordinator.isRecording && h.coordinator.transcriptionEngine?.isCapturing == true
+        }
+        XCTAssertTrue(resumed, "Resume must bring capture back")
+
+        // Same session throughout: the resume never created a second one.
+        let afterResume = await h.sessionRepository.getCurrentSessionID()
+        XCTAssertEqual(afterResume, sessionID)
+        XCTAssertEqual(h.controller.activeSessionID, sessionID)
+
+        h.controller.stopSession(settings: h.settings)
+        let stopped = await waitUntil(timeout: .seconds(10)) { h.coordinator.state == .idle }
+        XCTAssertTrue(stopped)
+
+        let sessions = await h.sessionRepository.listSessions()
+        XCTAssertEqual(sessions.count, 1, "Pause and resume must yield exactly one session")
+    }
+
+    /// Stop from a pause finalizes — the user never has to resume first.
+    func testStopFromPausedFinalizes() async {
+        let h = await MeetingHarness.makeStarted()
+
+        h.controller.pauseSession(settings: h.settings)
+        await waitUntil { h.coordinator.isPaused }
+
+        h.controller.stopSession(settings: h.settings)
+        let ended = await waitUntil(timeout: .seconds(10)) { h.coordinator.state == .idle }
+        XCTAssertTrue(ended, "A paused session must finalize on stop")
+
+        let sessions = await h.sessionRepository.listSessions()
+        XCTAssertEqual(sessions.count, 1)
+        XCTAssertNotNil(sessions.first?.endedAt, "The finalized session must carry an end date")
+    }
+
+    /// A second start while paused is rejected at the chokepoint — otherwise
+    /// it would abandon the open session's files and transcript.
+    func testStartWhilePausedIsRejected() async {
+        let h = await MeetingHarness.makeStarted()
+        let sessionID = await h.sessionRepository.getCurrentSessionID()
+
+        h.controller.pauseSession(settings: h.settings)
+        await waitUntil { h.coordinator.isPaused }
+
+        XCTAssertFalse(h.coordinator.canStartCapture)
+        h.controller.startSession(settings: h.settings)
+        try? await Task.sleep(for: .milliseconds(200))
+
+        XCTAssertTrue(h.coordinator.isPaused, "A start must not disturb a paused session")
+        let stillSame = await h.sessionRepository.getCurrentSessionID()
+        XCTAssertEqual(stillSame, sessionID)
+    }
+
+    /// Pause needs live capture, not merely a committed start: a session still
+    /// downloading its model has nothing to suspend, and pausing it would leave
+    /// the user in a paused banner over an engine that then starts recording.
+    func testPauseIsRejectedWithoutLiveCapture() async {
+        let h = MeetingHarness.make(withEngine: false)
+        h.controller.startSession(settings: h.settings)
+        await waitUntil { h.coordinator.isRecording }
+
+        h.controller.pauseSession(settings: h.settings)
+        try? await Task.sleep(for: .milliseconds(100))
+        XCTAssertFalse(h.coordinator.isPaused, "Nothing to pause without capture")
+        XCTAssertTrue(h.coordinator.isRecording)
+    }
+
+    /// A remote start aimed at a paused session means "make it record", which
+    /// is a resume — a plain start would be rejected at the chokepoint and the
+    /// command consumed for nothing (#153).
+    func testExternalStartWhilePausedResumes() async {
+        let h = await MeetingHarness.makeStarted()
+
+        h.controller.pauseSession(settings: h.settings)
+        await waitUntil { h.coordinator.isPaused }
+
+        h.coordinator.queueExternalCommand(.startSession)
+        h.controller.handlePendingExternalCommandIfPossible(
+            settings: h.settings, showPastMeetings: nil
+        )
+
+        let resumed = await waitUntil { h.coordinator.isRecording }
+        XCTAssertTrue(resumed, "lore://start on a paused meeting resumes it")
+        XCTAssertNil(h.coordinator.pendingExternalCommand, "and the command is consumed")
+    }
 }

@@ -11,6 +11,26 @@ enum AudioUtils {
 
     private static let log = Logger(subsystem: "com.lore.app", category: "AudioUtils")
 
+    /// A zeroed buffer of `frames` in `format`. Two callers with one rule: the
+    /// mic mute gate substitutes silence of the same shape as the buffer it
+    /// drops (#66), and the recorder fills a pause's gap with it (#153).
+    /// Returns nil only on allocation failure — the callers treat that as
+    /// "drop the frame" rather than passing audio through.
+    static func silentBuffer(format: AVAudioFormat, frames: AVAudioFrameCount) -> AVAudioPCMBuffer? {
+        guard frames > 0,
+              let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frames)
+        else { return nil }
+        buffer.frameLength = frames
+        // Every channel of every buffer in the list: `mDataByteSize` tracks
+        // `frameLength`, so this zeroes exactly what will be read.
+        for audioBuffer in UnsafeMutableAudioBufferListPointer(buffer.mutableAudioBufferList) {
+            if let data = audioBuffer.mData {
+                memset(data, 0, Int(audioBuffer.mDataByteSize))
+            }
+        }
+        return buffer
+    }
+
     static func extractSamples(_ buffer: AVAudioPCMBuffer, converter: inout AVAudioConverter?) -> [Float]? {
         let sourceFormat = buffer.format
         let frameLength = Int(buffer.frameLength)

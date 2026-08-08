@@ -358,6 +358,147 @@ final class AudioRecorderTests: XCTestCase {
         XCTAssertTrue(anchors.sysAnchors.isEmpty, "failed writes must not append anchors")
     }
 
+    // MARK: - Pause fill (#153)
+
+    /// Close the recorder's handles and read the finished tracks back. The
+    /// sealed temp files are the test's to clean up — `sealForBatch` hands
+    /// ownership over precisely so batch transcription can outlive the session.
+    private func sealAndRead(
+        _ recorder: AudioRecorder
+    ) throws -> (mic: AVAudioFile?, sys: AVAudioFile?) {
+        let sealed = recorder.sealForBatch()
+        addTeardownBlock {
+            [sealed.mic, sealed.sys].compactMap { $0 }
+                .forEach { try? FileManager.default.removeItem(at: $0) }
+        }
+        return (
+            mic: try sealed.mic.map { try AVAudioFile(forReading: $0) },
+            sys: try sealed.sys.map { try AVAudioFile(forReading: $0) }
+        )
+    }
+
+    /// The invariant the whole pause design rests on: after a resume, each
+    /// track's frame count has advanced by its own wall-clock gap. It is what
+    /// keeps `testMergeWithMatchingRatesDoesNotResample` above true for a paused
+    /// meeting — see `docs/features/meeting-pause-resume.md` for why an unfilled
+    /// gap silently stretches the system track.
+    ///
+    /// Second assertion, same run: the fill also has to make the pause
+    /// invisible to capture-gap detection (#128). Frame delta now matches wall
+    /// delta, so no resume-anchor is appended — a real outage still gets one.
+    func testPauseIsFilledWithSilenceAndAppendsNoGapAnchor() async throws {
+        let recorder = AudioRecorder(outputDirectory: outputDir)
+        recorder.startSession()
+
+        let rate: Double = 48_000
+        let frames = AVAudioFrameCount(4_800) // 0.1s
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
+        recorder.writeSysBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
+
+        // Longer than `captureGapThreshold` (2s), so an unfilled gap would be
+        // detected as an outage and the anchor assertion would discriminate.
+        let pause: TimeInterval = 2.2
+        try await Task.sleep(for: .seconds(pause))
+        recorder.noteResumedFromPause()
+
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
+        recorder.writeSysBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
+
+        let anchors = recorder.timingAnchors()
+        XCTAssertEqual(
+            anchors.micAnchors.count, 1,
+            "filled silence keeps frame delta in step with wall time — no gap anchor is due"
+        )
+        XCTAssertEqual(anchors.sysAnchors.count, 1)
+
+        let files = try sealAndRead(recorder)
+        for file in [files.mic, files.sys].compactMap({ $0 }) {
+            let expected = Double(frames) * 2 + pause * file.processingFormat.sampleRate
+            XCTAssertEqual(
+                Double(file.length), expected,
+                accuracy: file.processingFormat.sampleRate * 0.35,
+                "the track must carry \(pause)s of silence for the pause"
+            )
+        }
+    }
+
+    /// Each track fills to its *own* first buffer back, not to a shared clock:
+    /// the mic and the system tap come back at different instants, and neither
+    /// may inherit the other's bring-up latency.
+    func testEachTrackFillsItsOwnGap() async throws {
+        let recorder = AudioRecorder(outputDirectory: outputDir)
+        recorder.startSession()
+
+        let rate: Double = 48_000
+        let frames = AVAudioFrameCount(4_800)
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
+        recorder.writeSysBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
+
+        try await Task.sleep(for: .milliseconds(400))
+        recorder.noteResumedFromPause()
+
+        // The mic is back now; the system tap takes another 600ms.
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
+        try await Task.sleep(for: .milliseconds(600))
+        recorder.writeSysBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
+
+        let files = try sealAndRead(recorder)
+        guard let mic = files.mic, let sys = files.sys else {
+            XCTFail("both tracks must exist")
+            return
+        }
+        XCTAssertEqual(Double(mic.length), Double(frames) * 2 + 0.4 * rate,
+                       accuracy: rate * 0.2, "mic fills its own ~0.4s gap")
+        XCTAssertEqual(Double(sys.length), Double(frames) * 2 + 1.0 * rate,
+                       accuracy: rate * 0.2, "system tap fills its own ~1.0s gap")
+        XCTAssertGreaterThan(sys.length, mic.length,
+                             "the later-returning track fills the longer gap")
+    }
+
+    /// Two pauses with no audio in between need no accounting: the gap is
+    /// always measured from the last write that carried real audio, so the
+    /// second fill covers the whole span.
+    func testSecondPauseBeforeAnyAudioStillFillsTheWholeGap() async throws {
+        let recorder = AudioRecorder(outputDirectory: outputDir)
+        recorder.startSession()
+
+        let rate: Double = 48_000
+        let frames = AVAudioFrameCount(4_800)
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
+
+        try await Task.sleep(for: .milliseconds(300))
+        recorder.noteResumedFromPause()  // resume 1 — no buffer arrives
+        try await Task.sleep(for: .milliseconds(300))
+        recorder.noteResumedFromPause()  // resume 2
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
+
+        let files = try sealAndRead(recorder)
+        guard let mic = files.mic else {
+            XCTFail("mic file missing")
+            return
+        }
+        XCTAssertEqual(Double(mic.length), Double(frames) * 2 + 0.6 * rate,
+                       accuracy: rate * 0.2,
+                       "the fill spans both pauses, not just the last one")
+    }
+
+    /// A track whose first buffer arrives only after the pause has no earlier
+    /// audio to stay aligned with — its own start date is the truth. Leading
+    /// silence there would push the whole track late by the pause.
+    func testPauseBeforeATrackHasAudioAddsNoLeadingSilence() throws {
+        let recorder = AudioRecorder(outputDirectory: outputDir)
+        recorder.startSession()
+
+        recorder.noteResumedFromPause()
+
+        let frames = AVAudioFrameCount(4_800)
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: 48_000, frameCount: frames))
+
+        let files = try sealAndRead(recorder)
+        XCTAssertEqual(files.mic?.length, Int64(frames),
+                       "no silence may precede a track's first audio")
+    }
+
     /// Continuous back-to-back writes must keep exactly one anchor per track —
     /// the first-write one. The gap path stays dormant without an outage.
     func testContinuousWritesAddNoExtraAnchors() {

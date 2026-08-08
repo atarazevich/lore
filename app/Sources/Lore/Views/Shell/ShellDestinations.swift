@@ -48,21 +48,27 @@ struct MeetingsDestination: View {
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .onChange(of: coordinator.state) { _, newState in
-            shell.handleRecordingStateChange(newState)
+        .onChange(of: coordinator.state) { oldState, newState in
+            shell.handleRecordingStateChange(from: oldState, to: newState)
         }
     }
 
-    /// Compact segmented switch shown only while recording: "Live" (with the
-    /// recording dot) vs "Meetings" (the review layout).
+    /// Compact segmented switch shown only during a session: "Live" (with the
+    /// session dot — steady amber while paused, #153) vs "Meetings" (the review
+    /// layout).
     private func liveReviewSwitch(showLive: Bool) -> some View {
-        HStack {
+        let paused = coordinator.isPaused
+        return HStack {
             Spacer()
             HStack(spacing: 3) {
                 switchSegment(isOn: showLive) {
                     shell.meetingsReviewWhileRecording = false
                 } label: {
-                    LorePulsingDot(color: LoreTheme.Accent.red, size: 7)
+                    LorePulsingDot(
+                        color: paused ? LoreTheme.Accent.amber : LoreTheme.Accent.red,
+                        size: 7,
+                        pulses: !paused
+                    )
                     Text("Live")
                 }
                 switchSegment(isOn: !showLive) {

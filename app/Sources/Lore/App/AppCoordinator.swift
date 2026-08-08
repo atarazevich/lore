@@ -52,8 +52,17 @@ final class AppCoordinator {
         set { withMutation(keyPath: \.requestedSessionSelectionID) { _requestedSessionSelectionID = newValue } }
     }
 
+    /// Actively capturing. Deliberately false while `.paused` (#153): every
+    /// surface that pulses, meters or says "Recording" reads this, and a
+    /// paused session is not recording.
     var isRecording: Bool {
         if case .recording = state { return true }
+        return false
+    }
+
+    /// Capture suspended, session still open (#153).
+    var isPaused: Bool {
+        if case .paused = state { return true }
         return false
     }
 
@@ -149,6 +158,10 @@ final class AppCoordinator {
     /// Task consuming detection controller events.
     private var detectionEventTask: Task<Void, Never>?
 
+    /// The controller feeding that task. Held weakly (AppContainer owns it) so
+    /// pause/resume can suspend and restart the silence-timeout monitor (#153).
+    private weak var detectionController: MeetingDetectionController?
+
     init(
         sessionRepository: SessionRepository = SessionRepository(),
         templateStore: TemplateStore = TemplateStore(),
@@ -197,6 +210,28 @@ final class AppCoordinator {
         case .userStarted(let metadata):
             enqueueLifecycleEffect { [self] in
                 await liveSessionController?.startTranscription(metadata: metadata, settings: settings)
+            }
+
+        case .userPaused(let cause):
+            DiagStore.record(cause == .resumeFailed ? .sessionResumeFailed : .sessionPaused)
+            // The silence-timeout monitor is suspended for the duration of the
+            // pause (#153): a paused meeting is silent on purpose, and letting
+            // the timer run would auto-finalize the session behind the user's
+            // back. It restarts fresh on resume.
+            detectionController?.stopSilenceMonitoring()
+            enqueueLifecycleEffect { [self] in
+                await liveSessionController?.pauseCapture()
+            }
+
+        case .userResumed:
+            DiagStore.record(.sessionResumed)
+            enqueueLifecycleEffect { [self] in
+                await liveSessionController?.resumeCapture()
+            }
+            // Only auto-detected sessions ever had a silence monitor; restart
+            // it for those, with a fresh clock (#153).
+            if case .appLaunched = state.metadata?.detectionContext?.signal {
+                detectionController?.startSilenceMonitoring()
             }
 
         case .userStopped:
@@ -296,6 +331,7 @@ final class AppCoordinator {
     /// Maps detection events to state machine events.
     func startDetectionEventLoop(_ controller: MeetingDetectionController) {
         activeSettings = controller.activeSettings
+        detectionController = controller
         detectionEventTask?.cancel()
         detectionEventTask = Task { [weak self] in
             for await event in controller.events {
@@ -309,20 +345,28 @@ final class AppCoordinator {
                     }
                     self.handle(.userStarted(metadata), settings: self.activeSettings)
                 case .meetingAppExited:
-                    if case .recording(let meta) = self.state,
-                       case .appLaunched = meta.detectionContext?.signal {
+                    // Paused counts: the meeting app is gone, so the session is
+                    // over whether or not capture was suspended (#153).
+                    if self.state.isLive,
+                       case .appLaunched = self.state.metadata?.detectionContext?.signal {
                         controller.stopSilenceMonitoring()
                         controller.stopAppExitMonitoring()
                         self.handle(.userStopped)
                     }
                 case .silenceTimeout:
+                    // `.recording` only: a paused session is exempt from the
+                    // silence timeout by construction (its monitor is stopped
+                    // at pause), and this guard says so a second time (#153).
                     if case .recording = self.state {
                         controller.stopSilenceMonitoring()
                         controller.stopAppExitMonitoring()
                         self.handle(.userStopped)
                     }
                 case .systemSleep:
-                    if case .recording = self.state {
+                    // Sleeping while paused finalizes, exactly as sleeping
+                    // while recording does — the machine is going away and an
+                    // open session must not survive it (#153).
+                    if self.state.isLive {
                         controller.stopSilenceMonitoring()
                         controller.stopAppExitMonitoring()
                         self.handle(.userStopped)
@@ -338,5 +382,6 @@ final class AppCoordinator {
     func stopDetectionEventLoop() {
         detectionEventTask?.cancel()
         detectionEventTask = nil
+        detectionController = nil
     }
 }

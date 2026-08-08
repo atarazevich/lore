@@ -14,7 +14,7 @@ struct ContentView: View {
 
     private var rootContent: some View {
         let controllerState = liveSessionController?.state ?? LiveSessionState()
-        let startedAt = recordingStartedAt
+        let startedAt = sessionStartedAt
 
         return VStack(spacing: 0) {
             header(state: controllerState, startedAt: startedAt)
@@ -57,16 +57,17 @@ struct ContentView: View {
         }
     }
 
-    /// True recording start (same source as the shell REC pill) so the banner
+    /// True session start (same source as the shell REC pill) so the banner
     /// clock and the duration stat card tick from the real session start.
-    /// Non-nil exactly while `coordinator.state` is `.recording` — the single
-    /// state source for the Stop label, banner, stats, AND the toggle action.
-    private var recordingStartedAt: Date? {
-        if case .recording(let metadata) = coordinator.state {
-            return metadata.startedAt
-        }
-        return nil
+    /// Non-nil for the whole live session — `.recording` *and* `.paused`
+    /// (#153) — which is the single state source for the Stop label, banner,
+    /// stats, AND the toggle action. A pause must not tear the live surfaces
+    /// down: the session is still there.
+    private var sessionStartedAt: Date? {
+        guard coordinator.state.isLive else { return nil }
+        return coordinator.state.metadata?.startedAt
     }
+
 
     // MARK: - Header (MREC-01/02)
 
@@ -86,7 +87,8 @@ struct ContentView: View {
             }
 
             // Label and action key off the same coordinator-phase source
-            // (recordingStartedAt): a "Stop" can never route to start.
+            // (sessionStartedAt): a "Stop" can never route to start, and a
+            // paused session still reads Stop (#153).
             LoreStartStopButton(isRecording: startedAt != nil) {
                 if startedAt != nil {
                     stopSession()
@@ -101,38 +103,98 @@ struct ContentView: View {
     // MARK: - Live banner (MREC-10)
 
     /// Red recording banner: pulsing dot, "Recording", mono clock, waveform
-    /// bars driven by the real audio level, mute toggle, right-aligned hint.
+    /// bars driven by the real audio level, mute toggle, Pause, right-aligned
+    /// hint. Paused (#153) is the same banner in amber: steady dot, no clock
+    /// and no meter (both would read as "still capturing"), Resume in place of
+    /// Pause, and no mute control — while paused the banner states one thing.
+    @ViewBuilder
     private func recordingBanner(state: LiveSessionState, startedAt: Date) -> some View {
+        if coordinator.isPaused {
+            liveBanner(
+                tint: LoreTheme.Accent.amber,
+                pulses: false,
+                label: "Paused",
+                hint: "Capture is suspended \u{2014} resume to continue this meeting"
+            ) {
+                LoreResumeButton {
+                    liveSessionController?.resumeSession(settings: settings)
+                }
+                .accessibilityIdentifier("app.controlBar.resumeToggle")
+            }
+        } else {
+            liveBanner(
+                tint: LoreTheme.Accent.red,
+                pulses: true,
+                label: "Recording",
+                hint: "Live transcription \u{2014} notes when you stop"
+            ) {
+                Text(startedAt, style: .timer)
+                    .font(LoreTheme.Typography.mono(12.5))
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                LoreLiveWaveform(level: state.isMicMuted ? 0 : state.audioLevel)
+                    .frame(height: 16)
+                    .opacity(state.isMicMuted ? 0.35 : 1)
+                bannerIconButton(
+                    systemName: state.isMicMuted ? "mic.slash.fill" : "mic.fill",
+                    label: state.isMicMuted ? "Unmute microphone" : "Mute microphone",
+                    identifier: "app.controlBar.muteToggle",
+                    tint: state.isMicMuted ? LoreTheme.Accent.red : LoreTheme.TextColor.muted
+                ) {
+                    liveSessionController?.toggleMicMute()
+                }
+                // Offered only against live capture, never merely a committed
+                // start: a session still downloading its model has nothing to
+                // suspend (#153).
+                if state.isCapturing {
+                    bannerIconButton(
+                        systemName: "pause.fill",
+                        label: "Pause recording",
+                        identifier: "app.controlBar.pauseToggle"
+                    ) {
+                        liveSessionController?.pauseSession(settings: settings)
+                    }
+                }
+            }
+        }
+    }
+
+    /// The one live-banner shape: state dot, state word, the state's own
+    /// middle (clock/meter/controls), then the right-aligned hint.
+    private func liveBanner<Middle: View>(
+        tint: Color,
+        pulses: Bool,
+        label: String,
+        hint: String,
+        @ViewBuilder middle: () -> Middle
+    ) -> some View {
         HStack(spacing: 12) {
-            LorePulsingDot(size: 10)
-            Text("Recording")
+            LorePulsingDot(color: tint, size: 10, pulses: pulses)
+            Text(label)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(LoreTheme.Accent.red)
-            Text(startedAt, style: .timer)
-                .font(LoreTheme.Typography.mono(12.5))
-                .foregroundStyle(LoreTheme.TextColor.primary)
-            LoreLiveWaveform(level: state.isMicMuted ? 0 : state.audioLevel)
-                .frame(height: 16)
-                .opacity(state.isMicMuted ? 0.35 : 1)
-            muteToggle(isMuted: state.isMicMuted)
+                .foregroundStyle(tint)
+            middle()
             Spacer(minLength: 20)
-            Text("Live transcription \u{2014} notes when you stop")
+            Text(hint)
                 .font(.system(size: 11.5))
                 .foregroundStyle(LoreTheme.TextColor.muted)
                 .lineLimit(1)
         }
-        .loreBanner(tint: LoreTheme.Accent.red)
+        .loreBanner(tint: tint)
     }
 
-    /// Mic mute (MREC-06) — the only pause-like control; restyled into the
-    /// banner. System audio keeps flowing while muted.
-    private func muteToggle(isMuted: Bool) -> some View {
-        Button {
-            liveSessionController?.toggleMicMute()
-        } label: {
-            Image(systemName: isMuted ? "mic.slash.fill" : "mic.fill")
+    /// 24pt icon slot on the banner's translucent fill — mute (MREC-06) and
+    /// pause (#153) are the same control shape with different glyphs.
+    private func bannerIconButton(
+        systemName: String,
+        label: String,
+        identifier: String,
+        tint: Color = LoreTheme.TextColor.muted,
+        action: @escaping () -> Void
+    ) -> some View {
+        Button(action: action) {
+            Image(systemName: systemName)
                 .font(.system(size: 11, weight: .medium))
-                .foregroundStyle(isMuted ? LoreTheme.Accent.red : LoreTheme.TextColor.muted)
+                .foregroundStyle(tint)
                 .frame(width: 24, height: 24)
                 .background(
                     Color.white.opacity(0.07),
@@ -140,9 +202,9 @@ struct ContentView: View {
                 )
         }
         .buttonStyle(LorePressButtonStyle())
-        .help(isMuted ? "Unmute microphone" : "Mute microphone")
-        .accessibilityLabel(isMuted ? "Unmute microphone" : "Mute microphone")
-        .accessibilityIdentifier("app.controlBar.muteToggle")
+        .help(label)
+        .accessibilityLabel(label)
+        .accessibilityIdentifier(identifier)
     }
 
     // MARK: - Status / error / download surfaces
@@ -474,7 +536,7 @@ struct ContentView: View {
         // command). The clear also bumps the generation guard, so responses
         // from the previous session are dropped; the section itself unmounts
         // at stop, so no explicit end handling is needed.
-        .onChange(of: recordingStartedAt) { _, new in
+        .onChange(of: sessionStartedAt) { _, new in
             if new != nil {
                 askLore.startNewSession()
             }

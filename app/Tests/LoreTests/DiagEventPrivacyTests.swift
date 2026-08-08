@@ -64,6 +64,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case detectionLifecycle, detectionDeviceListChanged, detectionListenerFailed
         case detectionSignal, detectionAppScan, detectionPrompt
         case notificationAuthorization, notificationPosted
+        case sessionPaused, sessionResumed, sessionResumeFailed
         case historyWriteFailed, historyMigrated, corruptFileAside, sessionImportFailed
         case notesFolderMoveStarted, notesFolderMigrated, notesFolderLeftoverCleared
     }
@@ -125,6 +126,9 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .detectionPrompt: return .detectionPrompt
         case .notificationAuthorization: return .notificationAuthorization
         case .notificationPosted: return .notificationPosted
+        case .sessionPaused: return .sessionPaused
+        case .sessionResumed: return .sessionResumed
+        case .sessionResumeFailed: return .sessionResumeFailed
         case .historyWriteFailed: return .historyWriteFailed
         case .historyMigrated: return .historyMigrated
         case .notesFolderMoveStarted: return .notesFolderMoveStarted
@@ -216,6 +220,9 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .detectionPrompt: return .detectionPrompt(disposition: .suppressedSessionActive)
         case .notificationAuthorization: return .notificationAuthorization(outcome: .failed)
         case .notificationPosted: return .notificationPosted(outcome: .ok)
+        case .sessionPaused: return .sessionPaused
+        case .sessionResumed: return .sessionResumed
+        case .sessionResumeFailed: return .sessionResumeFailed
 
         case .historyWriteFailed: return .historyWriteFailed
         case .historyMigrated: return .historyMigrated(entries: .max, written: 0)

@@ -192,7 +192,12 @@ final class AppContainer {
             // prompt "Meeting detected" mid-dictation. Suppression is at prompt
             // time only — the detector keeps running, so a real meeting still
             // prompts after dictation ends.
-            return coordinator.isRecording
+            //
+            // Any non-idle phase, not just `.recording` (#153): during a pause
+            // the mic really is free, so the detector would happily announce
+            // "Meeting detected" for the meeting already open behind it — and
+            // accepting that prompt is a start the chokepoint then rejects.
+            return coordinator.state != .idle
                 || coordinator.dictationCoordinator.state == .recording
         }
         detectionController = controller

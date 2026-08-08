@@ -157,14 +157,37 @@ final class MenuBarHealthTests: XCTestCase {
 
     // MARK: - Precedence
 
-    /// The mark has one bead slot (#137). Recording wins it — rarer and
-    /// time-critical — and losing the slot is not losing the condition: it keeps
-    /// its own clock, so amber returns by itself when the recording ends.
-    func testRecordingOutranksAmberAndAmberReturnsAfterwards() {
-        XCTAssertEqual(MenuBarBead.resolve(recording: true, sustainedFailure: true), .recording)
-        XCTAssertEqual(MenuBarBead.resolve(recording: true, sustainedFailure: false), .recording)
-        XCTAssertEqual(MenuBarBead.resolve(recording: false, sustainedFailure: true), .health)
-        XCTAssertEqual(MenuBarBead.resolve(recording: false, sustainedFailure: false), .none)
+    /// The mark has one bead slot (#137). The session states win it — rarer and
+    /// time-critical — and losing the slot is not losing the condition: health
+    /// keeps its own clock, so amber returns by itself when the meeting ends.
+    /// Precedence is recording > paused > health (#153).
+    func testSessionStatesOutrankAmberAndAmberReturnsAfterwards() {
+        let cases: [(recording: Bool, paused: Bool, failure: Bool, expected: MenuBarBead)] = [
+            (true, false, true, .recording),
+            (true, false, false, .recording),
+            (false, true, true, .paused),
+            (false, true, false, .paused),
+            (false, false, true, .health),
+            (false, false, false, .none),
+        ]
+        for c in cases {
+            XCTAssertEqual(
+                MenuBarBead.resolve(recording: c.recording,
+                                    paused: c.paused,
+                                    sustainedFailure: c.failure),
+                c.expected,
+                "recording=\(c.recording) paused=\(c.paused) failure=\(c.failure)"
+            )
+        }
+    }
+
+    /// A paused meeting and a standing health condition paint the same steady
+    /// amber, so the words are the only thing that tells them apart (#153).
+    func testPausedAndHealthAmberAreDistinguishedByTheirLabels() {
+        let paused = MenuBarController.label(for: .paused, standing: [])
+        let health = MenuBarController.label(for: .health, standing: [.pasteFailed])
+        XCTAssertTrue(paused.contains("meeting paused"))
+        XCTAssertNotEqual(paused, health)
     }
 
     // MARK: - What the mark says

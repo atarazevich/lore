@@ -143,7 +143,9 @@ public struct LoreRootApp: App {
                     importMeetingRecording()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
-                .disabled(coordinator.isRecording || isBatchEngineBusy)
+                // Paused counts as busy (#153): the import preempts the live
+                // session's transcript, and a paused session still owns it.
+                .disabled(coordinator.state.isLive || isBatchEngineBusy)
 
                 Button("Dictation") {
                     guard isRunning else { return }
@@ -620,13 +622,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             return .terminateNow
         }
 
-        guard coordinator.isRecording else {
+        // A paused meeting is unsaved work too (#153) — quitting past it would
+        // drop the session as silently as quitting past a running one.
+        guard coordinator.state.isLive else {
             return .terminateNow
         }
 
+        let paused = coordinator.isPaused
         let alert = NSAlert()
-        alert.messageText = "Recording in Progress"
-        alert.informativeText = "Stop recording and quit?"
+        alert.messageText = paused ? "Meeting Paused" : "Recording in Progress"
+        alert.informativeText = paused ? "Stop the meeting and quit?" : "Stop recording and quit?"
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Stop & Quit")
         alert.addButton(withTitle: "Cancel")
@@ -851,7 +856,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // completing *is* the acknowledgement (#150).
         guard let coordinator, let settings else { return }
 
-        if coordinator.isRecording {
+        // The toggle's two positions are "a session exists" and "none does"
+        // (#153): from a pause it stops and finalizes rather than starting a
+        // second meeting on top of the first.
+        if coordinator.state.isLive {
             coordinator.handle(.userStopped, settings: settings)
         } else {
             coordinator.handle(.userStarted(.manual()), settings: settings)

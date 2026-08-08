@@ -323,6 +323,18 @@ enum DiagEvent: Codable, Sendable, Equatable {
     case detectionPrompt(disposition: PromptDisposition)
     case notificationAuthorization(outcome: Outcome)
     case notificationPosted(outcome: Outcome)
+    /// The user suspended and continued a meeting (#153). The pair is what
+    /// makes a gap in a session's audio reconstructable afterwards: without it,
+    /// a resumed meeting is indistinguishable from one whose capture died and
+    /// recovered. The gap's length is the two records' own timestamps — it is
+    /// not a payload, because a second copy of it could disagree with them.
+    case sessionPaused
+    case sessionResumed
+    /// A resume could not bring capture back, so the session returned to
+    /// paused. Its own case rather than a second `sessionPaused`, which would
+    /// read as a pause the user asked for — and, following a `sessionResumed`,
+    /// as a resume that hung.
+    case sessionResumeFailed
 
     // MARK: - Storage
 
@@ -387,7 +399,8 @@ extension DiagEvent {
 
         case .detectionLifecycle, .detectionDeviceListChanged, .detectionListenerFailed,
              .detectionSignal, .detectionAppScan, .detectionPrompt,
-             .notificationAuthorization, .notificationPosted:
+             .notificationAuthorization, .notificationPosted,
+             .sessionPaused, .sessionResumed, .sessionResumeFailed:
             return .meetings
 
         case .historyWriteFailed, .historyMigrated, .notesFolderMoveStarted,
@@ -458,6 +471,9 @@ extension DiagEvent {
         case .detectionPrompt: return "detectionPrompt"
         case .notificationAuthorization: return "notificationAuthorization"
         case .notificationPosted: return "notificationPosted"
+        case .sessionPaused: return "sessionPaused"
+        case .sessionResumed: return "sessionResumed"
+        case .sessionResumeFailed: return "sessionResumeFailed"
         case .historyWriteFailed: return "historyWriteFailed"
         case .historyMigrated: return "historyMigrated"
         case .notesFolderMoveStarted: return "notesFolderMoveStarted"

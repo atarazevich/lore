@@ -11,6 +11,10 @@ private let liveLog = Logger(subsystem: "com.lore.app", category: "LiveSession")
 /// transcript is cheap when unchanged.
 struct LiveSessionState: Equatable {
     var isRunning: Bool = false
+    /// Audio is actually flowing — a mic stream is subscribed. `isRunning` is
+    /// true from the moment a start commits, model download and all, so only
+    /// this may gate the Pause control (#153).
+    var isCapturing: Bool = false
     var sessionPhase: MeetingState = .idle
     var audioLevel: Float = 0
     var liveTranscript: [Utterance] = []
@@ -186,17 +190,39 @@ final class LiveSessionController {
         coordinator.handle(.userStopped, settings: settings)
     }
 
+    /// Suspend capture without ending the session (#153).
+    ///
+    /// `isCapturing`, not `isRunning`: the latter is set the moment a start
+    /// commits, so a session still downloading its model would accept a pause
+    /// and leave the user in a paused banner over an engine that then starts
+    /// recording. The state guard itself is the machine's job — a pause from
+    /// anywhere but `.recording` is already a no-op there.
+    func pauseSession(settings: AppSettings) {
+        guard coordinator.transcriptionEngine?.isCapturing == true else { return }
+        coordinator.handle(.userPaused(.userRequest), settings: settings)
+    }
+
+    func resumeSession(settings: AppSettings) {
+        coordinator.handle(.userResumed, settings: settings)
+    }
+
     func confirmDownloadAndStart(settings: AppSettings) {
         coordinator.transcriptionEngine?.downloadConfirmed = true
         if coordinator.canStartCapture {
             startSession(settings: settings)
-        } else if coordinator.state != .idle, coordinator.transcriptionEngine?.isRunning != true {
+        } else if case .recording = coordinator.state,
+                  coordinator.transcriptionEngine?.isRunning != true {
             // A session is already underway with the engine parked at the
             // model-download gate (Start was pressed before the model
             // existed). Continue that session: download and start the engine
             // directly — a new lifecycle start would be rejected at the
             // chokepoint. Runs on the lifecycle chain so a Stop during the
             // download finalizes cleanly behind it.
+            //
+            // `.recording` specifically, never "not idle" (#153): a paused
+            // session also has a stopped engine, and routing it through
+            // `startEngine` would call `AudioRecorder.startSession()` — new
+            // temp files, wiped anchors, the pre-pause audio orphaned.
             coordinator.enqueueLifecycleEffect { [self] in
                 await startEngine(settings: settings)
             }
@@ -218,12 +244,21 @@ final class LiveSessionController {
         switch request.command {
         case .startSession:
             guard coordinator.transcriptionEngine != nil else { return }
-            if !state.isRunning {
+            if coordinator.isPaused {
+                // "Make it record" is the intent behind a remote start, and on
+                // a paused session that is a resume (#153) — starting is
+                // rejected at the chokepoint, so treating the two alike would
+                // consume the command and do nothing.
+                resumeSession(settings: settings)
+            } else if !state.isRunning {
                 startSession(settings: settings)
             }
             handled = true
         case .stopSession:
-            guard state.isRunning else { return }
+            // The session, not the engine (#153): while paused the engine is
+            // down, and gating on it would leave a `lore://stop` pending
+            // forever — the request is only cleared once handled.
+            guard coordinator.state.isLive else { return }
             stopSession(settings: settings)
             handled = true
         case .openNotes(let sessionID):
@@ -337,6 +372,27 @@ final class LiveSessionController {
 
         if let settings {
             await startEngine(settings: settings)
+        }
+    }
+
+    /// Suspend / continue capture for the paused state (#153). Both are
+    /// dispatched on the lifecycle chain by `AppCoordinator`, so a stop
+    /// enqueued behind either one runs after it and finalizes a settled
+    /// engine.
+    func pauseCapture() async {
+        await coordinator.transcriptionEngine?.pause()
+    }
+
+    func resumeCapture() async {
+        guard let engine = coordinator.transcriptionEngine else { return }
+        await engine.resume()
+        if !engine.isCapturing {
+            // The resume did not bring capture back. Return the session to
+            // paused so every surface keeps saying "paused" — with the
+            // engine's error beside it — instead of a red "Recording" banner
+            // over a dead mic. The state the user is left in is definite, and
+            // Resume is still there to try again.
+            coordinator.handle(.userPaused(.resumeFailed))
         }
     }
 
@@ -537,6 +593,7 @@ final class LiveSessionController {
     func refreshState(settings: AppSettings) {
         var next = LiveSessionState()
         next.isRunning = coordinator.transcriptionEngine?.isRunning ?? false
+        next.isCapturing = coordinator.transcriptionEngine?.isCapturing ?? false
         next.sessionPhase = coordinator.state
         next.audioLevel = next.isRunning ? (coordinator.transcriptionEngine?.audioLevel ?? 0) : 0
         next.liveTranscript = coordinator.transcriptStore.utterances

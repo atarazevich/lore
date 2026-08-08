@@ -24,7 +24,7 @@ final class ShellModelTests: XCTestCase {
 
         // Recording starts (any path) — boundary reset, live side wins.
         recording = true
-        shell.handleRecordingStateChange(.recording(.manual()))
+        shell.handleRecordingStateChange(from: .idle, to: .recording(.manual()))
         XCTAssertTrue(shell.meetingsShowsLive())
     }
 
@@ -42,12 +42,12 @@ final class ShellModelTests: XCTestCase {
 
         // Recording ends → review layout while idle.
         recording = false
-        shell.handleRecordingStateChange(.idle)
+        shell.handleRecordingStateChange(from: .ending(.manual()), to: .idle)
         XCTAssertFalse(shell.meetingsShowsLive())
 
         // New recording starts → live again.
         recording = true
-        shell.handleRecordingStateChange(.recording(.manual()))
+        shell.handleRecordingStateChange(from: .idle, to: .recording(.manual()))
         XCTAssertTrue(shell.meetingsShowsLive())
     }
 
@@ -73,7 +73,7 @@ final class ShellModelTests: XCTestCase {
         // Gate led to a start: boundary reset, recording state drives live.
         shell.meetingsPinnedLive = true
         recording = true
-        shell.handleRecordingStateChange(.recording(.manual()))
+        shell.handleRecordingStateChange(from: .idle, to: .recording(.manual()))
         XCTAssertFalse(shell.meetingsPinnedLive)
         XCTAssertTrue(shell.meetingsShowsLive())
     }
@@ -89,21 +89,44 @@ final class ShellModelTests: XCTestCase {
         // Mid-recording flip, then stop: .ending arrival holds the flag.
         shell.showMeetingsReview()
         XCTAssertTrue(shell.meetingsReviewWhileRecording)
-        shell.handleRecordingStateChange(.ending(.manual()))
+        shell.handleRecordingStateChange(from: .recording(.manual()), to: .ending(.manual()))
         XCTAssertTrue(shell.meetingsReviewWhileRecording,
                       "finalizing keeps the user's current side")
 
         // .idle arrival resets.
-        shell.handleRecordingStateChange(.idle)
+        shell.handleRecordingStateChange(from: .ending(.manual()), to: .idle)
         XCTAssertFalse(shell.meetingsReviewWhileRecording)
 
         // .recording arrival resets (coalesced-boundary case: observed
         // directly after .ending, without an intermediate .idle update).
         shell.showMeetingsReview()
-        shell.handleRecordingStateChange(.recording(.manual()))
+        shell.handleRecordingStateChange(from: .ending(.manual()), to: .recording(.manual()))
         XCTAssertFalse(shell.meetingsReviewWhileRecording)
         XCTAssertFalse(shell.meetingsPinnedLive)
         XCTAssertTrue(shell.meetingsShowsLive())
+    }
+
+    /// A pause happens mid-session, so it is not a boundary (#153): the user
+    /// stays on whichever side they were reading, and the resume — which
+    /// arrives as `.recording` — must not yank them off it either.
+    func testPauseAndResumeAreNotBoundaries() {
+        let shell = ShellModel()
+        shell.isRecordingActive = { true }
+
+        shell.showMeetingsReview()
+        XCTAssertTrue(shell.meetingsReviewWhileRecording)
+
+        shell.handleRecordingStateChange(from: .recording(.manual()), to: .paused(.manual()))
+        XCTAssertTrue(shell.meetingsReviewWhileRecording,
+                      "pausing keeps the user's current side")
+        XCTAssertFalse(shell.meetingsShowsLive())
+
+        // The resume arrives as `.recording`, but it continues the same
+        // session — it must not reset the side either.
+        shell.handleRecordingStateChange(from: .paused(.manual()), to: .recording(.manual()))
+        XCTAssertTrue(shell.meetingsReviewWhileRecording,
+                      "a resume is not a boundary")
+        XCTAssertFalse(shell.meetingsShowsLive())
     }
 
     /// The default provider treats the app as idle, so early navigation

@@ -85,15 +85,23 @@ final class ShellModel {
         meetingsReviewWhileRecording = false
     }
 
-    /// Boundary mapping for the Meetings destination's state observer.
-    /// `.ending` keeps the user's current side while finalizing; arrival at
-    /// `.recording` or `.idle` resets to defaults. The observer is keyed to
-    /// the full `MeetingState` (not a derived `== .idle` Bool): opposite
-    /// transitions coalesced into one frame (.ending → .idle → .recording
-    /// observed as .ending → .recording) leave a derived Bool unchanged and
-    /// would skip the reset.
-    func handleRecordingStateChange(_ state: MeetingState) {
-        if case .ending = state { return }
+    /// Boundary mapping for the Meetings destination's state observer. A
+    /// boundary is a session beginning or ending; arriving at one resets the
+    /// destination to its defaults (live side while recording, review when
+    /// idle) and drops stale pins.
+    ///
+    /// Both states, not just the new one: opposite transitions coalesced into
+    /// one frame (.ending → .idle → .recording observed as .ending →
+    /// .recording) must still reset, while a resume — which also arrives at
+    /// .recording — must not, because it continues the session the user was
+    /// already reading around (#153).
+    func handleRecordingStateChange(from old: MeetingState, to new: MeetingState) {
+        // Mid-session phases keep the user's current side: finalizing, pausing,
+        // and the resume that ends a pause — the last of which arrives at
+        // `.recording` and is told from a real start only by where it came from.
+        if case .ending = new { return }
+        if case .paused = new { return }
+        if old.isLive, case .recording = new { return }
         resetMeetingsForRecordingBoundary()
     }
 

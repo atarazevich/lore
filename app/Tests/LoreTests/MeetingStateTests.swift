@@ -156,6 +156,104 @@ final class MeetingStateTests: XCTestCase {
     }
 
     // -------------------------------------------------------------------------
+    // MARK: - Paused State Tests (#153)
+    // -------------------------------------------------------------------------
+
+    func testRecordingUserPausedTransitionsToPaused() {
+        let meta = makeMetadata(title: "Standup")
+        let next = transition(from: .recording(meta), on: .userPaused(.userRequest))
+        XCTAssertEqual(next, .paused(meta))
+    }
+
+    /// The cause is carried for the trace only — both reach `.paused`.
+    func testPauseCauseDoesNotChangeTheTransition() {
+        let meta = makeMetadata()
+        XCTAssertEqual(transition(from: .recording(meta), on: .userPaused(.resumeFailed)),
+                       .paused(meta))
+    }
+
+    func testPausedUserResumedReturnsToRecordingWithSameMetadata() {
+        let meta = makeMetadata(title: "Standup", startedAt: Date(timeIntervalSince1970: 500))
+        let next = transition(from: .paused(meta), on: .userResumed)
+        // Same metadata, so the session ID, template and start time a resumed
+        // meeting reports are the ones it started with.
+        XCTAssertEqual(next, .recording(meta))
+        XCTAssertEqual(next.metadata?.startedAt, Date(timeIntervalSince1970: 500))
+    }
+
+    func testPausedUserStoppedTransitionsToEnding() {
+        let meta = makeMetadata(title: "Retro")
+        let next = transition(from: .paused(meta), on: .userStopped)
+        XCTAssertEqual(next, .ending(meta))
+    }
+
+    func testPausedUserDiscardedTransitionsToIdle() {
+        let next = transition(from: .paused(makeMetadata()), on: .userDiscarded)
+        XCTAssertEqual(next, .idle)
+    }
+
+    /// Every pair that must change nothing, in one place: a second start over a
+    /// live session, a pause with nothing to suspend, a resume with nothing to
+    /// continue, and finalization events aimed at a session still open.
+    func testNoOpTransitions() {
+        let meta = makeMetadata(title: "First")
+        let other = makeMetadata(title: "Second")
+        let cases: [(from: MeetingState, on: MeetingEvent, because: String)] = [
+            (.paused(meta), .userStarted(other), "a paused session must not be replaced by a new one"),
+            (.paused(meta), .userPaused(.userRequest), "already paused"),
+            (.paused(meta), .finalizationComplete, "nothing is finalizing"),
+            (.paused(meta), .finalizationTimeout, "nothing is finalizing"),
+            (.recording(meta), .userResumed, "already capturing"),
+            (.idle, .userPaused(.userRequest), "no session to suspend"),
+            (.idle, .userResumed, "no session to continue"),
+            (.ending(meta), .userPaused(.userRequest), "finalization cannot be suspended"),
+            (.ending(meta), .userResumed, "finalization cannot be continued"),
+        ]
+        for c in cases {
+            XCTAssertEqual(transition(from: c.from, on: c.on), c.from, c.because)
+        }
+    }
+
+    /// The whole point of the feature: one session spans the gap, however many
+    /// times it is suspended.
+    func testRepeatedPauseResumeKeepsOneSession() {
+        var state: MeetingState = .idle
+        let meta = makeMetadata(title: "1:1", startedAt: Date(timeIntervalSince1970: 42))
+
+        state = transition(from: state, on: .userStarted(meta))
+        for _ in 0..<3 {
+            state = transition(from: state, on: .userPaused(.userRequest))
+            XCTAssertEqual(state, .paused(meta))
+            state = transition(from: state, on: .userResumed)
+            XCTAssertEqual(state, .recording(meta))
+        }
+        XCTAssertEqual(state.metadata?.startedAt, Date(timeIntervalSince1970: 42))
+
+        state = transition(from: state, on: .userStopped)
+        XCTAssertEqual(state, .ending(meta))
+        state = transition(from: state, on: .finalizationComplete)
+        XCTAssertEqual(state, .idle)
+    }
+
+    // MARK: - isLive / metadata derivations
+
+    func testIsLiveCoversRecordingAndPausedOnly() {
+        let meta = makeMetadata()
+        XCTAssertTrue(MeetingState.recording(meta).isLive)
+        XCTAssertTrue(MeetingState.paused(meta).isLive)
+        XCTAssertFalse(MeetingState.idle.isLive)
+        XCTAssertFalse(MeetingState.ending(meta).isLive, "Finalization is not a session the user is in")
+    }
+
+    func testMetadataIsNilOnlyWhenIdle() {
+        let meta = makeMetadata(title: "Sync")
+        XCTAssertNil(MeetingState.idle.metadata)
+        XCTAssertEqual(MeetingState.recording(meta).metadata?.title, "Sync")
+        XCTAssertEqual(MeetingState.paused(meta).metadata?.title, "Sync")
+        XCTAssertEqual(MeetingState.ending(meta).metadata?.title, "Sync")
+    }
+
+    // -------------------------------------------------------------------------
     // MARK: - Ending State Tests
     // -------------------------------------------------------------------------
 

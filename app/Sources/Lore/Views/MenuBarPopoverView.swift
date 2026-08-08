@@ -92,30 +92,34 @@ struct MenuBarPopoverView: View {
         }
     }
 
+    @ViewBuilder
     private var statusLine: some View {
+        if coordinator.isPaused {
+            // Steady amber, the vocabulary every paused surface shares (#153).
+            statusRow(dot: LoreTheme.Accent.amber, pulses: false, text: "Paused",
+                      font: LoreTheme.Typography.control, tint: LoreTheme.Accent.amber)
+        } else if coordinator.isRecording {
+            statusRow(dot: LoreTheme.Accent.red, pulses: true,
+                      text: "Recording — \(formattedTime)",
+                      font: LoreTheme.Typography.control, tint: LoreTheme.TextColor.primary)
+        } else if settings.meetingAutoDetectEnabled {
+            statusRow(dot: LoreTheme.TextColor.muted, pulses: false,
+                      text: "Listening for meetings…",
+                      font: LoreTheme.Typography.secondary, tint: LoreTheme.TextColor.muted)
+        } else {
+            statusRow(dot: LoreTheme.TextColor.faint, pulses: false, text: "Idle",
+                      font: LoreTheme.Typography.secondary, tint: LoreTheme.TextColor.muted)
+        }
+    }
+
+    private func statusRow(
+        dot: Color, pulses: Bool, text: String, font: Font, tint: Color
+    ) -> some View {
         HStack(spacing: 8) {
-            if coordinator.isRecording {
-                Circle()
-                    .fill(LoreTheme.Accent.red)
-                    .frame(width: 8, height: 8)
-                Text("Recording — \(formattedTime)")
-                    .font(LoreTheme.Typography.control)
-                    .foregroundStyle(LoreTheme.TextColor.primary)
-            } else if settings.meetingAutoDetectEnabled {
-                Circle()
-                    .fill(LoreTheme.TextColor.muted)
-                    .frame(width: 8, height: 8)
-                Text("Listening for meetings…")
-                    .font(LoreTheme.Typography.secondary)
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-            } else {
-                Circle()
-                    .fill(LoreTheme.TextColor.faint)
-                    .frame(width: 8, height: 8)
-                Text("Idle")
-                    .font(LoreTheme.Typography.secondary)
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-            }
+            LorePulsingDot(color: dot, pulses: pulses)
+            Text(text)
+                .font(font)
+                .foregroundStyle(tint)
             Spacer()
         }
     }
@@ -124,14 +128,25 @@ struct MenuBarPopoverView: View {
         // Canonical redesign Start/Stop control; behavior preserved (D-031).
         // The consent detour is gone (#150): the menu bar only exists once setup
         // completed, and completing it is the acknowledgement.
-        LoreStartStopButton(isRecording: coordinator.isRecording) {
-            if coordinator.isRecording {
-                coordinator.handle(.userStopped, settings: settings)
-            } else {
-                coordinator.handle(.userStarted(.manual()), settings: settings)
+        //
+        // Paused (#153) puts Resume beside it: the toggle keeps meaning Stop
+        // for the whole live session, so the menu bar can always end a meeting
+        // it can see, and Resume is the way back into one.
+        HStack(spacing: 8) {
+            if coordinator.isPaused {
+                LoreResumeButton {
+                    coordinator.handle(.userResumed, settings: settings)
+                }
             }
+            LoreStartStopButton(isRecording: coordinator.state.isLive) {
+                if coordinator.state.isLive {
+                    coordinator.handle(.userStopped, settings: settings)
+                } else {
+                    coordinator.handle(.userStarted(.manual()), settings: settings)
+                }
+            }
+            .frame(maxWidth: .infinity)
         }
-        .frame(maxWidth: .infinity)
     }
 
     private var formattedTime: String {
