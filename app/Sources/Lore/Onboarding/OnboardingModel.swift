@@ -133,16 +133,33 @@ final class OnboardingModel {
         guard pollTimer == nil else { return }
         let timer = DispatchSource.makeTimerSource(queue: pollQueue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(400))
-        timer.setEventHandler { [weak self] in
+        timer.setEventHandler(handler: makePollTick())
+        pollTimer = timer
+        timer.resume()
+        DiagStore.record(.onboardingStarted)
+    }
+
+    /// One tick exactly as the source runs it: the two blocking reads on the
+    /// poll queue, a hop, and every mutation on the far side of it. Nothing here
+    /// may touch the model — the readings cross as values.
+    ///
+    /// Handed over by a `nonisolated` factory with an explicit `@Sendable` type
+    /// rather than written inline at `setEventHandler`, and that indirection *is*
+    /// the fix: a closure literal inside a `@MainActor` method inherits that
+    /// isolation, `DispatchSourceTimer` runs it on `pollQueue` regardless, and
+    /// the runtime's executor check then traps in the closure's prologue —
+    /// before its first line, so the hop below never got the chance to help. The
+    /// first tick is scheduled at `.now()`, so a fresh install died there, ahead
+    /// of the Welcome frame. Only a test that lets the real source fire can see
+    /// it: driving `apply` from a test actor is already main.
+    private nonisolated func makePollTick() -> @Sendable () -> Void {
+        { [weak self] in
             let snapshot = PermissionReader.snapshot()
             let fn = FnKeySetting.current()
             Task { @MainActor [weak self] in
                 self?.apply(permissions: snapshot, fn: fn)
             }
         }
-        pollTimer = timer
-        timer.resume()
-        DiagStore.record(.onboardingStarted)
     }
 
     /// The poller is scoped to the window, not to a step: a green that stops

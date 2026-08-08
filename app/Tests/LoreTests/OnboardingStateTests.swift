@@ -261,6 +261,36 @@ final class OnboardingStateTests: XCTestCase {
         XCTAssertEqual(model.step, .permissions)
     }
 
+    // MARK: - The poller's own queue
+
+    /// The crash a fresh install hit before it ever reached the Welcome frame:
+    /// the timer's handler, written inline in a `@MainActor` method, inherited
+    /// that isolation, and `DispatchSourceTimer` ran it on the poll queue
+    /// anyway — so the runtime's executor check trapped in the handler's
+    /// prologue, ahead of its first line, and the hop inside it never ran.
+    ///
+    /// Every other test here drives `apply` from the test actor, which *is*
+    /// main, so none of them could see it. This one runs the real handler on a
+    /// real background queue: reaching the assertions at all is the regression
+    /// pin, because the defect was a trap, not a wrong value.
+    func testThePollTickRunsOffMainAndAppliesOnMain() async {
+        let model = OnboardingModel(dwell: Self.testDwell)
+        let landed = Signal()
+
+        // `apply` calls this on every tick, so it is the far side of the hop.
+        let appliedOnMain: Bool = await withCheckedContinuation { continuation in
+            model.onClosableChanged = { _ in landed.resumeOnce(with: Thread.isMainThread) }
+            landed.continuation = continuation
+            // The real source, the real queue, the first tick at `.now()` —
+            // exactly the launch path.
+            model.start()
+        }
+        model.stop()
+
+        XCTAssertTrue(appliedOnMain, "the reading must be applied on the main actor, never on the poll queue")
+        XCTAssertEqual(model.permissions, PermissionReader.snapshot(), "the reading has to cross the hop as a value")
+    }
+
     // MARK: - Step dots
 
     /// The board's row is four — Permissions, Fn, Try it, Ready — with no row at
@@ -466,6 +496,19 @@ final class OnboardingStateTests: XCTestCase {
 @MainActor
 private final class Box {
     var value = 0
+}
+
+/// One-shot resume for a callback the running poll keeps delivering: the timer
+/// repeats every 400 ms, and a second `resume` on the same continuation traps.
+@MainActor
+private final class Signal {
+    var continuation: CheckedContinuation<Bool, Never>?
+
+    func resumeOnce(with value: Bool) {
+        guard let continuation else { return }
+        self.continuation = nil
+        continuation.resume(returning: value)
+    }
 }
 
 /// The dictation subsystem as the flow reads it.
