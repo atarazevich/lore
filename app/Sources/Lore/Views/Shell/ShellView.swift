@@ -10,18 +10,21 @@ struct ShellView: View {
     let updater: SPUUpdater
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(ShellModel.self) private var shell
-    @State private var showHealthPanel = false
     @State private var showProblemReport = false
 
     var body: some View {
-        HStack(spacing: 0) {
+        // The health panel's presentation lives on the shared model so the menu
+        // bar can open it too (#151); `@Bindable` is what turns the observable
+        // property into the `isPresented` binding.
+        @Bindable var shell = shell
+        return HStack(spacing: 0) {
             ShellSidebar(
                 activeDestination: shell.destination,
                 isMeetingRecording: coordinator.isRecording,
                 isDictationLocked: coordinator.dictationIndicator.model.isLocked,
                 healthMonitor: coordinator.healthMonitor,
                 onSelect: { shell.destination = $0 },
-                onOpenHealth: { showHealthPanel = true }
+                onOpenHealth: { shell.presentsHealthPanel = true }
             )
             mainPane
         }
@@ -32,28 +35,21 @@ struct ShellView: View {
         // The toolbar's "N recorded" subtitle needs the index at launch;
         // afterwards session end / batch completion keep it fresh.
         .task { await coordinator.loadHistory() }
-        // The notch self-summon (#83) raises the panel through this signal.
-        .onChange(of: shell.wantsHealthPanel) { _, wants in
-            if wants {
-                showHealthPanel = true
-                shell.wantsHealthPanel = false
-            }
-        }
-        .sheet(isPresented: $showHealthPanel) {
+        .sheet(isPresented: $shell.presentsHealthPanel) {
             if let monitor = coordinator.healthMonitor {
                 HealthPanelView(
                     monitor: monitor,
                     onOpenSettings: {
-                        showHealthPanel = false
+                        shell.presentsHealthPanel = false
                         shell.destination = .settings
                     },
                     onReportProblem: {
-                        showHealthPanel = false
+                        shell.presentsHealthPanel = false
                         // Next runloop: presenting one sheet as another dismisses
                         // conflicts on macOS.
                         DispatchQueue.main.async { showProblemReport = true }
                     },
-                    onClose: { showHealthPanel = false }
+                    onClose: { shell.presentsHealthPanel = false }
                 )
             }
         }
@@ -360,6 +356,11 @@ private struct ShellRecPill: View {
 struct LorePulsingDot: View {
     var color: Color = LoreTheme.Accent.red
     var size: CGFloat = 8
+    /// Off for a *standing* state rather than a live one — the menu bar's amber
+    /// health bead (#151), which marks a fact that has already held for a
+    /// minute. Pulsing at it would be the interruption that surface replaced.
+    /// The glow rule stays here either way, so both beads keep one definition.
+    var pulses = true
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
@@ -371,7 +372,7 @@ struct LorePulsingDot: View {
             // the literal 4, so the 3.2pt menu-bar bead glows like the 8pt one.
             .shadow(color: color, radius: size / 2)
             .phaseAnimator([1.0, 0.25]) { view, phase in
-                view.opacity(reduceMotion ? 1 : phase)
+                view.opacity(pulses && !reduceMotion ? phase : 1)
             } animation: { _ in
                 .easeInOut(duration: LoreTheme.Motion.pulseDuration / 2)
             }

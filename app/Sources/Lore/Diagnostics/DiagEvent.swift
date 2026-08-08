@@ -172,10 +172,14 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case moved
     }
 
-    /// What summoned the health notch (#140): a user action that just failed, or
-    /// the launch identity migration (#135). Never a bare state bit — permission
-    /// flags and secure input are explanations, not triggers.
-    enum SummonTrigger: String, Codable, Sendable, CaseIterable {
+    /// Which health condition a report is about (#140): a user action that just
+    /// failed, or the launch identity migration (#135). Never a bare state bit —
+    /// permission flags and secure input are explanations, not triggers.
+    ///
+    /// Named for the condition, not the surface (#151): the notch summon it was
+    /// born on is gone, the menu-bar mark's amber state carries these now, and
+    /// the raw values are unchanged so a persisted events.json still decodes.
+    enum HealthTrigger: String, Codable, Sendable, CaseIterable {
         case identityMigration
         case captureFailed
         /// The system-audio tap, not the microphone (#149) — different remedy,
@@ -185,11 +189,12 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case modelLoadFailed
     }
 
-    /// Why a summon left the screen (#149). Every exit is traced, not only the
-    /// fact of one, because a summon that appeared with no `healthSummonFired`
-    /// behind it is exactly the incident this pays for: `.sweptGhost` is the
-    /// only reason nobody in this app chose — the notch library re-fronted a
-    /// panel on a screen-parameter change and it rendered latched content.
+    /// Why a summon left the screen (#149). Retired with the surface (#151) and
+    /// kept for the same reason as the events that carry it: a persisted
+    /// events.json must keep decoding. `.sweptGhost` was the reason nobody in
+    /// this app chose — the notch library re-fronted a panel on a
+    /// screen-parameter change and it rendered latched content, which is the
+    /// class of fault that ended the surface.
     enum SummonWithdrawal: String, Codable, Sendable, CaseIterable {
         case recovered
         case timedOut
@@ -201,15 +206,28 @@ enum DiagEvent: Codable, Sendable, Equatable {
     // MARK: - App
 
     case appLaunched(build: Int)
-    /// The health notch went up / came down (#140) — without these, summon
-    /// history was unrecoverable from events.json.
-    case healthSummonFired(trigger: SummonTrigger)
-    /// Which summon left, and why (#149).
-    case healthSummonWithdrawn(trigger: SummonTrigger, reason: SummonWithdrawal)
-    /// Retired (#149): superseded by `healthSummonWithdrawn`, which names the
-    /// trigger and the reason instead of only the fact. Kept so a persisted
-    /// events.json carrying it still decodes rather than being moved aside as
-    /// corrupt — the same reason `tapEventsStalled` survives.
+
+    /// A health condition crossed / left the persistence window (#151) — one
+    /// pair per condition, at that condition's own crossing, so two failures
+    /// standing at once are two traces rather than one arbitrated winner.
+    ///
+    /// Deliberately about the **condition, not the pixel**. What the menu-bar
+    /// mark actually shows is `condition ∧ ¬recording` (the mark has one bead
+    /// slot and a recording outranks amber in it, `MenuBarBead`), and the
+    /// recording half is already in the stream — so the dot's visibility over a
+    /// session is reconstructable without tracing presentation, which is the
+    /// layer that lied in #149.
+    case healthConditionSustained(trigger: HealthTrigger)
+    case healthConditionCleared(trigger: HealthTrigger)
+
+    /// Retired (#151) with the notch summon surface itself: no code fires these
+    /// any more. Kept so a persisted events.json carrying them still decodes
+    /// rather than being moved aside as corrupt — the same reason
+    /// `tapEventsStalled` survives.
+    case healthSummonFired(trigger: HealthTrigger)
+    case healthSummonWithdrawn(trigger: HealthTrigger, reason: SummonWithdrawal)
+    /// Retired earlier still (#149): superseded by `healthSummonWithdrawn`,
+    /// which named the trigger and the reason instead of only the fact.
     case healthSummonCleared
 
     /// The exclusive setup state opened (#150) — the boundary that says this
@@ -340,7 +358,8 @@ enum DiagEvent: Codable, Sendable, Equatable {
 extension DiagEvent {
     var subsystem: DiagSubsystem {
         switch self {
-        case .appLaunched, .healthSummonFired, .healthSummonWithdrawn, .healthSummonCleared,
+        case .appLaunched, .healthConditionSustained, .healthConditionCleared,
+             .healthSummonFired, .healthSummonWithdrawn, .healthSummonCleared,
              .onboardingStarted, .onboardingStepShown, .onboardingDictationLanded,
              .onboardingCompleted:
             return .app
@@ -387,6 +406,8 @@ extension DiagEvent {
     var caseName: String {
         switch self {
         case .appLaunched: return "appLaunched"
+        case .healthConditionSustained: return "healthConditionSustained"
+        case .healthConditionCleared: return "healthConditionCleared"
         case .healthSummonFired: return "healthSummonFired"
         case .healthSummonWithdrawn: return "healthSummonWithdrawn"
         case .healthSummonCleared: return "healthSummonCleared"

@@ -131,7 +131,7 @@ struct HealthProber {
         case .vadModel: return plain(id, Self.vadModelPresent() ? .ok : .failed)
         case .openAIKey: return plain(id, hasOpenAIKey() ? .ok : .failed)
         case .notesFolder: return notesFolderReading()
-        case .micCapture, .modelWarmup, .openAILiveness, .systemAudio:
+        case .micCapture, .modelWarmup, .openAILiveness, .systemAudio, .paste:
             preconditionFailure("expensive probe \(id.rawValue) routed to cheapReading — check id.cost")
         }
     }
@@ -213,8 +213,8 @@ struct HealthProber {
         // Secure input behind a locked console is the lock screen doing its job —
         // working as designed whoever the registry credits (an attribution
         // rdar://48953777 makes unreliable anyway), and the panel is unreadable
-        // there, so nothing is surfaced and no notch summons at every lock
-        // screen (#98). A genuinely stuck flag resurfaces on the first tick
+        // there, so nothing is surfaced at every lock screen (#98).
+        // A genuinely stuck flag resurfaces on the first tick
         // after unlock: the lock state is re-read every cycle.
         let problem = state.active && !state.consoleLocked
         return Reading(
@@ -273,13 +273,25 @@ struct HealthProber {
         .modelWarmup: modelWarmupOutcome,
         .openAILiveness: openAILivenessOutcome,
         .systemAudio: systemAudioOutcome,
+        .paste: pasteOutcome,
     ]
+
+    /// The same fact the `pasteFailed` condition is derived from (#151), read
+    /// through the same last-attempt path as every other card — so the row and
+    /// the mark's dot cannot disagree, and both age out at the 24 h ceiling.
+    /// `eventsCreated` is all the attempt can observe: `CGEvent.post` returns
+    /// nothing, so this is "we managed to build and post the keystrokes", never
+    /// "the text landed".
+    nonisolated private static func pasteOutcome(_ event: DiagEvent) -> DiagEvent.Outcome? {
+        if case .pasteAttempt(_, let created, _) = event { return DiagEvent.Outcome(success: created) }
+        return nil
+    }
 
     /// `.ok` is frames arriving, never `captureStart` (#149): `AudioDeviceStart`
     /// returns noErr for a wedged IOProc too — that is the device the no-frames
     /// watchdog gives up on — so a start would certify a mic that delivers
-    /// nothing, and the panel would read green while the notch said it failed.
-    /// The notch reads the same rule in `HealthMonitor.summonSignal`.
+    /// nothing, and the panel would read green while the mark's amber dot said
+    /// it failed. The dot reads the same rule in `HealthMonitor.healthSignal`.
     nonisolated private static func micCaptureOutcome(_ event: DiagEvent) -> DiagEvent.Outcome? {
         switch event {
         case .micFramesFlowing: return .ok

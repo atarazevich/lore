@@ -74,7 +74,7 @@ final class NotchWindowVisibilityTests: XCTestCase {
 
     /// `SettingsStore.applyScreenShareVisibility()` sweeps `NSApp.windows` when
     /// the setting is toggled. An alive notch-shaped panel must appear there —
-    /// that listing is what lets the toggle reach a summon already on screen.
+    /// that listing is what lets the toggle reach a prompt already on screen.
     func testAlivePanelIsReachableByTheToggleSweep() {
         _ = NSApplication.shared
         let panel = makeNotchStylePanel()
@@ -118,20 +118,25 @@ final class NotchWindowVisibilityTests: XCTestCase {
 
     // MARK: - End to end through the presenter
 
-    /// After a summon, the real DynamicNotchKit panel carries the store's
+    /// After a prompt, the real DynamicNotchKit panel carries the store's
     /// sharing decision — proving `present()` routes through the seam. Reaches
-    /// the panel via `NSApp.windows` (the presenter's notch is private).
+    /// the panel via `NSApp.windows` (the window's notch is private).
     /// Needs a display session: DynamicNotchKit creates its panel on the main
     /// screen and patching happens after its ~0.4s expand animation.
+    ///
+    /// Driven through the meeting prompt since #151 retired the health summon —
+    /// the seam is shared, so one surviving surface proves it for the seam.
     func testPresentAppliesTheSharingDecisionToTheLibraryPanel() async throws {
         _ = NSApplication.shared
         try XCTSkipIf(NSScreen.screens.isEmpty, "no display — DynamicNotchKit cannot build its panel")
 
         let before = Set(NSApp.windows.map(ObjectIdentifier.init))
         let expected = SettingsStore.screenSharingType(from: .standard)
-        let presenter = HealthNotchPresenter(timeout: .seconds(60))
-        presenter.present(HealthSummon(trigger: .captureFailed))
-        defer { presenter.dismiss() }
+        let window = DynamicNotchPromptWindow()
+        await window.present(content: NotchPromptContent(
+            appName: "Zoom", onAccept: {}, onNotAMeeting: {}, onIgnoreApp: {}
+        ))
+        defer { Task { await window.dismiss() } }
 
         var panel: NSWindow?
         for _ in 0..<80 {

@@ -63,6 +63,10 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
     case inputMonitoring
     case secureInput
     case tap
+    /// Whether the last paste actually created events (#151). Event-derived like
+    /// the other last-attempt rows, so the dot's `pasteFailed` condition has a
+    /// row in the gauge to point at instead of a silent panel.
+    case paste
     // Audio
     case microphone
     case micCapture
@@ -83,7 +87,7 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
     var section: HealthSection {
         switch self {
         case .signing, .diskSpace: return .installIdentity
-        case .accessibility, .inputMonitoring, .secureInput, .tap: return .input
+        case .accessibility, .inputMonitoring, .secureInput, .tap, .paste: return .input
         case .microphone, .micCapture: return .audio
         case .asrModel, .vadModel, .modelWarmup: return .transcription
         case .openAIKey, .openAILiveness: return .cleanup
@@ -93,7 +97,10 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
 
     var cost: HealthCost {
         switch self {
-        case .micCapture, .modelWarmup, .openAILiveness, .systemAudio: return .expensive
+        // "Expensive" is the *card shape*, not the cost: each reads the last
+        // real attempt out of the event stream and ages out at the 24h ceiling.
+        // `.paste` has no on-demand test (no `sideEffect`), like `.systemAudio`.
+        case .micCapture, .modelWarmup, .openAILiveness, .systemAudio, .paste: return .expensive
         default: return .cheap
         }
     }
@@ -128,6 +135,7 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
         case .accessibility: return "Accessibility"
         case .inputMonitoring: return "Input Monitoring"
         case .tap: return "Keyboard shortcuts"
+        case .paste: return "Paste"
         case .secureInput: return "Secure input"
         case .microphone: return "Microphone"
         case .micCapture: return "Mic capture"
@@ -234,7 +242,7 @@ struct HealthSummary: Equatable {
             .filter(Self.countsInFooter)
             .sorted { HealthProbeID.order($0.id) < HealthProbeID.order($1.id) }
         issueCount = issues.count
-        // One definition of "critical failure", shared with the notch summon.
+        // One definition of "critical failure", shared with the panel's rows.
         hasCriticalFailure = !snapshot.criticalFailures.isEmpty
         firstIssueShortName = issues.first?.id.shortName
     }

@@ -10,11 +10,11 @@ extension NSWindow {
     /// (fullscreen Zoom is the primary case). It also never sets `sharingType`,
     /// so the panel stays at AppKit's captured default; the launch/key-window
     /// sweep can't reach it either — created lazily, never becomes key, and the
-    /// library rebuilds it on every hide/show and screen change (#145). Shared
-    /// by the meeting prompt (`DynamicNotchPromptWindow`) and the health summon
-    /// (`HealthNotchPresenter`) so the patch exists once, applied on every
-    /// show/re-show because each rebuild resets both properties. Reference
-    /// config: NotchDrop's NotchWindow (MIT).
+    /// library rebuilds it on every hide/show and screen change (#145). Used by
+    /// the meeting prompt (`DynamicNotchPromptWindow`), the last notch surface
+    /// left after #151 retired the health summon; applied on every show/re-show
+    /// because each rebuild resets both properties. Reference config: NotchDrop's
+    /// NotchWindow (MIT).
     ///
     /// Not used by `OverlayPanel`: that is a persistent indicator panel, not a
     /// transient over-fullscreen alert — it must not be `.stationary`/
@@ -35,8 +35,8 @@ extension NSWindow {
 /// Re-asserts the window policy after DynamicNotchKit's own screen-parameter
 /// observer rebuilds its panel — the library re-creates it and
 /// `orderFrontRegardless()`s it even while hidden (`DynamicNotch.swift:144`,
-/// the #141 residual). Both notch surfaces (health summon, meeting prompt)
-/// register here; the helper owns the notification token and the settle delay.
+/// the #141 residual). The meeting prompt registers here; the helper owns the
+/// notification token and the settle delay.
 /// Live surface → the rebuilt panel carries the library's default window
 /// properties, so the policy above is re-applied (#145). Hidden surface → the
 /// re-fronted ghost is ordered back out (#144); it must never be raised.
@@ -49,11 +49,6 @@ extension NSWindow {
 /// (#149 — a stale "Recording failed" summon appeared on a healthy process
 /// that had recorded no failure). Residual: a rebuild landing after the settle
 /// waits for the next screen-parameter event or present/hover transition.
-///
-/// `onGhost` runs before the window is touched — and therefore even when the
-/// panel does not exist yet — because dropping the surface's *content* is what
-/// makes a later rebuild harmless. It may fire twice per notification, so the
-/// surface must make it idempotent.
 @MainActor
 final class NotchScreenChangeSweeper {
     /// Written once in init, read only in deinit — never touched concurrently.
@@ -62,11 +57,9 @@ final class NotchScreenChangeSweeper {
     /// - Parameters:
     ///   - isLive: whether the surface currently has content on screen.
     ///   - window: the library panel, or nil before the first show.
-    ///   - onGhost: drop whatever content a rebuild could re-show.
     init(
         isLive: @escaping @MainActor () -> Bool,
-        window: @escaping @MainActor () -> NSWindow?,
-        onGhost: @escaping @MainActor () -> Void = {}
+        window: @escaping @MainActor () -> NSWindow?
     ) {
         observer = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -74,20 +67,18 @@ final class NotchScreenChangeSweeper {
             queue: .main
         ) { _ in
             Task { @MainActor in
-                Self.sweep(isLive: isLive, window: window, onGhost: onGhost)
+                Self.sweep(isLive: isLive, window: window)
                 try? await Task.sleep(for: .milliseconds(500))
-                Self.sweep(isLive: isLive, window: window, onGhost: onGhost)
+                Self.sweep(isLive: isLive, window: window)
             }
         }
     }
 
     private static func sweep(
         isLive: @MainActor () -> Bool,
-        window: @MainActor () -> NSWindow?,
-        onGhost: @MainActor () -> Void
+        window: @MainActor () -> NSWindow?
     ) {
         guard isLive() else {
-            onGhost()
             window()?.orderOut(nil)
             return
         }

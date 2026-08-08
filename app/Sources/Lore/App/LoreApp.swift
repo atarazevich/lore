@@ -182,15 +182,15 @@ extension LoreRootApp {
         // works from the installed scene graph. If applicationDidFinishLaunching
         // already wanted the window, wiring this presents it (didSet).
         appDelegate.onShowMainWindow = { [self] in showMainWindow() }
-        // Notch "Fix it" (#83) fronts the window and raises the health panel via
-        // the shell signal.
-        appDelegate.onShowHealthPanel = { [self] in
-            shell.wantsHealthPanel = true
-            showMainWindow()
-        }
         appDelegate.onShowMeetings = { [self] in
             // As-is: live while recording, review otherwise.
             shell.showMeetings()
+            showMainWindow()
+        }
+        // The amber bead's destination (#151) — same two lines as Meetings
+        // above: name the surface on the shared model, front the window.
+        appDelegate.onShowHealth = { [self] in
+            shell.presentsHealthPanel = true
             showMainWindow()
         }
     }
@@ -339,6 +339,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
     /// Navigate the shell to Meetings and front the window (menu bar action).
     var onShowMeetings: (() -> Void)?
+    /// Fronts the window with the health panel up — the menu bar's route from
+    /// the amber bead to the gauge (#151).
+    var onShowHealth: (() -> Void)?
 
     /// The exclusive setup surface (#150) — nil once setup is complete.
     private var onboardingWindow: OnboardingWindowController?
@@ -401,6 +404,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
         controller.onShowMainWindow = { [weak self] in self?.onShowMainWindow?() }
         controller.onShowMeetings = { [weak self] in self?.onShowMeetings?() }
+        controller.onShowHealth = { [weak self] in self?.onShowHealth?() }
         controller.onQuitApp = { [weak self] in
             self?.handleQuit()
         }
@@ -416,13 +420,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var localHotkeyMonitor: Any?
     private var didSetupDictation = false
     private var didStartDictationPipeline = false
-
-    /// Opens the health panel (fronts the window, raises the panel via the shell
-    /// signal). Wired from the scene's onAppear, where the shell is reachable.
-    var onShowHealthPanel: (() -> Void)?
-
-    /// Notch that summons the user on a critical health failure (#83).
-    private let healthNotch = HealthNotchPresenter()
 
     /// The last second of events is exactly the interesting second when the user
     /// quits to escape a wedged state. `record()` coalesces disk writes at 1s, so
@@ -678,7 +675,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// The dictation pipeline itself: coordinator wiring, the CGEvent tap, the
     /// model warm-up. Split out of `setupDictation` for the Try-it step (#150),
     /// which needs hold-to-talk and nothing else — no indicator panel over the
-    /// onboarding window, no Read Aloud chords, no health summons.
+    /// onboarding window, no Read Aloud chords, no health reporting.
     func startDictationPipeline(coordinator: AppCoordinator, settings: AppSettings) {
         guard !didStartDictationPipeline else { return }
         didStartDictationPipeline = true
@@ -732,10 +729,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         }
     }
 
-    /// Build the health monitor (#83, reworked #140): an on-open fact sheet plus
-    /// failure-triggered summons — no periodic verdict loop. It lives on the
-    /// delegate, not a view, because failed actions summon with no window open
-    /// (the "Fn dead" incident). The prober reads the hotkey tap's existing
+    /// Build the health monitor (#83, reworked #140/#151): an on-open fact sheet
+    /// plus the failure-driven amber state — no periodic verdict loop. It lives on
+    /// the delegate, not a view, because actions fail with no window open (the
+    /// "Fn dead" incident). The prober reads the hotkey tap's existing
     /// liveness (never installs a second tap) and the key presence; the three
     /// expensive Test-now actions reach the real mic / model cache / network.
     private func setupHealthMonitor(coordinator: AppCoordinator, settings: AppSettings) {
@@ -775,14 +772,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             _ = await KeyHealthCheck.probe(apiKey: key)
         }
 
-        monitor.onSummon = { [weak self] summon in
-            guard let self else { return }
-            self.healthNotch.onFix = { [weak self] in self?.onShowHealthPanel?() }
-            self.healthNotch.present(summon)
-        }
-        monitor.onRecovery = { [weak self] trigger in
-            self?.healthNotch.clearSummon(trigger: trigger)
-        }
         // Opening the panel is a fresh signal for a tap blocked on a permission
         // the user may have just granted (#149).
         monitor.refillTapRepairs = { [weak hotkeyManager] in
@@ -791,14 +780,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         coordinator.healthMonitor = monitor
 
-        // The summon trigger (#140): a summon fires only when a user action just
-        // failed, delivered by the event stream itself — no verdict loop. The
-        // filter runs on the recording thread; only a match hops to main.
+        // The failure door (#140): a health claim moves only when a user action
+        // just failed, delivered by the event stream itself — no verdict loop.
+        // The filter runs on the recording thread; only a match hops to main.
         // One filter, one hop, in the order the events were recorded (#149): a
         // failure and the recovery behind it must not race each other onto the
-        // notch, which two independent Tasks would allow.
+        // mark, which two independent Tasks would allow.
         DiagStore.shared.setObserver { [weak monitor] event in
-            guard let signal = HealthMonitor.summonSignal(for: event) else { return }
+            guard let signal = HealthMonitor.healthSignal(for: event) else { return }
             Task { @MainActor in monitor?.note(signal) }
         }
 
@@ -808,29 +797,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         hotkeyManager.onFirstRealKeyDown = { [weak monitor] in monitor?.refresh() }
 
         // Self-clear (#144): a keystroke reaching the tap acknowledges the
-        // ledger (`HealthMonitor.refresh`), and an identity summon still on
-        // screen withdraws itself the same moment — no polling, the ack site
-        // drives it.
-        signingLedger.onMigrationClosed = { [weak self] in
-            self?.healthNotch.clearSummon(trigger: .identityMigration)
+        // ledger (`HealthMonitor.refresh`), and the migration's clock stops the
+        // same moment — no polling, the ack site drives it. In the healthy case
+        // that keystroke lands well inside the persistence window, so the mark
+        // never says anything at all.
+        signingLedger.onMigrationClosed = { [weak monitor] in
+            monitor?.clearFailure(.identityMigration)
         }
 
-        // Proactive summon (#135): the identity changed since the last launch in
+        // Proactive notice (#135): the identity changed since the last launch in
         // a TCC-affecting way (different team, or ad-hoc involved — same-team
         // dev↔release flips share grants and stay silent, #140), so guide the
-        // re-grant now instead of waiting for the user to discover dead hotkeys.
-        // Through `onSummon` like every other summon — the notch wiring has one
-        // definition. `claimMigrationSummon` dedupes across launches (#144): a
-        // relaunch is not a new cause, so the notch fires once per transition
-        // while the panel row keeps warning until the real acknowledge.
+        // re-grant instead of waiting for the user to discover dead hotkeys.
+        // Through the same failure clock as every other condition.
+        //
+        // Read live from `migrationPending`, with no cross-launch marker (#151).
+        // #144's marker existed to stop an *interrupting popup* firing twice for
+        // one cause; a quiet dot has no such cost, and suppressing it on relaunch
+        // left the panel row warning beside a dark mark — the disagreement rule 2
+        // forbids. The 60 s persistence gate is the only dedupe a standing,
+        // non-interrupting report needs.
         if signingLedger.migrationPending {
-            // The claim burns the persisted marker before `present()` decides
-            // whether to show — safe only because this runs synchronously on
-            // the main actor before any `noteFailure` Task hop can land and
-            // occupy the notch.
-            if signingLedger.claimMigrationSummon() {
-                monitor.onSummon(HealthSummon(trigger: .identityMigration))
-            }
+            monitor.noteFailure(.identityMigration)
         } else {
             // Nothing pending: make the current identity the record, which is
             // what starts it on a first-ever launch.

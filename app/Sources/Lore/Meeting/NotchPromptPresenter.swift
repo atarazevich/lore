@@ -149,8 +149,13 @@ final class NotchPromptPresenter {
 /// (DynamicNotchKit's floating style has no compact state).
 ///
 /// One `DynamicNotch` for the app's whole life, with per-prompt content
-/// flowing through `model` (#141) — full rationale and the accepted residual
-/// on `HealthNotchPresenter.notch`. Created lazily on the first prompt.
+/// flowing through `model` (#141): the library's init spawns an unstructured
+/// Task iterating screen-parameter notifications forever with a strong `self`
+/// capture, so no DynamicNotch ever deallocates and per-present construction
+/// accumulates an instance per prompt, each rebuilding a ghost panel on every
+/// display change. Created lazily on the first prompt. Accepted residual: the
+/// observer re-creates and fronts the one panel on display changes even while
+/// hidden — a steady count of one, not growth.
 @MainActor
 final class DynamicNotchPromptWindow: NotchPromptWindow {
     private var notch: DynamicNotch<NotchPromptExpandedView, NotchPromptCompactIcon, NotchPromptCompactLabel>?

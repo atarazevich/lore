@@ -40,9 +40,13 @@ final class ShellModel {
 
     var destination: ShellDestination = .dictation
 
-    /// Raised by the notch self-summon (#83) to open the health panel; the
-    /// shell consumes it and clears it. A signal, not the panel's own state.
-    var wantsHealthPanel = false
+    /// The health panel's presentation state, on the shared model rather than in
+    /// `ShellView`'s `@State` so the menu bar can open it too (#151). One piece
+    /// of state that both doors — the sidebar footer and the popover's health
+    /// row — set directly; deliberately not a signal the view consumes and
+    /// clears, which is the shape that made the deleted notch "Fix it" path
+    /// three hops long.
+    var presentsHealthPanel = false
 
     /// Stage E: the Meetings destination shows the designed review layout
     /// (NotesView) while idle. This flag pins the live UI (ContentView) on

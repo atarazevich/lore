@@ -155,6 +155,7 @@ extension HealthResult {
         case .accessibility: return "Accessibility permission isn't granted — the Fn key can't insert text."
         case .inputMonitoring: return "Input Monitoring permission isn't granted — the hotkey can't be seen."
         case .tap: return "\(LoreTheme.wordmark)'s shortcuts aren't reaching it while other apps are focused (the event tap is dead or starved)."
+        case .paste: return "The last paste posted no keystrokes — the dictated text stayed on the clipboard."
         case .secureInput: return "Secure input is active, blocking the hotkey."
         case .microphone: return "Microphone permission isn't granted."
         case .micCapture: return "The last microphone capture failed."

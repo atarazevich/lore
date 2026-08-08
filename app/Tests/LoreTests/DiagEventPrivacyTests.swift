@@ -45,6 +45,7 @@ final class DiagEventPrivacyTests: XCTestCase {
     /// is added here; `CaseIterable` then grows the expected set for free.
     private enum CaseKey: String, CaseIterable {
         case appLaunched
+        case healthConditionSustained, healthConditionCleared
         case healthSummonFired, healthSummonWithdrawn, healthSummonCleared
         case onboardingStarted, onboardingStepShown, onboardingDictationLanded
         case onboardingCompleted
@@ -72,6 +73,8 @@ final class DiagEventPrivacyTests: XCTestCase {
     private static func key(of event: DiagEvent) -> CaseKey {
         switch event {
         case .appLaunched: return .appLaunched
+        case .healthConditionSustained: return .healthConditionSustained
+        case .healthConditionCleared: return .healthConditionCleared
         case .healthSummonFired: return .healthSummonFired
         case .healthSummonWithdrawn: return .healthSummonWithdrawn
         case .healthSummonCleared: return .healthSummonCleared
@@ -141,6 +144,8 @@ final class DiagEventPrivacyTests: XCTestCase {
     private static func sample(for key: CaseKey) -> DiagEvent {
         switch key {
         case .appLaunched: return .appLaunched(build: .max)
+        case .healthConditionSustained: return .healthConditionSustained(trigger: .captureFailed)
+        case .healthConditionCleared: return .healthConditionCleared(trigger: .identityMigration)
         case .healthSummonFired: return .healthSummonFired(trigger: .pasteFailed)
         case .healthSummonWithdrawn:
             return .healthSummonWithdrawn(trigger: .systemAudioFailed, reason: .sweptGhost)
@@ -244,7 +249,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         allowed.formUnion(DiagEvent.PasteKind.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.PromptDisposition.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.Artifact.allCases.map(\.rawValue))
-        allowed.formUnion(DiagEvent.SummonTrigger.allCases.map(\.rawValue))
+        allowed.formUnion(DiagEvent.HealthTrigger.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.NotesMigration.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.SummonWithdrawal.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.OnboardingStep.allCases.map(\.rawValue))

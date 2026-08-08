@@ -4,8 +4,8 @@ import XCTest
 /// The signing-identity migration (#135, rationale on `SigningIdentityLedger`):
 /// the ledger detects the *change* across launches, and the flow closes only on
 /// the one fact a cert change cannot fake — a key-down that actually reached
-/// Lore's tap. The panel copy it produces is pinned in `HealthCatalogTests`, its
-/// notch line in `HealthSummonTests`; this suite is the ledger and the monitor.
+/// Lore's tap. The panel copy it produces is pinned in `HealthCatalogTests`;
+/// this suite is the ledger and the monitor.
 @MainActor
 final class SigningMigrationTests: XCTestCase {
 
@@ -203,74 +203,18 @@ final class SigningMigrationTests: XCTestCase {
         XCTAssertFalse(relaunch.migrationPending, "acknowledged — never re-triggers")
     }
 
-    // MARK: - Summon dedup across launches (#144)
-
-    /// A relaunch is not a new cause: the notch summon fires once per distinct
-    /// identity transition, while `migrationPending` — and the panel row's
-    /// warning — keep surviving relaunches until the real acknowledge.
-    func testTheSummonIsClaimedOncePerTransitionAcrossLaunches() {
-        let defaults = freshDefaults()
-        launch(defaults, info(.appleDevelopment, team: "OLD"))
-        let first = SigningIdentityLedger(defaults: defaults, current: info(.developerID, team: "NEW"))
-        XCTAssertTrue(first.claimMigrationSummon(), "a fresh transition announces once")
-
-        let relaunch = SigningIdentityLedger(defaults: defaults, current: info(.developerID, team: "NEW"))
-        XCTAssertTrue(relaunch.migrationPending, "still pending — the row keeps warning")
-        XCTAssertFalse(relaunch.claimMigrationSummon(), "same transition — no second popup")
-    }
-
-    /// A genuinely different transition (e.g. the build flipped again before
-    /// the first one was ever acknowledged) is a new cause and announces again.
-    func testADifferentTransitionClaimsAgain() {
-        let defaults = freshDefaults()
-        launch(defaults, info(.appleDevelopment, team: "OLD"))
-        let toAdHoc = SigningIdentityLedger(defaults: defaults, current: info(.adHoc, team: nil))
-        XCTAssertTrue(toAdHoc.claimMigrationSummon())
-
-        // Never acknowledged; the next launch is signed again — the baseline is
-        // still OLD, so this is a different transition than OLD→ad-hoc.
-        let backToSigned = SigningIdentityLedger(defaults: defaults, current: info(.developerID, team: "NEW"))
-        XCTAssertTrue(backToSigned.migrationPending)
-        XCTAssertTrue(backToSigned.claimMigrationSummon(), "new transition — one new announcement")
-    }
-
-    /// The marker describes a *closed* migration once acknowledged: baseline
-    /// A → B summons and persists the "A>B" marker; the identity reverts to A
-    /// and a quiet launch acknowledges (closing nothing — the baseline is still
-    /// A); a later re-sign to B is a fresh TCC-invalidating migration and must
-    /// summon again. A marker surviving the acknowledge would suppress it
-    /// forever.
-    func testTheSameTransitionAfterARevertAndAcknowledgeSummonsAgain() {
-        let defaults = freshDefaults()
-        launch(defaults, info(.appleDevelopment, team: "A"))
-        let toB = SigningIdentityLedger(defaults: defaults, current: info(.appleDevelopment, team: "B"))
-        XCTAssertTrue(toB.claimMigrationSummon(), "first A→B announces")
-
-        // Reverted to A before any ack: nothing pending (the baseline is still
-        // A), so the launch path acknowledges quietly.
-        let reverted = launch(defaults, info(.appleDevelopment, team: "A"))
-        XCTAssertFalse(reverted.migrationPending)
-
-        // Re-signed to B: the same A→B transition string, but the previous
-        // migration is closed — this is a new cause.
-        let again = SigningIdentityLedger(defaults: defaults, current: info(.appleDevelopment, team: "B"))
-        XCTAssertTrue(again.migrationPending)
-        XCTAssertTrue(again.claimMigrationSummon(),
-                      "acknowledge cleared the marker — a fresh migration announces")
-    }
-
-    func testAQuietLedgerNeverClaimsASummon() {
-        let defaults = freshDefaults()
-        let ledger = launch(defaults, info(.appleDevelopment, team: "SAME"))
-        XCTAssertFalse(ledger.migrationPending)
-        XCTAssertFalse(ledger.claimMigrationSummon(), "nothing pending — nothing to announce")
-    }
+    // Deleted with the cross-launch summon marker (#151): its four tests pinned
+    // dedupe that existed to stop an interrupting popup firing twice for one
+    // cause. A standing amber dot has no such cost, and suppressing it on
+    // relaunch left the panel row warning beside a dark mark. `migrationPending`
+    // — tested above — is now read live, and the 60s persistence gate is the
+    // only dedupe a non-interrupting report needs.
 
     // MARK: - Self-clear wiring (#144)
 
     /// `onMigrationClosed` fires only when an ack closes a pending migration —
-    /// the notch's self-clear rides it — and never on the record-starting ack
-    /// of a quiet launch.
+    /// the migration's failure clock stops on it (#151) — and never on the
+    /// record-starting ack of a quiet launch.
     func testAcknowledgeFiresTheCallbackOnlyWhenItClosesAMigration() {
         let defaults = freshDefaults()
         var closed = 0

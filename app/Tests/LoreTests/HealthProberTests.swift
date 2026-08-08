@@ -382,38 +382,21 @@ final class HealthProberTests: XCTestCase {
                       "and toggling — what the user will try first — is called out as not working")
     }
 
-    // MARK: - #140: summons fire from failed actions, and probes stay quiet
+    // MARK: - #140: claims come from failed actions, and probes stay quiet
 
-    /// The inversion at the heart of #140: a red critical probe no longer
-    /// summons by itself — `refresh()` publishes state and nothing else.
-    func testRefreshNeverSummonsEvenWithACriticalFailure() {
+    /// The inversion at the heart of #140: a red critical probe raises no claim
+    /// by itself — `refresh()` publishes state and nothing else.
+    func testRefreshNeverStartsAFailureClockEvenWithACriticalFailure() {
         let monitor = HealthMonitor(prober: prober(alive: false, stalled: false))
-        var summoned: HealthSummon?
-        monitor.onSummon = { summoned = $0 }
 
         monitor.refresh()
 
-        XCTAssertNil(summoned, "state bits explain failures; they must not trigger summons")
+        XCTAssertTrue(monitor.failingSince.isEmpty,
+                      "state bits explain failures; they must not start one")
     }
 
-    /// A failed user action does: `note` re-probes and summons, naming the
-    /// trigger — and the same door in reverse withdraws instead of summoning.
-    func testAFailedUserActionSummonsWithItsTriggerAndARecoveryWithdraws() {
-        let monitor = HealthMonitor(prober: prober(alive: true, stalled: false))
-        var summoned: HealthSummon?
-        var cleared: DiagEvent.SummonTrigger?
-        monitor.onSummon = { summoned = $0 }
-        monitor.onRecovery = { cleared = $0 }
-
-        monitor.note(.init(trigger: .captureFailed, succeeded: false))
-        XCTAssertEqual(summoned?.trigger, .captureFailed)
-        XCTAssertNil(cleared)
-
-        summoned = nil
-        monitor.note(.init(trigger: .captureFailed, succeeded: true))
-        XCTAssertEqual(cleared, .captureFailed)
-        XCTAssertNil(summoned, "a recovery must never summon")
-    }
+    // The other half — a failed action starting a clock and a recovery stopping
+    // it — is `MenuBarHealthTests`, which owns the whole persistence rule.
 
     // MARK: - #140: the age ceiling on expensive outcomes
 

@@ -77,11 +77,6 @@ enum SigningIdentity {
 @MainActor
 final class SigningIdentityLedger {
     private static let key = "signingIdentityLastSeen"
-    /// The tccKey transition last announced on the notch (#144). Separate from
-    /// the baseline so the notch summon dedupes across launches while
-    /// `migrationPending` stays derived: the panel row keeps warning until a
-    /// real acknowledge, but the popup fires once per distinct transition.
-    private static let summonKey = "signingMigrationSummoned"
 
     private let defaults: UserDefaults
     private let current: SigningIdentity.Info
@@ -93,9 +88,10 @@ final class SigningIdentityLedger {
     private(set) var migrationPending: Bool
 
     /// Fired when `acknowledge()` closes a pending migration — never on the
-    /// record-starting ack of a quiet launch. The notch's self-clear (#144)
-    /// hangs off this: an identity summon on screen withdraws itself the moment
-    /// the ledger has positive evidence the grants work.
+    /// record-starting ack of a quiet launch. The self-clear (#144) hangs off
+    /// this: the migration's failure clock stops the moment the ledger has
+    /// positive evidence the grants work, which in the healthy case is inside
+    /// the menu-bar mark's persistence window, so nothing is ever shown (#151).
     var onMigrationClosed: (() -> Void)?
 
     init(defaults: UserDefaults = .standard,
@@ -122,29 +118,9 @@ final class SigningIdentityLedger {
         // readable launch still has to compare against the real previous one.
         guard current.certKind != .unknown else { return }
         defaults.set(Self.fingerprint(current), forKey: Self.key)
-        // The marker describes a *closed* migration now. Keeping it would
-        // suppress the summon forever if the same transition ever recurs
-        // (revert to the old identity, ack, re-sign) — a fresh TCC-invalidating
-        // migration with no announcement.
-        defaults.removeObject(forKey: Self.summonKey)
         let closedAMigration = migrationPending
         migrationPending = false
         if closedAMigration { onMigrationClosed?() }
-    }
-
-    /// The notch summon's cross-launch dedup (#144): true at most once per
-    /// distinct baseline→current tccKey transition, persisting the announced
-    /// transition as the marker. A relaunch before the ack re-derives the same
-    /// transition and stays silent; a genuinely new transition (baseline or
-    /// current changed) claims again. Deliberately does NOT touch the baseline,
-    /// so `migrationPending` — and the panel row's warning — survive relaunch
-    /// until a real `acknowledge()`.
-    func claimMigrationSummon() -> Bool {
-        guard migrationPending, let seen = defaults.string(forKey: Self.key) else { return false }
-        let transition = "\(Self.tccKey(seen))>\(Self.tccKey(Self.fingerprint(current)))"
-        guard defaults.string(forKey: Self.summonKey) != transition else { return false }
-        defaults.set(transition, forKey: Self.summonKey)
-        return true
     }
 
     /// Cert kind and team in one string. The full pair stays the *stored* record

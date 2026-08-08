@@ -5,6 +5,9 @@ struct MenuBarPopoverView: View {
     let settings: AppSettings
     let onShowMainWindow: () -> Void
     let onShowMeetings: () -> Void
+    /// The dot's destination (#151): the amber bead says "look", this row is
+    /// where looking happens.
+    let onShowHealth: () -> Void
     let onCheckForUpdates: () -> Void
     let onQuit: () -> Void
 
@@ -34,6 +37,17 @@ struct MenuBarPopoverView: View {
             LoreDivider()
 
             VStack(spacing: 2) {
+                // Only while a condition actually stands, so the popover carries
+                // no standing "check your health" nag — the row exists to answer
+                // the amber bead the user just clicked on.
+                if let standing = coordinator.healthMonitor?.sustainedSubjects, !standing.isEmpty {
+                    PopoverMenuRow(
+                        title: MenuBarController.label(for: .health, standing: standing),
+                        systemImage: "exclamationmark.circle",
+                        accent: LoreTheme.Accent.amber,
+                        action: onShowHealth
+                    )
+                }
                 PopoverMenuRow(
                     title: "Show \(LoreTheme.wordmark)",
                     systemImage: "macwindow",
@@ -159,10 +173,14 @@ private struct PopoverMenuRow: View {
     let title: String
     var systemImage: String
     var muted = false
+    /// An accented row points somewhere rather than doing something, so it takes
+    /// both the colour and the chevron. The health row carries the same amber as
+    /// the bead that sent the user here, so the two read as one thing.
+    var accent: Color? = nil
     let action: () -> Void
 
     var body: some View {
-        let tint = muted ? LoreTheme.TextColor.muted : LoreTheme.TextColor.primary
+        let tint = accent ?? (muted ? LoreTheme.TextColor.muted : LoreTheme.TextColor.primary)
         Button(action: action) {
             HStack(spacing: 10) {
                 Image(systemName: systemImage)
@@ -173,6 +191,11 @@ private struct PopoverMenuRow: View {
                     .font(LoreTheme.Typography.secondary)
                     .foregroundStyle(tint)
                 Spacer(minLength: 0)
+                if accent != nil {
+                    Image(systemName: "chevron.right")
+                        .font(.system(size: 10, weight: .semibold))
+                        .foregroundStyle(tint.opacity(0.6))
+                }
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 7)

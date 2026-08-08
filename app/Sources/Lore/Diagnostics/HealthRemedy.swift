@@ -342,7 +342,7 @@ enum HealthCatalog {
         // Expensive probes are dispatched by cost at the top of `copy`; this arm
         // is unreachable but keeps the switch exhaustive, so a new expensive
         // probe forces a categorization decision here as well.
-        case .micCapture, .modelWarmup, .openAILiveness, .systemAudio:
+        case .micCapture, .modelWarmup, .openAILiveness, .systemAudio, .paste:
             preconditionFailure("expensive probe \(result.id.rawValue) handled above via cost")
         }
     }
@@ -382,6 +382,18 @@ enum HealthCatalog {
                          failureRemedy: Remedy(
                             instruction: "macOS gates system-audio capture behind Screen & System Audio Recording — a separate grant from the microphone, and the one a fresh install is missing. Enable \(LoreTheme.wordmark) under Privacy & Security → Screen & System Audio Recording, then start the meeting again.",
                             actions: [.openSettings(.screenRecording)]))
+        case .paste:
+            // No sideEffect: a synthetic Cmd+V into whatever happens to be
+            // focused is not something a diagnostics panel may do on a button
+            // press. A failure has one overwhelmingly likely cause — the
+            // Accessibility grant the post needs — and the pasted text is still
+            // on the clipboard, which is the part the user can act on now.
+            return .init(title: "Paste", okDetail: "Last paste posted its keystrokes",
+                         failDetail: "Last paste posted nothing",
+                         warnDetail: "Nothing pasted yet.",
+                         failureRemedy: Remedy(
+                            instruction: "\(LoreTheme.wordmark) pastes by posting Cmd+V, which macOS allows only with Accessibility. Your text is still on the clipboard — press Cmd+V yourself to recover it, then re-grant Accessibility so the next one lands. \(reGrantWalkthrough)",
+                            actions: [.openSettings(.accessibility)]))
         case .signing, .diskSpace, .accessibility, .inputMonitoring,
              .tap, .secureInput, .microphone, .asrModel, .vadModel, .openAIKey,
              .notesFolder:
