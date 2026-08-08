@@ -257,17 +257,26 @@ final class HealthProberTests: XCTestCase {
     }
 
     /// The same invariant, observed through the remedy layer: the expensive
-    /// probes carry a `Test now` action for their own id — except `.systemAudio`,
-    /// which is observable only during a real meeting recording (there is no
-    /// on-demand test for it, #88), so it stays `.expensive` in cost yet carries
-    /// no button. This guards issue 2 against regression.
+    /// probes carry a `Test now` action for their own id — except the ones the
+    /// panel cannot actually run, which stay `.expensive` in card shape (the last
+    /// real outcome, read out of the event stream) yet carry no button, because a
+    /// button that can't run is not honest. `HealthMonitor.testNow` has no case
+    /// for either, and `ExpensiveLabels.sideEffect` — nil for both — is where the
+    /// production side decides it. This guards issue 2 against regression.
+    ///
+    /// Listed rather than derived so the set stays a decision: a new expensive
+    /// probe fails this test until someone says which side it is on.
     func testOnlyExpensiveProbesCarryTheirOwnTestNowRemedy() {
+        // `.systemAudio` (#88) is observable only during a real meeting recording;
+        // `.paste` (#151) only from a real dictation — a synthetic Cmd+V into
+        // whatever happens to be focused is not something the panel may post.
+        let noOnDemandTest: Set<HealthProbeID> = [.systemAudio, .paste]
         for id in HealthProbeID.allCases {
             let item = HealthCatalog.describe(HealthResult(id: id, status: .warning))
             let hasOwnTestNow = item.remedy?.actions.contains(.testNow(id)) ?? false
-            let expectsTestNow = id.cost == .expensive && id != .systemAudio
+            let expectsTestNow = id.cost == .expensive && !noOnDemandTest.contains(id)
             XCTAssertEqual(hasOwnTestNow, expectsTestNow,
-                           "\(id.rawValue): own Test-now action ⟺ expensive and not systemAudio")
+                           "\(id.rawValue): own Test-now action ⟺ expensive and testable on demand")
         }
     }
 

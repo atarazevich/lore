@@ -363,6 +363,13 @@ final class AudioRecorderTests: XCTestCase {
     /// Close the recorder's handles and read the finished tracks back. The
     /// sealed temp files are the test's to clean up — `sealForBatch` hands
     /// ownership over precisely so batch transcription can outlive the session.
+    ///
+    /// `sealForBatch` returns the session's *candidate* paths, not proof of a
+    /// file: a track that never received a buffer opened no file there, which is
+    /// the shape of every pause test that drives one leg only. Both production
+    /// consumers check existence before opening (`AudioRecorder.mergeAndEncode`,
+    /// `SessionRepository.stashAudioForBatch`); this reader does the same, so a
+    /// silent track reads back as `nil` rather than as an open failure.
     private func sealAndRead(
         _ recorder: AudioRecorder
     ) throws -> (mic: AVAudioFile?, sys: AVAudioFile?) {
@@ -371,10 +378,11 @@ final class AudioRecorderTests: XCTestCase {
             [sealed.mic, sealed.sys].compactMap { $0 }
                 .forEach { try? FileManager.default.removeItem(at: $0) }
         }
-        return (
-            mic: try sealed.mic.map { try AVAudioFile(forReading: $0) },
-            sys: try sealed.sys.map { try AVAudioFile(forReading: $0) }
-        )
+        func read(_ url: URL?) throws -> AVAudioFile? {
+            guard let url, FileManager.default.fileExists(atPath: url.path) else { return nil }
+            return try AVAudioFile(forReading: url)
+        }
+        return (mic: try read(sealed.mic), sys: try read(sealed.sys))
     }
 
     /// The invariant the whole pause design rests on: after a resume, each
