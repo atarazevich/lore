@@ -1,5 +1,51 @@
 # Changelog
 
+## v3.0.0 — 2026-08-10
+
+The distribution era changes: lore is now signed with a paid Developer ID, notarized by Apple, and ships as a proper DMG — no more Gatekeeper warnings, and updates arrive without any permission ceremony. Plus six weeks of features: whole-recording transcripts, on-device enrichment, meeting pause/resume, honest health reporting, and a rebuilt first launch.
+
+**A real signed app (#134, #135, #138)**
+- Every build is signed with a paid Apple Developer ID, hardened and notarized — macOS opens it without warnings, offline included
+- If the app's signing identity ever changes again, a guided migration walks through re-granting permissions instead of failing silently
+- API keys move from the login keychain to an owner-only secrets file — no keychain dialog will ever appear again
+
+**Meetings: the transcript is rebuilt from the whole recording (#109, #128, #129, #130)**
+- When a meeting ends, the live chunked transcript is replaced by one rebuilt from the full audio — better accuracy, no mid-utterance seams. An indicator shows chunked / rebuilding / whole, and clicking it rebuilds on demand — including for older meetings recorded before this update
+- Rebuild timestamps stay correct across capture gaps (pauses, device switches), a rebuild that would collapse speaker labels asks first, and every meeting with saved audio gets a play button
+
+**Meetings: on-device enrichment (#107, #108, #131)**
+- After a meeting, Apple's on-device model adds tags and structure to the notes — nothing leaves the Mac for this. The meetings review pane was restyled around it
+- Enrichment is the only on-device stage; dictation cleanup stays on OpenAI, where quality is decisively better
+
+**Meetings: pause and resume (#153)**
+- A live meeting can be paused and resumed as one session — one transcript, one recording, with the gap filled by silence so audio stays in sync. Paused reads as steady amber everywhere: banner, REC pill, sidebar, menu bar
+
+**Health reporting: no more popups, no more false alarms (#140, #141, #144, #145, #151)**
+- The notch health popups are gone. Health now speaks through a quiet amber dot on the menu-bar mark that appears only after a condition has stood for 60 seconds, and vanishes the moment it clears. The health panel remains the full gauge
+- The "app signature changed" alarm that fired on every launch of a healthy app is fixed: it fires once per real identity change, is dismissible, and clears itself
+- Notch surfaces are now excluded from screen sharing reliably — including after display changes
+
+**Recording reliability (#149)**
+- All capture retry loops are bounded by a shared budget — no more infinite 5-second retries flooding diagnostics. Microphone recovery is proven by audio frames actually arriving, not by the device claiming to start. A system-audio failure names itself and deep-links to the right permission pane
+
+**Onboarding rebuilt (#135, #136, #150)**
+- First launch is now a single guided window — permissions revealed in sequence with live readings, a real guided dictation, honest consent — and no subsystem (capture, detection, updates) starts until setup completes. A configured machine skips it entirely
+- When the app's signing identity changes (new build source), a guided migration walks through re-granting permissions instead of failing silently
+
+**Notes move into the app's own folder (#148)**
+- Meeting notes now live in the app's Application Support folder instead of ~/Documents. Existing notes are moved once, automatically; launch never triggers a Documents access dialog again
+
+**Dictation cleanup simplified (#143, #146)**
+- One tighter default prompt: no paraphrasing, self-corrections resolved. The Concise preset is gone — Default and Custom remain
+- The cleanup prompt in Settings is shown in full, selectable, with a Copy button — what you read is exactly what runs
+
+**Fn+K: send a dictation to the operator (#122)**
+- Pressing K during a recording flags that dictation for the Safe Flow dispatcher instead of pasting it
+
+**Smaller things**
+- The product is now lowercase "lore" everywhere it speaks for itself, with a new mark (#137)
+- Meetings list polling no longer burns CPU while idle (#142)
+
 ## v2.6.0 — 2026-07-27
 
 Lore learns to speak: Read Aloud turns any selected text into speech, in the language it's written in. Plus a dictation pipeline fix.
