@@ -1,6 +1,8 @@
 # Changelog
 
-## Unreleased
+## v3.1.0 — 2026-08-11
+
+Meetings now repair themselves. The transcript-state vocabulary is gone; a meeting shows its text, quietly prepares it, or says one honest sentence — and the app does its own chores.
 
 **Meetings self-heal (#166)**
 - The transcript-state UI is gone. A meeting shows its transcript; "Preparing the transcript…" with a live progress track while a job runs; or, only when there is no transcript and no audio to make one from, a single plain sentence. Zero buttons, tooltips, or state icons on the meeting page
