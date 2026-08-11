@@ -476,6 +476,131 @@ final class SessionRepositoryTests: XCTestCase {
         await repo.deleteSession(sessionID: sessionID)
     }
 
+    /// #166: the index count follows the file it counts — a rebuild that
+    /// replaced the transcript must not leave a stale promise beside the new
+    /// text (ui-language rule 8).
+    func testSaveFinalTranscriptUpdatesUtteranceCount() async {
+        let sessionID = "session_count_follows"
+        await repo.seedSession(
+            id: sessionID,
+            records: [SessionRecord(speaker: .you, text: "Live only", timestamp: Date())],
+            startedAt: Date()
+        )
+
+        let rebuilt = (1...4).map {
+            SessionRecord(speaker: .you, text: "Rebuilt \($0)", timestamp: Date())
+        }
+        await repo.saveFinalTranscript(sessionID: sessionID, records: rebuilt)
+
+        let index = await repo.listSessions().first { $0.id == sessionID }
+        XCTAssertEqual(index?.utteranceCount, 4)
+
+        await repo.deleteSession(sessionID: sessionID)
+    }
+
+    /// #166: writing a final transcript over an existing one replaces it in
+    /// one atomic step — the second save's content fully wins.
+    func testSaveFinalTranscriptReplacesExistingFinal() async {
+        let sessionID = "session_final_replace"
+        await repo.seedSession(
+            id: sessionID,
+            records: [SessionRecord(speaker: .you, text: "Live", timestamp: Date())],
+            startedAt: Date()
+        )
+
+        await repo.saveFinalTranscript(sessionID: sessionID, records: [
+            SessionRecord(speaker: .you, text: "First pass", timestamp: Date()),
+        ])
+        await repo.saveFinalTranscript(sessionID: sessionID, records: [
+            SessionRecord(speaker: .you, text: "Second pass A", timestamp: Date()),
+            SessionRecord(speaker: .them, text: "Second pass B", timestamp: Date()),
+        ])
+
+        let loaded = await repo.loadTranscript(sessionID: sessionID)
+        XCTAssertEqual(loaded.map(\.text), ["Second pass A", "Second pass B"])
+
+        await repo.deleteSession(sessionID: sessionID)
+    }
+
+    /// #166 launch-sweep predicate: transcript bytes present and non-empty.
+    /// An empty live file (a session that recorded nothing, or a killed
+    /// import placeholder) must read as having no text.
+    func testHasTranscriptText() async {
+        // Non-empty live transcript → true.
+        await repo.seedSession(
+            id: "session_with_text",
+            records: [SessionRecord(speaker: .you, text: "Hi", timestamp: Date())],
+            startedAt: Date()
+        )
+        var hasText = await repo.hasTranscriptText(sessionID: "session_with_text")
+        XCTAssertTrue(hasText)
+
+        // Zero-byte live transcript → false.
+        await repo.seedSession(id: "session_empty", records: [], startedAt: Date())
+        hasText = await repo.hasTranscriptText(sessionID: "session_empty")
+        XCTAssertFalse(hasText)
+
+        // No session at all → false.
+        hasText = await repo.hasTranscriptText(sessionID: "session_nonexistent")
+        XCTAssertFalse(hasText)
+
+        await repo.deleteSession(sessionID: "session_with_text")
+        await repo.deleteSession(sessionID: "session_empty")
+    }
+
+    /// #166 (B1): `hasTranscriptText` and `loadTranscript` share one
+    /// candidate list — a legacy `batch.jsonl` the loader shows must also
+    /// count as text for the sweep.
+    func testLegacyBatchTranscriptCountsAsTextAndLoads() async throws {
+        let sessionID = "session_legacy_batch"
+        let sessionDir = rootDir
+            .appendingPathComponent("sessions", isDirectory: true)
+            .appendingPathComponent(sessionID, isDirectory: true)
+        try FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
+
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .iso8601
+        let record = SessionRecord(speaker: .them, text: "Batch line", timestamp: Date())
+        let line = String(data: try encoder.encode(record), encoding: .utf8)! + "\n"
+        try line.write(
+            to: sessionDir.appendingPathComponent("batch.jsonl"),
+            atomically: true, encoding: .utf8
+        )
+
+        let hasText = await repo.hasTranscriptText(sessionID: sessionID)
+        XCTAssertTrue(hasText)
+        let loaded = await repo.loadTranscript(sessionID: sessionID)
+        XCTAssertEqual(loaded.map(\.text), ["Batch line"])
+
+        try? FileManager.default.removeItem(at: sessionDir)
+    }
+
+    // MARK: - No-speech verdict (#166, C9)
+
+    /// The persisted verdict round-trips through the index, and a landed
+    /// final transcript retires it.
+    func testNoSpeechVerdictPersistsAndClearsOnFinalTranscript() async {
+        let sessionID = "session_no_speech"
+        await repo.seedSession(id: sessionID, records: [], startedAt: Date())
+
+        await repo.markSessionNoSpeech(sessionID: sessionID)
+        var noSpeech = await repo.sessionNoSpeech(sessionID: sessionID)
+        XCTAssertTrue(noSpeech)
+        var index = await repo.listSessions().first { $0.id == sessionID }
+        XCTAssertEqual(index?.noSpeech, true)
+
+        await repo.saveFinalTranscript(sessionID: sessionID, records: [
+            SessionRecord(speaker: .you, text: "Speech after all", timestamp: Date()),
+        ])
+        noSpeech = await repo.sessionNoSpeech(sessionID: sessionID)
+        XCTAssertFalse(noSpeech, "A landed transcript retires the verdict")
+        index = await repo.listSessions().first { $0.id == sessionID }
+        XCTAssertNil(index?.noSpeech)
+        XCTAssertEqual(index?.utteranceCount, 1)
+
+        await repo.deleteSession(sessionID: sessionID)
+    }
+
     // MARK: - moveToRecentlyDeleted
 
     func testMoveToRecentlyDeleted() async {

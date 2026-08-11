@@ -9,6 +9,10 @@ struct NotesState {
     var sessionHistory: [SessionIndex] = []
     var selectedSessionID: String?
     var loadedTranscript: [SessionRecord] = []
+    /// False while the selected session's transcript load is in flight
+    /// (#166): the pane renders none of its three faces until the load
+    /// lands — an empty array must mean "no text", never "not read yet".
+    var transcriptLoaded = false
     var loadedNotes: EnhancedNotes?
     /// Ask Lore exchanges persisted with the session (#60); empty for
     /// legacy sessions (no chat.json).
@@ -79,6 +83,7 @@ final class NotesController {
         guard let sessionID else {
             state.loadedNotes = nil
             state.loadedTranscript = []
+            state.transcriptLoaded = false
             state.loadedChat = []
             state.selectedSessionDirectory = nil
             state.audioFileURL = nil
@@ -87,6 +92,7 @@ final class NotesController {
 
         state.loadedNotes = nil
         state.loadedTranscript = []
+        state.transcriptLoaded = false
         state.loadedChat = []
         state.audioFileURL = nil
         state.selectedSessionDirectory = coordinator.sessionRepository.sessionsDirectoryURL
@@ -103,8 +109,19 @@ final class NotesController {
 
             state.loadedNotes = notes
             state.loadedTranscript = transcript
+            state.transcriptLoaded = true
             state.loadedChat = chat
             state.audioFileURL = audioURL
+
+            // Open summons a job (#166): a meeting with nothing to read —
+            // missing, damaged, or interrupted mid-processing — gets a fresh
+            // repair attempt the moment it is opened, while audio exists.
+            // The healer dedupes against running/queued jobs, excludes the
+            // live session, and answers "unavailable" when nothing can be
+            // made — the pane's three faces derive from exactly that.
+            if transcript.isEmpty {
+                coordinator.transcriptHealer?.ensure(sessionID: sessionID)
+            }
         }
     }
 
@@ -164,86 +181,6 @@ final class NotesController {
     func appendLoadedChat(sessionID: String, exchange: ChatExchange) {
         guard state.selectedSessionID == sessionID else { return }
         state.loadedChat.append(exchange)
-    }
-
-    // MARK: - Transcript Rebuild (MREV-32, #109)
-
-    /// True while a rebuild (including its confirmation prompt) is running —
-    /// a second click is a no-op instead of stacking modal alerts and
-    /// concurrent engine passes.
-    @ObservationIgnored private var rebuildInFlight = false
-
-    /// Rebuild a session's transcript from its audio. Serves both the failed
-    /// banner's Retry (MREV-32/#43) and the chunked indicator's
-    /// click-to-rebuild (#109). The repository resolves the source ONCE
-    /// (`resolveRebuild`): per-track stash → `process()` (keeps You/Them),
-    /// merged audio (session copy or notes-folder m4a export) → the
-    /// import-style pass, anchored at the session's real start — and that
-    /// same resolution answers whether the rebuild would collapse an
-    /// existing multi-speaker transcript, which asks for confirmation first
-    /// (#129). The session's identity (title, tags, source) is untouched —
-    /// the import path only replaces the transcript. No audio findable →
-    /// `.failed`, so the retry banner says why instead of running a doomed
-    /// pass.
-    func rebuildTranscript(sessionID: String, settings: AppSettings) {
-        guard let batchEngine = coordinator.batchEngine, !rebuildInFlight else { return }
-        rebuildInFlight = true
-        let notesDir = URL(fileURLWithPath: settings.notesFolderPath)
-        let repo = coordinator.sessionRepository
-        let startedAt = state.sessionHistory.first { $0.id == sessionID }?.startedAt
-        Task {
-            defer { rebuildInFlight = false }
-
-            guard let resolved = await repo.resolveRebuild(sessionID: sessionID) else {
-                // Surface the real problem instead of a wrong path.
-                await batchEngine.markFailed(
-                    "Original audio no longer available",
-                    sessionID: sessionID
-                )
-                return
-            }
-
-            // #129: the per-track stash is gone and the merged-file pass
-            // would mark every line as the other speaker — unrecoverable.
-            // Confirm before destroying an existing multi-speaker transcript.
-            if resolved.wouldCollapseSpeakers, !Self.confirmSpeakerCollapse() {
-                return
-            }
-
-            // Fresh marker (MREV-39): green dot / processing state survive
-            // relaunch mid-rebuild, same as the auto kickoff.
-            await repo.markSessionUnviewed(sessionID: sessionID)
-
-            switch resolved.source {
-            case .tracks:
-                await batchEngine.process(
-                    sessionID: sessionID,
-                    sessionRepository: repo,
-                    notesDirectory: notesDir
-                )
-            case .file(let audioURL):
-                await batchEngine.importFile(
-                    url: audioURL,
-                    sessionID: sessionID,
-                    sessionRepository: repo,
-                    startDate: startedAt
-                )
-            }
-        }
-    }
-
-    /// #129 confirmation: standard alert, Cancel is the default button
-    /// (Return and Esc both cancel); the destructive rebuild takes a click.
-    private static func confirmSpeakerCollapse() -> Bool {
-        let alert = NSAlert()
-        alert.messageText = "Rebuild without speaker separation?"
-        alert.informativeText = "Separate speaker tracks are no longer available for this meeting. Rebuilding will mark every line as the other speaker."
-        alert.alertStyle = .warning
-        alert.addButton(withTitle: "Rebuild")
-        alert.addButton(withTitle: "Cancel")
-        alert.buttons[0].keyEquivalent = ""
-        alert.buttons[1].keyEquivalent = "\r"
-        return alert.runModal() == .alertFirstButtonReturn
     }
 
     // MARK: - Session Management

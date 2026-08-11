@@ -100,6 +100,10 @@ final class AppCoordinator {
     var refinementEngine: TranscriptRefinementEngine?
     var audioRecorder: AudioRecorder?
     var batchEngine: BatchTranscriptionEngine?
+    /// The transcript self-healing queue (#166) — the only dispatcher into
+    /// `batchEngine`: end-of-meeting pass, launch sweep, open-summoned
+    /// repairs, imports, quiet retries.
+    var transcriptHealer: TranscriptHealer?
     /// Meeting auto-enrichment (#107). Live mode only — nil in UI tests, so
     /// every trigger is a no-op there.
     var enrichmentEngine: MeetingEnrichmentEngine?

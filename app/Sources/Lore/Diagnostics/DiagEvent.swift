@@ -189,6 +189,26 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case modelLoadFailed
     }
 
+    /// What summoned a transcript repair job (#166). A closed set — never the
+    /// session id, which embeds the meeting's date and time.
+    enum RepairReason: String, Codable, Sendable, CaseIterable {
+        case launchSweep
+        case openedMeeting
+        case meetingEnded
+        case importRequested
+        case retry
+    }
+
+    /// How a repair run (or assessment) ended (#166). Its own enum, not
+    /// `Outcome` — whose `.unknown` means "completed without a verdict"
+    /// (network flake), while `.unavailable` here IS the verdict: nothing to
+    /// show and nothing to make it from.
+    enum RepairOutcome: String, Codable, Sendable, CaseIterable {
+        case repaired
+        case failed
+        case unavailable
+    }
+
     /// Why a summon left the screen (#149). Retired with the surface (#151) and
     /// kept for the same reason as the events that carry it: a persisted
     /// events.json must keep decoding. `.sweptGhost` was the reason nobody in
@@ -296,6 +316,15 @@ enum DiagEvent: Codable, Sendable, Equatable {
     case modelLoad(model: ModelKind, outcome: Outcome, seconds: Double, fromCache: Bool)
     case modelCacheCleared
     case transcribed(chunks: Int, failedChunks: Int, samples: Int, characters: Int, ms: Int)
+    /// A transcript repair job entered the healer's queue (#166) — the trace
+    /// behind every Preparing face, since a self-healing engine that leaves
+    /// no events cannot be debugged or trusted.
+    case transcriptRepairQueued(reason: RepairReason)
+    /// One repair run (or assessment) reached its verdict: `.repaired` a
+    /// readable transcript is on disk, `.failed` the pass failed (a bounded
+    /// retry may follow), `.unavailable` there is nothing to make a
+    /// transcript from — the meeting settles into the one sentence.
+    case transcriptRepairSettled(outcome: RepairOutcome)
     /// Per-session (or per-batch-pass) summary, never per suppressed utterance —
     /// an echoey meeting would otherwise evict the whole ring. Numbers only:
     /// never `you='…' them='…'`.
@@ -387,7 +416,8 @@ extension DiagEvent {
              .systemAudioCapture, .systemAudioGaveUp, .recordingSaved:
             return .audio
 
-        case .modelLoad, .modelCacheCleared, .transcribed, .echoSuppressed:
+        case .modelLoad, .modelCacheCleared, .transcribed, .echoSuppressed,
+             .transcriptRepairQueued, .transcriptRepairSettled:
             return .transcription
 
         case .apiCall:
@@ -457,6 +487,8 @@ extension DiagEvent {
         case .modelCacheCleared: return "modelCacheCleared"
         case .transcribed: return "transcribed"
         case .echoSuppressed: return "echoSuppressed"
+        case .transcriptRepairQueued: return "transcriptRepairQueued"
+        case .transcriptRepairSettled: return "transcriptRepairSettled"
         case .apiCall: return "apiCall"
         case .dictationRecorded: return "dictationRecorded"
         case .dictationZeroFrames: return "dictationZeroFrames"

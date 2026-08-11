@@ -86,27 +86,31 @@ struct SessionIndex: Identifiable, Codable, Sendable, Equatable {
     /// by Apple Foundation Models. Doubles as the enriched marker — nil means
     /// "not yet enriched" and the launch sweep will pick the session up.
     var summary: String? = nil
+    /// Persisted no-speech verdict (#166): a completed transcription pass
+    /// over this session's audio produced no text, so nothing changes by
+    /// running again — the sweep and open-summons skip it instead of
+    /// re-transcribing silence every launch. Cleared whenever a final
+    /// transcript lands. Optional — absent in older files.
+    var noSpeech: Bool? = nil
 
     /// Derived at list time (#109), never persisted (excluded from
     /// CodingKeys): whether `transcript.final.jsonl` exists — a whole
-    /// (rebuilt-from-audio) transcript vs the chunked live one.
+    /// (rebuilt-from-audio) transcript vs the chunked live one. The launch
+    /// sweep (#166) reads it to tell a completed-but-uncleaned batch stash
+    /// from an interrupted one.
     var hasFinalTranscript = false
-    /// Derived at list time (#109), never persisted: whether audio to rebuild
-    /// from is findable (per-track stash, session audio copy, or the merged
-    /// m4a export in the notes folder). Only derived for chunked sessions.
-    var hasRebuildAudio = false
 
     /// `source` value for sessions created via audio import (#43).
     /// Live/legacy sessions carry nil.
     static let importedSource = "imported"
 
-    /// Everything except the derived transcript-state flags (#109) — those
-    /// describe the filesystem, not the session, and must never be persisted
+    /// Everything except the derived transcript-state flag (#109) — it
+    /// describes the filesystem, not the session, and must never be persisted
     /// (session.json or legacy sidecars).
     private enum CodingKeys: String, CodingKey {
         case id, startedAt, endedAt, templateSnapshot, title, utteranceCount,
              hasNotes, language, meetingApp, engine, tags, source, unviewed,
-             summary
+             summary, noSpeech
     }
 }
 

@@ -143,9 +143,11 @@ public struct LoreRootApp: App {
                     importMeetingRecording()
                 }
                 .keyboardShortcut("i", modifiers: [.command, .shift])
-                // Paused counts as busy (#153): the import preempts the live
-                // session's transcript, and a paused session still owns it.
-                .disabled(coordinator.state.isLive || isBatchEngineBusy)
+                // Paused counts (#153): while a session is live the healer's
+                // queue is suspended and the import would only sit — keep the
+                // item disabled. A busy engine no longer blocks (#166): the
+                // healer serializes imports behind whatever is running.
+                .disabled(coordinator.state.isLive)
 
                 Button("Dictation") {
                     guard isRunning else { return }
@@ -216,13 +218,6 @@ extension LoreRootApp {
         showMainWindow()
     }
 
-    private var isBatchEngineBusy: Bool {
-        switch coordinator.batchStatus {
-        case .idle, .completed, .failed, .cancelled: return false
-        default: return true
-        }
-    }
-
     private func importMeetingRecording() {
         let panel = NSOpenPanel()
         panel.title = "Import Meeting Recording"
@@ -238,7 +233,7 @@ extension LoreRootApp {
 
         guard panel.runModal() == .OK, let fileURL = panel.url else { return }
 
-        guard let batchEngine = coordinator.batchEngine else { return }
+        guard let healer = coordinator.transcriptHealer else { return }
 
         let repo = coordinator.sessionRepository
 
@@ -271,31 +266,16 @@ extension LoreRootApp {
             )
 
             // Fresh marker + immediate list refresh + auto-select so the
-            // imported meeting is on screen showing the Processing state
-            // from the start (MREV-33, meetings-review.md acceptance).
+            // imported meeting is on screen showing its Preparing face from
+            // the start (MREV-33; #166). The healer owns everything after
+            // the enqueue: retries, preemption re-queueing, enrichment — a
+            // failed import keeps its session and repairs itself (#43).
             await repo.markSessionUnviewed(sessionID: sessionID)
             await coordinator.loadHistory()
             coordinator.queueSessionSelection(sessionID)
             showPastMeetings()
 
-            await batchEngine.importFile(
-                url: fileURL,
-                sessionID: sessionID,
-                sessionRepository: repo
-            )
-
-            // #43: import completion never deletes — failure/preemption keep the row with retry.
-            let status = await batchEngine.status
-            if case .failed(let message, _) = status {
-                DiagStore.record(.sessionImportFailed)
-                appLog.error("import did not complete for \(sessionID, privacy: .private): \(message, privacy: .private) — keeping session for retry")
-            } else if case .cancelled = status {
-                // Preemption by a recording start is the designed path (#43), not a
-                // failure. Recording it as one would put a red line in every report
-                // from a user who records back-to-back meetings.
-                appLog.debug("import preempted (recording started) — keeping session for retry")
-            }
-            await coordinator.loadHistory()
+            healer.enqueueImport(sessionID: sessionID, url: fileURL)
         }
     }
 

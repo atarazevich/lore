@@ -32,9 +32,6 @@ struct NotesView: View {
     /// Review chat model (#62): one conversation at a time, swapped (with a
     /// generation bump) whenever the selected session changes.
     @State private var reviewChat = AskLoreChatModel(isLive: false)
-    /// Dedupe guard: the engine keeps `.completed` while the poll loop resets
-    /// and re-copies it, so the same completion arrives more than once.
-    @State private var lastHandledBatchCompletion: String?
     /// True once the user selects a meeting themselves during a recording —
     /// the fresh-meeting auto-select at recording end must not clobber it.
     @State private var userNavigatedDuringRecording = false
@@ -159,32 +156,34 @@ struct NotesView: View {
         .onChange(of: controller.state.loadedChat) { _, exchanges in
             reviewChat.loadPersistedHistory(exchanges)
         }
-        // Batch completion: refresh the index (utterance counts change) and,
-        // if the fresh meeting is selected, resolve the Processing state into
-        // the enhanced Transcript (MREV-30/32). Deduped — the poll loop
-        // re-copies `.completed` from the engine after its 3s auto-dismiss.
-        .onChange(of: coordinator.batchStatus) { _, newStatus in
-            switch newStatus {
-            case .completed(let sid):
-                guard lastHandledBatchCompletion != sid else { return }
-                lastHandledBatchCompletion = sid
-                Task { await controller.loadHistory() }
-                if controller.state.selectedSessionID == sid {
-                    controller.selectSession(sid)
-                    detailViewMode = .transcript
-                }
-            case .loading, .transcribing:
-                // A new run (e.g. retry) may complete the same session again.
-                lastHandledBatchCompletion = nil
-            default:
-                break
+        // Repair completion (#166): the healer replaced a transcript —
+        // refresh the index (counts change) and, if the repaired meeting is
+        // the open one, reload its pane. Driven by the healer's generation,
+        // not engine status, which is reset between queued jobs.
+        .onChange(of: coordinator.transcriptHealer?.repairGeneration) {
+            Task { await controller.loadHistory() }
+            if let repaired = coordinator.transcriptHealer?.lastRepairedSessionID,
+               controller.state.selectedSessionID == repaired {
+                controller.selectSession(repaired)
+                detailViewMode = .transcript
             }
         }
-        // Fresh/green-dot lifetime (MREV-39): clears once the user views the
-        // meeting while no batch is in flight for it.
+        // Fresh-marker lifetime (MREV-39): clears once the user views the
+        // meeting while no job is in flight for it. Failure no longer blocks
+        // the clear (#166) — failures are the healer's problem, not a state
+        // the marker must outlive.
         .onChange(of: viewedClearCandidate(controller: controller), initial: true) { _, candidate in
             if let candidate {
                 controller.markViewed(sessionID: candidate)
+            }
+        }
+        // The standing open re-summons (#166): when the pane settles empty
+        // with no job and no verdict, this open is itself the fresh signal —
+        // ensure resets the budget and starts a new cycle, so face 3 stays
+        // strictly behind the healer's own no-audio/no-speech verdict.
+        .onChange(of: repairCandidate(controller: controller), initial: true) { _, candidate in
+            if let candidate {
+                coordinator.transcriptHealer?.ensure(sessionID: candidate)
             }
         }
     }
@@ -192,52 +191,49 @@ struct NotesView: View {
     // MARK: - Fresh marker (MREV-03/39)
 
     /// Session whose `unviewed` marker should be cleared right now, or nil.
-    /// A failed batch/import (#43) never clears: batchStatus is memory-only,
-    /// so the persisted dot is what still marks the failed import after a
-    /// relaunch — it stays until a retry succeeds.
     private func viewedClearCandidate(controller: NotesController) -> String? {
         guard isActiveInShell,
               let id = controller.state.selectedSessionID,
-              !isBatchInFlight(sessionID: id),
-              !isBatchFailed(sessionID: id),
+              !isPreparing(id),
               controller.state.sessionHistory.first(where: { $0.id == id })?.unviewed == true
         else { return nil }
         return id
     }
 
-    private func isBatchFailed(sessionID: String) -> Bool {
-        if case .failed(_, let sid) = coordinator.batchStatus { return sid == sessionID }
-        return false
+    // MARK: - The three faces (#166)
+
+    /// Work is pending or running for this meeting. The healer is the sole
+    /// dispatcher, so it is the single source — the polled engine status
+    /// lags settle and would only disagree.
+    private func isPreparing(_ sessionID: String) -> Bool {
+        coordinator.transcriptHealer?.isBusy(sessionID) == true
     }
 
-    private func isBatchInFlight(sessionID: String) -> Bool {
-        switch coordinator.batchStatus {
-        case .loading(let sid), .transcribing(_, let sid):
-            return sid == sessionID
-        default:
-            return false
-        }
+    /// The settled "nothing to show, nothing to make it from" verdict:
+    /// either assessed this launch (healer) or persisted from a completed
+    /// no-speech pass (index). Checked before Preparing so a reopened
+    /// no-speech meeting never flashes a face it will not keep.
+    private func isSettledUnavailable(_ sessionID: String, state: NotesState) -> Bool {
+        coordinator.transcriptHealer?.isUnavailable(sessionID) == true
+            || selectedSession(state)?.noSpeech == true
     }
 
-    /// Green dot: batch/import in flight, or processed but not yet viewed.
-    private func isFresh(_ session: SessionIndex) -> Bool {
-        session.unviewed == true || isBatchInFlight(sessionID: session.id)
-    }
-
-    // MARK: - Transcript state (#109)
-
-    /// Chunked / whole / rebuilding for the indicator (#109). In-flight wins:
-    /// a manual rebuild can run over a session that already has a final
-    /// transcript from an earlier pass.
-    private func transcriptState(_ session: SessionIndex) -> TranscriptState {
-        if isBatchInFlight(sessionID: session.id) {
-            if case .transcribing(let progress, _) = coordinator.batchStatus {
-                return .rebuilding(progress: progress)
-            }
-            return .rebuilding(progress: nil)
-        }
-        if session.hasFinalTranscript { return .whole }
-        return .chunked(canRebuild: session.hasRebuildAudio)
+    /// The standing open's re-summon slot (#166): the pane is empty with no
+    /// job running and no unavailable verdict — the shape a spent retry
+    /// budget leaves behind while audio still exists. Face 3 must never
+    /// claim "no audio" over audio, so the open meeting summons a fresh
+    /// cycle instead (ensure resets the budget). Bounded by attention:
+    /// navigating away empties the candidate and the cycle is not renewed.
+    private func repairCandidate(controller: NotesController) -> String? {
+        let state = controller.state
+        guard isActiveInShell,
+              let id = state.selectedSessionID,
+              state.transcriptLoaded,
+              state.loadedTranscript.isEmpty,
+              !isPreparing(id),
+              !isSettledUnavailable(id, state: state)
+        else { return nil }
+        return id
     }
 
     // MARK: - Section toolbar (#107 prototype `.toolbar`)
@@ -329,20 +325,21 @@ struct NotesView: View {
                 .foregroundStyle(LoreTheme.TextColor.primary)
                 .lineLimit(1)
 
-            // Icon + meta (#109, prototype `.dmeta`); the whole state adds a
-            // quiet trailing "whole". Non-clickable here — the chunked
-            // banner's button is the detail-view action.
-            let transcript = transcriptState(session)
-            HStack(spacing: 10) {
-                TranscriptStateIcon(state: transcript)
-                metaLine(
-                    type: typeTag(session)?.rawValue,
-                    components: metaComponents(session, detail: true)
-                        + (transcript == .whole ? ["whole"] : [])
+            // Meta (#107 prototype `.dmeta`). The utterance count is the
+            // shown transcript's own (#166, ui-language rule 8): it appears
+            // only beside text that is actually on screen, so metadata can
+            // never contradict the pane under it. No state icon, no "whole"
+            // suffix — transcript states are not presented (#166).
+            metaLine(
+                type: typeTag(session)?.rawValue,
+                components: metaComponents(
+                    session,
+                    detail: true,
+                    shownUtteranceCount: controller.state.loadedTranscript.count
                 )
-                .font(LoreTheme.Typography.monoMeta)
-                .lineLimit(1)
-            }
+            )
+            .font(LoreTheme.Typography.monoMeta)
+            .lineLimit(1)
             .padding(.top, 4)
 
             if let summary = session.summary, !summary.isEmpty {
@@ -443,17 +440,52 @@ struct NotesView: View {
     }
 
     /// Meta components: `27 July · 09:58 · 29 min` (duration omitted when
-    /// unknown). Detail adds the year and the utterance count:
+    /// unknown). Detail adds the year, and — only when text is on screen to
+    /// count (#166, rule 8) — that text's own utterance count:
     /// `27 July 2026 · 09:58 · 29 min · 135 utterances`.
-    private func metaComponents(_ session: SessionIndex, detail: Bool = false) -> [String] {
+    private func metaComponents(
+        _ session: SessionIndex, detail: Bool = false, shownUtteranceCount: Int = 0
+    ) -> [String] {
         let dateFormat = Date.FormatStyle.dateTime.day().month(.wide)
         var components = [
             session.startedAt.formatted(detail ? dateFormat.year() : dateFormat),
             session.startedAt.formatted(.dateTime.hour().minute()),
             durationLabel(session)
         ].compactMap { $0 }
-        if detail { components.append("\(session.utteranceCount) utterances") }
+        if detail && shownUtteranceCount > 0 {
+            components.append("\(shownUtteranceCount) utterances")
+        }
         return components
+    }
+
+    /// Prototype `.prep` — dimmer than faint, italic: a row never asks for
+    /// attention, it states that the pane behind it is working.
+    private static let preparingSlotColor = Color(
+        red: 0x4D / 255.0, green: 0x52 / 255.0, blue: 0x5C / 255.0
+    )
+
+    /// The row's count slot (#166): a faint italic `· preparing…` while a
+    /// job runs, `· 189 utterances` beside readable text, and nothing when
+    /// no content's statistics could exist. Preparing takes precedence over
+    /// the index count — the A9CQC3BX shape is exactly an index promising
+    /// utterances over a transcript with no bytes, and while the healer
+    /// works, the promise is the less trustworthy of the two (rule 8). A
+    /// count the healer or the persisted no-speech verdict has declared
+    /// unhonorable is suppressed outright.
+    private func rowCountSlot(_ session: SessionIndex) -> Text {
+        let separator = Text(" \u{00B7} ").foregroundStyle(LoreTheme.TextColor.faint)
+        if isPreparing(session.id) {
+            return separator + Text("preparing\u{2026}")
+                .italic()
+                .foregroundStyle(Self.preparingSlotColor)
+        }
+        if session.utteranceCount > 0,
+           session.noSpeech != true,
+           coordinator.transcriptHealer?.isUnavailable(session.id) != true {
+            return separator + Text("\(session.utteranceCount) utterances")
+                .foregroundStyle(LoreTheme.TextColor.faint)
+        }
+        return Text(verbatim: "")
     }
 
     // MARK: - Meeting list rail (MREV-01…10)
@@ -622,12 +654,6 @@ struct NotesView: View {
                         .foregroundStyle(isBulkSelected ? LoreTheme.Accent.green
                                                         : LoreTheme.TextColor.muted)
                 }
-                if isFresh(session) {
-                    Circle()
-                        .fill(LoreTheme.Accent.green)
-                        .frame(width: 7, height: 7)
-                        .accessibilityLabel("New")
-                }
                 if renamingSessionID == session.id {
                     TextField("Title", text: $renameText, onCommit: {
                         controller.renameSession(sessionID: session.id, newTitle: renameText)
@@ -658,17 +684,14 @@ struct NotesView: View {
                 }
             }
 
-            // Transcript-state icon (#109, prototype V1) leading the meta
-            // line: `work · 27 July · 09:58 · 29 min` — type prefix slightly
-            // brighter. Clicking the amber (chunked) icon starts a rebuild.
-            HStack(spacing: 6) {
-                TranscriptStateIcon(state: transcriptState(session)) {
-                    controller.rebuildTranscript(sessionID: session.id, settings: settings)
-                }
-                metaLine(type: typeTag(session)?.rawValue, components: metaComponents(session))
-                    .font(LoreTheme.Typography.monoMeta)
-                    .lineLimit(1)
-            }
+            // Meta line with the row's whole vocabulary in the count slot
+            // (#166): `work · 27 July · 09:58 · 29 min · 189 utterances`, a
+            // faint "preparing…" while a job runs, or nothing at all. No
+            // dots, no state icons, no colors-as-meaning.
+            (metaLine(type: typeTag(session)?.rawValue, components: metaComponents(session))
+                + rowCountSlot(session))
+                .font(LoreTheme.Typography.monoMeta)
+                .lineLimit(1)
 
             // ✦-summary (#107) — one truncated grey line; absent for
             // unenriched/empty sessions.
@@ -887,24 +910,14 @@ struct NotesView: View {
     private func detailContent(controller: NotesController, state: NotesState) -> some View {
         Group {
             if let sessionID = state.selectedSessionID {
-                if isBatchInFlight(sessionID: sessionID) && state.loadedTranscript.isEmpty {
-                    // Processing state (MREV-30): controls hidden while the
-                    // batch/import pass runs and there is nothing to read yet
-                    // (imports, empty sessions). A rebuild over an existing
-                    // live transcript keeps the meeting readable under the
-                    // blue progress banner instead (#109).
-                    processingView
-                } else {
-                    VStack(spacing: 0) {
-                        if let session = selectedSession(state) {
-                            detailHeader(controller: controller, session: session)
-                            transcriptStateBanner(controller: controller, session: session)
-                            LoreDivider()
-                        }
-                        detailToolbar(controller: controller, state: state)
+                VStack(spacing: 0) {
+                    if let session = selectedSession(state) {
+                        detailHeader(controller: controller, session: session)
                         LoreDivider()
-                        detailBody(controller: controller, state: state, sessionID: sessionID)
                     }
+                    detailToolbar(controller: controller, state: state)
+                    LoreDivider()
+                    detailBody(controller: controller, state: state, sessionID: sessionID)
                 }
             } else {
                 ContentUnavailableView("Select a Session", systemImage: "doc.text", description: Text("Choose a session from the sidebar to view its transcript and chat."))
@@ -925,94 +938,6 @@ struct NotesView: View {
                 .accessibilityHidden(true)
             }
         }
-    }
-
-    // MARK: - Transcript-state banner (#109, prototype `.banner`)
-
-    /// Under the detail header: chunked → amber banner with "↻ Rebuild whole"
-    /// (only when audio is findable — without audio the meta icon's tooltip
-    /// says why and there is no action to offer); rebuilding → blue progress
-    /// banner; whole → nothing. Suppressed while this session's failed banner
-    /// (MREV-32) shows — that one already carries Retry.
-    @ViewBuilder
-    private func transcriptStateBanner(controller: NotesController, session: SessionIndex) -> some View {
-        switch transcriptState(session) {
-        case .chunked(canRebuild: true) where !isBatchFailed(sessionID: session.id):
-            stateBanner(tint: LoreTheme.Accent.amber) {
-                TranscriptStateIcon(state: .chunked(canRebuild: true))
-                Text("Chunked transcript \u{2014} assembled live during the meeting. Audio saved.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                Button {
-                    controller.rebuildTranscript(sessionID: session.id, settings: settings)
-                } label: {
-                    Text("\u{21BB} Rebuild whole")
-                        .font(.system(size: 12, weight: .semibold))
-                        .foregroundStyle(.white)
-                        .padding(.horizontal, 11)
-                        .padding(.vertical, 4)
-                        .loreChipChrome(fill: Color.white.opacity(0.12))
-                }
-                .buttonStyle(.plain)
-                .help("Rebuild the whole transcript from audio")
-            }
-        case .rebuilding(let progress):
-            stateBanner(tint: LoreTheme.Accent.blue) {
-                TranscriptStateIcon(state: .rebuilding(progress: progress))
-                Text("Rebuilding from the full audio \u{2014} the transcript will update itself.")
-                    .font(.system(size: 12))
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-                    .frame(maxWidth: .infinity, alignment: .leading)
-                if let progress, progress > 0 {
-                    Text("\(Int(progress * 100))%")
-                        .font(LoreTheme.Typography.monoMeta)
-                        .foregroundStyle(LoreTheme.Accent.blue)
-                }
-            }
-        default:
-            EmptyView()
-        }
-    }
-
-    /// Prototype `.banner` chrome: tinted .08 fill, .25 border, card radius.
-    private func stateBanner(tint: Color, @ViewBuilder content: () -> some View) -> some View {
-        HStack(spacing: 10, content: content)
-            .padding(.horizontal, 12)
-            .padding(.vertical, 9)
-            .background(
-                tint.opacity(0.08),
-                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
-            )
-            .overlay(
-                RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
-                    .strokeBorder(tint.opacity(0.25), lineWidth: 1)
-            )
-            .padding(.horizontal, 20)
-            .padding(.bottom, 14)
-    }
-
-    // MARK: - Processing state (MREV-30/32)
-
-    private var processingView: some View {
-        VStack(spacing: 10) {
-            LorePulsingDot(color: LoreTheme.Accent.blue, size: 10)
-            Text("Transcribing\u{2026}")
-                .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(LoreTheme.TextColor.primary)
-            Text(coordinator.batchIsImporting
-                 ? "Importing \u{2014} the transcript will appear here in a moment"
-                 : "The enhanced transcript will appear here in a moment")
-                .font(LoreTheme.Typography.secondary)
-                .foregroundStyle(LoreTheme.TextColor.muted)
-            if case .transcribing(let progress, _) = coordinator.batchStatus, progress > 0 {
-                Text("\(Int(progress * 100))%")
-                    .font(LoreTheme.Typography.monoMeta)
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-            }
-        }
-        .frame(maxWidth: .infinity, maxHeight: .infinity)
-        .accessibilityIdentifier("meetings.processing")
     }
 
     // MARK: - Detail toolbar (MREV-11/28)
@@ -1176,47 +1101,106 @@ struct NotesView: View {
         }
     }
 
-    // MARK: - Transcript view (MREV-12…17)
+    // MARK: - Transcript view: the three faces (#166)
 
+    /// The pane has exactly three faces: the transcript; "Preparing the
+    /// transcript…" backed by a live job; or the one no-transcript sentence.
+    /// No indicator, banner, button, or tooltip — the engine repairs by
+    /// itself (`TranscriptHealer`), and this view only says what is true
+    /// right now.
     @ViewBuilder
     private func transcriptView(controller: NotesController, state: NotesState) -> some View {
-        VStack(spacing: 0) {
-            // Failed batch/import banner (MREV-32, #43): above the content —
-            // not inside the scroll — so it also shows when the transcript
-            // is empty, which is what a failed import leaves behind.
-            if case .failed(let batchError, let sid) = coordinator.batchStatus,
-               sid == state.selectedSessionID {
-                let isImport = selectedSession(state)?.source == SessionIndex.importedSource
-                errorBanner(isImport
-                            ? "Import failed: \(batchError)"
-                            : "Transcript enhancement failed: \(batchError)") {
-                    controller.rebuildTranscript(sessionID: sid, settings: settings)
-                }
-                .padding(.top, 12)
-            }
-            if state.loadedTranscript.isEmpty {
-                ContentUnavailableView("No Transcript", systemImage: "waveform", description: Text("This session has no recorded utterances."))
-            } else {
-                ScrollView {
-                    // Elapsed-stamp anchor (#63): the session's recorded start,
-                    // falling back to the first utterance's timestamp for legacy
-                    // sessions whose metadata never stored one.
-                    let anchor = ElapsedStamp.anchor(
-                        startedAt: selectedSession(state)?.startedAt,
-                        firstTimestamp: state.loadedTranscript.first?.timestamp
-                    )
-                    LazyVStack(alignment: .leading, spacing: 16) {
-                        ForEach(Array(state.loadedTranscript.enumerated()), id: \.offset) { _, record in
-                            transcriptRow(record: record, anchor: anchor, showingOriginal: state.showingOriginal)
-                        }
+        if !state.loadedTranscript.isEmpty {
+            ScrollView {
+                // Elapsed-stamp anchor (#63): the session's recorded start,
+                // falling back to the first utterance's timestamp for legacy
+                // sessions whose metadata never stored one.
+                let anchor = ElapsedStamp.anchor(
+                    startedAt: selectedSession(state)?.startedAt,
+                    firstTimestamp: state.loadedTranscript.first?.timestamp
+                )
+                LazyVStack(alignment: .leading, spacing: 16) {
+                    ForEach(Array(state.loadedTranscript.enumerated()), id: \.offset) { _, record in
+                        transcriptRow(record: record, anchor: anchor, showingOriginal: state.showingOriginal)
                     }
-                    .frame(maxWidth: 760, alignment: .leading)
-                    .padding(.horizontal, 24)
-                    .padding(.vertical, 18)
-                    .frame(maxWidth: .infinity, alignment: .leading)
                 }
+                .frame(maxWidth: 760, alignment: .leading)
+                .padding(.horizontal, 24)
+                .padding(.vertical, 18)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
+        } else if !state.transcriptLoaded {
+            // The async load is still in flight — no face may be claimed yet.
+            Color.clear
+        } else if let sessionID = state.selectedSessionID,
+                  isSettledUnavailable(sessionID, state: state) {
+            // Face 3 strictly behind the healer's verdict: no audio to run
+            // from, or a completed pass proved the audio holds no speech.
+            // Checked before Preparing so a reopened no-speech meeting never
+            // flashes a face it will not keep.
+            unavailablePane
+        } else if let sessionID = state.selectedSessionID, isPreparing(sessionID) {
+            preparingPane(sessionID: sessionID)
+        } else {
+            // Transient only: empty with no job and no verdict. The standing
+            // open's re-summon (repairCandidate) fills this within a beat —
+            // never the sentence, which would claim "no audio" unverified.
+            Color.clear
         }
+    }
+
+    /// Face 2 — one face for first processing, repair, and retry alike. The
+    /// percent is read from the running job at render time; before progress
+    /// is known the same line shows without a number and the track waits
+    /// empty, so nothing shifts.
+    private func preparingPane(sessionID: String) -> some View {
+        let progress: Double? = {
+            if case .transcribing(let p, let sid) = coordinator.batchStatus,
+               sid == sessionID, p > 0 { return p }
+            return nil
+        }()
+        return statePane {
+            (Text("Preparing the transcript\u{2026}")
+                + Text(progress.map { " \(Int($0 * 100))%" } ?? "")
+                    .font(LoreTheme.Typography.mono(12.5)))
+                .font(.system(size: 13))
+                .foregroundStyle(LoreTheme.TextColor.muted)
+            ZStack(alignment: .leading) {
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(LoreTheme.Accent.blue.opacity(0.22))
+                RoundedRectangle(cornerRadius: 2)
+                    .fill(LoreTheme.Accent.blue)
+                    .frame(width: 150 * (progress ?? 0))
+            }
+            .frame(width: 150, height: 3)
+        }
+        .accessibilityIdentifier("meetings.preparing")
+    }
+
+    /// Face 3 — the only sentence the app ever says, and only after it has
+    /// already tried everything. Nothing else: no count, no button, no hint.
+    private var unavailablePane: some View {
+        statePane {
+            Text("There\u{2019}s no transcript for this meeting, and no audio to make one from.")
+                .font(.system(size: 13))
+                .foregroundStyle(LoreTheme.TextColor.muted)
+        }
+        .accessibilityIdentifier("meetings.unavailable")
+    }
+
+    /// Prototype `.pane` chrome: quiet card, centered content.
+    private func statePane(@ViewBuilder content: () -> some View) -> some View {
+        VStack(spacing: 11, content: content)
+            .multilineTextAlignment(.center)
+            .frame(maxWidth: .infinity, minHeight: 128)
+            .padding(18)
+            .background(
+                LoreTheme.Surface.card,
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
+            )
+            .padding(.horizontal, 20)
+            .padding(.top, 14)
+            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
     }
 
     // MARK: - Ask Lore chat tab (#62)
@@ -1263,29 +1247,6 @@ struct NotesView: View {
             }
             controller.appendLoadedChat(sessionID: sessionID, exchange: exchange)
         }
-    }
-
-    /// Red token error line; optional retry (batch failures, MREV-32).
-    @ViewBuilder
-    private func errorBanner(_ message: String, retryAction: (() -> Void)? = nil) -> some View {
-        HStack(spacing: 8) {
-            Text(message)
-                .font(.system(size: 12))
-                .foregroundStyle(LoreTheme.Accent.red)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            if let retryAction {
-                LoreIconButton(
-                    systemName: "arrow.clockwise",
-                    label: "Retry",
-                    tint: LoreTheme.Accent.red,
-                    background: LoreTheme.Accent.red.opacity(0.12),
-                    action: retryAction
-                )
-                .help("Retry transcript enhancement")
-            }
-        }
-        .padding(.horizontal, 24)
-        .padding(.vertical, 4)
     }
 
     /// Speaker rows (MREV-13, #63): the live view's stamped row — elapsed

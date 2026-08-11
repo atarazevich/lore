@@ -520,7 +520,7 @@ struct ContentView: View {
                 shell.showMeetingsReview()
             }
 
-            await controller.performInitialSetup()
+            await controller.performInitialSetup(settings: settings)
 
             // Setup meeting detection if enabled
             if settings.meetingAutoDetectEnabled {

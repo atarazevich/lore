@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+**Meetings self-heal (#166)**
+- The transcript-state UI is gone. A meeting shows its transcript; "Preparing the transcript…" with a live progress track while a job runs; or, only when there is no transcript and no audio to make one from, a single plain sentence. Zero buttons, tooltips, or state icons on the meeting page
+- The app repairs transcripts by itself: transcript writes are atomic (a killed process can never corrupt or lose one), interrupted jobs resume at the next launch, failures retry quietly a few times per launch, and opening a meeting with nothing to read starts a fresh attempt while audio exists
+- A recording start no longer kills a background pass — the job waits and resumes after the meeting ends
+- The #129 speaker-separation question is answered by policy instead of a dialog: per-track audio is always preferred; the single-speaker pass runs only when it is the last option
+
 ## v3.0.0 — 2026-08-10
 
 The distribution era changes: lore is now signed with a paid Developer ID, notarized by Apple, and ships as a proper DMG — no more Gatekeeper warnings, and updates arrive without any permission ceremony. Plus six weeks of features: whole-recording transcripts, on-device enrichment, meeting pause/resume, honest health reporting, and a rebuilt first launch.

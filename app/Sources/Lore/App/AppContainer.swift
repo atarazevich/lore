@@ -169,16 +169,52 @@ final class AppContainer {
         coordinator.audioRecorder = services.audioRecorder
         coordinator.batchEngine = services.batchEngine
 
-        // Meeting auto-enrichment (#107): live mode only — UI-test sessions
-        // must stay byte-stable, and scripted runs must not call the model.
-        if case .live = mode {
-            coordinator.enrichmentEngine = MeetingEnrichmentEngine(
-                repository: coordinator.sessionRepository,
-                onEnriched: { [weak coordinator] in
-                    await coordinator?.loadHistory()
+        // Everything below is live mode only: UI-test sessions must stay
+        // byte-stable, scripted runs must not call the on-device model, and
+        // a healer sweep or open in a UI test must never load the real ASR
+        // model.
+        guard case .live = mode else { return }
+
+        // Meeting auto-enrichment (#107).
+        coordinator.enrichmentEngine = MeetingEnrichmentEngine(
+            repository: coordinator.sessionRepository,
+            onEnriched: { [weak coordinator] in
+                await coordinator?.loadHistory()
+            }
+        )
+
+        // Transcript self-healing (#166): the one queue every batch/import/
+        // repair dispatch goes through. `onRepaired` is the single
+        // completion path — a transcript replaced by the sweep or a retry
+        // resets the enrichment marker and re-enriches exactly like the
+        // end-of-meeting pass (#107/#109).
+        let batchEngine = services.batchEngine
+        coordinator.transcriptHealer = TranscriptHealer(
+            repository: coordinator.sessionRepository,
+            liveSessionID: { [weak coordinator] in
+                coordinator?.liveSessionController?.activeSessionID
+            },
+            onRepaired: { [weak coordinator] sessionID in
+                guard let coordinator else { return }
+                await coordinator.sessionRepository.updateSessionSummary(sessionID: sessionID, summary: nil)
+                await coordinator.loadHistory()
+                if let engine = coordinator.enrichmentEngine {
+                    await engine.enrichIfNeeded(sessionID: sessionID)
                 }
-            )
-        }
+            },
+            onGaveUp: { [weak coordinator] sessionID in
+                // A failed repair leaves the live transcript in place —
+                // enrich it now (#107) rather than waiting a launch. No
+                // summary reset: nothing was replaced.
+                await coordinator?.enrichmentEngine?.enrichIfNeeded(sessionID: sessionID)
+            },
+            runJob: TranscriptHealer.engineRunner(
+                engine: batchEngine,
+                repository: coordinator.sessionRepository,
+                notesDirectory: { URL(fileURLWithPath: settings.notesFolderPath) }
+            ),
+            cancelRun: { await batchEngine.cancel() }
+        )
     }
 
     /// Create and start the detection controller, wire the coordinator event loop.

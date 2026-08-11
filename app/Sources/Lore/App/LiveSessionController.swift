@@ -47,10 +47,6 @@ final class LiveSessionController {
     private var observedNotesFolderPath = ""
     private var observedInputDeviceID: AudioDeviceID = 0
     private var observedPendingExternalCommandID: UUID?
-    /// Tracks the session ID we last handled a batch completion for,
-    /// preventing the auto-dismiss → re-poll cycle from re-triggering the history reload.
-    private var lastHandledBatchSessionID: String?
-    private var lastHandledFailedBatchSessionID: String?
 
     init(coordinator: AppCoordinator, container: AppContainer) {
         self.coordinator = coordinator
@@ -60,8 +56,14 @@ final class LiveSessionController {
     // MARK: - Initialization
 
     /// One-time setup tasks called when the view first appears.
-    func performInitialSetup() async {
+    func performInitialSetup(settings: AppSettings) async {
         await coordinator.sessionRepository.purgeRecentlyDeleted()
+
+        // The notes folder must be known BEFORE the healer sweep looks for
+        // merged m4a exports (#166): a sweep racing the first poll tick would
+        // otherwise misread m4a-recoverable meetings as unrecoverable.
+        let notesURL = URL(fileURLWithPath: settings.notesFolderPath)
+        await coordinator.sessionRepository.setNotesFolderPath(notesURL)
 
         // Launch backfill sweep (#107): every meeting without a summary gets
         // enriched on-device, one at a time, at background priority. No-op
@@ -69,6 +71,16 @@ final class LiveSessionController {
         if let engine = coordinator.enrichmentEngine {
             Task.detached(priority: .background) {
                 await engine.sweep()
+            }
+        }
+
+        // Transcript self-healing sweep (#166): orphaned batch stashes
+        // resume their whole-audio pass; empty sessions with findable audio
+        // get a repair job. No stored "processing" claim survives without a
+        // live job behind it.
+        if let healer = coordinator.transcriptHealer {
+            Task(priority: .background) {
+                await healer.sweep()
             }
         }
     }
@@ -86,67 +98,18 @@ final class LiveSessionController {
         while !Task.isCancelled {
             try? await Task.sleep(for: pollInterval)
 
-            // Poll batch engine status (actor-isolated)
+            // Poll batch engine status (actor-isolated). Status is a
+            // projection only (#166): the Preparing face's percent and the
+            // poll cadence read it, while every completion consequence —
+            // enrichment, summary reset, history reload, retries — lives in
+            // `TranscriptHealer`, which acknowledges terminal statuses back
+            // to idle as it settles each job.
             if let engine = coordinator.batchEngine {
                 let status = await engine.status
                 let importing = await engine.isImporting
-                if status != .idle || coordinator.batchStatus != .idle {
+                if status != coordinator.batchStatus || importing != coordinator.batchIsImporting {
                     coordinator.batchStatus = status
                     coordinator.batchIsImporting = importing
-
-                    // A new run (retry, manual rebuild) may complete or fail
-                    // the same session again — a zero-record batch even
-                    // reports .completed without writing the final
-                    // transcript, so the session stays chunked and gets
-                    // rebuilt again. Reset both dedupe guards when a run
-                    // starts (mirrors NotesView's view-level dedupe).
-                    switch status {
-                    case .loading, .transcribing:
-                        lastHandledBatchSessionID = nil
-                        lastHandledFailedBatchSessionID = nil
-                    default:
-                        break
-                    }
-
-                    // A failed batch leaves the live transcript in place —
-                    // still worth enriching now (#107) instead of waiting for
-                    // the next launch sweep. Separate dedupe var so a later
-                    // successful retry of the same session is handled fully.
-                    if case .failed(_, let sid) = status, lastHandledFailedBatchSessionID != sid {
-                        lastHandledFailedBatchSessionID = sid
-                        if let engine = coordinator.enrichmentEngine {
-                            Task.detached(priority: .utility) {
-                                await engine.enrichIfNeeded(sessionID: sid)
-                            }
-                        }
-                    }
-
-                    if case .completed(let sid) = status, lastHandledBatchSessionID != sid {
-                        lastHandledBatchSessionID = sid
-                        // Rebuild before analysis (#109): the whole transcript
-                        // just replaced the chunked one — drop the summary
-                        // idempotency marker so enrichment re-runs on the new
-                        // text. No-op on the auto path (summary still nil);
-                        // effective after a manual rebuild of an
-                        // already-enriched meeting.
-                        await coordinator.sessionRepository.updateSessionSummary(sessionID: sid, summary: nil)
-                        await coordinator.loadHistory()
-
-                        // Batch replaced the transcript — enrich now if this
-                        // session hasn't been enriched yet (#107).
-                        if let engine = coordinator.enrichmentEngine {
-                            Task.detached(priority: .utility) {
-                                await engine.enrichIfNeeded(sessionID: sid)
-                            }
-                        }
-
-                        Task { @MainActor in
-                            try? await Task.sleep(for: .seconds(3))
-                            if case .completed = coordinator.batchStatus {
-                                coordinator.batchStatus = .idle
-                            }
-                        }
-                    }
                 }
             }
 
@@ -329,7 +292,12 @@ final class LiveSessionController {
     // MARK: - Transcription Lifecycle (migrated from AppCoordinator)
 
     func startTranscription(metadata: MeetingMetadata, settings: AppSettings?) async {
-        if let batchEngine = coordinator.batchEngine {
+        // Live capture owns the model now. The healer suspends its queue and
+        // re-queues the running job uncharged (#166) — preemption is not
+        // failure; the pass resumes after the meeting ends.
+        if let healer = coordinator.transcriptHealer {
+            await healer.suspend()
+        } else if let batchEngine = coordinator.batchEngine {
             await batchEngine.cancel()
         }
 
@@ -439,8 +407,10 @@ final class LiveSessionController {
             // AppCoordinator makes this unreachable, but belt-and-braces: the
             // engine is already torn down above (step 1), so it can never keep
             // capturing after the state returns to idle, and there is no
-            // session to finalize or auto-select.
+            // session to finalize or auto-select. The healer still resumes —
+            // its queue must never stay suspended past the recording (#166).
             coordinator.sessionTemplateSnapshot = nil
+            coordinator.transcriptHealer?.resume()
             return
         }
         let utterancesSnapshot = coordinator.transcriptStore.utterances
@@ -546,9 +516,10 @@ final class LiveSessionController {
         await coordinator.loadHistory()
 
         // 7. Enrich on-device (#107) — unless a batch pass is about to
-        //    replace the transcript, in which case enrichment waits for its
-        //    completion (poll loop). Detached: never blocks finalization.
-        let batchWillRun = settings?.enableBatchRefinement == true && coordinator.batchEngine != nil
+        //    replace the transcript, in which case enrichment waits for the
+        //    healer's completion path. Detached: never blocks finalization.
+        let batchWillRun = settings?.enableBatchRefinement == true
+            && coordinator.transcriptHealer != nil
         if !batchWillRun, let engine = coordinator.enrichmentEngine {
             let endedSessionID = sessionID
             Task.detached(priority: .utility) {
@@ -556,23 +527,16 @@ final class LiveSessionController {
             }
         }
 
-        // 8. Kick off batch transcription if enabled
-        if let settings, settings.enableBatchRefinement, let batchEngine = coordinator.batchEngine {
-            let batchSessionID = sessionID
-            // Fresh marker (MREV-39): persisted so the green dot / processing
-            // state survive relaunch mid-batch; cleared when the user views
-            // the processed meeting.
-            await coordinator.sessionRepository.markSessionUnviewed(sessionID: batchSessionID)
-            let notesDir = URL(fileURLWithPath: settings.notesFolderPath)
-            let repo = coordinator.sessionRepository
-            Task.detached { [batchEngine] in
-                await batchEngine.process(
-                    sessionID: batchSessionID,
-                    sessionRepository: repo,
-                    notesDirectory: notesDir
-                )
-            }
+        // 8. Queue the whole-audio pass (#109) at the head of the healer's
+        //    queue, then let dispatch continue either way — the queue was
+        //    suspended for the whole recording.
+        if let settings, settings.enableBatchRefinement, let healer = coordinator.transcriptHealer {
+            // Fresh marker (MREV-39): persisted so an unseen processed
+            // meeting stays marked across relaunch; cleared when viewed.
+            await coordinator.sessionRepository.markSessionUnviewed(sessionID: sessionID)
+            healer.enqueueMeetingBatch(sessionID: sessionID)
         }
+        coordinator.transcriptHealer?.resume()
     }
 
     func discardSession() {
@@ -580,6 +544,9 @@ final class LiveSessionController {
         coordinator.audioRecorder?.discardRecording()
         coordinator.transcriptStore.clear()
         _currentSessionID = nil
+        // The healer was suspended for the recording (#166); a discarded
+        // session queues nothing, but dispatch must continue.
+        coordinator.transcriptHealer?.resume()
         Task {
             await coordinator.sessionRepository.endSession()
         }

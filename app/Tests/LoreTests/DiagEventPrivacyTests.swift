@@ -58,6 +58,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case systemAudioCapture
         case systemAudioGaveUp, recordingSaved
         case modelLoad, modelCacheCleared, transcribed, echoSuppressed
+        case transcriptRepairQueued, transcriptRepairSettled
         case apiCall
         case dictationRecorded, dictationZeroFrames, dictationPasted
         case dictationUpgrade, dictationDiscarded
@@ -112,6 +113,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .modelCacheCleared: return .modelCacheCleared
         case .transcribed: return .transcribed
         case .echoSuppressed: return .echoSuppressed
+        case .transcriptRepairQueued: return .transcriptRepairQueued
+        case .transcriptRepairSettled: return .transcriptRepairSettled
         case .apiCall: return .apiCall
         case .dictationRecorded: return .dictationRecorded
         case .dictationZeroFrames: return .dictationZeroFrames
@@ -201,6 +204,10 @@ final class DiagEventPrivacyTests: XCTestCase {
             )
         case .echoSuppressed:
             return .echoSuppressed(path: .retroactive, count: .max, meanJaccard: 1.0)
+        case .transcriptRepairQueued:
+            return .transcriptRepairQueued(reason: .openedMeeting)
+        case .transcriptRepairSettled:
+            return .transcriptRepairSettled(outcome: .failed)
 
         case .apiCall:
             return .apiCall(endpoint: .keyHealth, outcome: .unknown, httpStatus: 503, ms: .max)
@@ -260,6 +267,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         allowed.formUnion(DiagEvent.NotesMigration.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.SummonWithdrawal.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.OnboardingStep.allCases.map(\.rawValue))
+        allowed.formUnion(DiagEvent.RepairReason.allCases.map(\.rawValue))
+        allowed.formUnion(DiagEvent.RepairOutcome.allCases.map(\.rawValue))
         allowed.formUnion(DictationState.allCases.map(\.rawValue))
         return allowed
     }()

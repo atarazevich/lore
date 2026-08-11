@@ -102,6 +102,10 @@ struct SessionMetadata: Codable, Sendable {
     /// single idempotency rule for the enrichment sweep. Optional — absent
     /// in older files, which therefore backfill themselves.
     var summary: String? = nil
+    /// Persisted no-speech verdict (#166): a completed pass over this
+    /// session's audio produced no transcript. Cleared when a final
+    /// transcript lands. Optional — absent in older files.
+    var noSpeech: Bool? = nil
 }
 
 extension SessionIndex {
@@ -121,7 +125,8 @@ extension SessionIndex {
             tags: meta.tags,
             source: meta.source,
             unviewed: meta.unviewed,
-            summary: meta.summary
+            summary: meta.summary,
+            noSpeech: meta.noSpeech
         )
     }
 }
@@ -185,7 +190,12 @@ actor SessionRepository {
         // app's own Application Support tree, so it is safe at launch.
         NotesFolder.prepare(sessionsDirectory)
 
-        Self.cleanupOrphanedBatchAudio(in: sessionsDirectory)
+        // No orphan cleanup here (#166): the batch stash is the durable
+        // marker of an interrupted whole-audio pass, and the launch sweep
+        // (`TranscriptHealer.sweep`) resumes it or — when a final transcript
+        // proves the pass finished — cleans it on that evidence. The old
+        // 24h directory-mtime cleanup deleted recoverable stashes before
+        // anything could look.
     }
 
     // MARK: - Configuration
@@ -491,6 +501,11 @@ actor SessionRepository {
 
     // MARK: - Final Transcript
 
+    /// Atomic by construction (#166): the payload lands in a temp file, then
+    /// replaces the final in one rename. A process killed at any instant
+    /// leaves either the previous good file or the new one — never a partial
+    /// write, and never the remove-then-move window that used to lose an
+    /// existing final transcript.
     func saveFinalTranscript(sessionID: String, records: [SessionRecord]) {
         let dir = sessionDirectory(for: sessionID)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
@@ -510,11 +525,24 @@ actor SessionRepository {
             try payload.write(to: tempURL, options: .atomic)
             let fm = FileManager.default
             if fm.fileExists(atPath: finalURL.path) {
-                try fm.removeItem(at: finalURL)
+                _ = try fm.replaceItemAt(finalURL, withItemAt: tempURL)
+            } else {
+                try fm.moveItem(at: tempURL, to: finalURL)
             }
-            try fm.moveItem(at: tempURL, to: finalURL)
         } catch {
             repoLog.error("Failed to write final transcript: \(error.localizedDescription, privacy: .private)")
+            return
+        }
+
+        // The index count follows the file it counts (#166, ui-language
+        // rule 8): a rebuild that replaced the transcript must not leave a
+        // stale promise beside the new text. A landed transcript also
+        // retires any persisted no-speech verdict.
+        if var meta = loadSessionMetadataFile(sessionID: sessionID),
+           meta.utteranceCount != records.count || meta.noSpeech != nil {
+            meta.utteranceCount = records.count
+            meta.noSpeech = nil
+            writeSessionMetadata(meta, sessionID: sessionID)
         }
 
         // Mirror to notesFolderPath
@@ -592,16 +620,15 @@ actor SessionRepository {
                 let metaURL = item.appendingPathComponent("session.json")
                 if let data = try? Data(contentsOf: metaURL),
                    let meta = try? decoder.decode(SessionMetadata.self, from: data) {
-                    // Transcript-state flags (#109): derived from file
-                    // existence at load, never persisted. Refreshed by the
-                    // history reloads that follow a completed rebuild.
+                    // Transcript-state flag (#109): derived from file
+                    // existence at load, never persisted. Recoverability is
+                    // not derived here (#166) — `TranscriptHealer` asks
+                    // `rebuildAudioSource` at the moment it matters, so a
+                    // damaged final file can't block the answer.
                     var index = SessionIndex(from: meta)
                     index.hasFinalTranscript = fm.fileExists(
                         atPath: item.appendingPathComponent("transcript.final.jsonl").path
                     )
-                    if !index.hasFinalTranscript {
-                        index.hasRebuildAudio = rebuildAudioSource(sessionID: meta.id) != nil
-                    }
                     results.append(index)
                     continue
                 }
@@ -645,27 +672,28 @@ actor SessionRepository {
         return LegacySessionReader.loadSession(id: id, sessionsDirectory: sessionsDirectory)
     }
 
-    func loadTranscript(sessionID: String) -> [SessionRecord] {
+    /// Transcript file candidates in load-preference order — the ONE list
+    /// `loadTranscript` and the sweep's `hasTranscriptText` both read (#166),
+    /// so the two can never disagree about where text lives. Canonical
+    /// final/live first, then the legacy layouts (`batch.jsonl`, flat
+    /// `<id>.jsonl`) that `LegacySessionReader` documents.
+    private func transcriptCandidates(sessionID: String) -> [URL] {
         let dir = sessionDirectory(for: sessionID)
+        return [
+            dir.appendingPathComponent("transcript.final.jsonl"),
+            dir.appendingPathComponent("transcript.live.jsonl"),
+            dir.appendingPathComponent("batch.jsonl"),
+            sessionsDirectory.appendingPathComponent("\(sessionID).jsonl"),
+        ]
+    }
 
-        // Prefer final transcript
-        let finalURL = dir.appendingPathComponent("transcript.final.jsonl")
-        if FileManager.default.fileExists(atPath: finalURL.path),
-           let content = try? String(contentsOf: finalURL, encoding: .utf8) {
+    func loadTranscript(sessionID: String) -> [SessionRecord] {
+        for url in transcriptCandidates(sessionID: sessionID) {
+            guard let content = try? String(contentsOf: url, encoding: .utf8) else { continue }
             let records = parseJSONL(content)
             if !records.isEmpty { return records }
         }
-
-        // Then live transcript
-        let liveURL = dir.appendingPathComponent("transcript.live.jsonl")
-        if FileManager.default.fileExists(atPath: liveURL.path),
-           let content = try? String(contentsOf: liveURL, encoding: .utf8) {
-            let records = parseJSONL(content)
-            if !records.isEmpty { return records }
-        }
-
-        // Fall back to legacy
-        return LegacySessionReader.loadTranscript(sessionID: sessionID, sessionsDirectory: sessionsDirectory)
+        return []
     }
 
     func loadLiveTranscript(sessionID: String) -> [SessionRecord] {
@@ -959,11 +987,18 @@ actor SessionRepository {
         try? fm.removeItem(at: dir.appendingPathComponent("batch-meta.json"))
     }
 
-    /// Audio a chunked session can be rebuilt from (#109), in preference
-    /// order: the per-track batch stash (keeps You/Them via timing anchors),
-    /// then any merged audio `audioFileURL(for:)` resolves — the session's
-    /// own copy (imports, earlier rebuild attempts) or the m4a export in the
-    /// notes folder.
+    /// Audio a session's transcript can be rebuilt from (#109), in
+    /// preference order: the per-track batch stash (keeps You/Them via
+    /// timing anchors), then any merged audio `audioFileURL(for:)` resolves —
+    /// the session's own copy (imports, earlier rebuild attempts) or the m4a
+    /// export in the notes folder.
+    ///
+    /// This ordering IS the speaker-collapse policy (#129, decided by policy
+    /// under #166 — never a dialog): the merged-file pass labels every
+    /// utterance `.them`, so it runs only when the per-track stash is gone,
+    /// and by then either the transcript is damaged/absent (no separation
+    /// left to preserve) or a single-speaker whole transcript is still the
+    /// best obtainable text.
     func rebuildAudioSource(sessionID: String) -> RebuildAudioSource? {
         let tracks = batchAudioURLs(sessionID: sessionID)
         if tracks.mic != nil || tracks.sys != nil { return .tracks }
@@ -971,22 +1006,35 @@ actor SessionRepository {
         return nil
     }
 
-    /// Resolve the rebuild source once and answer, from that same resolved
-    /// source, whether the rebuild would destroy speaker separation (#129):
-    /// the per-track stash is gone, so the merged-file pass would label every
-    /// utterance `.them` — while the existing transcript (final if present,
-    /// else live) still distinguishes more than one speaker. One resolution
-    /// serves both the prompt and the engine dispatch, so the check and the
-    /// run can't disagree about the source.
-    func resolveRebuild(sessionID: String) -> RebuildResolution? {
-        guard let source = rebuildAudioSource(sessionID: sessionID) else { return nil }
-        let wouldCollapseSpeakers: Bool
-        if case .file = source {
-            wouldCollapseSpeakers = Set(loadTranscript(sessionID: sessionID).map(\.speaker)).count > 1
-        } else {
-            wouldCollapseSpeakers = false
+    /// The session's recorded start, for anchoring a merged-file rebuild.
+    func sessionStartDate(sessionID: String) -> Date? {
+        loadSessionMetadataFile(sessionID: sessionID)?.startedAt
+    }
+
+    /// Cheap launch-sweep predicate (#166): does this session have
+    /// transcript bytes to show? Same candidate list as `loadTranscript`,
+    /// file presence + non-zero size only — the full parse happens at open,
+    /// where the load is already paid for, and atomic final writes mean a
+    /// non-empty final file is a whole one.
+    func hasTranscriptText(sessionID: String) -> Bool {
+        transcriptCandidates(sessionID: sessionID).contains { url in
+            ((try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0) > 0
         }
-        return RebuildResolution(source: source, wouldCollapseSpeakers: wouldCollapseSpeakers)
+    }
+
+    /// Persist the no-speech verdict (#166): a completed pass produced no
+    /// transcript, so nothing changes by running again. Canonical sessions
+    /// only — legacy sessions never enter the repair pipeline.
+    func markSessionNoSpeech(sessionID: String) {
+        guard var meta = loadSessionMetadataFile(sessionID: sessionID),
+              meta.noSpeech != true else { return }
+        meta.noSpeech = true
+        writeSessionMetadata(meta, sessionID: sessionID)
+    }
+
+    /// The persisted no-speech verdict, read at assessment time.
+    func sessionNoSpeech(sessionID: String) -> Bool {
+        loadSessionMetadataFile(sessionID: sessionID)?.noSpeech == true
     }
 
     /// The merged m4a export in the notes folder for a session. The export
@@ -1285,49 +1333,6 @@ actor SessionRepository {
     }
 
 
-    // MARK: - Orphan Cleanup
-
-    private static func cleanupOrphanedBatchAudio(in sessionsDirectory: URL) {
-        let fm = FileManager.default
-        guard let contents = try? fm.contentsOfDirectory(
-            at: sessionsDirectory,
-            includingPropertiesForKeys: [.contentModificationDateKey, .isDirectoryKey]
-        ) else { return }
-
-        let cutoff = Date().addingTimeInterval(-24 * 3600)
-
-        for item in contents {
-            guard let values = try? item.resourceValues(forKeys: [.isDirectoryKey, .contentModificationDateKey]),
-                  values.isDirectory == true else { continue }
-
-            let name = item.lastPathComponent
-            guard name.hasPrefix("session_") else { continue }
-
-            // Check both canonical audio/ and legacy layout
-            let audioDir = item.appendingPathComponent("audio", isDirectory: true)
-            let micCanonical = audioDir.appendingPathComponent("mic.caf")
-            let sysCanonical = audioDir.appendingPathComponent("sys.caf")
-            let micLegacy = item.appendingPathComponent("mic.caf")
-            let sysLegacy = item.appendingPathComponent("sys.caf")
-
-            let hasAudio = fm.fileExists(atPath: micCanonical.path) ||
-                           fm.fileExists(atPath: sysCanonical.path) ||
-                           fm.fileExists(atPath: micLegacy.path) ||
-                           fm.fileExists(atPath: sysLegacy.path)
-
-            guard hasAudio else { continue }
-
-            if let modDate = values.contentModificationDate, modDate < cutoff {
-                try? fm.removeItem(at: micCanonical)
-                try? fm.removeItem(at: sysCanonical)
-                try? fm.removeItem(at: audioDir.appendingPathComponent("batch-meta.json"))
-                try? fm.removeItem(at: micLegacy)
-                try? fm.removeItem(at: sysLegacy)
-                try? fm.removeItem(at: item.appendingPathComponent("batch-meta.json"))
-                repoLog.info("Cleaned up orphaned batch audio in \(name, privacy: .private)")
-            }
-        }
-    }
 }
 
 // MARK: - Batch Transcription Support Types
@@ -1340,14 +1345,6 @@ enum RebuildAudioSource: Sendable {
     /// A single merged audio file — the import-style pass
     /// (`BatchTranscriptionEngine.importFile`), single-speaker transcript.
     case file(URL)
-}
-
-/// A rebuild source resolved once (#129): the source drives the engine
-/// dispatch, and the speaker-collapse answer is computed from that same
-/// source so the confirmation prompt and the run can't diverge.
-struct RebuildResolution: Sendable {
-    let source: RebuildAudioSource
-    let wouldCollapseSpeakers: Bool
 }
 
 /// Timing anchor data passed from AudioRecorder to SessionRepository.

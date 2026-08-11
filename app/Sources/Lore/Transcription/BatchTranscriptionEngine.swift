@@ -89,25 +89,30 @@ actor BatchTranscriptionEngine {
         await task.value
     }
 
+    /// Cancellation leaves the engine idle (#166): the failed banner this
+    /// used to preserve a status for is gone, and `TranscriptHealer` — the
+    /// only canceller — re-queues a preempted job from its own bookkeeping,
+    /// never from a stored engine claim.
     func cancel() async {
         let task = currentTask
         currentTask = nil
         task?.cancel()
         await task?.value
-        // #43: a preempted import's own catch lands as .failed(interrupted) —
-        // preserve it so the session's failed banner + retry survive; other
-        // terminal states collapse to .cancelled as before.
-        if case .failed = status {} else {
-            status = .cancelled
-        }
+        status = .idle
         isImporting = false
     }
 
-    /// Surface a failure that happened outside a run (#43): retry of an
-    /// imported session whose audio copy is gone cannot start — mark it
-    /// failed so the banner + retry path shows why.
-    func markFailed(_ message: String, sessionID: String) {
-        status = .failed(message, sessionID: sessionID)
+    /// The healer read a terminal status and owns its consequences from
+    /// here — return to idle so no stale claim outlives the job (#166,
+    /// no-false-positives: live, not latched).
+    func acknowledgeCompletion() {
+        switch status {
+        case .completed, .failed, .cancelled:
+            status = .idle
+            isImporting = false
+        case .idle, .loading, .transcribing:
+            break
+        }
     }
 
     // MARK: - Audio Import
@@ -136,11 +141,10 @@ actor BatchTranscriptionEngine {
                     startDate: startDate
                 )
             } catch is CancellationError {
-                // #43: the only canceller is a recording start preempting the
-                // engine (LiveSessionController.startTranscription) — never a
-                // user choice against the import. Land as .failed so the
-                // session keeps the banner + retry instead of vanishing.
-                await self.setStatus(.failed("Interrupted \u{2014} a recording started", sessionID: sessionID))
+                // The only canceller is a recording start preempting the
+                // engine. Preemption is not failure (#166): the healer
+                // re-queues the job itself, so this lands as .cancelled.
+                await self.setStatus(.cancelled)
                 await self.setIsImporting(false)
                 batchLog.info("Audio import preempted for \(sessionID)")
             } catch {
@@ -211,8 +215,12 @@ actor BatchTranscriptionEngine {
         try Task.checkCancellation()
 
         guard !records.isEmpty else {
+            // Not a failure (#166): the pass ran to completion and the audio
+            // simply holds no speech — retrying cannot change that. The
+            // healer reads completed-with-no-transcript as "nothing left to
+            // try" and the meeting settles into the no-transcript sentence.
             batchLog.warning("Audio import produced no records for \(sessionID)")
-            status = .failed("No speech detected in the audio file", sessionID: sessionID)
+            status = .completed(sessionID: sessionID)
             isImporting = false
             return
         }
