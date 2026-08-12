@@ -1,0 +1,22 @@
+/*
+ * Lore's designated requirement (DR) — the one file build.sh and release.sh both sign with.
+ *
+ * TCC records a bundle's DR at the moment a permission is granted and re-evaluates
+ * every later launch against that record. codesign's default DR pins the leaf
+ * certificate's *CN*, so the two signing paths produced two different DRs — dev
+ * builds said `certificate leaf[subject.CN] = "Apple Development: a@cognition.design
+ * (626Q86RGK8)"`, releases pinned the Developer ID OU — and every crossing between
+ * them silently invalidated Accessibility and Input Monitoring. Pinning the team OU
+ * instead lets both paths satisfy one requirement, so a grant survives the crossing.
+ *
+ * The certificate-type OIDs are Apple's own (TN3127 "Inside Code Signing:
+ * Requirements", which is also where the "supply your own DR when you are not using
+ * Xcode" guidance comes from): 6.2.1 marks an Apple Development leaf, 6.2.6 +
+ * 6.1.13 a Developer ID one. They stay: the team alone would accept anything
+ * CTHL87V7H8 ever signs, including certificate types this app is never shipped with.
+ *
+ * This file holds the requirement itself, not the `designated => ...` assignment:
+ * that is the form `codesign -R` takes when both scripts verify the signed bundle
+ * against it, and the scripts prepend the assignment for `codesign -r`.
+ */
+identifier "com.lore.app" and anchor apple generic and certificate leaf[subject.OU] = "CTHL87V7H8" and (certificate 1[field.1.2.840.113635.100.6.2.1] /* Apple Development */ or certificate 1[field.1.2.840.113635.100.6.2.6] and certificate leaf[field.1.2.840.113635.100.6.1.13] /* Developer ID */)

@@ -125,9 +125,17 @@ fi
 # Fix rpath so the binary finds Sparkle.framework in Contents/Frameworks/
 install_name_tool -add_rpath @loader_path/../Frameworks "$MACOS/Lore" 2>/dev/null || true
 
-# Sign with Apple Development certificate (stable identity preserves Accessibility permission across rebuilds)
-# Filter by paid-account email (team CTHL87V7H8) so dev builds share TCC permissions
-# with Developer ID releases. Grep by email, not cert ID — the ID changes on renewal.
+# Sign with the paid account's Apple Development certificate (team CTHL87V7H8).
+# Grep by email, not cert ID — the ID changes on renewal, and the free
+# hello@cognition.design certs still in the keychain must not be picked.
+#
+# The certificate is not what preserves Accessibility and Input Monitoring across
+# rebuilds — that assumption failed, repeatedly. TCC keys a grant to the bundle's
+# designated requirement, and codesign's default DR pins the leaf certificate's CN,
+# which differs between this path and release.sh's Developer ID: every crossing
+# invalidated the grants. What preserves them is the shared DR in lore.dr, applied
+# below and by release.sh, which pins the team instead.
+#
 # No fallback and no swallowed stderr (#144): a silently ad-hoc bundle flips the
 # TCC identity, drops the permission grants, and fires the signature-changed
 # summon — the ad-hoc path was only ever a trap. Fail loudly instead. The
@@ -139,13 +147,29 @@ if [ -z "$SIGN_ID" ]; then
     echo "  Unlock the keychain or install the certificate — an ad-hoc bundle would drop TCC grants." >&2
     exit 1
 fi
-# Sign Sparkle framework first if present
+# Sign Sparkle framework first if present. The nested framework needs no custom DR:
+# TCC evaluates the app bundle alone.
 if [ -d "$FRAMEWORKS/Sparkle.framework" ]; then
     codesign --force --sign "$SIGN_ID" "$FRAMEWORKS/Sparkle.framework"
 fi
+# `-r` takes a requirement *set*, so the `designated =>` assignment is prepended here;
+# lore.dr holds the requirement itself, which is what `-R` takes below.
+DR_FILE="lore.dr"
 codesign --force --sign "$SIGN_ID" \
+    -r "=designated => $(cat "$DR_FILE")" \
     --entitlements "Sources/Lore/Lore.entitlements" \
     "$APP_DIR"
+
+# The signature must actually satisfy the requirement it now carries. A certificate
+# from another team — the free personal team an old checkout still signs with (#144)
+# — signs without complaint but fails here, and failing is the point: that bundle
+# would install and then quietly lose every TCC grant.
+if ! codesign --verify --strict -R "$DR_FILE" "$APP_DIR"; then
+    echo "Error: the signed bundle does not satisfy $DR_FILE." >&2
+    echo "  Signing identity $SIGN_ID must belong to team CTHL87V7H8; installing this" >&2
+    echo "  bundle would drop Accessibility and Input Monitoring." >&2
+    exit 1
+fi
 
 echo ""
 echo "Built: $APP_DIR"
