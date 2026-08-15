@@ -172,7 +172,9 @@ final class HealthMonitor {
             return HealthSignal(trigger: .systemAudioFailed, succeeded: true)
         case .pasteAttempt(_, let created, _):
             return HealthSignal(trigger: .pasteFailed, succeeded: created)
-        case .modelLoad(.asr, let outcome, _, _) where outcome != .unknown:
+        // A real load attempt only: a cache hit loaded nothing and cannot clear
+        // a leg whose own load failed (#169) — see `HealthProbes.modelWarmupOutcome`.
+        case .modelLoad(.asr, let outcome, _, false) where outcome != .unknown:
             return HealthSignal(trigger: .modelLoadFailed, succeeded: outcome == .ok)
         default:
             return nil

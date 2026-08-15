@@ -171,17 +171,7 @@ actor BatchTranscriptionEngine {
         // source already IS the session copy — an explicit no-op there.
         await sessionRepository.copyAudioFileToSession(sessionID: sessionID, sourceURL: url)
 
-        // Prepare backend and VAD
-        let backend = ParakeetBackend()
-        try await backend.prepare { statusMsg in
-            batchLog.info("Backend: \(statusMsg)")
-        }
-
-        try Task.checkCancellation()
-
-        let vad = try await VadManager()
-
-        try Task.checkCancellation()
+        let (backend, vad) = try await loadModels()
 
         status = .transcribing(progress: 0, sessionID: sessionID)
 
@@ -245,6 +235,24 @@ actor BatchTranscriptionEngine {
 
     // MARK: - Private
 
+    /// The two models one batch run transcribes through, its own copies:
+    /// a batch run is off the live path and outlives no session, so it does not
+    /// draw from `SharedBackendCache` and records no `modelLoad` event — the
+    /// cache owns that diagnostic for the loads it serves, and these are not
+    /// among them. Routing batch through it is #185.
+    private func loadModels() async throws -> (backend: ParakeetBackend, vad: VadManager) {
+        let backend = ParakeetBackend()
+        try await backend.prepare { statusMsg in
+            batchLog.info("Backend: \(statusMsg)")
+        }
+        try Task.checkCancellation()
+
+        let vad = try await VadManager()
+        try Task.checkCancellation()
+
+        return (backend, vad)
+    }
+
     private func setStatus(_ newStatus: Status) {
         status = newStatus
     }
@@ -272,18 +280,7 @@ actor BatchTranscriptionEngine {
         // Load timing anchors
         let anchors = await loadBatchMeta(sessionID: sessionID, sessionRepository: sessionRepository)
 
-        // Create and prepare backend
-        let backend = ParakeetBackend()
-        try await backend.prepare { statusMsg in
-            batchLog.info("Backend: \(statusMsg)")
-        }
-
-        try Task.checkCancellation()
-
-        // Load VAD
-        let vad = try await VadManager()
-
-        try Task.checkCancellation()
+        let (backend, vad) = try await loadModels()
 
         status = .transcribing(progress: 0, sessionID: sessionID)
 

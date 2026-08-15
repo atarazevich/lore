@@ -76,14 +76,10 @@ struct MeetingHarness {
         // it exercises are the post-setup ones.
         defaults.set(true, forKey: SetupState.completedKey)
 
-        let storage = AppSettingsStorage(
-            defaults: defaults,
-            secretStore: .ephemeral,
-            defaultNotesDirectory: notesDirectory,
-            legacyNotesDirectories: [],
-            runMigrations: false
+        let settings = isolatedSettings(
+            "LoreMeetingHarness", defaults: defaults, notesDirectory: notesDirectory
         )
-        return (root, notesDirectory, defaults, AppSettings(storage: storage))
+        return (root, notesDirectory, defaults, settings)
     }
 
     static func make(scripted: [Utterance] = [], withEngine: Bool = true) -> MeetingHarness {

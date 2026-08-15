@@ -4,19 +4,8 @@ import XCTest
 @MainActor
 final class MeetingDetectionControllerTests: XCTestCase {
 
-    /// Isolated settings (ephemeral suite + secret store) — never `.live()`.
     private func makeSettings() -> AppSettings {
-        let suiteName = "MeetingDetectionControllerTests-\(UUID().uuidString)"
-        let suite = UserDefaults(suiteName: suiteName)!
-        suite.removePersistentDomain(forName: suiteName)
-        return AppSettings(storage: AppSettingsStorage(
-            defaults: suite,
-            secretStore: .ephemeral,
-            defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent(suiteName),
-            legacyNotesDirectories: [],
-            runMigrations: false
-        ))
+        isolatedSettings("MeetingDetectionControllerTests")
     }
 
     // MARK: - Event Stream: accepted metadata flows through

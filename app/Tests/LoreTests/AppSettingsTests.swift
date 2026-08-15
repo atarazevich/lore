@@ -4,22 +4,8 @@ import XCTest
 @MainActor
 final class AppSettingsTests: XCTestCase {
 
-    /// Isolated settings: ephemeral suite + ephemeral secret store. Tests
-    /// must never construct `AppSettings()` — the default storage is
-    /// `.live()`, which reads the user's real Keychain and UserDefaults.
     private func makeSettings() -> AppSettings {
-        let suiteName = "AppSettingsTests-\(UUID().uuidString)"
-        let suite = UserDefaults(suiteName: suiteName)!
-        suite.removePersistentDomain(forName: suiteName)
-        let storage = AppSettingsStorage(
-            defaults: suite,
-            secretStore: .ephemeral,
-            defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("AppSettingsTests"),
-            legacyNotesDirectories: [],
-            runMigrations: false
-        )
-        return AppSettings(storage: storage)
+        isolatedSettings("AppSettingsTests")
     }
 
     // MARK: - AppSettings Defaults

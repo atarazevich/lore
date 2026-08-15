@@ -300,8 +300,15 @@ struct HealthProber {
         }
     }
 
+    /// Real load attempts only. A cache hit loaded nothing, so it can certify
+    /// nothing — and the app prepares more than one ASR instance, so letting a
+    /// hit on one speak for all of them is how a permanently broken leg read as
+    /// green after any dictation (#169). The row's own copy already says the
+    /// Test-now button is "instant if already warm": on a warm cache it now
+    /// leaves the last real attempt standing instead of overwriting it with a
+    /// load that never happened. Same rule in `HealthMonitor.healthSignal`.
     nonisolated private static func modelWarmupOutcome(_ event: DiagEvent) -> DiagEvent.Outcome? {
-        if case .modelLoad(let model, let outcome, _, _) = event, model == .asr { return outcome }
+        if case .modelLoad(.asr, let outcome, _, false) = event { return outcome }
         return nil
     }
 

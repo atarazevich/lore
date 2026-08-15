@@ -36,23 +36,8 @@ final class DictationCoordinatorMetaGatingTests: XCTestCase {
         )
     }
 
-    /// Settings with a (fake) API key, backed by ephemeral storage — no
-    /// Keychain, no real defaults.
     private func makeSettings(apiKey: String) -> AppSettings {
-        let name = "com.lore.test.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defaults.removePersistentDomain(forName: name)
-        let storage = SettingsStorage(
-            defaults: defaults,
-            secretStore: .ephemeral,
-            defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("DictationCoordinatorMetaGatingTests"),
-            legacyNotesDirectories: [],
-            runMigrations: false
-        )
-        let settings = SettingsStore(storage: storage)
-        settings.openaiApiKey = apiKey
-        return settings
+        isolatedSettings("DictationCoordinatorMetaGatingTests", apiKey: apiKey)
     }
 
     private func addTranscribedEntry(to coordinator: DictationCoordinator) -> DictationHistoryEntry {

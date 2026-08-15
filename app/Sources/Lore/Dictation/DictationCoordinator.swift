@@ -83,19 +83,11 @@ final class DictationCoordinator {
     /// Shared backend cache — set by AppDelegate during dictation setup.
     var backendCache: SharedBackendCache?
 
-    /// Private backend instance for dictation transcription.
-    ///
-    /// Not, as this comment claimed until #169, because of decoder state:
-    /// `ParakeetBackend.transcribe` makes a fresh `TdtDecoderState` per call
-    /// and `AsrManager` is an actor, so sharing one instance is safe. What it
-    /// is not proven to be is fast — a dictation and a live meeting would then
-    /// queue behind each other on one actor. That latency is being measured
-    /// separately; until it has an answer the private instance stays.
-    private var ownBackend: (any TranscriptionBackend)?
-
-    /// In-flight build of `ownBackend`, if any. Lets the launch prewarm and a
-    /// real first dictation share one load instead of each building a backend.
-    private var ownBackendTask: Task<any TranscriptionBackend, Error>?
+    /// Dictation's own prepared instance — a second cache, not a second dedup:
+    /// the launch prewarm and a real first dictation join one build here, on
+    /// the same terms as `backendCache`. Why dictation holds an instance of its
+    /// own at all, and for how long: `docs/decisions.md` 2026-08-15 (#169), #185.
+    private let ownCache: SharedBackendCache
 
     /// The current history entry being processed (needed for upgrades).
     private var currentEntryID: UUID?
@@ -159,7 +151,8 @@ final class DictationCoordinator {
     ) {
         self.history = history
         self.cleanupClient = cleanupClient
-        self.ownBackend = backend
+        self.ownCache = backend.map { stub in SharedBackendCache(makeBackend: { stub }) }
+            ?? SharedBackendCache()
     }
 
     /// Start capturing audio silently before hold is confirmed (pre-buffer phase).
@@ -870,37 +863,16 @@ final class DictationCoordinator {
 
     // MARK: - Transcription
 
-    /// Eagerly build the private dictation backend so the first dictation pays
+    /// Eagerly load both instances dictation needs so the first dictation pays
     /// no model-load latency. Non-blocking: fire from a detached Task at launch;
-    /// launch never waits on it. Idempotent — reuses any in-flight/complete load.
+    /// launch never waits on it. Idempotent — joins any in-flight load.
+    ///
+    /// The shared cache first, always: it is where the model files are
+    /// downloaded, and the private build must find them on disk rather than
+    /// start a second fetch into the same directory.
     func prewarm() async {
-        _ = try? await ensureOwnBackend()
-    }
-
-    /// Return the private dictation backend, building it once. Concurrent callers
-    /// (launch prewarm + first transcription) await the same in-flight build
-    /// rather than each constructing a backend and double-loading the model.
-    private func ensureOwnBackend() async throws -> any TranscriptionBackend {
-        if let ownBackend { return ownBackend }
-        if let ownBackendTask { return try await ownBackendTask.value }
-
-        log.debug("creating private backend")
-        let cache = backendCache
-        let task = Task { () throws -> any TranscriptionBackend in
-            // Download the model once through the shared cache (its dedup token
-            // guarantees a single fetch even when the launch prewarms race); the
-            // private build then finds files on disk and only loads its own
-            // decoder state, so we never launch two concurrent HF downloads.
-            try await cache?.prepare()
-            let fresh = ParakeetBackend()
-            try await fresh.prepare(onStatus: { _ in }, onProgress: { _ in })
-            return fresh
-        }
-        ownBackendTask = task
-        defer { ownBackendTask = nil }
-        let backend = try await task.value
-        ownBackend = backend
-        return backend
+        _ = try? await backendCache?.prepare()
+        _ = try? await ownCache.prepare()
     }
 
     private func transcribeEntry(
@@ -910,10 +882,8 @@ final class DictationCoordinator {
         if let cache = backendCache {
             do {
                 try await cache.prepare { [weak self] _ in
-                    Task { @MainActor in
-                        guard let self, self.isCurrentSession(epoch) else { return }
-                        self.state = .loadingModel
-                    }
+                    guard let self, self.isCurrentSession(epoch) else { return }
+                    self.state = .loadingModel
                 }
             } catch is CancellationError {
                 // Deliberate discard (#104): quiet stop, entry stays
@@ -931,14 +901,11 @@ final class DictationCoordinator {
             log.error("backendCache nil — dictation setup may not have run")
         }
 
-        // Dictation's own backend instance — kept so a dictation never queues
-        // behind a live meeting's decode, not for the decoder-state reason this
-        // comment used to give (see `ownBackend`). Deduped so the launch
-        // prewarm and this first use don't both build one (see
-        // `ensureOwnBackend`); already-warm if prewarm finished at launch.
+        // Dictation's own instance (see `ownCache`), already warm if the launch
+        // prewarm finished — and joined, not rebuilt, if it is still running.
         let backend: any TranscriptionBackend
         do {
-            backend = try await ensureOwnBackend()
+            backend = try await ownCache.prepare()
         } catch is CancellationError {
             // Deliberate discard (#104): quiet stop, entry stays retryable.
             return

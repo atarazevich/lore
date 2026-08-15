@@ -35,7 +35,7 @@ final class HealthSignalTests: XCTestCase {
             (.micFramesFlowing, .captureFailed),
             (.systemAudioCapture(outcome: .ok, osStatus: nil), .systemAudioFailed),
             (.pasteAttempt(kind: .paste, eventsCreated: true, accessibilityTrusted: false), .pasteFailed),
-            (.modelLoad(model: .asr, outcome: .ok, seconds: 1, fromCache: true), .modelLoadFailed),
+            (.modelLoad(model: .asr, outcome: .ok, seconds: 1, fromCache: false), .modelLoadFailed),
         ]
         for (event, trigger) in recoveries {
             XCTAssertEqual(HealthMonitor.healthSignal(for: event),
@@ -56,6 +56,10 @@ final class HealthSignalTests: XCTestCase {
             // load is no verdict either way.
             .modelLoad(model: .vad, outcome: .failed, seconds: 1, fromCache: false),
             .modelLoad(model: .asr, outcome: .unknown, seconds: 1, fromCache: false),
+            // A cache hit loaded nothing, so it certifies nothing: the app
+            // prepares more than one ASR instance, and a hit on one used to
+            // clear a failure another had just reported (#169).
+            .modelLoad(model: .asr, outcome: .ok, seconds: 0, fromCache: true),
             // The killed summons: state bits and silence-derived verdicts.
             .permissionTransition(permission: .accessibility, granted: false),
             .secureInputChanged(active: true, holderPID: 42),

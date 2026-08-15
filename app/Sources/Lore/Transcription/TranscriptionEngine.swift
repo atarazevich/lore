@@ -127,15 +127,8 @@ final class TranscriptionEngine {
 
     /// The two backends a live session transcribes through: the mic leg draws
     /// the app's single prepared instance from `sharedBackendCache`, the system
-    /// leg keeps its own.
-    ///
-    /// The separation is *not* about decoder state, despite what this comment
-    /// said until #169: `ParakeetBackend.transcribe` makes a fresh
-    /// `TdtDecoderState` per call and `AsrManager` is an actor, and the batch
-    /// engine already runs both tracks of a recording through one backend. What
-    /// a second instance actually buys is that the two live streams don't
-    /// serialize on one actor — a latency question that is being measured
-    /// separately, so the instance stays until it has an answer.
+    /// leg keeps its own (why they are two, and for how long: `docs/decisions.md`
+    /// 2026-08-15 (#169), #185).
     ///
     /// Readable (never writable) from outside so a test can assert the mic leg
     /// really is the shared instance and not a copy of it.
@@ -159,6 +152,12 @@ final class TranscriptionEngine {
     /// Factory for the system leg's backend — the production Parakeet instance;
     /// injectable so tests can drive the model path without a CoreML load.
     private let makeSystemBackend: @Sendable () -> any TranscriptionBackend
+
+    /// The microphone gate `start()` must pass, read live from TCC. Injectable
+    /// because a test binary has no grant to read and `requestAccess` there
+    /// would prompt: without this seam nothing downstream of it — the model
+    /// path `start()` runs — can be tested at all.
+    private let micAuthorization: @Sendable () -> AVAuthorizationStatus
 
     /// Tracks the resolved mic device ID currently in use.
     private var currentMicDeviceID: AudioDeviceID = 0
@@ -184,7 +183,8 @@ final class TranscriptionEngine {
         sharedBackendCache: SharedBackendCache,
         audioBus: AudioBus = AudioBus(),
         mode: Mode = .live,
-        makeSystemBackend: @escaping @Sendable () -> any TranscriptionBackend = { ParakeetBackend() }
+        makeSystemBackend: @escaping @Sendable () -> any TranscriptionBackend = { ParakeetBackend() },
+        micAuthorization: @escaping @Sendable () -> AVAuthorizationStatus = { MicrophonePermission.status }
     ) {
         self.transcriptStore = transcriptStore
         self.settings = settings
@@ -192,6 +192,7 @@ final class TranscriptionEngine {
         self.audioBus = audioBus
         self.mode = mode
         self.makeSystemBackend = makeSystemBackend
+        self.micAuthorization = micAuthorization
         switch mode {
         case .live:
             self.needsModelDownload = Self.modelNeedsDownload()
@@ -246,29 +247,33 @@ final class TranscriptionEngine {
         defer { isStarting = false }
 
         // 1. Load transcription models via backend protocol
-        if sharedBackendCache.isReady && cachedSystemBackend != nil {
-            engineLog.debug("reusing prepared backends")
-            assetStatus = "Models ready"
-        } else {
-            let isDownloading = needsModelDownload
-            assetStatus = isDownloading
-                ? "Downloading Parakeet TDT v3..."
-                : "Loading Parakeet TDT v3..."
-            if isDownloading { downloadProgress = 0 }
-            engineLog.debug("loading transcription model")
-        }
+        assetStatus = needsModelDownload
+            ? "Downloading Parakeet TDT v3..."
+            : "Loading Parakeet TDT v3..."
+        if needsModelDownload { downloadProgress = 0 }
 
         do {
-            // Each step records its own modelLoad event at the point the load
-            // happens, so a VAD failure is never reported as an ASR one and a
-            // load the shared cache served is never counted twice.
+            // Each load records its own modelLoad event where it happens, so a
+            // VAD failure is never reported as an ASR one.
             try await acquireASRBackends()
-            try await ensureVAD()
 
-            needsModelDownload = false
-            downloadConfirmed = false
-            downloadProgress = nil
-            assetStatus = "Models ready"
+            if vadManager == nil {
+                assetStatus = "Loading VAD model..."
+                let startedAt = Date()
+                do {
+                    vadManager = try await VadManager()
+                } catch {
+                    DiagStore.record(.modelLoad(
+                        model: .vad, outcome: .failed,
+                        seconds: Date().timeIntervalSince(startedAt), fromCache: false
+                    ))
+                    throw error
+                }
+                DiagStore.record(.modelLoad(
+                    model: .vad, outcome: .ok,
+                    seconds: Date().timeIntervalSince(startedAt), fromCache: false
+                ))
+            }
         } catch {
             let msg = "Failed to load models: \(error.localizedDescription)"
             // The underlying error can name model cache paths — private.
@@ -277,7 +282,10 @@ final class TranscriptionEngine {
             assetStatus = "Ready"
             isRunning = false
             downloadProgress = nil
-            // Clear corrupt cache so the next attempt triggers a fresh download
+            // Clear corrupt cache so the next attempt triggers a fresh download.
+            // The files go, the shared cache's loaded instance does not: after
+            // this, disk and memory disagree until the app restarts — the cache
+            // has no eviction entry point. Tracked as #186.
             invalidateBackendCache()
             ParakeetBackend().clearModelCache()
             DiagStore.record(.modelCacheCleared)
@@ -286,41 +294,43 @@ final class TranscriptionEngine {
             return
         }
 
+        // A load can be a multi-minute download — the longest await in start(),
+        // and stop()/finalize() may have landed inside it. Every other
+        // resumption point in this file rechecks; this one has the most to lose.
+        guard isRunning else {
+            engineLog.debug("stopped during the model load — aborting start")
+            micBackend = nil
+            systemBackend = nil
+            downloadProgress = nil
+            assetStatus = "Ready"
+            return
+        }
+
+        needsModelDownload = false
+        downloadConfirmed = false
+        downloadProgress = nil
+        assetStatus = "Models ready"
+
         guard let vadManager else { return }
 
         await bringUpCapture(vadManager: vadManager)
     }
 
-    /// Put both ASR backends in place for a session.
+    /// Put both ASR backends in place for a session: the mic leg borrowed from
+    /// the shared cache, the system leg built once per engine lifetime and
+    /// reused. Authority: `docs/decisions.md` 2026-08-15 (#169).
     ///
-    /// The mic leg comes from the shared cache — asked, never peeked at: a
-    /// meeting started while the launch warm-up is still loading joins that
-    /// load instead of building a second copy of the model, which is what #169
-    /// was. The cache owns that leg's `modelLoad` event (cold or hit) and the
-    /// instance itself: the engine only borrows it, and ending a meeting
-    /// releases the borrow, never the instance.
-    ///
-    /// The system leg builds once per engine lifetime and is reused after
-    /// that. Its build reports only failure — the ASR-is-up event has already
-    /// been recorded for this start, and `ModelKind` cannot tell the two legs
-    /// apart, so a second success event would read as a second cold load. A
-    /// failure has no such double: nothing else would say transcription is
-    /// broken, and the health surface needs to hear it (#151).
+    /// The system leg records its own load either way. Its failure is the only
+    /// thing that would tell the health surface transcription is broken (#151),
+    /// and its success is the only thing that can take that back — a claim with
+    /// no way to clear itself keeps lying (`no-false-positives.md` rule 2).
     ///
     /// Separate from `start()` so the model path can be exercised without a
     /// microphone permission, an audio device, or the VAD model.
     func acquireASRBackends() async throws {
         micBackend = try await sharedBackendCache.prepare(
-            onStatus: { [weak self] status in
-                Task { @MainActor in
-                    self?.assetStatus = status
-                }
-            },
-            onProgress: { [weak self] fraction in
-                Task { @MainActor in
-                    self?.downloadProgress = fraction
-                }
-            }
+            onStatus: { [weak self] in self?.assetStatus = $0 },
+            onProgress: { [weak self] in self?.downloadProgress = $0 }
         )
 
         if let cachedSystemBackend {
@@ -341,34 +351,14 @@ final class TranscriptionEngine {
             ))
             throw error
         }
-        systemBackend = sys
-        cachedSystemBackend = sys
-    }
-
-    /// Load the VAD model once per engine lifetime. Records its own event so a
-    /// VAD failure is never reported as an ASR one.
-    private func ensureVAD() async throws {
-        if vadManager != nil { return }
-
-        assetStatus = "Loading VAD model..."
-        let startedAt = Date()
-        do {
-            vadManager = try await VadManager()
-        } catch {
-            DiagStore.record(.modelLoad(
-                model: .vad,
-                outcome: .failed,
-                seconds: Date().timeIntervalSince(startedAt),
-                fromCache: false
-            ))
-            throw error
-        }
         DiagStore.record(.modelLoad(
-            model: .vad,
+            model: .asr,
             outcome: .ok,
             seconds: Date().timeIntervalSince(startedAt),
             fromCache: false
         ))
+        systemBackend = sys
+        cachedSystemBackend = sys
     }
 
     /// Bring both capture legs up against the current settings: resolve and
@@ -605,7 +595,7 @@ final class TranscriptionEngine {
     }
 
     private func ensureMicrophonePermission() async -> Bool {
-        switch MicrophonePermission.status {
+        switch micAuthorization() {
         case .authorized:
             return true
         case .notDetermined:
@@ -1004,9 +994,8 @@ final class TranscriptionEngine {
     }
 
     /// Drop the system leg's backend so the next start() builds a fresh one.
-    /// The mic leg has no equivalent here: it belongs to the shared cache,
-    /// which clears its own view when its load fails — the engine never
-    /// invalidates a backend it does not own.
+    /// The mic leg has no equivalent: the engine never invalidates an instance
+    /// it borrows.
     private func invalidateBackendCache() {
         cachedSystemBackend = nil
         engineLog.debug("system backend discarded")

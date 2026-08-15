@@ -21,7 +21,6 @@ final class SharedBackendCacheTests: XCTestCase {
 
         XCTAssertEqual(builds.count, 1, "concurrent prepare must build the backend exactly once")
         XCTAssertTrue(cache.isReady)
-        XCTAssertNotNil(cache.backend)
     }
 
     func testPrepareAfterCompletionShortCircuits() async throws {

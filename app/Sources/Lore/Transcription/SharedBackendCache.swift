@@ -4,36 +4,24 @@ import os
 
 private let cacheLog = Logger(subsystem: "com.lore.app", category: "SharedBackendCache")
 
-/// Shared cache for the transcription backend. Both DictationCoordinator and
-/// TranscriptionEngine draw from here so only one instance exists in memory.
-///
-/// The cache stores a single prepared Parakeet backend and is the only place
-/// the meeting's mic leg and dictation's model download may come from — asking
-/// it is what keeps a meeting started during the launch warm-up from pulling a
-/// second copy of the model into memory (#169).
-///
-/// It also owns the ASR `modelLoad` diagnostic for every load it serves, so a
-/// cold load and a cache hit stay distinguishable in `events.json` and callers
-/// never record a second event for the same load.
+/// One prepared Parakeet instance, loaded once and handed to every caller that
+/// asks for it. Authority: `docs/decisions.md` 2026-08-15 (#169).
 @MainActor
 @Observable
 final class SharedBackendCache {
-    private(set) var backend: (any TranscriptionBackend)?
+    private var backend: (any TranscriptionBackend)?
 
-    /// In-flight load, if any. Concurrent `prepare()` callers await this same
-    /// task instead of each building their own backend (which would double-load
-    /// the model — e.g. the launch prewarm racing a real first transcription).
+    /// In-flight load, if any — later callers await this task instead of
+    /// building a second backend.
     @ObservationIgnored private var loadTask: Task<any TranscriptionBackend, Error>?
 
-    /// Status/progress handlers of every caller waiting on the in-flight load.
-    /// A caller that joins an existing load has to hear it too, or the meeting
-    /// it started sits on a frozen "Loading…" line for the whole download (#169).
-    /// Cleared when the load ends — they only ever describe the current one.
-    @ObservationIgnored private var statusHandlers: [@Sendable (String) -> Void] = []
-    @ObservationIgnored private var progressHandlers: [@Sendable (Double) -> Void] = []
+    /// Status/progress handlers of every caller waiting on the current load,
+    /// cleared when it ends — a joining caller has to hear the download too,
+    /// or its meeting sits on a frozen "Loading…" (#169).
+    @ObservationIgnored private var statusHandlers: [@MainActor @Sendable (String) -> Void] = []
+    @ObservationIgnored private var progressHandlers: [@MainActor @Sendable (Double) -> Void] = []
 
-    /// Backend factory — defaults to the production Parakeet backend; injectable
-    /// so tests can exercise the dedup without loading a real CoreML model.
+    /// Injectable so tests exercise the dedup without a real CoreML load.
     @ObservationIgnored private let makeBackend: @Sendable () -> any TranscriptionBackend
 
     var isReady: Bool { backend != nil }
@@ -42,17 +30,16 @@ final class SharedBackendCache {
         self.makeBackend = makeBackend
     }
 
-    /// The prepared backend, loading it once. A caller arriving during a load
-    /// joins it instead of starting a second, and gets its status and progress
-    /// while it waits.
+    /// The prepared backend, loading it once.
     ///
-    /// Records exactly one ASR `modelLoad` event per call: a cold load for the
-    /// caller that performed it, a cache hit for everyone the cache served
-    /// without loading.
+    /// Records one ASR `modelLoad` event per call — a cold load for the caller
+    /// that ran it, a hit for everyone served without loading. A load that
+    /// fails is recorded once, by the caller that ran it: the callers that
+    /// joined it inherit the error, not a second event for the same failure.
     @discardableResult
     func prepare(
-        onStatus: @escaping @Sendable (String) -> Void = { _ in },
-        onProgress: @escaping @Sendable (Double) -> Void = { _ in }
+        onStatus: @escaping @MainActor @Sendable (String) -> Void = { _ in },
+        onProgress: @escaping @MainActor @Sendable (Double) -> Void = { _ in }
     ) async throws -> any TranscriptionBackend {
         if let backend {
             DiagStore.record(.modelLoad(model: .asr, outcome: .ok, seconds: 0, fromCache: true))
@@ -64,8 +51,6 @@ final class SharedBackendCache {
             statusHandlers.append(onStatus)
             progressHandlers.append(onProgress)
             let joined = try await loadTask.value
-            // No loading was done by this caller — the same fact a hit reports,
-            // and the health surface needs it to hear that ASR came up (#151).
             DiagStore.record(.modelLoad(model: .asr, outcome: .ok, seconds: 0, fromCache: true))
             return joined
         }

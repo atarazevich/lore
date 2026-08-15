@@ -13,6 +13,11 @@ final class StubTranscriptionBackend: TranscriptionBackend, @unchecked Sendable 
     private let yieldDuringPrepare: Bool
     private var prepared = false
 
+    /// Runs inside `prepare()`, before it returns — the seam for acting while a
+    /// load is in flight (stopping the engine mid-load, say). Assigned after the
+    /// object exists, so the hook can reach something built around it.
+    var duringPrepare: (@MainActor @Sendable () -> Void)?
+
     init(
         statusMessage: String = "Preparing Mock...",
         failOnPrepare: Bool = false,
@@ -28,6 +33,7 @@ final class StubTranscriptionBackend: TranscriptionBackend, @unchecked Sendable 
     func prepare(onStatus: @Sendable (String) -> Void, onProgress: @escaping @Sendable (Double) -> Void) async throws {
         onStatus(statusMessage)
         if yieldDuringPrepare { await Task.yield() }
+        if let duringPrepare { await duringPrepare() }
         if failOnPrepare { throw StubBackendError.prepareFailed }
         prepared = true
     }

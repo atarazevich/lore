@@ -61,20 +61,7 @@ final class DictationRetryTests: XCTestCase {
     }
 
     private func makeSettings(apiKey: String) -> AppSettings {
-        let name = "com.lore.test.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defaults.removePersistentDomain(forName: name)
-        let storage = SettingsStorage(
-            defaults: defaults,
-            secretStore: .ephemeral,
-            defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("DictationRetryTests"),
-            legacyNotesDirectories: [],
-            runMigrations: false
-        )
-        let settings = SettingsStore(storage: storage)
-        settings.openaiApiKey = apiKey
-        return settings
+        isolatedSettings("DictationRetryTests", apiKey: apiKey)
     }
 
     /// Save `sampleCount` samples of audio and add a history entry pointing at

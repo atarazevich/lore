@@ -674,14 +674,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         )
 
         // Preload models so the first use is instant. Detached; launch never
-        // blocks. Two loads cover the common warm set: the shared cache (meeting
-        // mic reuses it) and dictation's private backend (its own decoder state).
-        // The meeting system-audio backend is left lazy on purpose — it's a
-        // second decoder only a meeting recording needs, so preloading it would
-        // hold a third model resident for users who only ever dictate.
-        Task {
-            try? await coordinator.sharedBackendCache.prepare()
-        }
+        // blocks. `prewarm()` covers the common warm set — the shared cache (the
+        // meeting's mic leg reuses it) and dictation's own instance, in that
+        // order. The meeting's system-audio backend is left lazy on purpose: it
+        // is a third copy only a meeting recording needs.
         Task {
             await coordinator.dictationCoordinator.prewarm()
         }

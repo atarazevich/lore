@@ -1,3 +1,5 @@
+import AVFoundation
+import os
 import XCTest
 @testable import LoreKit
 
@@ -5,9 +7,10 @@ import XCTest
 /// shared cache — the app's single prepared instance — instead of building a
 /// second copy of the model beside it, whatever the timing.
 ///
-/// Drives `acquireASRBackends()` rather than `start()`: that is the whole model
-/// path, minus the microphone permission, the audio device and the VAD model
-/// that `start()` would also need.
+/// Most tests drive `acquireASRBackends()`: that is the whole model path, minus
+/// the microphone permission, the audio device and the VAD model that `start()`
+/// would also need. `testStartAsksTheSharedCache…` pins that `start()` really
+/// goes through it, since a peek re-introduced there would leave the rest green.
 @MainActor
 final class TranscriptionEngineBackendTests: XCTestCase {
 
@@ -30,34 +33,19 @@ final class TranscriptionEngineBackendTests: XCTestCase {
         await Task.yield()
         // …and the meeting, arriving during it.
         try await engine.acquireASRBackends()
-        _ = try await warmUp.value
+        let shared = try await warmUp.value
 
         XCTAssertEqual(builds.count, 1, "a meeting during the warm-up must not load a second model")
         XCTAssertIdentical(
-            engine.micBackend as AnyObject,
-            cache.backend as AnyObject,
+            engine.micBackend as AnyObject, shared as AnyObject,
             "the mic leg must be the shared instance, not a copy of it"
         )
     }
 
-    /// The cold case: nothing warm anywhere. The mic leg still comes from the
-    /// cache, so dictation and the meeting share the one instance afterwards.
-    func testColdMeetingLoadsThroughTheSharedCache() async throws {
-        let builds = BuildCounter()
-        let cache = SharedBackendCache(makeBackend: {
-            builds.increment()
-            return StubTranscriptionBackend()
-        })
-        let engine = makeEngine(cache: cache)
-
-        try await engine.acquireASRBackends()
-
-        XCTAssertEqual(builds.count, 1)
-        XCTAssertIdentical(engine.micBackend as AnyObject, cache.backend as AnyObject)
-    }
-
-    /// A second meeting in the same session loads nothing: neither leg.
-    func testSecondMeetingLoadsNothing() async throws {
+    /// The cold case and every meeting after it: one build per leg for the whole
+    /// app. Ending a meeting gives up the borrowed references only — the shared
+    /// instance dictation is also using stays, and so does the system leg.
+    func testTheSharedInstanceOutlivesTheMeetingsThatBorrowIt() async throws {
         let builds = BuildCounter()
         let systemBuilds = BuildCounter()
         let cache = SharedBackendCache(makeBackend: {
@@ -72,34 +60,53 @@ final class TranscriptionEngineBackendTests: XCTestCase {
         try await engine.acquireASRBackends()
         let firstMic = engine.micBackend as AnyObject
         let firstSystem = engine.systemBackend as AnyObject
+        XCTAssertEqual(builds.count, 1, "a cold meeting loads its mic leg through the cache")
+        let shared = try await cache.prepare() as AnyObject
+        XCTAssertIdentical(firstMic, shared, "the mic leg must be the shared instance, not a copy of it")
 
         await engine.finalize()
-        try await engine.acquireASRBackends()
+        XCTAssertNil(engine.micBackend)
+        XCTAssertNil(engine.systemBackend)
+        XCTAssertTrue(cache.isReady, "a meeting ending must not tear down the shared instance")
 
+        try await engine.acquireASRBackends()
         XCTAssertEqual(builds.count, 1, "the shared instance must survive a meeting ending")
         XCTAssertEqual(systemBuilds.count, 1, "the system leg must survive a meeting ending")
         XCTAssertIdentical(engine.micBackend as AnyObject, firstMic)
         XCTAssertIdentical(engine.systemBackend as AnyObject, firstSystem)
     }
 
-    /// Ending a meeting gives up the borrowed references only — dictation's
-    /// copy of the same instance keeps working.
-    func testFinalizeReleasesTheBorrowNotTheSharedInstance() async throws {
-        let cache = SharedBackendCache(makeBackend: { StubTranscriptionBackend() })
-        let engine = makeEngine(cache: cache)
+    /// `start()` reaches the cache, and a stop that lands inside the load — a
+    /// download can run for minutes — leaves no capture behind it.
+    func testStartAsksTheSharedCacheAndAStopDuringTheLoadBringsNoCaptureUp() async throws {
+        let builds = BuildCounter()
+        let stub = StubTranscriptionBackend()
+        let cache = SharedBackendCache(makeBackend: {
+            builds.increment()
+            return stub
+        })
+        let engine = makeEngine(cache: cache, micAuthorization: .authorized)
+        // The user stops the meeting while the model is still loading.
+        stub.duringPrepare = { [weak engine] in engine?.stop() }
+        // Past the download gate: on a machine with no model on disk, start()
+        // would otherwise return before loading anything.
+        engine.downloadConfirmed = true
 
-        try await engine.acquireASRBackends()
-        await engine.finalize()
+        await engine.start()
 
-        XCTAssertNil(engine.micBackend)
-        XCTAssertTrue(cache.isReady, "a meeting ending must not tear down the shared instance")
+        XCTAssertEqual(builds.count, 1, "start() must take the mic leg from the shared cache")
+        XCTAssertFalse(engine.isRunning, "a stop during the load must not be resumed over")
+        XCTAssertNil(engine.micBackend, "an abandoned start holds no borrowed backend")
+        XCTAssertEqual(engine.assetStatus, "Ready")
     }
 
     // MARK: - What the events say
 
-    /// One cold load for the whole app, cache hits after it — the check the
-    /// issue asks for against `events.json`.
-    func testEventsReportOneColdLoadThenHits() async throws {
+    /// One real load per instance — the shared one, and the meeting's own
+    /// system leg — and a hit for every caller served without loading. That is
+    /// the reading `events.json` has to support: cold loads count the copies of
+    /// the model in memory, hits count the callers that needed none.
+    func testEventsReportOneColdLoadPerInstanceThenHits() async throws {
         let cache = SharedBackendCache(makeBackend: { StubTranscriptionBackend(yieldDuringPrepare: true) })
         let engine = makeEngine(cache: cache)
 
@@ -113,8 +120,8 @@ final class TranscriptionEngineBackendTests: XCTestCase {
         }
 
         XCTAssertEqual(
-            recorded.filter { $0.outcome == .ok && !$0.fromCache }.count, 1,
-            "exactly one cold ASR load: \(recorded)"
+            recorded.filter { $0.outcome == .ok && !$0.fromCache }.count, 2,
+            "one cold load each for the shared instance and the system leg: \(recorded)"
         )
         XCTAssertEqual(
             recorded.filter { $0.outcome == .ok && $0.fromCache }.count, 2,
@@ -122,8 +129,9 @@ final class TranscriptionEngineBackendTests: XCTestCase {
         )
     }
 
-    /// A system-leg build that fails still reports transcription as broken —
-    /// the health surface has no other source for that (#151).
+    /// A system-leg build that fails reports transcription as broken — the
+    /// health surface has no other source for that (#151). Its success reports
+    /// too (the test above counts it): the claim has to be able to clear.
     func testSystemLegFailureIsReported() async throws {
         let cache = SharedBackendCache(makeBackend: { StubTranscriptionBackend() })
         let engine = makeEngine(cache: cache, systemBackend: { StubTranscriptionBackend(failOnPrepare: true) })
@@ -146,29 +154,16 @@ final class TranscriptionEngineBackendTests: XCTestCase {
 
     private func makeEngine(
         cache: SharedBackendCache,
-        systemBackend: @escaping @Sendable () -> any TranscriptionBackend = { StubTranscriptionBackend() }
+        systemBackend: @escaping @Sendable () -> any TranscriptionBackend = { StubTranscriptionBackend() },
+        micAuthorization: AVAuthorizationStatus = .denied
     ) -> TranscriptionEngine {
         TranscriptionEngine(
             transcriptStore: TranscriptStore(),
-            settings: Self.makeSettings(),
+            settings: isolatedSettings("TranscriptionEngineBackendTests"),
             sharedBackendCache: cache,
-            makeSystemBackend: systemBackend
+            makeSystemBackend: systemBackend,
+            micAuthorization: { micAuthorization }
         )
-    }
-
-    /// Isolated settings — never the user's real defaults or Keychain.
-    private static func makeSettings() -> AppSettings {
-        let suiteName = "TranscriptionEngineBackendTests-\(UUID().uuidString)"
-        let suite = UserDefaults(suiteName: suiteName)!
-        suite.removePersistentDomain(forName: suiteName)
-        return AppSettings(storage: AppSettingsStorage(
-            defaults: suite,
-            secretStore: .ephemeral,
-            defaultNotesDirectory: URL(fileURLWithPath: NSTemporaryDirectory())
-                .appendingPathComponent("TranscriptionEngineBackendTests"),
-            legacyNotesDirectories: [],
-            runMigrations: false
-        ))
     }
 
     /// The ASR `modelLoad` events `body` caused, in order. Listens at the
@@ -182,28 +177,11 @@ final class TranscriptionEngineBackendTests: XCTestCase {
     private func asrLoads(
         during body: () async throws -> Void
     ) async rethrows -> [(outcome: DiagEvent.Outcome, fromCache: Bool)] {
-        let collector = DiagEventCollector()
-        DiagStore.shared.setObserver { collector.record($0) }
+        let events = OSAllocatedUnfairLock(initialState: [DiagEvent]())
+        DiagStore.shared.setObserver { event in events.withLock { $0.append(event) } }
         defer { DiagStore.shared.setObserver(nil) }
         try await body()
-        return collector.asrLoads
-    }
-}
-
-private final class DiagEventCollector: @unchecked Sendable {
-    private let lock = NSLock()
-    private var events: [DiagEvent] = []
-
-    func record(_ event: DiagEvent) {
-        lock.lock()
-        defer { lock.unlock() }
-        events.append(event)
-    }
-
-    var asrLoads: [(outcome: DiagEvent.Outcome, fromCache: Bool)] {
-        lock.lock()
-        defer { lock.unlock() }
-        return events.compactMap { event in
+        return events.withLock { $0 }.compactMap { event in
             guard case .modelLoad(.asr, let outcome, _, let fromCache) = event else { return nil }
             return (outcome, fromCache)
         }
