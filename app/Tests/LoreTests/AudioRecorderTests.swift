@@ -4,46 +4,61 @@ import XCTest
 
 final class AudioRecorderTests: XCTestCase {
 
+    private var root: URL!
+    /// The notes folder the merged m4a export lands in.
     private var outputDir: URL!
+    /// A meeting's own `audio/` directory — where the two tracks are written
+    /// from the first buffer (#177).
+    private var trackDir: URL!
+    /// The meeting `trackDir` belongs to. Every recorder operation names it,
+    /// so one armed for another meeting is left alone.
+    private let sessionID = "session_1"
 
     override func setUp() {
         super.setUp()
-        outputDir = URL(fileURLWithPath: NSTemporaryDirectory())
+        root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("LoreRecorderTests")
             .appendingPathComponent(UUID().uuidString)
-        try? FileManager.default.createDirectory(at: outputDir, withIntermediateDirectories: true)
+        outputDir = root.appendingPathComponent("Notes")
+        trackDir = audioDirectory(of: sessionID)
+        for dir in [outputDir!, trackDir!] {
+            try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        }
     }
 
     override func tearDown() {
-        try? FileManager.default.removeItem(at: outputDir)
+        try? FileManager.default.removeItem(at: root)
         super.tearDown()
     }
 
     // MARK: - Helpers
 
-    /// Create a sine-wave PCM buffer at the given format.
-    private func makeSineBuffer(
-        sampleRate: Double,
-        channels: UInt32 = 1,
-        frameCount: AVAudioFrameCount,
-        frequency: Float = 440
-    ) -> AVAudioPCMBuffer {
-        let format = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: sampleRate,
-            channels: channels,
-            interleaved: channels == 1
-        )!
-        let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)!
-        buffer.frameLength = frameCount
-        let data = buffer.floatChannelData!
-        for ch in 0..<Int(channels) {
-            for i in 0..<Int(frameCount) {
-                let phase = Float(i) / Float(sampleRate) * frequency * 2 * .pi
-                data[ch][i] = sin(phase) * 0.5
-            }
-        }
-        return buffer
+    /// A meeting's own `audio/` directory, as the repository lays it out.
+    private func audioDirectory(of sessionID: String) -> URL {
+        root.appendingPathComponent("sessions/\(sessionID)/audio")
+    }
+
+    /// A recorder armed for the test meeting.
+    private func makeRecorder() -> AudioRecorder {
+        let recorder = AudioRecorder(outputDirectory: outputDir)
+        recorder.startSession(id: sessionID, trackDirectory: trackDir)
+        return recorder
+    }
+
+    private var micTrack: URL { BatchAudioStash.micURL(in: trackDir) }
+    private var sysTrack: URL { BatchAudioStash.sysURL(in: trackDir) }
+
+    private func m4aFiles() -> [URL] {
+        let files = (try? FileManager.default.contentsOfDirectory(
+            at: outputDir, includingPropertiesForKeys: nil
+        )) ?? []
+        return files.filter { $0.pathExtension == "m4a" }
+    }
+
+    /// The stash as the batch pass reads it — the persisted anchors, not the
+    /// recorder's memory of them.
+    private func persistedMeta() -> BatchMeta? {
+        BatchAudioStash.readMeta(in: trackDir)
     }
 
     /// Write system audio buffers simulating a rate mismatch:
@@ -85,8 +100,7 @@ final class AudioRecorderTests: XCTestCase {
     // MARK: - Tests
 
     func testMergeProducesOutputFile() async {
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+        let recorder = makeRecorder()
 
         // Write 2 seconds of mic audio at 24kHz
         let micBuffer = makeSineBuffer(sampleRate: 24000, frameCount: 48000)
@@ -96,20 +110,134 @@ final class AudioRecorderTests: XCTestCase {
         let sysBuffer = makeSineBuffer(sampleRate: 48000, frameCount: 96000)
         recorder.writeSysBuffer(sysBuffer)
 
-        await recorder.finalizeRecording()
+        await recorder.exportMerged(for: sessionID)
 
-        // Should produce an m4a file
-        let files = try? FileManager.default.contentsOfDirectory(at: outputDir, includingPropertiesForKeys: nil)
-        let m4aFiles = files?.filter { $0.pathExtension == "m4a" } ?? []
-        XCTAssertEqual(m4aFiles.count, 1, "Expected one m4a output file")
+        XCTAssertEqual(m4aFiles().count, 1, "Expected one m4a output file")
+    }
+
+    /// The tracks are the meeting's from the first buffer (#177): they land in
+    /// the session's own audio/ directory, not in a temp directory, and the
+    /// timing anchors are on disk beside them while the recording is still
+    /// running — the two things a rebuild after a kill needs.
+    @MainActor
+    func testTracksAndAnchorsLandInTheMeetingDuringRecording() async {
+        let recorder = makeRecorder()
+
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: 48000, frameCount: 4800))
+        recorder.writeSysBuffer(makeSineBuffer(sampleRate: 48000, frameCount: 4800))
+
+        XCTAssertTrue(FileManager.default.fileExists(atPath: micTrack.path))
+        XCTAssertTrue(FileManager.default.fileExists(atPath: sysTrack.path))
+
+        // The anchor write is dispatched off the audio thread; it is the only
+        // thing here that is not synchronous.
+        await waitUntil { self.persistedMeta()?.sysStartDate != nil }
+        let meta = persistedMeta()
+        XCTAssertNotNil(meta?.micStartDate, "the mic start anchor must be on disk mid-recording")
+        XCTAssertNotNil(meta?.sysStartDate, "the sys start anchor must be on disk mid-recording")
+        XCTAssertEqual(meta?.micAnchors.first?.frame, 0)
+    }
+
+    /// Closing the tracks writes the last anchor snapshot once more. Anchors
+    /// persist themselves as they appear, but that write can only log its
+    /// failures — without this retry a meeting whose one anchor write failed
+    /// would keep its tracks and permanently lack the timing beside them, and
+    /// the rebuild would stamp the recovered transcript at the moment of the
+    /// rebuild instead of the moment it was spoken.
+    @MainActor
+    func testClosingTheTracksWritesTheTimingAgain() async {
+        let recorder = makeRecorder()
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: 48_000, frameCount: 4_800))
+        await waitUntil { self.persistedMeta() != nil }
+
+        // Stands in for the anchor write that failed: the meeting has its
+        // track, and no timing beside it.
+        try? FileManager.default.removeItem(at: BatchAudioStash.metaURL(in: trackDir))
+        XCTAssertNil(persistedMeta())
+
+        await recorder.finishTracks(for: sessionID)
+        XCTAssertNotNil(
+            persistedMeta()?.micStartDate,
+            "the close must persist the timing the failed write lost"
+        )
+    }
+
+    /// The assumption recovery rests on: a track file that was never closed is
+    /// still readable at its true length. While writing, CoreAudio leaves the
+    /// CAF data chunk sized −1 ("to end of file"), so a reader measures the
+    /// bytes that landed rather than trusting a header the kill never patched.
+    /// A canary: if this ever stops holding, every meeting killed mid-recording
+    /// loses its audio again.
+    ///
+    /// Two seconds, not a fraction of one: the whole fix rests on this platform
+    /// property, and a margin under a second would be passed by a writer that
+    /// simply buffers a second before flushing.
+    func testTrackKilledMidWriteIsStillReadable() throws {
+        let recorder = makeRecorder()
+        let frames = AVAudioFrameCount(48_000) // 1s at 48kHz
+        for _ in 0..<2 {
+            recorder.writeMicBuffer(makeSineBuffer(sampleRate: 48_000, frameCount: frames))
+        }
+
+        // The kill: read the bytes on disk with the recorder still holding the
+        // file open — no close, no header patch.
+        let file = try AVAudioFile(forReading: micTrack)
+        XCTAssertEqual(file.length, Int64(frames) * 2, "the killed track must read back whole")
+        XCTAssertGreaterThan(file.processingFormat.sampleRate, 0)
+    }
+
+    /// A finalize dropped by its timeout resumes long after a later meeting
+    /// armed the recorder for itself. Every operation names its meeting, so the
+    /// stale one merges nothing and — the part that would be silent — closes
+    /// nothing: the running recording keeps writing.
+    func testStaleFinalizeLeavesTheRunningMeetingAlone() async throws {
+        let recorder = makeRecorder()
+
+        // The later meeting takes the recorder.
+        let secondDir = audioDirectory(of: "session_2")
+        try FileManager.default.createDirectory(at: secondDir, withIntermediateDirectories: true)
+        recorder.startSession(id: "session_2", trackDirectory: secondDir)
+
+        let frames = AVAudioFrameCount(4_800)
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: 48_000, frameCount: frames))
+
+        // The earlier meeting's finalize, arriving now.
+        await recorder.exportMerged(for: sessionID)
+        await recorder.finishTracks(for: sessionID)
+
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: 48_000, frameCount: frames))
+        await recorder.finishTracks(for: "session_2")
+
+        let mic = try AVAudioFile(forReading: BatchAudioStash.micURL(in: secondDir))
+        XCTAssertEqual(
+            mic.length, Int64(frames) * 2,
+            "a stale finalize must not close the running meeting's track"
+        )
+        XCTAssertEqual(m4aFiles().count, 0, "and must not export another meeting's audio")
+    }
+
+    /// The known re-entry path (`confirmDownloadAndStart` continuing a paused
+    /// session, #153) must not restart the recorder over its own files: the
+    /// destination is fixed per meeting now, so a second arm would truncate
+    /// everything recorded so far.
+    func testRearmingTheSameMeetingKeepsTheRecording() async throws {
+        let recorder = makeRecorder()
+        let frames = AVAudioFrameCount(4_800)
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: 48_000, frameCount: frames))
+
+        recorder.startSession(id: sessionID, trackDirectory: trackDir)
+        recorder.writeMicBuffer(makeSineBuffer(sampleRate: 48_000, frameCount: frames))
+
+        await recorder.finishTracks(for: sessionID)
+        let mic = try AVAudioFile(forReading: micTrack)
+        XCTAssertEqual(mic.length, Int64(frames) * 2, "the re-arm must not truncate the track")
     }
 
     func testMergeWithRateMismatchProducesCorrectDuration() async {
         // Simulate the real bug: system audio IO proc delivers at half the declared rate.
         // 480 frames tagged as 48kHz, but arriving at the rate of 24kHz
         // (i.e., half as many buffers per second as expected).
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+        let recorder = makeRecorder()
 
         let durationSeconds = 4.0
 
@@ -136,14 +264,13 @@ final class AudioRecorderTests: XCTestCase {
             recorder.writeSysBuffer(buffer)
         }
 
-        await recorder.finalizeRecording()
+        await recorder.exportMerged(for: sessionID)
 
         // Check the output file duration
-        let files = try? FileManager.default.contentsOfDirectory(at: outputDir, includingPropertiesForKeys: nil)
-        let m4aFiles = files?.filter { $0.pathExtension == "m4a" } ?? []
-        XCTAssertEqual(m4aFiles.count, 1)
+        let outputs = m4aFiles()
+        XCTAssertEqual(outputs.count, 1)
 
-        guard let outputURL = m4aFiles.first else { return }
+        guard let outputURL = outputs.first else { return }
         let outputFile = try? AVAudioFile(forReading: outputURL)
         guard let outputFile else {
             XCTFail("Could not read output file")
@@ -163,8 +290,7 @@ final class AudioRecorderTests: XCTestCase {
 
     func testMergeWithMatchingRatesDoesNotResample() async {
         // When declared and effective rates match, no resampling override should happen.
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+        let recorder = makeRecorder()
 
         let durationSeconds = 2.0
 
@@ -178,13 +304,12 @@ final class AudioRecorderTests: XCTestCase {
         let sysBuffer = makeSineBuffer(sampleRate: 48000, frameCount: sysFrames)
         recorder.writeSysBuffer(sysBuffer)
 
-        await recorder.finalizeRecording()
+        await recorder.exportMerged(for: sessionID)
 
-        let files = try? FileManager.default.contentsOfDirectory(at: outputDir, includingPropertiesForKeys: nil)
-        let m4aFiles = files?.filter { $0.pathExtension == "m4a" } ?? []
-        XCTAssertEqual(m4aFiles.count, 1)
+        let outputs = m4aFiles()
+        XCTAssertEqual(outputs.count, 1)
 
-        guard let outputURL = m4aFiles.first,
+        guard let outputURL = outputs.first,
               let outputFile = try? AVAudioFile(forReading: outputURL) else {
             XCTFail("Could not read output file")
             return
@@ -196,10 +321,9 @@ final class AudioRecorderTests: XCTestCase {
         XCTAssertLessThan(outputDuration, durationSeconds + 0.5)
     }
 
-    func testSysEffectiveRateTracking() {
+    func testSysEffectiveRateTracking() async {
         // Verify that writeSysBuffer tracks timing anchors correctly.
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+        let recorder = makeRecorder()
 
         let buffer = makeSineBuffer(sampleRate: 48000, frameCount: 480)
 
@@ -208,25 +332,11 @@ final class AudioRecorderTests: XCTestCase {
             recorder.writeSysBuffer(buffer)
         }
 
-        let anchors = recorder.timingAnchors()
-        XCTAssertNotNil(anchors.sysStartDate, "sysStartDate should be set after writes")
-        XCTAssertEqual(anchors.sysAnchors.count, 1, "Should have exactly one start anchor")
-        XCTAssertEqual(anchors.sysAnchors.first?.frame, 0, "Start anchor should be at frame 0")
-    }
-
-    func testDiscardDoesNotProduceOutput() {
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
-
-        let buffer = makeSineBuffer(sampleRate: 48000, frameCount: 48000)
-        recorder.writeMicBuffer(buffer)
-        recorder.writeSysBuffer(buffer)
-
-        recorder.discardRecording()
-
-        let files = try? FileManager.default.contentsOfDirectory(at: outputDir, includingPropertiesForKeys: nil)
-        let m4aFiles = files?.filter { $0.pathExtension == "m4a" } ?? []
-        XCTAssertEqual(m4aFiles.count, 0, "Discarded recording should not produce output")
+        await recorder.finishTracks(for: sessionID)
+        let anchors = persistedMeta()
+        XCTAssertNotNil(anchors?.sysStartDate, "sysStartDate should be set after writes")
+        XCTAssertEqual(anchors?.sysAnchors.count, 1, "Should have exactly one start anchor")
+        XCTAssertEqual(anchors?.sysAnchors.first?.frame, 0, "Start anchor should be at frame 0")
     }
 
     // MARK: - recordingSaved is latched, once per recording (#82)
@@ -239,25 +349,14 @@ final class AudioRecorderTests: XCTestCase {
             .occurrences
     }
 
-    /// Block the temp CAF paths so `AVAudioFile(forWriting:)` throws, driving the
-    /// per-buffer failure branch. Both the current and next minute are blocked, since
-    /// `sessionTimestamp` has minute resolution and the test may straddle a boundary.
-    private func blockTempCAFPaths() -> [URL] {
-        let fmt = DateFormatter()
-        fmt.dateFormat = "yyyy-MM-dd_HH-mm"
-        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
-        var blocked: [URL] = []
-        for offset in [0.0, 60.0] {
-            let stamp = fmt.string(from: Date().addingTimeInterval(offset))
-            for prefix in ["lore_mic_", "lore_sys_"] {
-                let url = tmp.appendingPathComponent("\(prefix)\(stamp).caf")
-                try? FileManager.default.removeItem(at: url)
-                // A directory where a file is expected makes AVAudioFile throw.
-                try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
-                blocked.append(url)
-            }
+    /// Block the meeting's track paths so `AVAudioFile(forWriting:)` throws,
+    /// driving the per-buffer failure branch. A directory where a file is
+    /// expected is enough to make AVAudioFile throw.
+    private func blockTrackPaths() {
+        for url in [micTrack, sysTrack] {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         }
-        return blocked
     }
 
     /// The real R1 regression: the failure site sits inside
@@ -266,11 +365,9 @@ final class AudioRecorderTests: XCTestCase {
     /// real recording delivers them at buffer rate — evicting the whole 2000-event
     /// ring within seconds.
     func testPerBufferFileCreationFailureRecordsExactlyOneEvent() {
-        let blocked = blockTempCAFPaths()
-        defer { blocked.forEach { try? FileManager.default.removeItem(at: $0) } }
+        blockTrackPaths()
 
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+        let recorder = makeRecorder()
         let before = recordingSavedCount()
 
         let buffer = makeSineBuffer(sampleRate: 48_000, frameCount: 512)
@@ -284,20 +381,21 @@ final class AudioRecorderTests: XCTestCase {
 
     /// The failure sites live inside `if micFile == nil { … } catch { record; return }`,
     /// which the buffer path re-enters on every audio callback. Unlatched, one dead
-    /// output file would evict all 2000 prior events within seconds. `finalizeRecording`
-    /// on an empty session drives the same latched helper end to end.
+    /// output file would evict all 2000 prior events within seconds. An export
+    /// of an empty session drives the same latched helper end to end.
     func testRecordingSavedIsEmittedAtMostOncePerSession() async {
         let recorder = AudioRecorder(outputDirectory: outputDir)
         let before = recordingSavedCount()
 
-        recorder.startSession()
-        await recorder.finalizeRecording()
+        recorder.startSession(id: sessionID, trackDirectory: trackDir)
+        await recorder.exportMerged(for: sessionID)
         let afterFirst = recordingSavedCount()
         XCTAssertEqual(afterFirst - before, 1, "an empty session records exactly one outcome")
 
-        // Second finalize on the sealed session must add nothing.
-        await recorder.finalizeRecording()
-        XCTAssertEqual(recordingSavedCount(), afterFirst, "a sealed session records no further outcome")
+        // Second finalize on the finished session must add nothing.
+        await recorder.finishTracks(for: sessionID)
+        await recorder.exportMerged(for: sessionID)
+        XCTAssertEqual(recordingSavedCount(), afterFirst, "a finished session records no further outcome")
     }
 
     /// `startSession` re-arms the latch, so the next recording gets its own event.
@@ -305,10 +403,11 @@ final class AudioRecorderTests: XCTestCase {
         let recorder = AudioRecorder(outputDirectory: outputDir)
         let before = recordingSavedCount()
 
-        recorder.startSession()
-        await recorder.finalizeRecording()
-        recorder.startSession()
-        await recorder.finalizeRecording()
+        recorder.startSession(id: sessionID, trackDirectory: trackDir)
+        await recorder.exportMerged(for: sessionID)
+        await recorder.finishTracks(for: sessionID)
+        recorder.startSession(id: "session_2", trackDirectory: audioDirectory(of: "session_2"))
+        await recorder.exportMerged(for: "session_2")
 
         XCTAssertEqual(recordingSavedCount() - before, 2, "two sessions, two outcomes")
     }
@@ -338,12 +437,10 @@ final class AudioRecorderTests: XCTestCase {
     /// no anchors. The old code advanced end-frame/date tracking before the
     /// failure exits, skewing the frame delta and (under persistent failure)
     /// spamming anchors on every buffer.
-    func testFailingWritesLeaveAnchorTrackingUntouched() {
-        let blocked = blockTempCAFPaths()
-        defer { blocked.forEach { try? FileManager.default.removeItem(at: $0) } }
+    func testFailingWritesLeaveAnchorTrackingUntouched() async {
+        blockTrackPaths()
 
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+        let recorder = makeRecorder()
 
         let buffer = makeSineBuffer(sampleRate: 48_000, frameCount: 512)
         for _ in 0..<40 {
@@ -351,38 +448,34 @@ final class AudioRecorderTests: XCTestCase {
             recorder.writeSysBuffer(buffer)
         }
 
-        let anchors = recorder.timingAnchors()
-        XCTAssertNil(anchors.micStartDate, "failed writes must not set a start date")
-        XCTAssertNil(anchors.sysStartDate, "failed writes must not set a start date")
-        XCTAssertTrue(anchors.micAnchors.isEmpty, "failed writes must not append anchors")
-        XCTAssertTrue(anchors.sysAnchors.isEmpty, "failed writes must not append anchors")
+        // A track's first successful write is also its first anchor, so an
+        // empty pair is "no start date, no gap anchors, nothing tracked".
+        XCTAssertTrue(recorder.micAnchors.isEmpty, "failed writes must not append anchors")
+        XCTAssertTrue(recorder.sysAnchors.isEmpty, "failed writes must not append anchors")
+
+        await recorder.finishTracks(for: sessionID)
+        XCTAssertNil(persistedMeta(), "and nothing of them may reach disk")
     }
 
     // MARK: - Pause fill (#153)
 
-    /// Close the recorder's handles and read the finished tracks back. The
-    /// sealed temp files are the test's to clean up — `sealForBatch` hands
-    /// ownership over precisely so batch transcription can outlive the session.
+    /// Close the recorder's handles and read the finished tracks back from the
+    /// meeting they were recorded into.
     ///
-    /// `sealForBatch` returns the session's *candidate* paths, not proof of a
-    /// file: a track that never received a buffer opened no file there, which is
-    /// the shape of every pause test that drives one leg only. Both production
-    /// consumers check existence before opening (`AudioRecorder.mergeAndEncode`,
-    /// `SessionRepository.stashAudioForBatch`); this reader does the same, so a
+    /// A track that never received a buffer opened no file, which is the shape
+    /// of every pause test that drives one leg only. Every production consumer
+    /// checks existence before opening (`AudioRecorder.mergeAndEncode`,
+    /// `SessionRepository.batchAudioURLs`); this reader does the same, so a
     /// silent track reads back as `nil` rather than as an open failure.
     private func sealAndRead(
         _ recorder: AudioRecorder
-    ) throws -> (mic: AVAudioFile?, sys: AVAudioFile?) {
-        let sealed = recorder.sealForBatch()
-        addTeardownBlock {
-            [sealed.mic, sealed.sys].compactMap { $0 }
-                .forEach { try? FileManager.default.removeItem(at: $0) }
-        }
-        func read(_ url: URL?) throws -> AVAudioFile? {
-            guard let url, FileManager.default.fileExists(atPath: url.path) else { return nil }
+    ) async throws -> (mic: AVAudioFile?, sys: AVAudioFile?) {
+        await recorder.finishTracks(for: sessionID)
+        func read(_ url: URL) throws -> AVAudioFile? {
+            guard FileManager.default.fileExists(atPath: url.path) else { return nil }
             return try AVAudioFile(forReading: url)
         }
-        return (mic: try read(sealed.mic), sys: try read(sealed.sys))
+        return (mic: try read(micTrack), sys: try read(sysTrack))
     }
 
     /// The invariant the whole pause design rests on: after a resume, each
@@ -395,8 +488,7 @@ final class AudioRecorderTests: XCTestCase {
     /// invisible to capture-gap detection (#128). Frame delta now matches wall
     /// delta, so no resume-anchor is appended — a real outage still gets one.
     func testPauseIsFilledWithSilenceAndAppendsNoGapAnchor() async throws {
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+        let recorder = makeRecorder()
 
         let rate: Double = 48_000
         let frames = AVAudioFrameCount(4_800) // 0.1s
@@ -412,14 +504,14 @@ final class AudioRecorderTests: XCTestCase {
         recorder.writeMicBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
         recorder.writeSysBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
 
-        let anchors = recorder.timingAnchors()
+        let files = try await sealAndRead(recorder)
+        let anchors = persistedMeta()
         XCTAssertEqual(
-            anchors.micAnchors.count, 1,
+            anchors?.micAnchors.count, 1,
             "filled silence keeps frame delta in step with wall time — no gap anchor is due"
         )
-        XCTAssertEqual(anchors.sysAnchors.count, 1)
+        XCTAssertEqual(anchors?.sysAnchors.count, 1)
 
-        let files = try sealAndRead(recorder)
         for file in [files.mic, files.sys].compactMap({ $0 }) {
             let expected = Double(frames) * 2 + pause * file.processingFormat.sampleRate
             XCTAssertEqual(
@@ -434,8 +526,7 @@ final class AudioRecorderTests: XCTestCase {
     /// the mic and the system tap come back at different instants, and neither
     /// may inherit the other's bring-up latency.
     func testEachTrackFillsItsOwnGap() async throws {
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+        let recorder = makeRecorder()
 
         let rate: Double = 48_000
         let frames = AVAudioFrameCount(4_800)
@@ -450,7 +541,7 @@ final class AudioRecorderTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(600))
         recorder.writeSysBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
 
-        let files = try sealAndRead(recorder)
+        let files = try await sealAndRead(recorder)
         guard let mic = files.mic, let sys = files.sys else {
             XCTFail("both tracks must exist")
             return
@@ -467,8 +558,7 @@ final class AudioRecorderTests: XCTestCase {
     /// always measured from the last write that carried real audio, so the
     /// second fill covers the whole span.
     func testSecondPauseBeforeAnyAudioStillFillsTheWholeGap() async throws {
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+        let recorder = makeRecorder()
 
         let rate: Double = 48_000
         let frames = AVAudioFrameCount(4_800)
@@ -480,7 +570,7 @@ final class AudioRecorderTests: XCTestCase {
         recorder.noteResumedFromPause()  // resume 2
         recorder.writeMicBuffer(makeSineBuffer(sampleRate: rate, frameCount: frames))
 
-        let files = try sealAndRead(recorder)
+        let files = try await sealAndRead(recorder)
         guard let mic = files.mic else {
             XCTFail("mic file missing")
             return
@@ -493,25 +583,23 @@ final class AudioRecorderTests: XCTestCase {
     /// A track whose first buffer arrives only after the pause has no earlier
     /// audio to stay aligned with — its own start date is the truth. Leading
     /// silence there would push the whole track late by the pause.
-    func testPauseBeforeATrackHasAudioAddsNoLeadingSilence() throws {
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+    func testPauseBeforeATrackHasAudioAddsNoLeadingSilence() async throws {
+        let recorder = makeRecorder()
 
         recorder.noteResumedFromPause()
 
         let frames = AVAudioFrameCount(4_800)
         recorder.writeMicBuffer(makeSineBuffer(sampleRate: 48_000, frameCount: frames))
 
-        let files = try sealAndRead(recorder)
+        let files = try await sealAndRead(recorder)
         XCTAssertEqual(files.mic?.length, Int64(frames),
                        "no silence may precede a track's first audio")
     }
 
     /// Continuous back-to-back writes must keep exactly one anchor per track —
     /// the first-write one. The gap path stays dormant without an outage.
-    func testContinuousWritesAddNoExtraAnchors() {
-        let recorder = AudioRecorder(outputDirectory: outputDir)
-        recorder.startSession()
+    func testContinuousWritesAddNoExtraAnchors() async {
+        let recorder = makeRecorder()
 
         let buffer = makeSineBuffer(sampleRate: 48_000, frameCount: 4800)
         for _ in 0..<20 {
@@ -519,9 +607,10 @@ final class AudioRecorderTests: XCTestCase {
             recorder.writeSysBuffer(buffer)
         }
 
-        let anchors = recorder.timingAnchors()
-        XCTAssertEqual(anchors.micAnchors.count, 1)
-        XCTAssertEqual(anchors.sysAnchors.count, 1)
+        await recorder.finishTracks(for: sessionID)
+        let anchors = persistedMeta()
+        XCTAssertEqual(anchors?.micAnchors.count, 1)
+        XCTAssertEqual(anchors?.sysAnchors.count, 1)
     }
 
 }

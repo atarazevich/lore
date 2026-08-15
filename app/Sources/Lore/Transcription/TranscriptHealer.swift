@@ -165,9 +165,12 @@ final class TranscriptHealer {
     /// Open summons a job: called when a meeting is opened and its loaded
     /// transcript is empty. A user open is a fresh signal — the retry budget
     /// starts over, so the app always makes a fresh attempt while audio
-    /// exists. Never fires for the live session (it has no stash and no
-    /// final transcript by construction), and never double-dispatches
-    /// against a job already queued or running for the session.
+    /// exists. Never double-dispatches against a job already queued or running
+    /// for the session.
+    ///
+    /// The live session is excluded by the guard below, and only by it: since
+    /// #177 a recording meeting has a stash from its first buffer and no final
+    /// transcript, which is exactly the shape this dispatches on.
     func ensure(sessionID: String) {
         guard sessionID != liveSessionID() else { return }
         // A user open is a fresh signal: the budget starts over even while a

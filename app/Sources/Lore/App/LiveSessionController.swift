@@ -184,8 +184,10 @@ final class LiveSessionController {
             //
             // `.recording` specifically, never "not idle" (#153): a paused
             // session also has a stopped engine, and routing it through
-            // `startEngine` would call `AudioRecorder.startSession()` — new
-            // temp files, wiped anchors, the pre-pause audio orphaned.
+            // `startEngine` would re-run the whole capture bring-up under a
+            // pause. The recorder itself is safe either way since #177 — a
+            // second arm for the same meeting keeps the running tracks rather
+            // than wiping the anchors and truncating the audio.
             coordinator.enqueueLifecycleEffect { [self] in
                 await startEngine(settings: settings)
             }
@@ -369,12 +371,29 @@ final class LiveSessionController {
     /// `confirmDownloadAndStart` to continue a session whose engine was
     /// parked at the model-download gate.
     private func startEngine(settings: AppSettings) async {
+        // Decided first, assigned once, after the await below: nilling the
+        // engine's recorder up front would leave it without one across an
+        // actor hop, which is exactly the window a re-entry here lands in.
+        let recorder: AudioRecorder?
         if settings.saveAudioRecording || settings.enableBatchRefinement {
-            coordinator.audioRecorder?.startSession()
-            coordinator.transcriptionEngine?.audioRecorder = coordinator.audioRecorder
+            if let sessionID = _currentSessionID {
+                // The tracks are the meeting's from the first buffer (#177).
+                let trackDirectory = await coordinator.sessionRepository
+                    .prepareAudioDirectory(sessionID: sessionID)
+                coordinator.audioRecorder?.startSession(id: sessionID, trackDirectory: trackDirectory)
+                recorder = coordinator.audioRecorder
+            } else {
+                // No session id, no owner for the audio — so this meeting
+                // records none. Traced: audio the user asked for and never got
+                // must not be a silent branch.
+                DiagStore.record(.recordingUnowned)
+                liveLog.error("no session id at engine start — this meeting records no audio")
+                recorder = nil
+            }
         } else {
-            coordinator.transcriptionEngine?.audioRecorder = nil
+            recorder = nil
         }
+        coordinator.transcriptionEngine?.audioRecorder = recorder
 
         await coordinator.transcriptionEngine?.start()
     }
@@ -446,64 +465,21 @@ final class LiveSessionController {
             )
         )
 
-        // 5. Handle audio recording
+        // 5. Handle audio recording. The tracks are already inside this
+        //    meeting (#177), so nothing moves or is copied here. Every call
+        //    names the session, exactly as the delete below does: a finalize
+        //    that outlived its timeout reaches this line with the recorder
+        //    possibly armed for a LATER meeting, and exporting or closing that
+        //    one would merge another meeting's audio and leave the running
+        //    recording writing nothing.
         if let settings, let recorder = coordinator.audioRecorder {
-            let wantsBatch = settings.enableBatchRefinement
-            let wantsExport = settings.saveAudioRecording
-
-            if wantsBatch && wantsExport {
-                let tempURLs = recorder.tempFileURLs()
-                let anchorsData = recorder.timingAnchors()
-                let fm = FileManager.default
-
-                let copiedMic: URL?
-                if let micSrc = tempURLs.mic, fm.fileExists(atPath: micSrc.path) {
-                    let dst = URL(fileURLWithPath: NSTemporaryDirectory())
-                        .appendingPathComponent("batch_mic_\(sessionID).caf")
-                    try? fm.copyItem(at: micSrc, to: dst)
-                    copiedMic = dst
-                } else {
-                    copiedMic = nil
-                }
-
-                let copiedSys: URL?
-                if let sysSrc = tempURLs.sys, fm.fileExists(atPath: sysSrc.path) {
-                    let dst = URL(fileURLWithPath: NSTemporaryDirectory())
-                        .appendingPathComponent("batch_sys_\(sessionID).caf")
-                    try? fm.copyItem(at: sysSrc, to: dst)
-                    copiedSys = dst
-                } else {
-                    copiedSys = nil
-                }
-
-                await coordinator.sessionRepository.stashAudioForBatch(
-                    sessionID: sessionID,
-                    micURL: copiedMic,
-                    sysURL: copiedSys,
-                    anchors: BatchAnchors(
-                        micStartDate: anchorsData.micStartDate,
-                        sysStartDate: anchorsData.sysStartDate,
-                        micAnchors: anchorsData.micAnchors,
-                        sysAnchors: anchorsData.sysAnchors
-                    )
-                )
-
-                await recorder.finalizeRecording()
-            } else if wantsBatch {
-                let sealed = recorder.sealForBatch()
-                await coordinator.sessionRepository.stashAudioForBatch(
-                    sessionID: sessionID,
-                    micURL: sealed.mic,
-                    sysURL: sealed.sys,
-                    anchors: BatchAnchors(
-                        micStartDate: sealed.micStartDate,
-                        sysStartDate: sealed.sysStartDate,
-                        micAnchors: sealed.micAnchors,
-                        sysAnchors: sealed.sysAnchors
-                    )
-                )
-            } else if wantsExport {
-                await recorder.finalizeRecording()
+            if settings.saveAudioRecording {
+                await recorder.exportMerged(for: sessionID)
+            }
+            await recorder.finishTracks(for: sessionID)
+            if !settings.enableBatchRefinement {
+                // No batch pass, so nothing will read the tracks again.
+                await coordinator.sessionRepository.cleanupBatchAudio(sessionID: sessionID)
             }
         }
 
@@ -539,17 +515,30 @@ final class LiveSessionController {
         coordinator.transcriptHealer?.resume()
     }
 
-    func discardSession() {
+    func discardSession() async {
         coordinator.transcriptionEngine?.stop()
-        coordinator.audioRecorder?.discardRecording()
         coordinator.transcriptStore.clear()
+        let discardedSessionID = _currentSessionID
         _currentSessionID = nil
-        // The healer was suspended for the recording (#166); a discarded
-        // session queues nothing, but dispatch must continue.
-        coordinator.transcriptHealer?.resume()
-        Task {
-            await coordinator.sessionRepository.endSession()
+
+        if let discardedSessionID {
+            // Close this meeting's tracks first, so no queued anchor write can
+            // land after the delete. Both calls name the session: the delete
+            // never goes by the recorder's memory of what it last recorded,
+            // and the close never touches a recorder a later meeting has
+            // already armed for itself.
+            await coordinator.audioRecorder?.finishTracks(for: discardedSessionID)
+            await coordinator.sessionRepository.cleanupBatchAudio(sessionID: discardedSessionID)
         }
+        await coordinator.sessionRepository.endSession()
+
+        // The healer was suspended for the recording (#166); a discarded
+        // session queues nothing, but dispatch must continue. Last, not first:
+        // until its audio is gone this session still looks like a stash with
+        // no final transcript — the shape `ensure`/`sweep` dispatch on — and it
+        // stopped being the live session they exclude the moment the id above
+        // was cleared.
+        coordinator.transcriptHealer?.resume()
     }
 
     // MARK: - State Refresh

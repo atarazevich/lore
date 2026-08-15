@@ -56,7 +56,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case captureGaveUp, captureReconfigured, inputDeviceSelected, deviceSwitched
         case noFramesRecovery, micStalled, micRecovered, micFramesFlowing
         case systemAudioCapture
-        case systemAudioGaveUp, recordingSaved
+        case systemAudioGaveUp, recordingSaved, recordingUnowned
         case modelLoad, modelCacheCleared, transcribed, echoSuppressed
         case transcriptRepairQueued, transcriptRepairSettled
         case apiCall
@@ -109,6 +109,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .systemAudioCapture: return .systemAudioCapture
         case .systemAudioGaveUp: return .systemAudioGaveUp
         case .recordingSaved: return .recordingSaved
+        case .recordingUnowned: return .recordingUnowned
         case .modelLoad: return .modelLoad
         case .modelCacheCleared: return .modelCacheCleared
         case .transcribed: return .transcribed
@@ -190,6 +191,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .systemAudioCapture: return .systemAudioCapture(outcome: .failed, osStatus: .min)
         case .systemAudioGaveUp: return .systemAudioGaveUp(attempts: .max)
         case .recordingSaved: return .recordingSaved(outcome: .ok, frames: .max)
+        case .recordingUnowned: return .recordingUnowned
 
         case .modelLoad:
             return .modelLoad(

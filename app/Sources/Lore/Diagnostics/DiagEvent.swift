@@ -310,6 +310,12 @@ enum DiagEvent: Codable, Sendable, Equatable {
     case systemAudioGaveUp(attempts: Int)
     /// Latched: at most one per recording, never one per audio buffer.
     case recordingSaved(outcome: Outcome, frames: Int)
+    /// The meeting asked for audio and none will be captured: capture started
+    /// with no session to own the tracks, so the recorder was never armed
+    /// (#177). Not a `recordingSaved(.failed)` — nothing was saved and nothing
+    /// was attempted, and reusing a save outcome here would put a second one in
+    /// the ring for a meeting that still records its own.
+    case recordingUnowned
 
     // MARK: - Transcription
 
@@ -413,7 +419,8 @@ extension DiagEvent {
         case .captureStart, .captureFailed, .captureStopped, .captureRetryScheduled,
              .captureGaveUp, .captureReconfigured, .inputDeviceSelected, .deviceSwitched,
              .noFramesRecovery, .micStalled, .micRecovered, .micFramesFlowing,
-             .systemAudioCapture, .systemAudioGaveUp, .recordingSaved:
+             .systemAudioCapture, .systemAudioGaveUp, .recordingSaved,
+             .recordingUnowned:
             return .audio
 
         case .modelLoad, .modelCacheCleared, .transcribed, .echoSuppressed,
@@ -483,6 +490,7 @@ extension DiagEvent {
         case .systemAudioCapture: return "systemAudioCapture"
         case .systemAudioGaveUp: return "systemAudioGaveUp"
         case .recordingSaved: return "recordingSaved"
+        case .recordingUnowned: return "recordingUnowned"
         case .modelLoad: return "modelLoad"
         case .modelCacheCleared: return "modelCacheCleared"
         case .transcribed: return "transcribed"

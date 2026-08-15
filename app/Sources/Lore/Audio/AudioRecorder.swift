@@ -3,8 +3,13 @@ import os
 
 private let recorderLog = Logger(subsystem: "com.lore.app", category: "AudioRecorder")
 
-/// Records mic and system audio to temporary CAF files during a session,
-/// then merges and encodes them into a single M4A (AAC) file on finalization.
+/// Records mic and system audio into the meeting's own `audio/` directory as
+/// two CAF tracks, then merges and encodes them into a single M4A (AAC) file
+/// on finalization.
+///
+/// The tracks are the meeting's from the first buffer (#177), so a kill leaves
+/// the audio where the launch sweep already reads it (`TranscriptHealer.sweep`)
+/// and finalization has nothing to move.
 final class AudioRecorder: @unchecked Sendable {
     /// Timestamp format for the merged m4a export filename (`<stamp>.m4a` in
     /// the notes folder). Shared with the rebuild-audio matcher in
@@ -15,10 +20,23 @@ final class AudioRecorder: @unchecked Sendable {
     private let lock = NSLock()
     private var micFile: AVAudioFile?
     private var sysFile: AVAudioFile?
-    private var micTempURL: URL?
-    private var sysTempURL: URL?
+    /// The meeting this recorder is armed for. Every operation names its
+    /// session and does nothing unless it matches, so work belonging to an
+    /// earlier meeting — a finalize that outlived its timeout — can never close
+    /// or export a later one's recording.
+    private var armedSessionID: String?
+    /// The meeting's `audio/` directory — the two tracks and their timing meta
+    /// live here for as long as the recording does. Nil means disarmed: no
+    /// directory, no track URLs, so a late buffer writes nothing.
+    private var trackDirectory: URL?
+    private var micTrackURL: URL? { trackDirectory.map(BatchAudioStash.micURL(in:)) }
+    private var sysTrackURL: URL? { trackDirectory.map(BatchAudioStash.sysURL(in:)) }
     private var outputDirectory: URL
     private var sessionTimestamp = ""
+    /// Off-thread writer for `batch-meta.json`. Serial, so the newest snapshot
+    /// is always the last one written; `.utility` keeps the audio callback that
+    /// produced an anchor free of file I/O.
+    private let metaQueue = DispatchQueue(label: "com.lore.recorder.meta", qos: .utility)
     /// At most one `recordingSaved` per recording. The file-creation failures below sit
     /// inside `if micFile == nil { … } catch { … return }`, so they re-fire on EVERY
     /// audio buffer — unlatched, one dead output file evicts all 2000 prior events
@@ -34,6 +52,9 @@ final class AudioRecorder: @unchecked Sendable {
     private var sysStartDate: Date?
 
     /// Wall-clock timestamp and frame position of the most recent buffer write.
+    /// In memory only, unlike the anchors below: it feeds the
+    /// effective-sample-rate correction in `mergeAndEncode`, which serves the
+    /// merged export a killed meeting never produces.
     private var sysEndDate: Date?
     private var sysEndFrame: Int64 = 0
 
@@ -76,7 +97,19 @@ final class AudioRecorder: @unchecked Sendable {
         lock.withLock { outputDirectory = url }
     }
 
-    func startSession() {
+    /// Arm the recorder for one meeting: its id, and its own `audio/` directory
+    /// (`SessionRepository.prepareAudioDirectory`).
+    ///
+    /// Re-arming the same meeting keeps the running recording: the destination
+    /// is fixed per meeting, so a second arm would re-create `mic.caf` for
+    /// writing and truncate everything recorded so far
+    /// (`confirmDownloadAndStart` is the one path that can reach here twice,
+    /// #153).
+    func startSession(id sessionID: String, trackDirectory directory: URL) {
+        guard lock.withLock({ armedSessionID != sessionID }) else {
+            recorderLog.debug("recorder already armed for this meeting — keeping the running tracks")
+            return
+        }
         saveOutcomeLock.withLock { didRecordSaveOutcome = false }
         lock.withLock {
             micFile = nil
@@ -96,9 +129,8 @@ final class AudioRecorder: @unchecked Sendable {
             fmt.dateFormat = Self.exportTimestampFormat
             sessionTimestamp = fmt.string(from: Date())
 
-            let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
-            micTempURL = tmp.appendingPathComponent("lore_mic_\(sessionTimestamp).caf")
-            sysTempURL = tmp.appendingPathComponent("lore_sys_\(sessionTimestamp).caf")
+            armedSessionID = sessionID
+            trackDirectory = directory
         }
     }
 
@@ -114,7 +146,9 @@ final class AudioRecorder: @unchecked Sendable {
     /// failed fill leaves the date untouched, so the next buffer retries), and
     /// it needs no accounting when a resume fails or a second pause follows —
     /// whenever audio lands, the gap it measures is the whole span since real
-    /// audio last did. Why the gap must be filled at all:
+    /// audio last did. A kill during a pause needs no accounting either: a gap
+    /// only misplaces the audio that follows it, and after a kill there is
+    /// none. Why the gap must be filled at all:
     /// `docs/features/meeting-pause-resume.md`.
     func noteResumedFromPause() {
         lock.withLock {
@@ -179,7 +213,7 @@ final class AudioRecorder: @unchecked Sendable {
             let channels = Int(buffer.format.channelCount)
 
             // Lazily create file as mono at the source sample rate
-            if micFile == nil, let url = micTempURL {
+            if micFile == nil, let url = micTrackURL {
                 guard let monoFormat = AVAudioFormat(
                     standardFormatWithSampleRate: buffer.format.sampleRate, channels: 1
                 ) else {
@@ -295,6 +329,7 @@ final class AudioRecorder: @unchecked Sendable {
             if micStartDate == nil {
                 micStartDate = now
                 micAnchors.append((frame: preWriteFrame, date: now))
+                persistMetaLocked()
             } else if let last = micEndDate, let file = micFile,
                       Self.isCaptureGap(
                           frameDelta: preWriteFrame - micEndFrame,
@@ -302,6 +337,7 @@ final class AudioRecorder: @unchecked Sendable {
                           wallDelta: now.timeIntervalSince(last)
                       ) {
                 micAnchors.append((frame: preWriteFrame, date: now))
+                persistMetaLocked()
             }
             micEndDate = now
             micEndFrame = micFile?.length ?? preWriteFrame
@@ -311,7 +347,7 @@ final class AudioRecorder: @unchecked Sendable {
     func writeSysBuffer(_ buffer: AVAudioPCMBuffer) {
         lock.withLock {
             guard buffer.frameLength > 0 else { return }
-            if sysFile == nil, let url = sysTempURL {
+            if sysFile == nil, let url = sysTrackURL {
                 do {
                     sysFile = try AVAudioFile(
                         forWriting: url,
@@ -350,6 +386,7 @@ final class AudioRecorder: @unchecked Sendable {
             if sysStartDate == nil {
                 sysStartDate = now
                 sysAnchors.append((frame: preWriteFrame, date: now))
+                persistMetaLocked()
             } else if let last = sysEndDate, let file = sysFile,
                       Self.isCaptureGap(
                           frameDelta: preWriteFrame - sysEndFrame,
@@ -357,93 +394,112 @@ final class AudioRecorder: @unchecked Sendable {
                           wallDelta: now.timeIntervalSince(last)
                       ) {
                 sysAnchors.append((frame: preWriteFrame, date: now))
+                persistMetaLocked()
             }
             sysEndDate = now
             sysEndFrame = sysFile?.length ?? preWriteFrame
         }
     }
 
-    /// Read-only access to current temp file URLs (for copying before finalize).
-    func tempFileURLs() -> (mic: URL?, sys: URL?) {
-        lock.withLock { (micTempURL, sysTempURL) }
-    }
-
-    /// Read-only access to timing anchor data.
-    func timingAnchors() -> (
-        micStartDate: Date?, sysStartDate: Date?,
-        micAnchors: [(frame: Int64, date: Date)],
-        sysAnchors: [(frame: Int64, date: Date)]
-    ) {
-        lock.withLock {
-            (micStartDate: micStartDate, sysStartDate: sysStartDate,
-             micAnchors: micAnchors, sysAnchors: sysAnchors)
+    /// Close `sessionID`'s tracks, let go of the meeting, and return once the
+    /// queued meta writes have landed — the batch pass may read the meta the
+    /// moment finalization returns. Nothing happens when the recorder is armed
+    /// for a different meeting: a finalize dropped by its timeout can reach
+    /// here after a later meeting armed the recorder, and closing that one
+    /// would stop a running recording dead.
+    ///
+    /// The tracks themselves stay inside the meeting; deleting them is the
+    /// session's decision, made by session id
+    /// (`SessionRepository.cleanupBatchAudio`), never by this recorder's memory
+    /// of the last thing it recorded.
+    ///
+    /// The last anchor snapshot is written once more here. Every anchor already
+    /// persisted itself as it appeared, so this changes nothing when those
+    /// writes succeeded — and when one failed (`BatchAudioStash.writeMeta` can
+    /// only log it) it is the meeting's one retry, without which the stash
+    /// would keep its tracks and permanently lack the timing a rebuild needs.
+    func finishTracks(for sessionID: String) async {
+        let pending: (meta: BatchMeta, directory: URL)? = lock.withLock {
+            guard armedSessionID == sessionID, let directory = trackDirectory else { return nil }
+            let meta = metaSnapshotLocked()
+            closeTracksLocked()
+            // A meeting that recorded nothing has no timing to persist, and an
+            // empty meta beside no tracks would be a file claiming a stash.
+            return meta.hasAnchors ? (meta: meta, directory: directory) : nil
         }
-    }
-
-    /// Close file handles without merging or deleting temp files.
-    /// Returns the temp CAF URLs and timing data for batch transcription.
-    func sealForBatch() -> (
-        mic: URL?, sys: URL?,
-        micStartDate: Date?, sysStartDate: Date?,
-        micAnchors: [(frame: Int64, date: Date)],
-        sysAnchors: [(frame: Int64, date: Date)]
-    ) {
-        lock.withLock {
-            micFile = nil
-            sysFile = nil
-            let result = (
-                mic: micTempURL, sys: sysTempURL,
-                micStartDate: self.micStartDate, sysStartDate: self.sysStartDate,
-                micAnchors: self.micAnchors, sysAnchors: self.sysAnchors
-            )
-            micTempURL = nil
-            sysTempURL = nil
-            return result
-        }
-    }
-
-    /// Discard the current recording without merging or encoding.
-    /// Closes file handles and removes temp CAF files.
-    func discardRecording() {
-        lock.withLock {
-            micFile = nil
-            sysFile = nil
-        }
-        cleanupTempFiles()
-    }
-
-    func finalizeRecording() async {
-        let alreadySealed: Bool = lock.withLock {
-            let sealed = micFile == nil && sysFile == nil && micTempURL == nil && sysTempURL == nil
-            if !sealed {
-                micFile = nil
-                sysFile = nil
+        // Drained rather than blocked — the caller is the @MainActor finalize
+        // path — and the queue is serial, so this lands after every anchor.
+        await withCheckedContinuation { continuation in
+            metaQueue.async {
+                if let pending { BatchAudioStash.writeMeta(pending.meta, in: pending.directory) }
+                continuation.resume()
             }
-            return sealed
         }
+    }
 
-        guard !alreadySealed else { return }
-
+    /// Merge `sessionID`'s two tracks into the notes folder's m4a export. The
+    /// track files stay on disk; the recorder lets go of them. Nothing happens
+    /// when the recorder is armed for a different meeting — see
+    /// `finishTracks(for:)`.
+    func exportMerged(for sessionID: String) async {
         await Task.detached(priority: .userInitiated) { [self] in
-            self.mergeAndEncode()
-            self.cleanupTempFiles()
+            self.mergeAndEncode(for: sessionID)
         }.value
     }
 
     // MARK: - Private
 
-    private func cleanupTempFiles() {
-        lock.withLock {
-            let fm = FileManager.default
-            if let url = micTempURL { try? fm.removeItem(at: url) }
-            if let url = sysTempURL { try? fm.removeItem(at: url) }
-            micTempURL = nil
-            sysTempURL = nil
-        }
+    /// Close the two track files and let go of the meeting. Caller holds `lock`.
+    ///
+    /// Always both halves: a closed file with the directory still armed lets
+    /// the next buffer re-create `mic.caf` forWriting — truncating the
+    /// meeting's own audio.
+    private func closeTracksLocked() {
+        micFile = nil
+        sysFile = nil
+        trackDirectory = nil
+        armedSessionID = nil
     }
 
-    private func mergeAndEncode() {
-        let (micURL, sysURL, dir, timestamp, sysEffectiveRate) = lock.withLock {
+    /// Caller holds `lock`.
+    private func metaSnapshotLocked() -> BatchMeta {
+        BatchMeta(
+            micStartDate: micStartDate,
+            sysStartDate: sysStartDate,
+            micAnchors: micAnchors.map { .init(frame: $0.frame, date: $0.date) },
+            sysAnchors: sysAnchors.map { .init(frame: $0.frame, date: $0.date) }
+        )
+    }
+
+    /// Persist the timing anchors the moment they are created, off the audio
+    /// thread. Caller holds `lock`.
+    ///
+    /// Anchors place a rebuilt transcript in real time (#128), and after a kill
+    /// there is no in-memory state left to write them from — a recovered
+    /// recording without them is stamped at the moment of the rebuild rather
+    /// than the moment it was spoken. They appear at each track's first buffer
+    /// and at each capture outage: a few hundred bytes, a handful of times per
+    /// meeting.
+    private func persistMetaLocked() {
+        guard let directory = trackDirectory else { return }
+        let meta = metaSnapshotLocked()
+        metaQueue.async { BatchAudioStash.writeMeta(meta, in: directory) }
+    }
+
+    private func mergeAndEncode(for sessionID: String) {
+        typealias ExportPlan = (
+            mic: URL?, sys: URL?, dir: URL, timestamp: String, sysEffectiveRate: Double?
+        )
+        let plan: ExportPlan? = lock.withLock {
+            // Another meeting's tracks are not this finalize's to merge, and
+            // the close below would end its recording.
+            guard armedSessionID == sessionID else { return nil }
+
+            // Reading a track still open for writing would merge without its
+            // unflushed tail; closing here makes the export safe in any order.
+            let tracks = (mic: micTrackURL, sys: sysTrackURL)
+            closeTracksLocked()
+
             // Effective sample rate: corrects for process tap delivering at lower rate than declared.
             var effectiveRate: Double? = nil
             if let start = sysStartDate, let end = sysEndDate, sysEndFrame > 0 {
@@ -452,7 +508,11 @@ final class AudioRecorder: @unchecked Sendable {
                     effectiveRate = Double(sysEndFrame) / wallClockSeconds
                 }
             }
-            return (micTempURL, sysTempURL, outputDirectory, sessionTimestamp, effectiveRate)
+            return (tracks.mic, tracks.sys, outputDirectory, sessionTimestamp, effectiveRate)
+        }
+        guard let (micURL, sysURL, dir, timestamp, sysEffectiveRate) = plan else {
+            recorderLog.debug("export skipped: the recorder is not armed for this meeting")
+            return
         }
 
         let micReader: AVAudioFile? = {

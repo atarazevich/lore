@@ -253,7 +253,7 @@ final class AppCoordinator {
 
         case .userDiscarded:
             enqueueLifecycleEffect { [self] in
-                liveSessionController?.discardSession()
+                await liveSessionController?.discardSession()
             }
 
         case .finalizationComplete:

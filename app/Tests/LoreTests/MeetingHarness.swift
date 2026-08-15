@@ -1,5 +1,33 @@
+import AVFoundation
 import XCTest
 @testable import LoreKit
+
+/// One buffer of sine-wave audio — what a capture tap delivers, minus the
+/// hardware. Shared by the recorder's own tests and the meeting-level ones, so
+/// both drive the recorder with the same shape of input.
+func makeSineBuffer(
+    sampleRate: Double,
+    channels: UInt32 = 1,
+    frameCount: AVAudioFrameCount,
+    frequency: Float = 440
+) -> AVAudioPCMBuffer {
+    let format = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: sampleRate,
+        channels: channels,
+        interleaved: channels == 1
+    )!
+    let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount)!
+    buffer.frameLength = frameCount
+    let data = buffer.floatChannelData!
+    for ch in 0..<Int(channels) {
+        for i in 0..<Int(frameCount) {
+            let phase = Float(i) / Float(sampleRate) * frequency * 2 * .pi
+            data[ch][i] = sin(phase) * 0.5
+        }
+    }
+    return buffer
+}
 
 /// Polls `condition` on the main actor until it holds or `timeout` elapses.
 /// Returns the final value of the condition.

@@ -403,12 +403,7 @@ actor SessionRepository {
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
         let sessionID = "session_\(formatter.string(from: config.startedAt))"
 
-        let sessionDir = sessionDirectory(for: sessionID)
-        try? FileManager.default.createDirectory(at: sessionDir, withIntermediateDirectories: true)
-
-        // Create audio subdirectory
-        let audioDir = sessionDir.appendingPathComponent("audio", isDirectory: true)
-        try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
+        prepareAudioDirectory(sessionID: sessionID)
 
         let metadata = SessionMetadata(
             id: sessionID,
@@ -482,9 +477,7 @@ actor SessionRepository {
 
     /// Copy an audio file into the session's audio directory.
     func copyAudioFileToSession(sessionID: String, sourceURL: URL) {
-        let audioDir = sessionDirectory(for: sessionID)
-            .appendingPathComponent("audio", isDirectory: true)
-        try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
+        let audioDir = prepareAudioDirectory(sessionID: sessionID)
         let dest = audioDir.appendingPathComponent("imported.\(sourceURL.pathExtension)")
         // Retry of an import (#43) re-runs over the session's own copy —
         // an explicit no-op, not a swallowed error.
@@ -917,74 +910,46 @@ actor SessionRepository {
 
     // MARK: - Batch Audio Persistence
 
-    func stashAudioForBatch(
-        sessionID: String,
-        micURL: URL?,
-        sysURL: URL?,
-        anchors: BatchAnchors
-    ) {
-        let fm = FileManager.default
-        let audioDir = sessionDirectory(for: sessionID).appendingPathComponent("audio", isDirectory: true)
-        try? fm.createDirectory(at: audioDir, withIntermediateDirectories: true)
+    /// The session's own `audio/` directory. Not created — see
+    /// `prepareAudioDirectory`.
+    private func audioDirectory(for sessionID: String) -> URL {
+        sessionDirectory(for: sessionID).appendingPathComponent("audio", isDirectory: true)
+    }
 
-        if let src = micURL, fm.fileExists(atPath: src.path) {
-            let dst = audioDir.appendingPathComponent("mic.caf")
-            try? fm.moveItem(at: src, to: dst)
-        }
-        if let src = sysURL, fm.fileExists(atPath: src.path) {
-            let dst = audioDir.appendingPathComponent("sys.caf")
-            try? fm.moveItem(at: src, to: dst)
-        }
+    /// Where a session's per-track stash can be, in preference order: the
+    /// canonical `audio/` subdirectory, then the legacy layout that put the
+    /// same three files straight in the session directory.
+    private func stashDirectories(sessionID: String) -> [URL] {
+        [audioDirectory(for: sessionID), sessionDirectory(for: sessionID)]
+    }
 
-        let meta = BatchMeta(
-            micStartDate: anchors.micStartDate,
-            sysStartDate: anchors.sysStartDate,
-            micAnchors: anchors.micAnchors.map { .init(frame: $0.frame, date: $0.date) },
-            sysAnchors: anchors.sysAnchors.map { .init(frame: $0.frame, date: $0.date) }
-        )
-        if let data = try? JSONEncoder.iso8601Encoder.encode(meta) {
-            try? data.write(to: audioDir.appendingPathComponent("batch-meta.json"), options: .atomic)
-        }
+    /// The session's `audio/` directory, created — where `AudioRecorder`
+    /// records the two tracks from the first buffer (#177).
+    @discardableResult
+    func prepareAudioDirectory(sessionID: String) -> URL {
+        let audioDir = audioDirectory(for: sessionID)
+        try? FileManager.default.createDirectory(at: audioDir, withIntermediateDirectories: true)
+        return audioDir
     }
 
     func batchAudioURLs(sessionID: String) -> (mic: URL?, sys: URL?) {
         let fm = FileManager.default
-
-        // Try canonical audio/ subdirectory first
-        let audioDir = sessionDirectory(for: sessionID).appendingPathComponent("audio", isDirectory: true)
-        let micCanonical = audioDir.appendingPathComponent("mic.caf")
-        let sysCanonical = audioDir.appendingPathComponent("sys.caf")
-        if fm.fileExists(atPath: micCanonical.path) || fm.fileExists(atPath: sysCanonical.path) {
-            return (
-                mic: fm.fileExists(atPath: micCanonical.path) ? micCanonical : nil,
-                sys: fm.fileExists(atPath: sysCanonical.path) ? sysCanonical : nil
+        for directory in stashDirectories(sessionID: sessionID) {
+            let mic = BatchAudioStash.micURL(in: directory)
+            let sys = BatchAudioStash.sysURL(in: directory)
+            let found = (
+                mic: fm.fileExists(atPath: mic.path) ? mic : nil,
+                sys: fm.fileExists(atPath: sys.path) ? sys : nil
             )
+            if found.mic != nil || found.sys != nil { return found }
         }
-
-        // Fall back to legacy layout (files directly in session subdirectory)
-        let dir = sessionDirectory(for: sessionID)
-        let micLegacy = dir.appendingPathComponent("mic.caf")
-        let sysLegacy = dir.appendingPathComponent("sys.caf")
-        return (
-            mic: fm.fileExists(atPath: micLegacy.path) ? micLegacy : nil,
-            sys: fm.fileExists(atPath: sysLegacy.path) ? sysLegacy : nil
-        )
+        return (mic: nil, sys: nil)
     }
 
     func cleanupBatchAudio(sessionID: String) {
-        let fm = FileManager.default
-
-        // Clean canonical audio/
-        let audioDir = sessionDirectory(for: sessionID).appendingPathComponent("audio", isDirectory: true)
-        try? fm.removeItem(at: audioDir.appendingPathComponent("mic.caf"))
-        try? fm.removeItem(at: audioDir.appendingPathComponent("sys.caf"))
-        try? fm.removeItem(at: audioDir.appendingPathComponent("batch-meta.json"))
-
-        // Clean legacy layout
-        let dir = sessionDirectory(for: sessionID)
-        try? fm.removeItem(at: dir.appendingPathComponent("mic.caf"))
-        try? fm.removeItem(at: dir.appendingPathComponent("sys.caf"))
-        try? fm.removeItem(at: dir.appendingPathComponent("batch-meta.json"))
+        for directory in stashDirectories(sessionID: sessionID) {
+            BatchAudioStash.remove(in: directory)
+        }
     }
 
     /// Audio a session's transcript can be rebuilt from (#109), in
@@ -992,6 +957,11 @@ actor SessionRepository {
     /// timing anchors), then any merged audio `audioFileURL(for:)` resolves —
     /// the session's own copy (imports, earlier rebuild attempts) or the m4a
     /// export in the notes folder.
+    ///
+    /// A stash is no longer evidence that the meeting ended: since #177 a live
+    /// meeting has one from its first buffer. Callers must exclude the live
+    /// session themselves — `TranscriptHealer` does it in `sweep` and
+    /// `ensure`, both against `liveSessionID()`.
     ///
     /// This ordering IS the speaker-collapse policy (#129, decided by policy
     /// under #166 — never a dialog): the merged-file pass labels every
@@ -1071,18 +1041,10 @@ actor SessionRepository {
     }
 
     func loadBatchMeta(sessionID: String) -> BatchMeta? {
-        // Try canonical audio/ path first
-        let audioMetaURL = sessionDirectory(for: sessionID)
-            .appendingPathComponent("audio", isDirectory: true)
-            .appendingPathComponent("batch-meta.json")
-        if let data = try? Data(contentsOf: audioMetaURL) {
-            return try? decoder.decode(BatchMeta.self, from: data)
-        }
-
-        // Legacy path
-        let legacyMetaURL = sessionDirectory(for: sessionID).appendingPathComponent("batch-meta.json")
-        guard let data = try? Data(contentsOf: legacyMetaURL) else { return nil }
-        return try? decoder.decode(BatchMeta.self, from: data)
+        stashDirectories(sessionID: sessionID)
+            .lazy
+            .compactMap { BatchAudioStash.readMeta(in: $0) }
+            .first
     }
 
 
@@ -1173,8 +1135,7 @@ actor SessionRepository {
     /// when the session's audio/ has no playable file, resolve it there. The
     /// session-local copy wins when both exist.
     func audioFileURL(for sessionID: String) -> URL? {
-        let audioDir = sessionDirectory(for: sessionID)
-            .appendingPathComponent("audio", isDirectory: true)
+        let audioDir = audioDirectory(for: sessionID)
         let contents = (try? FileManager.default.contentsOfDirectory(
             at: audioDir, includingPropertiesForKeys: nil
         )) ?? []
@@ -1347,12 +1308,49 @@ enum RebuildAudioSource: Sendable {
     case file(URL)
 }
 
-/// Timing anchor data passed from AudioRecorder to SessionRepository.
-struct BatchAnchors: Sendable {
-    let micStartDate: Date?
-    let sysStartDate: Date?
-    let micAnchors: [(frame: Int64, date: Date)]
-    let sysAnchors: [(frame: Int64, date: Date)]
+/// The layout of a meeting's per-track stash. `AudioRecorder` writes it live
+/// (#177) and `SessionRepository` reads it, so the names and the meta format
+/// have exactly one owner. The same three names describe the legacy layout,
+/// which put them straight in the session directory instead of `audio/`.
+enum BatchAudioStash {
+    static func micURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("mic.caf")
+    }
+
+    static func sysURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("sys.caf")
+    }
+
+    static func metaURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("batch-meta.json")
+    }
+
+    /// Logged, not swallowed: a meeting's timing anchors are written from an
+    /// off-thread queue with nobody waiting on the result, so a failure that
+    /// left no trace would surface much later as a rebuilt transcript stamped
+    /// at the moment of the rebuild. `AudioRecorder.finishTracks(for:)` writes
+    /// the last snapshot again, which is the retry.
+    static func writeMeta(_ meta: BatchMeta, in directory: URL) {
+        do {
+            let data = try JSONEncoder.iso8601Encoder.encode(meta)
+            try data.write(to: metaURL(in: directory), options: .atomic)
+        } catch {
+            repoLog.error("batch meta write failed: \(error.localizedDescription, privacy: .private)")
+        }
+    }
+
+    static func readMeta(in directory: URL) -> BatchMeta? {
+        guard let data = try? Data(contentsOf: metaURL(in: directory)) else { return nil }
+        return try? JSONDecoder.iso8601Decoder.decode(BatchMeta.self, from: data)
+    }
+
+    /// Remove the whole stash — both tracks and their timing meta.
+    static func remove(in directory: URL) {
+        let fm = FileManager.default
+        try? fm.removeItem(at: micURL(in: directory))
+        try? fm.removeItem(at: sysURL(in: directory))
+        try? fm.removeItem(at: metaURL(in: directory))
+    }
 }
 
 /// Codable batch metadata persisted as batch-meta.json.
@@ -1361,6 +1359,10 @@ struct BatchMeta: Codable, Sendable {
     let sysStartDate: Date?
     let micAnchors: [TimingAnchor]
     let sysAnchors: [TimingAnchor]
+
+    /// There is timing worth persisting. A track's first successful write is
+    /// also its first anchor, so an empty pair means no audio ever landed.
+    var hasAnchors: Bool { !micAnchors.isEmpty || !sysAnchors.isEmpty }
 
     struct TimingAnchor: Codable, Sendable {
         let frame: Int64
