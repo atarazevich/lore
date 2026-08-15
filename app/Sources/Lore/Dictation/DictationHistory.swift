@@ -90,6 +90,125 @@ struct DictationHistoryEntry: Identifiable, Codable, Equatable {
     }
 }
 
+/// A dictation's audio while it is still being spoken (#182). The file is the
+/// entry's own from the first buffer, appended to on a private serial queue so
+/// the main actor — where capture lands — never waits on the disk, and the
+/// entry's JSON is written beside it in that same first operation: audio no
+/// entry names can never be matched to anything afterwards. The entry joins
+/// `entries` only when the recording ends, so nothing offers a retry over a
+/// file that is still growing. Why: `docs/decisions.md` 2026-08-15.
+///
+/// `@unchecked Sendable`: every mutable field is touched only on `queue`,
+/// except `audioIsOnDisk`, which `finish` publishes through it.
+final class LiveDictationRecording: @unchecked Sendable {
+    /// The entry written at the first buffer. Its duration stays 0 until the
+    /// recording ends — the one field a start cannot know.
+    let entry: DictationHistoryEntry
+
+    /// Whether the audio reached disk. Meaningful once `finish` has run.
+    private(set) var audioIsOnDisk = false
+
+    private let audioURL: URL
+    private let entryURL: URL
+    private let entryData: Data
+    private let queue = DispatchQueue(label: "com.lore.dictation.recording", qos: .userInitiated)
+
+    private var handle: FileHandle?
+    /// Set by the first buffer whether or not the file could be created: one
+    /// open attempt per recording, and no later buffer can re-create a file
+    /// this recording is done with.
+    private var attemptedOpen = false
+    private var wroteAudio = false
+
+    init(entry: DictationHistoryEntry, audioURL: URL, entryURL: URL, entryData: Data) {
+        self.entry = entry
+        self.audioURL = audioURL
+        self.entryURL = entryURL
+        self.entryData = entryData
+    }
+
+    /// Hand one capture buffer to the disk. Returns immediately — the copy is
+    /// the caller's cost, the write is the queue's.
+    func append(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
+        let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
+        queue.async { [self] in
+            if !attemptedOpen {
+                attemptedOpen = true
+                handle = openFiles()
+                wroteAudio = handle != nil
+            }
+            guard let handle else { return }
+            do {
+                try handle.write(contentsOf: data)
+            } catch {
+                // A failed write leaves the file short; appending past it would
+                // splice a gap into the middle of the audio. Keep what landed.
+                close()
+                DiagStore.record(.historyWriteFailed)
+                historyLog.error("dictation audio write failed: \(error.localizedDescription, privacy: .private)")
+            }
+        }
+    }
+
+    /// End the recording. Synchronous by design: it runs behind every buffer
+    /// already queued, so when it returns, what the user said is on disk.
+    func finish() {
+        audioIsOnDisk = queue.sync {
+            close()
+            return wroteAudio
+        }
+    }
+
+    /// Leave nothing behind — audio and entry file go together, behind every
+    /// buffer already queued. Every gesture that does not become a dictation
+    /// ends here: a tap, an Esc, a slip under half a second.
+    func abandon() {
+        queue.sync {
+            close()
+            try? FileManager.default.removeItem(at: audioURL)
+            try? FileManager.default.removeItem(at: entryURL)
+        }
+        audioIsOnDisk = false
+    }
+
+    /// The entry this recording wrote at its first buffer, completed with the
+    /// duration only the end knows. Nil when no audio reached disk — the
+    /// caller still holds the samples and saves them itself. Read after
+    /// `finish`.
+    func completed(durationSeconds: Double) -> DictationHistoryEntry? {
+        guard audioIsOnDisk else { return nil }
+        var completed = entry
+        completed.durationSeconds = durationSeconds
+        return completed
+    }
+
+    private func close() {
+        try? handle?.close()
+        handle = nil
+        attemptedOpen = true
+    }
+
+    /// The entry lands with the first sample, never after it. Neither file may
+    /// survive alone: an entry with no audio offers a retry over nothing, and
+    /// audio with no entry is what left six unreferenced blobs on disk (#182).
+    private func openFiles() -> FileHandle? {
+        do {
+            try entryData.write(to: entryURL, options: .atomic)
+            guard FileManager.default.createFile(atPath: audioURL.path, contents: nil) else {
+                throw CocoaError(.fileWriteUnknown)
+            }
+            return try FileHandle(forWritingTo: audioURL)
+        } catch {
+            try? FileManager.default.removeItem(at: entryURL)
+            try? FileManager.default.removeItem(at: audioURL)
+            DiagStore.record(.historyWriteFailed)
+            historyLog.error("failed to open recording: \(error.localizedDescription, privacy: .private)")
+            return nil
+        }
+    }
+}
+
 @Observable
 @MainActor
 final class DictationHistory {
@@ -179,9 +298,35 @@ final class DictationHistory {
         revision += 1
     }
 
+    /// Open the files a recording is written to while it is being spoken
+    /// (#182). The entry is deliberately not added to `entries`: an in-progress
+    /// recording must not appear in history, because a growing file has nothing
+    /// to retry. It joins the list at `add`, or disappears with `abandon`.
+    func beginRecording(timestamp: Date = Date()) -> LiveDictationRecording? {
+        let filename = Self.newAudioFilename()
+        let entry = DictationHistoryEntry(
+            timestamp: timestamp, durationSeconds: 0, audioFilename: filename
+        )
+        guard let data = try? JSONEncoder().encode(entry) else {
+            DiagStore.record(.historyWriteFailed)
+            historyLog.error("failed to encode in-progress entry")
+            return nil
+        }
+        return LiveDictationRecording(
+            entry: entry,
+            audioURL: audioDirectory.appendingPathComponent(filename),
+            entryURL: entryFileURL(entry.id),
+            entryData: data
+        )
+    }
+
+    private static func newAudioFilename() -> String {
+        "dictation-\(UUID().uuidString).raw"
+    }
+
     /// Save raw audio samples to disk. Returns the filename.
     func saveAudio(_ samples: [Float]) -> String? {
-        let filename = "dictation-\(UUID().uuidString).raw"
+        let filename = Self.newAudioFilename()
         let url = audioDirectory.appendingPathComponent(filename)
         let data = samples.withUnsafeBufferPointer { Data(buffer: $0) }
         do {
@@ -204,6 +349,17 @@ final class DictationHistory {
             let floatBuffer = baseAddress.assumingMemoryBound(to: Float.self)
             return Array(UnsafeBufferPointer(start: floatBuffer, count: count))
         }
+    }
+
+    /// Bytes per second of the raw audio files this store writes: the 16 kHz
+    /// mono float32 the dictation capture converts to.
+    private static let audioBytesPerSecond = 16000.0 * Double(MemoryLayout<Float>.size)
+
+    private func durationOfAudio(_ filename: String) -> Double? {
+        let url = audioDirectory.appendingPathComponent(filename)
+        guard let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize,
+              size > 0 else { return nil }
+        return Double(size) / Self.audioBytesPerSecond
     }
 
     private func deleteAudioFile(for entry: DictationHistoryEntry) {
@@ -276,7 +432,15 @@ final class DictationHistory {
         ) {
             for url in files where url.pathExtension == "json" {
                 if let data = try? Data(contentsOf: url),
-                   let entry = try? JSONDecoder().decode(DictationHistoryEntry.self, from: data) {
+                   var entry = try? JSONDecoder().decode(DictationHistoryEntry.self, from: data) {
+                    // A recording interrupted before it ended never learned its
+                    // duration (#182) — read it back from the audio that
+                    // survived, so a recovered entry doesn't sit beside its own
+                    // sound claiming 0:00.
+                    if entry.durationSeconds == 0, let filename = entry.audioFilename,
+                       let duration = durationOfAudio(filename) {
+                        entry.durationSeconds = duration
+                    }
                     loaded.append(entry)
                 } else {
                     DiagStore.record(.corruptFileAside(artifact: .historyEntry))

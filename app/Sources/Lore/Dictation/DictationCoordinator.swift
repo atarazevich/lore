@@ -50,6 +50,11 @@ final class DictationCoordinator {
     private var stickyErrorInFlight = false
     private var pendingStickyRelease = false
     private var accumulatedSamples: [Float] = []
+    /// The recording being written to disk while the user speaks (#182), from
+    /// the confirmed hold until whichever path ends the capture. `stopMicCapture`
+    /// hands it to that path, which either adopts it into history or abandons
+    /// it — nothing else may hold it, and no path may drop it silently.
+    private var liveRecording: LiveDictationRecording?
     private var converter: AVAudioConverter?
     private let cleanupClient: any CleanupProviding
 
@@ -110,10 +115,10 @@ final class DictationCoordinator {
     /// The 300ms audio-tail sleep of the in-flight pipeline, separate from
     /// the pipeline Task so a new Fn press can cut the tail short without
     /// cancelling the pipeline itself (#104): `startPreBuffer` cancels it,
-    /// finalizes the capture synchronously, and parks the samples in
-    /// `cutTailSamples` for the pipeline to pick up.
+    /// finalizes the capture synchronously, and parks the samples — and the
+    /// recording they were written to — in `cutTail` for the pipeline to pick up.
     private var tailTask: Task<Void, Never>?
-    private var cutTailSamples: [Float]?
+    private var cutTail: (samples: [Float], recording: LiveDictationRecording?)?
 
     /// Enqueue the newest transcription (#104). `work` receives the session
     /// epoch it was enqueued under and the previous link, which it must await
@@ -172,12 +177,11 @@ final class DictationCoordinator {
             // not a press — and the recording is left alone. The tailTask
             // check also guarantees the parked samples are always picked up:
             // the pipeline is at the tail await, whose next statement reads
-            // `cutTailSamples`.
+            // `cutTail`.
             guard latestTranscription?.epoch == sessionEpoch, let tailTask else { return }
             tailTask.cancel()
             self.tailTask = nil
-            stopMicCapture()
-            cutTailSamples = accumulatedSamples
+            cutTail = (samples: accumulatedSamples, recording: stopMicCapture())
             accumulatedSamples.removeAll()
             state = .processing
         }
@@ -319,6 +323,11 @@ final class DictationCoordinator {
         lastError = nil
         captureConfirmed = true
         state = .recording
+        // Only past the tap threshold does the audio start reaching disk (#182):
+        // a pre-buffer is a gesture that may still turn out to be nothing, and
+        // nothing must leave a file. What it already holds goes in first.
+        liveRecording = history.beginRecording()
+        liveRecording?.append(accumulatedSamples)
         log.debug("recording confirmed (pre-buffer kept)")
     }
 
@@ -326,7 +335,7 @@ final class DictationCoordinator {
     func cancelPreBuffer() {
         guard isPreBuffering else { return }
         isPreBuffering = false
-        stopMicCapture()
+        stopMicCapture()?.abandon()
         accumulatedSamples.removeAll()
         log.debug("pre-buffer discarded (tap)")
     }
@@ -362,14 +371,19 @@ final class DictationCoordinator {
         tailTask = nil
 
         let samples: [Float]
-        if let cut = cutTailSamples {
+        // The recording this pipeline now owns: adopted into history below, or
+        // abandoned on the way out (#182).
+        let recording: LiveDictationRecording?
+        if let cut = cutTail {
             // Tail cut by a new press — capture already finalized for us.
-            cutTailSamples = nil
-            samples = cut
+            cutTail = nil
+            samples = cut.samples
+            recording = cut.recording
         } else {
             // Re-check state — may have been discarded during the tail
+            // (which abandoned the recording along with it).
             guard state == .recording, isCurrentSession(epoch) else { return }
-            stopMicCapture()
+            recording = stopMicCapture()
             samples = accumulatedSamples
             accumulatedSamples.removeAll()
         }
@@ -385,6 +399,7 @@ final class DictationCoordinator {
         // an empty history entry. A non-empty but short recording falls through to
         // the quiet "too short" path below, preserving prior behavior.
         guard !samples.isEmpty else {
+            recording?.abandon()
             // Prefer a concrete bus capture error if one was recorded; otherwise the
             // unified message. Fn is already released here (stop came from the release
             // path), so use the grace hide directly.
@@ -407,17 +422,22 @@ final class DictationCoordinator {
         if isCurrentSession(epoch) { lastError = nil }
 
         guard samples.count > Self.minimumSpeechSamples else {
+            recording?.abandon()
             log.info("Too short, ignoring")
             if isCurrentSession(epoch) { state = .idle }
             return
         }
 
-        // STEP 1: Save audio to disk FIRST — never lose the recording.
+        // STEP 1: the audio is already at its final path — capture wrote it
+        // there as the user spoke (#182), and the entry beside it. Only a
+        // recording that never reached disk still needs the blob written here.
         // Sync the audio retention limit from Settings so add-time pruning
         // honors the user's choice (#52); history stays settings-agnostic.
         history.audioRetentionLimit = settings?.dictationAudioRetentionCount ?? 500
-        let audioFilename = history.saveAudio(samples)
-        var entry = DictationHistoryEntry(durationSeconds: durationSeconds, audioFilename: audioFilename)
+        var entry = recording?.completed(durationSeconds: durationSeconds)
+            ?? DictationHistoryEntry(
+                durationSeconds: durationSeconds, audioFilename: history.saveAudio(samples)
+            )
         // Fn+K (#122): the flag belongs to this session — a stale pipeline
         // must not steal a newer session's arming (same rule as `pending`
         // below). Set before `add` so the entry's FIRST write carries it;
@@ -429,7 +449,7 @@ final class DictationCoordinator {
         }
         history.add(entry)
         if isCurrentSession(epoch) { currentEntryID = entry.id }
-        log.debug("audio saved: \(audioFilename ?? "FAILED", privacy: .private)")
+        log.debug("audio saved: \(entry.audioFilename ?? "FAILED", privacy: .private)")
 
         // Capture the pre-paste mode now, while it is still this session's —
         // a newer session owns `pendingCleanupMode` once confirmed, and a
@@ -641,7 +661,9 @@ final class DictationCoordinator {
             latestTranscription.task.cancel()
         }
         sessionEpoch += 1
-        stopMicCapture()
+        // Nothing behind, on disk as in memory (#182) — unless the pipeline
+        // already adopted the recording, and then there is nothing to hand over.
+        stopMicCapture()?.abandon()
         accumulatedSamples.removeAll()
         pendingCleanupMode = nil
         pendingOperatorAddressed = false
@@ -739,13 +761,27 @@ final class DictationCoordinator {
             for await buffer in stream {
                 guard let self, !Task.isCancelled else { break }
                 if let samples = AudioUtils.extractSamples(buffer, converter: &self.converter) {
-                    self.accumulatedSamples.append(contentsOf: samples)
+                    self.appendCapturedSamples(samples)
                 }
             }
         }
     }
 
-    private func stopMicCapture() {
+    /// One capture buffer, two destinations: memory for the transcription about
+    /// to run, and the recording's own file so the words survive a kill before
+    /// the key is released (#182). This runs on the main actor while the user is
+    /// speaking, so the write itself belongs to the recording's serial queue.
+    /// Internal so tests drive the loop without opening a microphone.
+    func appendCapturedSamples(_ samples: [Float]) {
+        accumulatedSamples.append(contentsOf: samples)
+        liveRecording?.append(samples)
+    }
+
+    /// End the capture and hand back the recording it was writing (#182). Not
+    /// discardable: every caller says what becomes of it — adopted into
+    /// history, parked for the pipeline that owns it, or abandoned — so no path
+    /// can leave a file behind. Nil when the gesture never became a recording.
+    private func stopMicCapture() -> LiveDictationRecording? {
         captureEpoch += 1
         firstFrameWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
@@ -758,9 +794,16 @@ final class DictationCoordinator {
         }
         recordingTask?.cancel()
         recordingTask = nil
+        // After the cancel: the capture loop appends on this actor, so no buffer
+        // reaches the file past this point, and `finish` closes it behind every
+        // buffer already queued.
+        let recording = liveRecording
+        liveRecording = nil
+        recording?.finish()
         bluetoothMicRedirected = false
         noSignal = false
         onCaptureEnded?(!captureConfirmed)
+        return recording
     }
 
     /// Toggle pre-paste cleanup mode during recording.
