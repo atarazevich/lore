@@ -17,7 +17,7 @@
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
 	<key>CFBundleShortVersionString</key>
-	<string>3.1.0</string>
+	<string>3.1.1</string>
 	<key>CFBundleURLTypes</key>
 	<array>
 		<dict>
@@ -48,11 +48,11 @@
 	<string>lore needs microphone access to transcribe your voice in real-time during conversations.</string>
 	<key>SUEnableAutomaticChecks</key>
 	<true/>
-	<key>SUScheduledCheckInterval</key>
-	<integer>21600</integer>
 	<key>SUFeedURL</key>
 	<string>https://updates.dev.cognition.design/appcast.xml</string>
 	<key>SUPublicEDKey</key>
 	<string>JRchHE93Qx99A4qlbMpEFnyLhymm/Sv7G7lrMk17u4Y=</string>
+	<key>SUScheduledCheckInterval</key>
+	<integer>21600</integer>
 </dict>
 </plist>
