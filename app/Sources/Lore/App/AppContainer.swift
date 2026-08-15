@@ -137,12 +137,14 @@ final class AppContainer {
             transcriptionEngine = TranscriptionEngine(
                 transcriptStore: coordinator.transcriptStore,
                 settings: settings,
+                sharedBackendCache: coordinator.sharedBackendCache,
                 audioBus: audioBus
             )
         case .uiTest:
             transcriptionEngine = TranscriptionEngine(
                 transcriptStore: coordinator.transcriptStore,
                 settings: settings,
+                sharedBackendCache: coordinator.sharedBackendCache,
                 mode: .scripted(Self.scriptedUtterances)
             )
         }
@@ -164,7 +166,6 @@ final class AppContainer {
 
         let services = makeServices(settings: settings, coordinator: coordinator)
         coordinator.transcriptionEngine = services.transcriptionEngine
-        coordinator.transcriptionEngine?.sharedBackendCache = coordinator.sharedBackendCache
         coordinator.refinementEngine = services.refinementEngine
         coordinator.audioRecorder = services.audioRecorder
         coordinator.batchEngine = services.batchEngine

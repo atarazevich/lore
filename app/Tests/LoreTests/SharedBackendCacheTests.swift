@@ -14,9 +14,10 @@ final class SharedBackendCacheTests: XCTestCase {
         })
 
         // Two callers race; both should observe a single build.
-        async let a: Void = cache.prepare()
-        async let b: Void = cache.prepare()
-        _ = try await (a, b)
+        async let a = cache.prepare()
+        async let b = cache.prepare()
+        let (first, second) = try await (a, b)
+        XCTAssertIdentical(first as AnyObject, second as AnyObject, "both callers get the one instance")
 
         XCTAssertEqual(builds.count, 1, "concurrent prepare must build the backend exactly once")
         XCTAssertTrue(cache.isReady)
@@ -57,14 +58,4 @@ final class SharedBackendCacheTests: XCTestCase {
         XCTAssertEqual(builds.count, 2)
         XCTAssertTrue(cache.isReady)
     }
-}
-
-// MARK: - Test helpers
-
-private final class BuildCounter: @unchecked Sendable {
-    private let lock = NSLock()
-    private var value = 0
-    var count: Int { lock.lock(); defer { lock.unlock() }; return value }
-    @discardableResult
-    func increment() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
 }

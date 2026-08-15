@@ -125,23 +125,40 @@ final class TranscriptionEngine {
     /// Tracks the AudioBus subscription for mic capture.
     private var micConsumerID: UUID?
 
-    /// Separate backend instances for mic and system audio.
-    /// Parakeet keeps mutable decoder state per manager, so mic and system audio
-    /// need separate instances even when they share the same loaded model files.
-    private var micBackend: (any TranscriptionBackend)?
-    private var systemBackend: (any TranscriptionBackend)?
+    /// The two backends a live session transcribes through: the mic leg draws
+    /// the app's single prepared instance from `sharedBackendCache`, the system
+    /// leg keeps its own.
+    ///
+    /// The separation is *not* about decoder state, despite what this comment
+    /// said until #169: `ParakeetBackend.transcribe` makes a fresh
+    /// `TdtDecoderState` per call and `AsrManager` is an actor, and the batch
+    /// engine already runs both tracks of a recording through one backend. What
+    /// a second instance actually buys is that the two live streams don't
+    /// serialize on one actor — a latency question that is being measured
+    /// separately, so the instance stays until it has an answer.
+    ///
+    /// Readable (never writable) from outside so a test can assert the mic leg
+    /// really is the shared instance and not a copy of it.
+    private(set) var micBackend: (any TranscriptionBackend)?
+    private(set) var systemBackend: (any TranscriptionBackend)?
     private var vadManager: VadManager?
 
-    /// Cached backends survive across start/stop cycles to avoid reloading models from disk.
-    private var cachedMicBackend: (any TranscriptionBackend)?
+    /// The system leg's backend, kept across start/stop cycles so a second
+    /// meeting in the same session reloads nothing. The mic leg needs no
+    /// equivalent — the shared cache is where it survives.
     private var cachedSystemBackend: (any TranscriptionBackend)?
 
     /// Audio recorder for tapping streams (set by ContentView when recording is enabled).
     var audioRecorder: AudioRecorder?
 
-    /// Shared backend cache — if set, the engine reuses the cached backend for mic
-    /// transcription instead of loading a duplicate model.
-    var sharedBackendCache: SharedBackendCache?
+    /// The app's one prepared ASR instance. The engine asks it for the mic leg
+    /// rather than building its own, so a meeting started while the launch
+    /// warm-up is still loading joins that load instead of doubling it (#169).
+    let sharedBackendCache: SharedBackendCache
+
+    /// Factory for the system leg's backend — the production Parakeet instance;
+    /// injectable so tests can drive the model path without a CoreML load.
+    private let makeSystemBackend: @Sendable () -> any TranscriptionBackend
 
     /// Tracks the resolved mic device ID currently in use.
     private var currentMicDeviceID: AudioDeviceID = 0
@@ -161,11 +178,20 @@ final class TranscriptionEngine {
     private var pendingMicDeviceID: AudioDeviceID?
     private var pendingSystemAudioRestart = false
 
-    init(transcriptStore: TranscriptStore, settings: AppSettings, audioBus: AudioBus = AudioBus(), mode: Mode = .live) {
+    init(
+        transcriptStore: TranscriptStore,
+        settings: AppSettings,
+        sharedBackendCache: SharedBackendCache,
+        audioBus: AudioBus = AudioBus(),
+        mode: Mode = .live,
+        makeSystemBackend: @escaping @Sendable () -> any TranscriptionBackend = { ParakeetBackend() }
+    ) {
         self.transcriptStore = transcriptStore
         self.settings = settings
+        self.sharedBackendCache = sharedBackendCache
         self.audioBus = audioBus
         self.mode = mode
+        self.makeSystemBackend = makeSystemBackend
         switch mode {
         case .live:
             self.needsModelDownload = Self.modelNeedsDownload()
@@ -220,18 +246,10 @@ final class TranscriptionEngine {
         defer { isStarting = false }
 
         // 1. Load transcription models via backend protocol
-        let canReuseCache = cachedMicBackend != nil && cachedSystemBackend != nil
-        let modelLoadStart = Date()
-        var usedSharedCacheBackend = false
-
-        if canReuseCache {
-            engineLog.debug("reusing cached backends")
-            self.micBackend = cachedMicBackend
-            self.systemBackend = cachedSystemBackend
+        if sharedBackendCache.isReady && cachedSystemBackend != nil {
+            engineLog.debug("reusing prepared backends")
             assetStatus = "Models ready"
-        }
-
-        if !canReuseCache {
+        } else {
             let isDownloading = needsModelDownload
             assetStatus = isDownloading
                 ? "Downloading Parakeet TDT v3..."
@@ -240,74 +258,12 @@ final class TranscriptionEngine {
             engineLog.debug("loading transcription model")
         }
 
-        // Which model the `do` block is currently loading, so a failure is attributed
-        // to the model that actually failed. VAD lives inside the same `do`, and used
-        // to be reported as an ASR failure.
-        var loadingModel: DiagEvent.ModelKind = .asr
-        var phaseStart = modelLoadStart
-
         do {
-            if !canReuseCache {
-                // Try shared cache first — reuse the preloaded dictation backend as mic backend
-                if let sharedBackend = sharedBackendCache?.backend {
-                    self.micBackend = sharedBackend
-                    usedSharedCacheBackend = true
-                    engineLog.debug("reusing shared cache backend for mic")
-                } else {
-                    let mic = ParakeetBackend()
-                    try await mic.prepare(
-                        onStatus: { [weak self] status in
-                            Task { @MainActor in
-                                self?.assetStatus = status
-                            }
-                        },
-                        onProgress: { [weak self] fraction in
-                            Task { @MainActor in
-                                self?.downloadProgress = fraction
-                            }
-                        }
-                    )
-                    self.micBackend = mic
-                }
-
-                // Parakeet needs a separate backend for system audio (mutable decoder state).
-                let sys = ParakeetBackend()
-                try await sys.prepare { _ in }
-                self.systemBackend = sys
-
-                // Store in cache for next session.
-                // Only cache engine-created backends — the shared cache backend
-                // is owned by SharedBackendCache.
-                let usedSharedBackend = (self.micBackend as AnyObject) === (sharedBackendCache?.backend as AnyObject)
-                if !usedSharedBackend {
-                    cachedMicBackend = self.micBackend
-                }
-                cachedSystemBackend = self.systemBackend
-            }
-
-            // The ASR backend is up. A cache hit did no loading, so its duration is 0
-            // rather than a stopwatch reading of a few skipped `if`s.
-            let fromCache = canReuseCache || usedSharedCacheBackend
-            DiagStore.record(.modelLoad(
-                model: .asr,
-                outcome: .ok,
-                seconds: fromCache ? 0 : Date().timeIntervalSince(modelLoadStart),
-                fromCache: fromCache
-            ))
-
-            if self.vadManager == nil {
-                assetStatus = "Loading VAD model..."
-                loadingModel = .vad
-                phaseStart = Date()
-                let vad = try await VadManager()
-                self.vadManager = vad
-                DiagStore.record(.modelLoad(
-                    model: .vad,
-                    outcome: .ok,
-                    seconds: Date().timeIntervalSince(phaseStart),
-                    fromCache: false
-                ))
-            }
+            // Each step records its own modelLoad event at the point the load
+            // happens, so a VAD failure is never reported as an ASR one and a
+            // load the shared cache served is never counted twice.
+            try await acquireASRBackends()
+            try await ensureVAD()
 
             needsModelDownload = false
             downloadConfirmed = false
@@ -315,12 +271,6 @@ final class TranscriptionEngine {
             assetStatus = "Models ready"
         } catch {
             let msg = "Failed to load models: \(error.localizedDescription)"
-            DiagStore.record(.modelLoad(
-                model: loadingModel,
-                outcome: .failed,
-                seconds: Date().timeIntervalSince(phaseStart),
-                fromCache: loadingModel == .asr && (canReuseCache || usedSharedCacheBackend)
-            ))
             // The underlying error can name model cache paths — private.
             engineLog.error("failed to load models: \(error.localizedDescription, privacy: .private)")
             lastError = msg
@@ -339,6 +289,86 @@ final class TranscriptionEngine {
         guard let vadManager else { return }
 
         await bringUpCapture(vadManager: vadManager)
+    }
+
+    /// Put both ASR backends in place for a session.
+    ///
+    /// The mic leg comes from the shared cache — asked, never peeked at: a
+    /// meeting started while the launch warm-up is still loading joins that
+    /// load instead of building a second copy of the model, which is what #169
+    /// was. The cache owns that leg's `modelLoad` event (cold or hit) and the
+    /// instance itself: the engine only borrows it, and ending a meeting
+    /// releases the borrow, never the instance.
+    ///
+    /// The system leg builds once per engine lifetime and is reused after
+    /// that. Its build reports only failure — the ASR-is-up event has already
+    /// been recorded for this start, and `ModelKind` cannot tell the two legs
+    /// apart, so a second success event would read as a second cold load. A
+    /// failure has no such double: nothing else would say transcription is
+    /// broken, and the health surface needs to hear it (#151).
+    ///
+    /// Separate from `start()` so the model path can be exercised without a
+    /// microphone permission, an audio device, or the VAD model.
+    func acquireASRBackends() async throws {
+        micBackend = try await sharedBackendCache.prepare(
+            onStatus: { [weak self] status in
+                Task { @MainActor in
+                    self?.assetStatus = status
+                }
+            },
+            onProgress: { [weak self] fraction in
+                Task { @MainActor in
+                    self?.downloadProgress = fraction
+                }
+            }
+        )
+
+        if let cachedSystemBackend {
+            systemBackend = cachedSystemBackend
+            return
+        }
+
+        let sys = makeSystemBackend()
+        let startedAt = Date()
+        do {
+            try await sys.prepare { _ in }
+        } catch {
+            DiagStore.record(.modelLoad(
+                model: .asr,
+                outcome: .failed,
+                seconds: Date().timeIntervalSince(startedAt),
+                fromCache: false
+            ))
+            throw error
+        }
+        systemBackend = sys
+        cachedSystemBackend = sys
+    }
+
+    /// Load the VAD model once per engine lifetime. Records its own event so a
+    /// VAD failure is never reported as an ASR one.
+    private func ensureVAD() async throws {
+        if vadManager != nil { return }
+
+        assetStatus = "Loading VAD model..."
+        let startedAt = Date()
+        do {
+            vadManager = try await VadManager()
+        } catch {
+            DiagStore.record(.modelLoad(
+                model: .vad,
+                outcome: .failed,
+                seconds: Date().timeIntervalSince(startedAt),
+                fromCache: false
+            ))
+            throw error
+        }
+        DiagStore.record(.modelLoad(
+            model: .vad,
+            outcome: .ok,
+            seconds: Date().timeIntervalSince(startedAt),
+            fromCache: false
+        ))
     }
 
     /// Bring both capture legs up against the current settings: resolve and
@@ -661,8 +691,10 @@ final class TranscriptionEngine {
 
         await tearDownCaptureLegs()
 
-        // NOTE: cachedMicBackend/cachedSystemBackend are intentionally preserved
-        // across sessions to avoid model reload. Call invalidateBackendCache() to release.
+        // Only the session's borrowed references go. The shared cache's
+        // instance and `cachedSystemBackend` are deliberately preserved, so the
+        // next meeting reloads nothing — and a meeting ending can never tear
+        // down the instance dictation is also using.
         micBackend = nil
         systemBackend = nil
         isRunning = false
@@ -971,10 +1003,12 @@ final class TranscriptionEngine {
         engineLog.debug("mic mute -> off (session ended)")
     }
 
-    /// Discard cached backends so the next start() creates fresh ones.
+    /// Drop the system leg's backend so the next start() builds a fresh one.
+    /// The mic leg has no equivalent here: it belongs to the shared cache,
+    /// which clears its own view when its load fails — the engine never
+    /// invalidates a backend it does not own.
     private func invalidateBackendCache() {
-        cachedMicBackend = nil
         cachedSystemBackend = nil
-        engineLog.debug("backend cache invalidated")
+        engineLog.debug("system backend discarded")
     }
 }

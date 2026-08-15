@@ -99,6 +99,7 @@ struct MeetingHarness {
             coordinator.transcriptionEngine = TranscriptionEngine(
                 transcriptStore: transcriptStore,
                 settings: settings,
+                sharedBackendCache: coordinator.sharedBackendCache,
                 mode: .scripted(scripted)
             )
         }

@@ -37,3 +37,13 @@ final class StubTranscriptionBackend: TranscriptionBackend, @unchecked Sendable 
         return "mock transcription"
     }
 }
+
+/// How many backends a factory was asked for — the count every "did it load a
+/// second copy of the model" test is really asking about.
+final class BuildCounter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    var count: Int { lock.lock(); defer { lock.unlock() }; return value }
+    @discardableResult
+    func increment() -> Int { lock.lock(); defer { lock.unlock() }; value += 1; return value }
+}

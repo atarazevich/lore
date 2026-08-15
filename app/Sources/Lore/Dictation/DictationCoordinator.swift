@@ -84,8 +84,13 @@ final class DictationCoordinator {
     var backendCache: SharedBackendCache?
 
     /// Private backend instance for dictation transcription.
-    /// Separate from the shared cache to avoid concurrent decoder state mutation
-    /// when TranscriptionEngine also transcribes via the shared backend.
+    ///
+    /// Not, as this comment claimed until #169, because of decoder state:
+    /// `ParakeetBackend.transcribe` makes a fresh `TdtDecoderState` per call
+    /// and `AsrManager` is an actor, so sharing one instance is safe. What it
+    /// is not proven to be is fast — a dictation and a live meeting would then
+    /// queue behind each other on one actor. That latency is being measured
+    /// separately; until it has an answer the private instance stays.
     private var ownBackend: (any TranscriptionBackend)?
 
     /// In-flight build of `ownBackend`, if any. Lets the launch prewarm and a
@@ -926,9 +931,10 @@ final class DictationCoordinator {
             log.error("backendCache nil — dictation setup may not have run")
         }
 
-        // Use a private backend instance to avoid sharing mutable decoder state
-        // with TranscriptionEngine's backend from the shared cache. Deduped so
-        // the launch prewarm and this first use don't both build one (see
+        // Dictation's own backend instance — kept so a dictation never queues
+        // behind a live meeting's decode, not for the decoder-state reason this
+        // comment used to give (see `ownBackend`). Deduped so the launch
+        // prewarm and this first use don't both build one (see
         // `ensureOwnBackend`); already-warm if prewarm finished at launch.
         let backend: any TranscriptionBackend
         do {
