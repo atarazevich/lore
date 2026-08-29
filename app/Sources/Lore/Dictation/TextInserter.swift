@@ -73,6 +73,20 @@ enum TextInserter {
     }
 
     static func paste(_ text: String) {
+        paste([.text(text)])
+    }
+
+    /// A dictation's delivery, in order (#195). One step for a terminal; for a
+    /// web composer, the words up to a picture, then the picture as a file on
+    /// the pasteboard, then the words after it — a composer cannot be handed a
+    /// picture inside a string.
+    ///
+    /// Each step writes the pasteboard and posts its own Cmd+V; the user's
+    /// clipboard is saved once before the first step and restored once after
+    /// the last, because restoring between steps would hand the target its own
+    /// old clipboard mid-sequence.
+    static func paste(_ steps: [RichInput.DeliveryStep]) {
+        guard !steps.isEmpty else { return }
         let granted = isAccessibilityGranted
 
         // Even if AXIsProcessTrusted returns false, try the paste anyway —
@@ -87,28 +101,50 @@ enum TextInserter {
         // Save current clipboard
         let savedItems = savePasteboard(pasteboard)
 
-        // Set our text
-        writeString(text, to: pasteboard)
+        Task { @MainActor in
+            for (index, step) in steps.enumerated() {
+                switch step {
+                case .text(let text): writeString(text, to: pasteboard)
+                case .files(let paths): writeFileURLs(paths, to: pasteboard)
+                }
 
-        // Small delay to let clipboard settle, then simulate Cmd+V
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            // `postCmdV` reports only whether the CGEvents could be *created*.
-            // `CGEvent.post` returns nothing, so whether the paste reached an app is
-            // unobservable from here — an `Outcome.ok` would have read "fine" in
-            // precisely the incident this feature exists to diagnose.
-            let eventsCreated = postCmdV()
-            DiagStore.record(.pasteAttempt(
-                kind: .paste,
-                eventsCreated: eventsCreated,
-                accessibilityTrusted: granted
-            ))
+                // Small delay to let clipboard settle, then simulate Cmd+V.
+                try? await Task.sleep(for: .milliseconds(50))
+
+                // `postCmdV` reports only whether the CGEvents could be *created*.
+                // `CGEvent.post` returns nothing, so whether the paste reached an app is
+                // unobservable from here — an `Outcome.ok` would have read "fine" in
+                // precisely the incident this feature exists to diagnose. One event per
+                // step, so a sequence that stopped halfway says where.
+                let eventsCreated = postCmdV()
+                DiagStore.record(.pasteAttempt(
+                    kind: .paste,
+                    eventsCreated: eventsCreated,
+                    accessibilityTrusted: granted
+                ))
+                // Nothing was posted, so nothing later will land in the right
+                // place either: stop, restore, and leave the words that did
+                // arrive where they are.
+                guard eventsCreated else { break }
+                guard index < steps.count - 1 else { break }
+                try? await Task.sleep(for: settle(after: step))
+            }
 
             // Restore clipboard after target app processes the paste
-            Task { @MainActor in
-                try? await Task.sleep(for: .milliseconds(800))
-                restorePasteboard(NSPasteboard.general, items: savedItems)
-                log.debug("clipboard restored")
-            }
+            try? await Task.sleep(for: .milliseconds(800))
+            restorePasteboard(NSPasteboard.general, items: savedItems)
+            log.debug("clipboard restored")
+        }
+    }
+
+    /// How long the target needs before the next step. A composer attaches a
+    /// file asynchronously — it uploads a thumbnail, moves the caret, rebuilds
+    /// the box — and a paste arriving mid-attachment is the one that gets
+    /// dropped. Words are absorbed as fast as they are typed.
+    private static func settle(after step: RichInput.DeliveryStep) -> Duration {
+        switch step {
+        case .text: .milliseconds(250)
+        case .files: .milliseconds(600)
         }
     }
 
@@ -279,6 +315,26 @@ enum TextInserter {
         pasteboard.clearContents()
         PasteboardWriteLedger.shared.note(pasteboard.changeCount)
         pasteboard.setString(text, forType: .string)
+        PasteboardWriteLedger.shared.note(pasteboard.changeCount)
+    }
+
+    /// One pasteboard carrying one item per file, each a `public.file-url`
+    /// (#195). Chrome and WebKit walk every such item and attach every file
+    /// under its real name, where a paste carrying image *bytes* exposes only
+    /// the first picture — `dataForType:` reads the first item that has the
+    /// type and stops.
+    ///
+    /// Goes through the write ledger like every other lore write, so the
+    /// clipboard door does not read the app's own attachment back as material
+    /// for the next dictation.
+    private static func writeFileURLs(_ paths: [String], to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        PasteboardWriteLedger.shared.note(pasteboard.changeCount)
+        pasteboard.writeObjects(paths.map { path in
+            let item = NSPasteboardItem()
+            item.setString(URL(fileURLWithPath: path).absoluteString, forType: .fileURL)
+            return item
+        })
         PasteboardWriteLedger.shared.note(pasteboard.changeCount)
     }
 

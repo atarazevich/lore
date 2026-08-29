@@ -135,7 +135,10 @@ enum RichInput {
             .filter(\.included)
             .enumerated()
             .compactMap { order, item -> (index: String.Index, order: Int, text: String)? in
-                guard let text = item.pasteText else { return nil }
+                // The path form: what `compose` builds is the dictation's
+                // record — its history entry and what cleanup sees. The web
+                // form is derived from it at paste time (`delivery`, #195).
+                guard let text = item.pasteText(for: .path) else { return nil }
                 let count = wordIndex(for: item.offset, words: words)
                 return (characterIndex(afterWord: count, in: spoken), order, text)
             }
@@ -176,6 +179,79 @@ enum RichInput {
         return out
     }
 
+    // MARK: - Deliver
+
+    /// One step of a paste (#195). A web composer cannot be handed a picture
+    /// inside a string, so a dictation that carries one arrives as a short
+    /// sequence: the words up to the picture, the picture itself, the words
+    /// after it.
+    enum DeliveryStep: Equatable, Sendable {
+        /// Words — the spoken text with `<copied>`/`<link>` and the tags that
+        /// name the files, exactly as they will read in the composer.
+        case text(String)
+        /// Absolute paths, delivered as one pasteboard carrying one
+        /// `public.file-url` item each: Chrome and WebKit expose every such
+        /// item as a file under its real name, where image bytes on the
+        /// pasteboard expose only the first picture.
+        case files([String])
+    }
+
+    /// How a composed dictation reaches `target`.
+    ///
+    /// A terminal reads paths, so it gets what it has always got: one step,
+    /// one paste, the text untouched. Everything else gets the same text with
+    /// each picture's tag reduced to the filename the composer will show, cut
+    /// at every picture so the file can be pasted where it was taken.
+    ///
+    /// The items are found by their own pasted text, searched forward from the
+    /// previous cut — the same discipline as `split`, so a cleaned text (whose
+    /// items came back verbatim) cuts exactly as the raw one does. An item that
+    /// cannot be found is left alone rather than guessed at.
+    static func delivery(
+        text: String, items: [DictationItem], target: PasteTarget
+    ) -> [DeliveryStep] {
+        guard target == .web else { return text.isEmpty ? [] : [.text(text)] }
+
+        var steps: [DeliveryStep] = []
+        var pending = ""
+        var run: [String] = []
+        var cursor = text.startIndex
+
+        // The files that follow the words already gathered. Emitting the words
+        // first is what puts each tag in the composer before the attachment it
+        // names.
+        func flushRun() {
+            guard !run.isEmpty else { return }
+            if !pending.isEmpty {
+                steps.append(.text(pending))
+                pending = ""
+            }
+            steps.append(.files(run))
+            run = []
+        }
+
+        for item in items where item.included {
+            guard let needle = item.pasteText(for: .path), !needle.isEmpty,
+                  let found = text.range(of: needle, range: cursor..<text.endIndex) else { continue }
+            let between = String(text[cursor..<found.lowerBound])
+            let attaches = item.kind.isFile && item.path != nil
+            // Two pictures taken in the same breath travel in one paste; a word
+            // spoken between them ends the run and starts a new one.
+            if !attaches || !between.allSatisfy(\.isWhitespace) { flushRun() }
+            pending += between
+            pending += item.pasteText(for: attaches ? .web : .path) ?? needle
+            if attaches, let path = item.path { run.append(path) }
+            cursor = found.upperBound
+        }
+        flushRun()
+
+        pending += String(text[cursor...])
+        if !pending.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            steps.append(.text(pending))
+        }
+        return steps
+    }
+
     // MARK: - Split (cleanup and translation never touch inserted material)
 
     /// A composed text cut back into the parts the model may see and the parts
@@ -212,7 +288,7 @@ enum RichInput {
         var separators: [String] = []
         var cursor = text.startIndex
         for item in items where item.included {
-            guard let needle = item.pasteText, !needle.isEmpty,
+            guard let needle = item.pasteText(for: .path), !needle.isEmpty,
                   let found = text.range(of: needle, range: cursor..<text.endIndex) else { continue }
             var start = found.lowerBound
             while start > cursor, text[text.index(before: start)].isWhitespace {

@@ -148,7 +148,7 @@ final class RichInputTests: XCTestCase {
         let item = watcher.collect(at: 4.0)
         XCTAssertEqual(item?.kind, .url)
         XCTAssertEqual(
-            item?.pasteText,
+            item?.pasteText(for: .path),
             "<link>https://open.spotify.com/track/2xLMifQCjDGFmkHkpNLD9h</link>"
         )
     }
@@ -280,24 +280,24 @@ final class RichInputTests: XCTestCase {
     /// fence a name with spaces in it needs.
     func testEachKindIsTaggedForWhatItIs() {
         XCTAssertEqual(
-            DictationItem(kind: .text, offset: 0, text: "two\nlines").pasteText,
+            DictationItem(kind: .text, offset: 0, text: "two\nlines").pasteText(for: .path),
             "<copied>\ntwo\nlines\n</copied>"
         )
         XCTAssertEqual(
-            DictationItem(kind: .url, offset: 0, text: "https://example.com").pasteText,
+            DictationItem(kind: .url, offset: 0, text: "https://example.com").pasteText(for: .path),
             "<link>https://example.com</link>"
         )
         XCTAssertEqual(
             DictationItem(kind: .image, offset: 0, path: "/Users/a/Screenshot 13.41.02.png")
-                .pasteText,
+                .pasteText(for: .path),
             "<screenshot>/Users/a/Screenshot 13.41.02.png</screenshot>"
         )
         XCTAssertEqual(
-            DictationItem(kind: .fileURL, offset: 0, path: "/Users/a/notes 2026.md").pasteText,
+            DictationItem(kind: .fileURL, offset: 0, path: "/Users/a/notes 2026.md").pasteText(for: .path),
             "<file>/Users/a/notes 2026.md</file>"
         )
         // A picture whose file could not be written names nothing.
-        XCTAssertNil(DictationItem(kind: .image, offset: 0).pasteText)
+        XCTAssertNil(DictationItem(kind: .image, offset: 0).pasteText(for: .path))
     }
 
     /// The diagnostic stream may carry the size, never the content (#82) — and
@@ -403,7 +403,7 @@ final class RichInputTests: XCTestCase {
             AT THAT
             """
         )
-        XCTAssertTrue(cleaned.contains(item.pasteText!))
+        XCTAssertTrue(cleaned.contains(item.pasteText(for: .path)!))
     }
 
     /// The model returning stray whitespace must not add a paragraph break: the

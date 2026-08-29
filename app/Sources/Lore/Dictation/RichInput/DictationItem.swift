@@ -8,6 +8,11 @@ enum DictationItemKind: String, Codable, Sendable, CaseIterable {
     case image
     case fileURL
     case url
+
+    /// Whether the item is a file on disk. These are the two kinds a composer
+    /// has to be *handed* rather than told about (#195); the other two are text
+    /// and travel inside the paste like the spoken words do.
+    var isFile: Bool { self == .image || self == .fileURL }
 }
 
 /// One thing the user copied — or screenshotted to the clipboard — while a
@@ -63,12 +68,16 @@ struct DictationItem: Identifiable, Codable, Equatable, Sendable {
     /// What this item contributes to the prompt, tagged by what it is so that
     /// whoever reads the paste — a model or a person — can tell inserted
     /// material from spoken words. Copied text is fenced across its own lines
-    /// because it can be a paragraph; a path or a URL is one line and is not
-    /// quoted, the tag being the fence a name with spaces in it needs.
+    /// because it can be a paragraph; a path, a filename or a URL is one line
+    /// and is not quoted, the tag being the fence a name with spaces in it
+    /// needs.
+    ///
+    /// The tag is the same in both forms and stays where the item happened;
+    /// only what a file is *called* changes with the target (#195).
     ///
     /// Nil when the item has nothing to contribute — an image whose file could
     /// not be written names a picture that is not there.
-    var pasteText: String? {
+    func pasteText(for target: PasteTarget) -> String? {
         switch kind {
         case .text:
             guard let text, !text.isEmpty else { return nil }
@@ -77,11 +86,23 @@ struct DictationItem: Identifiable, Codable, Equatable, Sendable {
             guard let text, !text.isEmpty else { return nil }
             return "<link>\(text)</link>"
         case .image:
-            guard let path, !path.isEmpty else { return nil }
-            return "<screenshot>\(path)</screenshot>"
+            guard let name = fileName(for: target) else { return nil }
+            return "<screenshot>\(name)</screenshot>"
         case .fileURL:
-            guard let path, !path.isEmpty else { return nil }
-            return "<file>\(path)</file>"
+            guard let name = fileName(for: target) else { return nil }
+            return "<file>\(name)</file>"
+        }
+    }
+
+    /// What the text calls this item's file. A terminal's agent opens the path;
+    /// a web composer is handed the file itself and shows it under its own
+    /// name, so the text names it the same way the attachment does — a path
+    /// there points at nothing the reader can reach (#195).
+    private func fileName(for target: PasteTarget) -> String? {
+        guard let path, !path.isEmpty else { return nil }
+        switch target {
+        case .path: return path
+        case .web: return URL(fileURLWithPath: path).lastPathComponent
         }
     }
 

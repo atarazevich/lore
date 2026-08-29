@@ -578,13 +578,22 @@ final class DictationCoordinator {
         // dictation still lands where the cursor is.
         if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
-            TextInserter.paste(text)
+            // Where the words are about to land decides the form the items take
+            // (#195): a terminal's agent opens a path, a web composer has to be
+            // handed the file. Read now — the user may have changed windows
+            // while this was being transcribed.
+            let target = PasteTarget.frontmost
+            TextInserter.paste(
+                RichInput.delivery(text: text, items: entry.items ?? [], target: target)
+            )
             // The pasted text is exactly what the user dictated and is already
             // visible in the app's own history UI — only its length is recorded.
             DiagStore.record(.dictationPasted(characters: text.count, cleaned: didCleanup))
             if let items = entry.items, !items.isEmpty {
                 DiagStore.record(.dictationItemsPasted(
-                    items: items.count, included: items.filter(\.included).count
+                    items: items.count,
+                    included: items.filter(\.included).count,
+                    target: target
                 ))
             }
         }
