@@ -306,6 +306,9 @@ extension LoreRootApp {
 @MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var windowObserver: Any?
+    /// Retained for the app's lifetime, like `windowObserver` — a launch
+    /// refused elsewhere (#193) can arrive at any point once this is live.
+    private var launchRefusedObserver: Any?
     private var menuBarController: MenuBarController?
     private var isTerminating = false
     var coordinator: AppCoordinator? {
@@ -403,10 +406,85 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var didSetupDictation = false
     private var didStartDictationPipeline = false
 
+    /// Set right before `NSApp.terminate(nil)` in `applicationWillFinishLaunching`
+    /// (#193) — this process is exiting because another instance is already
+    /// running, not because the user quit.
+    private var isRefusedLaunch = false
+
+    /// Distributed so it crosses the process boundary between the refused
+    /// launch and the survivor (#193) — an in-process `NotificationCenter`
+    /// only reaches observers in the same process.
+    private static let launchRefusedNotification = Notification.Name("com.lore.app.launchRefused")
+    private static let launchRefusedBuildKey = "build"
+
+    /// `CFBundleVersion` is `MAJOR.MINOR.<git commit count>`; the last
+    /// component is the monotonic build every diagnostic event about a launch
+    /// names. Shared by `.appLaunched` and the refused-launch notification so
+    /// there is one parser, not two.
+    private static var currentBuildNumber: Int {
+        let bundleVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
+        return Int(bundleVersion.split(separator: ".").last ?? "") ?? 0
+    }
+
+    /// Earliest delegate hook — fires before `applicationDidFinishLaunching`
+    /// and before the scene's `onAppear` reaches `AppBoot.startSubsystemsOnce`
+    /// (see `SingleInstanceGuard` for what this guards against, #193).
+    ///
+    /// Skipped for UI tests: a UI test launches the real bundle, and a
+    /// developer's already-running dev build or `/Applications/Lore.app` would
+    /// otherwise make every UI-test run defer to it and exit immediately,
+    /// failing the test rather than the developer's other instance. Unit tests
+    /// never reach this delegate at all (`RuntimeEnvironment.isRunningUnitTests`
+    /// guard is defensive, not load-bearing, for that reason).
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        guard !RuntimeEnvironment.isRunningUnitTests, !isUITest else { return }
+
+        let bundleID = Bundle.main.bundleIdentifier ?? "com.lore.app"
+        let me = NSRunningApplication.current
+        let myPID = me.processIdentifier
+
+        // Keyed by pid so `me` — which may or may not already appear in
+        // AppKit's own lookup at this earliest hook — contributes exactly one
+        // entry, with its own `launchDate` rather than a possibly-absent one.
+        var byPID: [Int32: SingleInstanceGuard.Candidate] = [:]
+        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
+            byPID[app.processIdentifier] = SingleInstanceGuard.Candidate(
+                pid: app.processIdentifier,
+                launchDate: app.launchDate ?? .distantPast
+            )
+        }
+        byPID[myPID] = SingleInstanceGuard.Candidate(pid: myPID, launchDate: me.launchDate ?? .distantPast)
+
+        guard let winner = SingleInstanceGuard.processToDeferTo(
+            candidates: Array(byPID.values),
+            myPID: myPID
+        ) else { return }
+
+        NSRunningApplication(processIdentifier: winner.pid)?.activate()
+        // The trace has to be recorded by the survivor: this process's own
+        // `flush()` (below) never runs, and even if it did, its ring never
+        // held the event a later flush from the survivor would overwrite it
+        // with. `deliverImmediately` because this process exits right after.
+        DistributedNotificationCenter.default().postNotificationName(
+            Self.launchRefusedNotification,
+            object: nil,
+            userInfo: [Self.launchRefusedBuildKey: Self.currentBuildNumber],
+            deliverImmediately: true
+        )
+        isRefusedLaunch = true
+        NSApp.terminate(nil)
+    }
+
     /// The last second of events is exactly the interesting second when the user
     /// quits to escape a wedged state. `record()` coalesces disk writes at 1s, so
     /// without this the tail is lost. (A crash still loses it — nothing to do there.)
+    ///
+    /// Skipped for a refused launch (#193): its ring never held `.appLaunched`
+    /// or anything else, and flushing it would write that empty/stale ring
+    /// over whatever the surviving process writes for the event it is about
+    /// to record on this process's behalf.
     func applicationWillTerminate(_ notification: Notification) {
+        guard !isRefusedLaunch else { return }
         DiagStore.shared.flush()
     }
 
@@ -414,12 +492,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // First event of every run: the persisted ring is loaded here, so the
         // timeline shows where one launch ends and the next begins — which is
         // exactly the question "did they restart after granting the permission?".
-        // CFBundleVersion is MAJOR.MINOR.<git commit count>; the last component
-        // is the monotonic build that maps to an exact commit.
-        let bundleVersion = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? ""
-        DiagStore.record(.appLaunched(
-            build: Int(bundleVersion.split(separator: ".").last ?? "") ?? 0
-        ))
+        DiagStore.record(.appLaunched(build: Self.currentBuildNumber))
+
+        // A launch refused elsewhere (#193) records into *this* process's ring
+        // — the refused one never flushes its own (`applicationWillTerminate`).
+        launchRefusedObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Self.launchRefusedNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            let build = notification.userInfo?[Self.launchRefusedBuildKey] as? Int ?? 0
+            DiagStore.record(.appLaunchRefused(build: build))
+        }
 
         if !isUITest {
             NSApp.setActivationPolicy(.regular)

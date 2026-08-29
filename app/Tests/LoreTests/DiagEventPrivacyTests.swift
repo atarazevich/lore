@@ -44,7 +44,7 @@ final class DiagEventPrivacyTests: XCTestCase {
     /// One key per `DiagEvent` case. Adding a case breaks `key(of:)` below until a key
     /// is added here; `CaseIterable` then grows the expected set for free.
     private enum CaseKey: String, CaseIterable {
-        case appLaunched
+        case appLaunched, appLaunchRefused
         case healthConditionSustained, healthConditionCleared
         case healthSummonFired, healthSummonWithdrawn, healthSummonCleared
         case onboardingStarted, onboardingStepShown, onboardingDictationLanded
@@ -75,6 +75,7 @@ final class DiagEventPrivacyTests: XCTestCase {
     private static func key(of event: DiagEvent) -> CaseKey {
         switch event {
         case .appLaunched: return .appLaunched
+        case .appLaunchRefused: return .appLaunchRefused
         case .healthConditionSustained: return .healthConditionSustained
         case .healthConditionCleared: return .healthConditionCleared
         case .healthSummonFired: return .healthSummonFired
@@ -152,6 +153,7 @@ final class DiagEventPrivacyTests: XCTestCase {
     private static func sample(for key: CaseKey) -> DiagEvent {
         switch key {
         case .appLaunched: return .appLaunched(build: .max)
+        case .appLaunchRefused: return .appLaunchRefused(build: .max)
         case .healthConditionSustained: return .healthConditionSustained(trigger: .captureFailed)
         case .healthConditionCleared: return .healthConditionCleared(trigger: .identityMigration)
         case .healthSummonFired: return .healthSummonFired(trigger: .pasteFailed)

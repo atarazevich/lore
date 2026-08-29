@@ -227,6 +227,14 @@ enum DiagEvent: Codable, Sendable, Equatable {
 
     case appLaunched(build: Int)
 
+    /// A second `com.lore.app` process found one already running and exited
+    /// instead of standing up its own event tap, mic subscription and
+    /// menu-bar mark (#193). The running instance was activated in its place
+    /// and records this on the refused process's behalf, since the refused
+    /// process's own ring never survives to a flush. `build` names which
+    /// build tried to launch, matching its sibling `appLaunched(build:)`.
+    case appLaunchRefused(build: Int)
+
     /// A health condition crossed / left the persistence window (#151) — one
     /// pair per condition, at that condition's own crossing, so two failures
     /// standing at once are two traces rather than one arbitrated winner.
@@ -405,7 +413,7 @@ enum DiagEvent: Codable, Sendable, Equatable {
 extension DiagEvent {
     var subsystem: DiagSubsystem {
         switch self {
-        case .appLaunched, .healthConditionSustained, .healthConditionCleared,
+        case .appLaunched, .appLaunchRefused, .healthConditionSustained, .healthConditionCleared,
              .healthSummonFired, .healthSummonWithdrawn, .healthSummonCleared,
              .onboardingStarted, .onboardingStepShown, .onboardingDictationLanded,
              .onboardingCompleted:
@@ -456,6 +464,7 @@ extension DiagEvent {
     var caseName: String {
         switch self {
         case .appLaunched: return "appLaunched"
+        case .appLaunchRefused: return "appLaunchRefused"
         case .healthConditionSustained: return "healthConditionSustained"
         case .healthConditionCleared: return "healthConditionCleared"
         case .healthSummonFired: return "healthSummonFired"
