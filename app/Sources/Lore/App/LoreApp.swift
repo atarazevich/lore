@@ -197,6 +197,12 @@ extension LoreRootApp {
             shell.presentsHealthPanel = true
             showMainWindow()
         }
+        // The bubble's gear (#201) — same two lines again.
+        // TODO(#198): land on the Copying section once `SettingsSection.copying` exists.
+        appDelegate.onShowSettings = { [self] in
+            shell.destination = .settings
+            showMainWindow()
+        }
     }
 
     /// The one place every subsystem starts, exactly once, and only in the
@@ -327,6 +333,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// Fronts the window with the health panel up — the menu bar's route from
     /// the amber bead to the gauge (#151).
     var onShowHealth: (() -> Void)?
+    /// Fronts the window at Settings — the recording bubble's gear (#201).
+    var onShowSettings: (() -> Void)?
 
     /// The exclusive setup surface (#150) — nil once setup is complete.
     private var onboardingWindow: OnboardingWindowController?
@@ -775,8 +783,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         coordinator.dictationIndicator.start(
             coordinator: coordinator.dictationCoordinator,
-            hotkeyManager: coordinator.hotkeyManager
+            hotkeyManager: coordinator.hotkeyManager,
+            defaults: defaults
         )
+        coordinator.dictationIndicator.model.onOpenSettings = { [weak self] in
+            self?.onShowSettings?()
+        }
 
         // Read Aloud (#105): Fn+R / Fn+Q chords, floating player panel, and
         // the dictation interplay (capture start pauses playback before the

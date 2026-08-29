@@ -34,10 +34,11 @@ final class OverlayPanel: NSPanel {
 
 /// The machinery shared by the floating top-centered panels (dictation
 /// indicator, Read Aloud player): a configured non-activating `OverlayPanel`
-/// wrapping an intrinsic-size `NSHostingView`, animated resize-to-content
-/// pinned `topInset` points under the menu bar of the mouse's screen, and
-/// show/hide. Managers keep their own polling loops and call `show`/`hide`/
-/// `resizeToContent`.
+/// wrapping an intrinsic-size `NSHostingView`, resize-to-content pinned
+/// `topInset` points under the menu bar of the mouse's screen, and show/hide.
+/// Managers keep their own polling loops and call `show`/`hide`/
+/// `resizeToContent` — or, when the content animates its own shape,
+/// `setContentSize` (#201).
 @MainActor
 final class TopCenteredPanel<Content: View> {
     private let panel: OverlayPanel
@@ -45,6 +46,10 @@ final class TopCenteredPanel<Content: View> {
     private let topInset: CGFloat
     private var lastPanelSize: NSSize = .zero
     private var currentScreen: NSScreen?
+    /// The size the content last reported for itself (#201). Once it has
+    /// spoken, it is the only source of the frame: a poll's own measurement
+    /// would fight it mid-animation.
+    private var reportedSize: NSSize?
 
     /// Nil when no screen can be resolved for the mouse (headless edge case).
     init?(content: Content, topInset: CGFloat) {
@@ -87,8 +92,32 @@ final class TopCenteredPanel<Content: View> {
         lastPanelSize = .zero
     }
 
+    /// The frame the content asked for, applied at once and with no animation
+    /// of its own (#201).
+    ///
+    /// The bubble springs its own shape open in SwiftUI. A window animating on
+    /// a second curve underneath cannot keep up with that: while the frame
+    /// eased toward the widened size, the window clipped the very shape it was
+    /// meant to be revealing, and the 50 ms poll restarted the easing on every
+    /// tick. So the window stops animating entirely and becomes an exact
+    /// follower — one frame change per layout pass, always the size SwiftUI
+    /// just laid out, so the content is never wider than the window that holds
+    /// it and only one animation is ever running.
+    func setContentSize(_ size: CGSize) {
+        let size = NSSize(width: ceil(size.width), height: ceil(size.height))
+        guard size.width > 10, size.height > 5 else { return }
+        reportedSize = size
+        applyFrame(size: size, animated: false, tolerance: 0.5)
+    }
+
     func resizeToContent() {
-        guard let screen = Self.screenForMouse() else { return }
+        // Content-driven since the first report: re-apply what it asked for, so
+        // the poll still follows the pointer across screens without measuring
+        // (and re-animating) a shape mid-spring.
+        if let reportedSize {
+            applyFrame(size: reportedSize, animated: false, tolerance: 0.5)
+            return
+        }
         hostingView.layoutSubtreeIfNeeded()
         // `fittingSize` is the *smallest* size the content can be pressed into,
         // not the size it wants: a panel sized from it squeezes its own
@@ -104,6 +133,11 @@ final class TopCenteredPanel<Content: View> {
             height: max(ideal.height, minimum.height)
         )
         guard size.width > 10 && size.height > 5 else { return }
+        applyFrame(size: size, animated: true, tolerance: 1)
+    }
+
+    private func applyFrame(size: NSSize, animated: Bool, tolerance: CGFloat) {
+        guard let screen = Self.screenForMouse() else { return }
 
         // Detect cross-screen move by identity, not dimensions
         let screenChanged = screen !== currentScreen
@@ -112,8 +146,8 @@ final class TopCenteredPanel<Content: View> {
         }
 
         // Only resize when dimensions actually change (avoid 20x/sec animation calls)
-        let widthChanged = abs(size.width - lastPanelSize.width) > 1
-        let heightChanged = abs(size.height - lastPanelSize.height) > 1
+        let widthChanged = abs(size.width - lastPanelSize.width) > tolerance
+        let heightChanged = abs(size.height - lastPanelSize.height) > tolerance
         guard widthChanged || heightChanged || screenChanged else { return }
         lastPanelSize = size
 
@@ -121,7 +155,7 @@ final class TopCenteredPanel<Content: View> {
         let y = screen.visibleFrame.maxY - size.height - topInset
         let newFrame = NSRect(x: x, y: y, width: size.width, height: size.height)
 
-        if screenChanged {
+        if screenChanged || !animated {
             // Snap instantly across screens — no sliding through the gap
             panel.setFrame(newFrame, display: true)
         } else {

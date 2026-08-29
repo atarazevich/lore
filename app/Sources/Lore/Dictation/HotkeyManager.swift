@@ -467,17 +467,7 @@ final class HotkeyManager {
         // Space while recording or pre-buffering → confirm + lock
         if event.keyCode == 49 && modifierOn({ $0.modifierLockEnabled })
             && (coordinator.state == .recording || coordinator.isPreBuffering) && !isLocked {
-            fnTimer?.cancel()
-            fnTimer = nil
-            isHoldMode = false
-            isPreBufferingFlag = false
-            fnHeldAtLock = fnDown  // Track: if Fn held at lock, first release should continue
-            if coordinator.isPreBuffering {
-                coordinator.confirmRecording()
-            }
-            isLocked = true
-            isLockedFlag = true
-            isRecordingFlag = true
+            lockRecording(coordinator)
             HotkeyManager.hkLog.debug("[HOTKEY] Space → confirm + locked")
             return
         }
@@ -496,6 +486,48 @@ final class HotkeyManager {
         if HotkeyManager.isRepasteChord(event) {
             coordinator.pasteLastTranscript()
         }
+    }
+
+    // MARK: - The lock, by pointer (#201)
+
+    /// Confirm and lock — the Space key's own steps, shared with the recording
+    /// bubble's lock glyph so there is one lock and not two.
+    private func lockRecording(_ coordinator: DictationCoordinator) {
+        fnTimer?.cancel()
+        fnTimer = nil
+        isHoldMode = false
+        isPreBufferingFlag = false
+        fnHeldAtLock = fnDown  // Track: if Fn held at lock, first release should continue
+        if coordinator.isPreBuffering {
+            coordinator.confirmRecording()
+        }
+        isLocked = true
+        isLockedFlag = true
+        isRecordingFlag = true
+    }
+
+    /// The bubble's lock glyph (#201). Locking is the Space path itself.
+    /// Unlocking is the only ending a locked recording has ever had — the Fn
+    /// release: stop and paste. Anything else would leave a recording running
+    /// hands-free under a glyph that says it is not.
+    func toggleLockByClick() {
+        guard let coordinator else { return }
+        if isLocked {
+            fnReleaseDebounce?.cancel()
+            fnReleaseDebounce = nil
+            fnHeldAtLock = false
+            isLocked = false
+            isLockedFlag = false
+            isRecordingFlag = false
+            HotkeyManager.hkLog.debug("[HOTKEY] lock glyph → unlocked → stop + paste")
+            coordinator.dismissMicErrorAfterRelease()
+            coordinator.stopRecording()
+            return
+        }
+        guard modifierOn({ $0.modifierLockEnabled }),
+              coordinator.state == .recording || coordinator.isPreBuffering else { return }
+        lockRecording(coordinator)
+        HotkeyManager.hkLog.debug("[HOTKEY] lock glyph → confirm + locked")
     }
 
     /// Fn+R (read now) / Fn+Q (enqueue) — Read Aloud (#105). Reading and
