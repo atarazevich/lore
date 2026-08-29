@@ -424,7 +424,15 @@ struct SettingsView: View {
         let options = Self.richInputKeepOptions
         let current = settings.richInputKeepMegabytes
         let index = options.firstIndex(of: current) ?? 0
-        settings.richInputKeepMegabytes = options[(index + 1) % options.count]
+        let next = options[(index + 1) % options.count]
+        settings.richInputKeepMegabytes = next
+        // Same promise as Keep audio: a lower ceiling reclaims the disk now
+        // rather than at the next dictation, and off the main thread.
+        if Self.shouldPruneImmediately(current: current, next: next) {
+            Task.detached(priority: .utility) {
+                RichInputStore.pruneToCap(limitMegabytes: next)
+            }
+        }
     }
 
     // MARK: - READ ALOUD (#105)

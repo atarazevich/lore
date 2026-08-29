@@ -586,6 +586,15 @@ final class DictationCoordinator {
                 DiagStore.record(.dictationItemsPasted(
                     items: items.count, included: items.filter(\.included).count
                 ))
+                // The folder that just grew is brought back under its ceiling
+                // (#196) — after the paste, off this actor, oldest first. What
+                // was named a moment ago is the newest thing in it.
+                if items.contains(where: { $0.kind == .image }) {
+                    let limit = RichInputSettings.keepMegabytes
+                    Task.detached(priority: .utility) {
+                        RichInputStore.pruneToCap(limitMegabytes: limit)
+                    }
+                }
             }
         }
 

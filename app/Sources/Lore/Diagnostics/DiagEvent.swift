@@ -373,6 +373,10 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// The paste carried `included` of `items` — the receipt for what actually
     /// travelled, which the panel deliberately does not restate on screen.
     case dictationItemsPasted(items: Int, included: Int)
+    /// The collected images were pruned back under the ceiling (#196): how
+    /// many files went, and how many bytes came back. Never which — a path is
+    /// a name, and names do not enter the stream.
+    case dictationItemsPruned(deleted: Int, bytesFreed: Int)
     /// Fn+S posted the system's copy-region-to-clipboard chord. `eventsCreated`
     /// is all this can observe, for the same reason `pasteAttempt` says so:
     /// `CGEvent.post` returns nothing.
@@ -466,8 +470,8 @@ extension DiagEvent {
 
         case .dictationRecorded, .dictationZeroFrames, .dictationPasted,
              .dictationUpgrade, .dictationDiscarded, .dictationItemCollected,
-             .dictationItemSwitched, .dictationItemsPasted, .dictationScreenshotChord,
-             .clipboardProbeRead:
+             .dictationItemSwitched, .dictationItemsPasted, .dictationItemsPruned,
+             .dictationScreenshotChord, .clipboardProbeRead:
             return .dictation
 
         case .detectionLifecycle, .detectionDeviceListChanged, .detectionListenerFailed,
@@ -543,6 +547,7 @@ extension DiagEvent {
         case .dictationItemCollected: return "dictationItemCollected"
         case .dictationItemSwitched: return "dictationItemSwitched"
         case .dictationItemsPasted: return "dictationItemsPasted"
+        case .dictationItemsPruned: return "dictationItemsPruned"
         case .dictationScreenshotChord: return "dictationScreenshotChord"
         case .clipboardProbeRead: return "clipboardProbeRead"
         case .detectionLifecycle: return "detectionLifecycle"

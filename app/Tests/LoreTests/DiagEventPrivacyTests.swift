@@ -63,6 +63,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case dictationRecorded, dictationZeroFrames, dictationPasted
         case dictationUpgrade, dictationDiscarded
         case dictationItemCollected, dictationItemSwitched, dictationItemsPasted
+        case dictationItemsPruned
         case dictationScreenshotChord, clipboardProbeRead
         case detectionLifecycle, detectionDeviceListChanged, detectionListenerFailed
         case detectionSignal, detectionAppScan, detectionPrompt
@@ -128,6 +129,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .dictationItemCollected: return .dictationItemCollected
         case .dictationItemSwitched: return .dictationItemSwitched
         case .dictationItemsPasted: return .dictationItemsPasted
+        case .dictationItemsPruned: return .dictationItemsPruned
         case .dictationScreenshotChord: return .dictationScreenshotChord
         case .clipboardProbeRead: return .clipboardProbeRead
         case .detectionLifecycle: return .detectionLifecycle
@@ -233,6 +235,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .dictationItemSwitched:
             return .dictationItemSwitched(kind: .text, included: false)
         case .dictationItemsPasted: return .dictationItemsPasted(items: .max, included: .max)
+        case .dictationItemsPruned:
+            return .dictationItemsPruned(deleted: .max, bytesFreed: .max)
         case .dictationScreenshotChord: return .dictationScreenshotChord(eventsCreated: false)
         case .clipboardProbeRead: return .clipboardProbeRead(read: .data, result: .max)
 

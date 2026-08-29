@@ -247,6 +247,9 @@ final class DictationHistory {
     private let entriesDirectory: URL
     /// Non-private so Settings can measure on-disk audio usage (#52).
     let audioDirectory: URL
+    /// Where the images collected during a dictation are written (#192), so
+    /// that deleting entries takes their files with them (#196).
+    private let richInputDirectory: URL
 
     static var defaultAudioDirectory: URL {
         let appSupport = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first!
@@ -263,11 +266,13 @@ final class DictationHistory {
     init(
         defaults: UserDefaults = .standard,
         entriesDirectory: URL? = nil,
-        audioDirectory: URL? = nil
+        audioDirectory: URL? = nil,
+        richInputDirectory: URL? = nil
     ) {
         self.defaults = defaults
         self.entriesDirectory = entriesDirectory ?? Self.defaultEntriesDirectory
         self.audioDirectory = audioDirectory ?? Self.defaultAudioDirectory
+        self.richInputDirectory = richInputDirectory ?? RichInputStore.defaultDirectory
         try? FileManager.default.createDirectory(at: self.audioDirectory, withIntermediateDirectories: true)
         try? FileManager.default.createDirectory(at: self.entriesDirectory, withIntermediateDirectories: true)
         migrateFromDefaultsIfNeeded()
@@ -288,11 +293,17 @@ final class DictationHistory {
         revision += 1
     }
 
-    /// "Clear history" means everything: audio, every entry file in the
-    /// directory (including stray leftovers), and the legacy blob + its
-    /// migration backup — nothing may resurrect deleted entries later.
+    /// "Clear history" means everything: audio, the images the dictations
+    /// collected (#196), every entry file in the directory (including stray
+    /// leftovers), and the legacy blob + its migration backup — nothing may
+    /// resurrect deleted entries later.
     func clear() {
         for entry in entries { deleteAudioFile(for: entry) }
+        // What a dictation collected goes with it (#196): its images are named
+        // after the entry, so nothing outlives the row that pointed at it.
+        RichInputStore.deleteFiles(
+            ofEntries: Set(entries.map(\.id)), directory: richInputDirectory
+        )
         entries.removeAll()
         if let files = try? FileManager.default.contentsOfDirectory(
             at: entriesDirectory, includingPropertiesForKeys: nil
