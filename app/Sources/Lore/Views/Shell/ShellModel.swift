@@ -29,6 +29,30 @@ enum ShellDestination: String, CaseIterable, Identifiable {
     }
 }
 
+/// A section of the Settings destination, by name (#198). A navigation id, not
+/// a layout: the cards and their order stay in `SettingsView`. Surfaces outside
+/// the shell — the recording bubble's gear — name the section they want and
+/// land on it.
+enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
+    case general
+    case talk
+    case copying
+    case readAloud
+    case modifiers
+    case meetings
+    case notes
+    case advanced
+
+    var id: String { rawValue }
+
+    /// The one door for a surface that is not in the shell's environment: name
+    /// the section, and the window comes forward showing it. Installed once by
+    /// the scene (`LoreApp.wireDelegate`), which is the only place that can
+    /// front a window; a no-op until then, so no caller has to ask whether the
+    /// UI exists yet.
+    @MainActor static var open: (SettingsSection) -> Void = { _ in }
+}
+
 /// Single navigation state of the shell — the one `view` selection the
 /// prototype keeps (SHELL-16). Every action that used to open a separate
 /// window navigates this model instead.
@@ -114,6 +138,17 @@ final class ShellModel {
     /// through the same guarded stop path as the live header (bounce guard in
     /// LiveSessionController.stopSession).
     @ObservationIgnored var requestMeetingRecordingStop: (() -> Void)?
+
+    /// The Settings section a deep link asked for, cleared by the Settings
+    /// screen the moment it has scrolled there (#198). Nil the rest of the
+    /// time: nothing may read it as "the section you are in".
+    var pendingSettingsSection: SettingsSection?
+
+    /// Navigate to Settings, optionally at one section.
+    func showSettings(_ section: SettingsSection? = nil) {
+        destination = .settings
+        pendingSettingsSection = section
+    }
 
     /// Navigate to Meetings as-is: live while recording, review otherwise.
     func showMeetings() {

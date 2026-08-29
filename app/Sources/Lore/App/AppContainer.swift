@@ -31,6 +31,11 @@ final class AppContainer {
         self.defaults = defaults
         self.appSupportDirectory = appSupportDirectory
         self.notesDirectory = notesDirectory
+        // The Copying switches are read live by surfaces that hold no settings
+        // object — the clipboard door, the paste's text, the event tap (#198).
+        // Point them at this run's store so a UI test's suite, not the user's
+        // defaults, is what they see.
+        RichInputSettings.use(defaults)
     }
 
     static func bootstrap() -> AppLaunchContext {

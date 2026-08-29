@@ -197,6 +197,13 @@ extension LoreRootApp {
             shell.presentsHealthPanel = true
             showMainWindow()
         }
+        // The recording bubble's gear (#198) — same two lines again: name the
+        // surface on the shared model, front the window. Installed here because
+        // this is the only place that can do the second half.
+        SettingsSection.open = { [self] section in
+            shell.showSettings(section)
+            showMainWindow()
+        }
     }
 
     /// The one place every subsystem starts, exactly once, and only in the

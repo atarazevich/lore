@@ -97,9 +97,13 @@ final class RichInputTests: XCTestCase {
     // every other @MainActor case here already uses.
     override func setUp() async throws {
         board = NSPasteboard(name: NSPasteboard.Name("com.lore.tests.\(UUID().uuidString)"))
+        // The door reads the Copying switches live (#198); on this machine the
+        // owner's own Settings would otherwise decide whether these pass.
+        _ = isolatedRichInputDefaults("RichInputTests")
     }
 
     override func tearDown() async throws {
+        RichInputSettings.use(.standard)
         board.releaseGlobally()
         board = nil
     }

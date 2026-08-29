@@ -449,7 +449,8 @@ final class HotkeyManager {
                 if isLocked { fnHeldAtLock = true }
                 HotkeyManager.hkLog.debug("[HOTKEY] Fn+K → operator addressed")
                 return
-            } else if event.keyCode == 1, modifierOn({ $0.modifierUpgradeKeysEnabled }) { // S (#192)
+            } else if event.keyCode == 1, RichInputSettings.screenshotsEnabled,
+                      modifierOn({ $0.modifierUpgradeKeysEnabled }) { // S (#192/#198)
                 TextInserter.postScreenshotToClipboard()
                 if isLocked { fnHeldAtLock = true }
                 HotkeyManager.hkLog.debug("[HOTKEY] Fn+S → screenshot to clipboard")
@@ -614,7 +615,8 @@ final class HotkeyManager {
                             HotkeyManager.hkLog.debug("[HOTKEY] Fn+T (CGEvent) → pending translate")
                         }
                         return nil
-                    } else if keyCode == 1, manager.modifierOn({ $0.modifierUpgradeKeysEnabled }) { // S (#192)
+                    } else if keyCode == 1, RichInputSettings.screenshotsEnabled,
+                              manager.modifierOn({ $0.modifierUpgradeKeysEnabled }) { // S (#192/#198)
                         Task { @MainActor in
                             // The system's own crosshair, pressed for the user —
                             // the image lands on the clipboard and the door

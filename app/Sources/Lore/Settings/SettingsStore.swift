@@ -327,6 +327,46 @@ final class SettingsStore {
         }
     }
 
+    // MARK: - Copying Settings (#198)
+
+    @ObservationIgnored nonisolated(unsafe) private var _richInputSwitches: [RichInputSettings.Switch: Bool]
+    /// The Copying section's switches, as one observable value: seven rows that
+    /// change together need seven keys, not seven properties. Writes go to the
+    /// key `RichInputSettings` reads live, so a flip lands in the next
+    /// dictation without a restart; only changed keys are written, so a machine
+    /// that never opened the section keeps its defaults absent.
+    var richInputSwitches: [RichInputSettings.Switch: Bool] {
+        get { access(keyPath: \.richInputSwitches); return _richInputSwitches }
+        set {
+            withMutation(keyPath: \.richInputSwitches) {
+                for (item, value) in newValue where _richInputSwitches[item] != value {
+                    defaults.set(value, forKey: item.key)
+                }
+                _richInputSwitches = newValue
+            }
+        }
+    }
+
+    func richInput(_ item: RichInputSettings.Switch) -> Bool {
+        richInputSwitches[item] ?? item.defaultValue
+    }
+
+    func setRichInput(_ item: RichInputSettings.Switch, _ isOn: Bool) {
+        richInputSwitches[item] = isOn
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _richInputKeepMegabytes: Int
+    /// Size ceiling for the collected screenshots (#196). 0 = unlimited.
+    var richInputKeepMegabytes: Int {
+        get { access(keyPath: \.richInputKeepMegabytes); return _richInputKeepMegabytes }
+        set {
+            withMutation(keyPath: \.richInputKeepMegabytes) {
+                _richInputKeepMegabytes = newValue
+                defaults.set(newValue, forKey: RichInputSettings.keepMegabytesKey)
+            }
+        }
+    }
+
     // MARK: - Read Aloud Settings (#105)
 
     @ObservationIgnored nonisolated(unsafe) private var _speechifyApiKey: String
@@ -580,6 +620,12 @@ final class SettingsStore {
         self._cleanupByDefault = defaults.bool(forKey: "dictationCleanupEnabled")
         self._translationByDefault = defaults.bool(forKey: "dictationTranslationEnabled")
         self._openaiApiKey = storage.secretStore.load(key: "openaiApiKey") ?? ""
+
+        // Copying Settings (#198) — every switch resolved against the same
+        // table the live readers use, so the card and the door never disagree
+        // about what "absent" means.
+        self._richInputSwitches = RichInputSettings.all(in: defaults)
+        self._richInputKeepMegabytes = RichInputSettings.keepMegabytes(in: defaults)
 
         // Read Aloud Settings (#105)
         self._speechifyApiKey = storage.secretStore.load(key: "speechifyApiKey") ?? ""

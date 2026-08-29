@@ -9,10 +9,11 @@ import os
 /// cheapest read there is) and only touches the contents when it moved. The
 /// bytes are read at once because the next copy overwrites them.
 ///
-/// Three things never become an item: a copy marked concealed, transient or
+/// Four things never become an item: a copy marked concealed, transient or
 /// auto-generated (every password manager marks its own — the surface does not
 /// change at all, there is no "something was ignored" state), lore's own
-/// pasteboard writes, and anything the classifier does not recognise.
+/// pasteboard writes, anything the classifier does not recognise, and a kind
+/// switched off in Settings → Copying (#198).
 @MainActor
 final class ClipboardWatcher {
     private static let log = Logger(subsystem: "com.lore.app", category: "ClipboardWatcher")
@@ -63,6 +64,12 @@ final class ClipboardWatcher {
 
         let types = pasteboard.types ?? []
         guard let kind = Self.kind(for: types) else { return nil }
+        // The Copying switches, read at the moment of the copy (#198): a kind
+        // that is switched off is never read, never becomes an item and never
+        // reaches a count. A copied link rides the text switch — the
+        // classification below can turn one into the other, and both sides of
+        // that answer have the same owner.
+        guard RichInputSettings.collects(kind) else { return nil }
         // `item.kind`, not `kind`: a copy that carries only plain text can
         // still turn out to be a link once the text itself is read.
         guard let item = read(kind: kind, at: offset) else { return nil }

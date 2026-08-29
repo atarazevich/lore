@@ -23,6 +23,8 @@ struct SettingsView: View {
     /// kept alive, so state refresh happens on each activation, not once.
     var isActiveInShell = true
     @Environment(AppCoordinator.self) private var coordinator
+    /// Where a deep link into a section arrives (#198).
+    @Environment(ShellModel.self) private var shell
 
     @State private var inputDevices: [(id: AudioDeviceID, name: String)] = []
     @State private var automaticallyChecksForUpdates = false
@@ -80,18 +82,28 @@ struct SettingsView: View {
     }
 
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 20) {
-                generalSection
-                talkSection
-                readAloudSection
-                modifiersSection
-                meetingsSection
-                notesSection
-                advancedSection
+        ScrollViewReader { proxy in
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    generalSection.id(SettingsSection.general)
+                    talkSection.id(SettingsSection.talk)
+                    copyingSection.id(SettingsSection.copying)
+                    readAloudSection.id(SettingsSection.readAloud)
+                    modifiersSection.id(SettingsSection.modifiers)
+                    meetingsSection.id(SettingsSection.meetings)
+                    notesSection.id(SettingsSection.notes)
+                    advancedSection.id(SettingsSection.advanced)
+                }
+                .padding(EdgeInsets(top: 18, leading: 26, bottom: 26, trailing: 26))
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
-            .padding(EdgeInsets(top: 18, leading: 26, bottom: 26, trailing: 26))
-            .frame(maxWidth: .infinity, alignment: .leading)
+            // A surface outside the shell asked for a section (#198): show it,
+            // then drop the request — it names where to go, never where we are.
+            .onChange(of: shell.pendingSettingsSection, initial: true) { _, section in
+                guard let section else { return }
+                proxy.scrollTo(section, anchor: .top)
+                shell.pendingSettingsSection = nil
+            }
         }
         .accessibilityIdentifier("settings.form")
         .sheet(isPresented: $showAutoDetectExplanation) {
@@ -128,7 +140,7 @@ struct SettingsView: View {
     // MARK: - GENERAL (SET-10/11)
 
     private var generalSection: some View {
-        SettingsSection(label: "General") {
+        SettingsSectionCard(label: "General") {
             SettingsRow(
                 name: "Launch at login",
                 sub: "Start \(LoreTheme.wordmark) when your Mac starts"
@@ -150,7 +162,7 @@ struct SettingsView: View {
     // MARK: - TALK (DSET-01/09…21)
 
     private var talkSection: some View {
-        SettingsSection(label: "Talk") {
+        SettingsSectionCard(label: "Talk") {
             SettingsRow(name: "Hotkey", sub: "Hold to talk, anywhere") {
                 // Cycles the current option set only (Fn / Right Option, DSET-03).
                 LoreMonoValueButton(title: settings.hotkeyKey.displayName) {
@@ -311,6 +323,110 @@ struct SettingsView: View {
         .padding(EdgeInsets(top: 0, leading: 16, bottom: 13, trailing: 16))
     }
 
+    // MARK: - COPYING (#198)
+
+    /// What you copy while dictating joins the prompt (#192), and this is where
+    /// it is switched. Copy is the board's
+    /// (`docs/design/prototypes/recording-bubble.html`, Settings sketch): the
+    /// first row's sub repeats the paperclip's tooltip word for word, so the
+    /// two surfaces of one switch read as one thing.
+    private var copyingSection: some View {
+        SettingsSectionCard(label: "Copying") {
+            richInputToggleRow(
+                .collect,
+                name: "Collect what I copy",
+                sub: "What you copy joins the prompt while you dictate"
+            )
+            LoreDivider()
+            richInputToggleRow(.text, name: "Text", sub: "Words and paragraphs", indented: true)
+            LoreDivider()
+            richInputToggleRow(
+                .images, name: "Images", sub: "Screenshots and copied pictures", indented: true
+            )
+            LoreDivider()
+            richInputToggleRow(
+                .files, name: "Files", sub: "Copied files, as their path", indented: true
+            )
+            LoreDivider()
+            SettingsRow(
+                name: "Screenshot into the prompt",
+                sub: "The crosshair appears, and the picture joins where you said it"
+            ) {
+                LoreMonoValueButton(title: "Fn+S", width: 64)
+            } trailing: {
+                richInputToggle(.screenshots, name: "Screenshot into the prompt")
+            }
+            LoreDivider()
+            richInputToggleRow(
+                .redirectSystemScreenshot,
+                name: "Screenshots while dictating go into the prompt",
+                sub: "Cmd+Shift+3/4 behave like Fn+S",
+                indented: true
+            )
+            LoreDivider()
+            richInputToggleRow(
+                .tags,
+                name: "Mark each item in the text",
+                sub: "<screenshot> at the spot it happened"
+            )
+            LoreDivider()
+            keepScreenshotsRow
+        }
+    }
+
+    private func richInputToggle(
+        _ item: RichInputSettings.Switch, name: String
+    ) -> some View {
+        Toggle(name, isOn: Binding(
+            get: { settings.richInput(item) },
+            set: { settings.setRichInput(item, $0) }
+        ))
+        .toggleStyle(LoreToggleStyle())
+        .labelsHidden()
+    }
+
+    /// One switch of the Copying card. `indented` is the board's sub-row: a
+    /// kind that only exists while the switch above it is on.
+    private func richInputToggleRow(
+        _ item: RichInputSettings.Switch, name: String, sub: String, indented: Bool = false
+    ) -> some View {
+        SettingsRow(name: name, sub: sub) {
+            richInputToggle(item, name: name)
+        }
+        .padding(.leading, indented ? 14 : 0)
+    }
+
+    /// Cycle order for the screenshot-size ceiling; 0 is the unlimited
+    /// sentinel, as in Keep audio.
+    private static let richInputKeepOptions = [200, 500, 1000, 0]
+
+    /// #196: the collected screenshots are kept under a size ceiling, oldest
+    /// deleted first. Same value-button idiom as Keep audio, and the same
+    /// promise: lowering it reclaims the disk now, and nothing deleted returns.
+    private var keepScreenshotsRow: some View {
+        SettingsRow(
+            name: "Keep screenshots up to",
+            sub: "Older screenshots are deleted to stay under it"
+        ) {
+            LoreMonoValueButton(title: keepScreenshotsTitle) {
+                cycleRichInputKeep()
+            }
+        }
+        .accessibilityIdentifier("settings.richInputKeep")
+    }
+
+    private var keepScreenshotsTitle: String {
+        let megabytes = settings.richInputKeepMegabytes
+        return megabytes == 0 ? "\u{221E}" : "\(megabytes) MB"
+    }
+
+    private func cycleRichInputKeep() {
+        let options = Self.richInputKeepOptions
+        let current = settings.richInputKeepMegabytes
+        let index = options.firstIndex(of: current) ?? 0
+        settings.richInputKeepMegabytes = options[(index + 1) % options.count]
+    }
+
     // MARK: - READ ALOUD (#105)
 
     /// Paid tier is disclosed by key presence: Speechify voice groups and the
@@ -319,7 +435,7 @@ struct SettingsView: View {
     private var hasSpeechifyKey: Bool { !settings.speechifyApiKey.isEmpty }
 
     private var readAloudSection: some View {
-        SettingsSection(label: "Read aloud") {
+        SettingsSectionCard(label: "Read aloud") {
             SettingsRow(
                 name: "Speechify API key",
                 sub: hasSpeechifyKey
@@ -714,7 +830,7 @@ struct SettingsView: View {
         // Rows reflect the CURRENT hardcoded keymap truthfully (D-031): key
         // chips are static — no remapping this stage. The enable toggles are
         // new and gate HotkeyManager + the dictation footer kbd bar.
-        SettingsSection(
+        SettingsSectionCard(
             label: "Modifiers \u{2014} while holding \(hotkeyShortLabel)",
             note: "Tap a key while talking to say where the words go. Remapping comes later."
         ) {
@@ -765,7 +881,7 @@ struct SettingsView: View {
     // MARK: - MEETINGS (SET-20/21, SET-37…41, SET-44)
 
     private var meetingsSection: some View {
-        SettingsSection(label: "Meetings") {
+        SettingsSectionCard(label: "Meetings") {
             // First-enable privacy gate preserved (SET-20): flip back off and
             // show the explanation sheet until it has been accepted once.
             toggleRow(
@@ -932,7 +1048,7 @@ struct SettingsView: View {
     // MARK: - NOTES (SET-32/34/35/43/46)
 
     private var notesSection: some View {
-        SettingsSection(label: "Notes") {
+        SettingsSectionCard(label: "Notes") {
             SettingsRow(
                 name: "Notes folder",
                 sub: settings.notesFolderPath,
@@ -1083,7 +1199,7 @@ struct SettingsView: View {
     // MARK: - ADVANCED (SET-30/33/36/42/44/45/48, DSET-08/18/19)
 
     private var advancedSection: some View {
-        SettingsSection(label: "Advanced") {
+        SettingsSectionCard(label: "Advanced") {
             toggleRow(
                 "Hide from screen sharing",
                 sub: "The app is invisible during screen sharing and recording",
@@ -1318,7 +1434,7 @@ struct SettingsView: View {
 
 // MARK: - Section (SET-02: label + optional note + card, max-width 640)
 
-private struct SettingsSection<Rows: View>: View {
+private struct SettingsSectionCard<Rows: View>: View {
     let label: String
     var note: String?
     @ViewBuilder var rows: Rows
