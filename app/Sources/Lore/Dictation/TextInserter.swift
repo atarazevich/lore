@@ -191,9 +191,16 @@ enum TextInserter {
     /// user (#192): the familiar crosshair appears, the drag lands a PNG on the
     /// clipboard with no file and no thumbnail delay, and the clipboard door
     /// picks it up at the second it happened.
+    ///
+    /// `fullScreen` posts the whole-screen variant (Ctrl+Shift+Cmd+3) instead
+    /// of the crosshair — what the redirect of a system Cmd+Shift+3 needs so
+    /// the user gets the shot they asked for (#199).
     @discardableResult
-    static func postScreenshotToClipboard() -> Bool {
-        let created = postCommandChord(0x15, flags: [.maskCommand, .maskShift, .maskControl]) // 21 = '4'
+    static func postScreenshotToClipboard(fullScreen: Bool = false) -> Bool {
+        // 21 = '4' (drag a region), 20 = '3' (the whole screen).
+        let created = postCommandChord(
+            fullScreen ? 0x14 : 0x15, flags: [.maskCommand, .maskShift, .maskControl]
+        )
         DiagStore.record(.dictationScreenshotChord(eventsCreated: created))
         return created
     }

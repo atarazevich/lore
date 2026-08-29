@@ -381,6 +381,10 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// is all this can observe, for the same reason `pasteAttempt` says so:
     /// `CGEvent.post` returns nothing.
     case dictationScreenshotChord(eventsCreated: Bool)
+    /// A system screenshot shortcut pressed during a dictation was redirected
+    /// to its clipboard variant, so the picture joins the prompt (#199). The
+    /// one place lore changes system behaviour, and it says so every time.
+    case dictationScreenshotRedirected(fullScreen: Bool)
     /// The paste-protection probe (#192, step 0) — one per read. `result` is
     /// what that read returned: the change count, the number of types, or the
     /// number of bytes. Removable with `ClipboardProbe`.
@@ -471,7 +475,8 @@ extension DiagEvent {
         case .dictationRecorded, .dictationZeroFrames, .dictationPasted,
              .dictationUpgrade, .dictationDiscarded, .dictationItemCollected,
              .dictationItemSwitched, .dictationItemsPasted, .dictationItemsPruned,
-             .dictationScreenshotChord, .clipboardProbeRead:
+             .dictationScreenshotChord, .dictationScreenshotRedirected,
+             .clipboardProbeRead:
             return .dictation
 
         case .detectionLifecycle, .detectionDeviceListChanged, .detectionListenerFailed,
@@ -549,6 +554,7 @@ extension DiagEvent {
         case .dictationItemsPasted: return "dictationItemsPasted"
         case .dictationItemsPruned: return "dictationItemsPruned"
         case .dictationScreenshotChord: return "dictationScreenshotChord"
+        case .dictationScreenshotRedirected: return "dictationScreenshotRedirected"
         case .clipboardProbeRead: return "clipboardProbeRead"
         case .detectionLifecycle: return "detectionLifecycle"
         case .detectionDeviceListChanged: return "detectionDeviceListChanged"

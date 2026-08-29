@@ -694,6 +694,26 @@ final class HotkeyManager {
                     return nil
                 }
 
+                // Cmd+Shift+4/3 while dictating → the clipboard variant, so a
+                // screenshot taken mid-sentence joins the prompt instead of
+                // landing in a folder nothing is reading (#199). The one place
+                // lore changes system behaviour: only during a recording, only
+                // with both switches on, and only for the bare chord.
+                if manager.isRecordingFlag,
+                   let shortcut = ScreenshotShortcut(keyCode: keyCode, flags: flags),
+                   RichInputSettings.screenshotsEnabled,
+                   RichInputSettings.redirectsSystemScreenshot {
+                    let fullScreen = shortcut.isFullScreen
+                    DiagStore.record(.dictationScreenshotRedirected(fullScreen: fullScreen))
+                    Task { @MainActor in
+                        TextInserter.postScreenshotToClipboard(fullScreen: fullScreen)
+                        HotkeyManager.hkLog.debug(
+                            "[HOTKEY] Cmd+Shift+3/4 (CGEvent) → screenshot to clipboard"
+                        )
+                    }
+                    return nil
+                }
+
                 // Esc while upgrade panel showing → dismiss
                 if keyCode == 53 && manager.isUpgradeShowingFlag {
                     Task { @MainActor in
