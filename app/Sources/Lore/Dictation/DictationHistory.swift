@@ -47,6 +47,13 @@ struct DictationHistoryEntry: Identifiable, Codable, Equatable {
     /// `true` (or nil to unflag) and read `== true`; `false` is never
     /// stored.
     var operatorAddressed: Bool?
+    /// What rode along with this dictation (#192): what was copied or
+    /// screenshotted while it was being spoken, each at the second it happened.
+    /// Optional so the synthesized encoder omits nil — a dictation with nothing
+    /// attached stays byte-identical on disk, and Safe Flow's readers, which go
+    /// by key, ignore the field entirely. `rawText`/`cleanedText` already carry
+    /// the items in place, so nothing downstream has to assemble anything.
+    var items: [DictationItem]?
 
     /// The text for the currently active version.
     var displayText: String? {
@@ -87,6 +94,7 @@ struct DictationHistoryEntry: Identifiable, Codable, Equatable {
         cleanupMethodName = try c.decodeIfPresent(String.self, forKey: .cleanupMethodName)
         translatedToLanguage = try c.decodeIfPresent(String.self, forKey: .translatedToLanguage)
         operatorAddressed = try c.decodeIfPresent(Bool.self, forKey: .operatorAddressed)
+        items = try c.decodeIfPresent([DictationItem].self, forKey: .items)
     }
 }
 

@@ -38,6 +38,14 @@ final class ParakeetBackend: TranscriptionBackend, @unchecked Sendable {
     }
 
     func transcribe(_ samples: [Float], previousContext: String? = nil) async throws -> String {
+        try await transcribeDetailed(samples, previousContext: previousContext).text
+    }
+
+    /// The timings come back from the model on every TDT decode; until #192
+    /// they were dropped one line before Lore saw them.
+    func transcribeDetailed(
+        _ samples: [Float], previousContext: String? = nil
+    ) async throws -> TranscriptionResult {
         guard let asrManager else {
             throw TranscriptionBackendError.notPrepared
         }
@@ -45,6 +53,11 @@ final class ParakeetBackend: TranscriptionBackend, @unchecked Sendable {
         // so we make a fresh state per call (matches upstream CLI / benchmark idiom).
         var decoderState = TdtDecoderState.make(decoderLayers: await asrManager.decoderLayerCount)
         let result = try await asrManager.transcribe(samples, decoderState: &decoderState)
-        return result.text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return TranscriptionResult(
+            text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            tokens: (result.tokenTimings ?? []).map {
+                TranscribedToken(text: $0.token, start: $0.startTime, end: $0.endTime)
+            }
+        )
     }
 }

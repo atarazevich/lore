@@ -128,6 +128,14 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case undoAndPaste
     }
 
+    /// Which pasteboard read the paste-protection probe made (#192, step 0).
+    /// Removable with `ClipboardProbe` itself.
+    enum ClipboardRead: String, Codable, Sendable, CaseIterable {
+        case changeCount
+        case types
+        case data
+    }
+
     /// Why a detection prompt did or did not reach the user.
     enum PromptDisposition: String, Codable, Sendable, CaseIterable {
         case shown
@@ -356,6 +364,24 @@ enum DiagEvent: Codable, Sendable, Equatable {
     case dictationUpgrade(endpoint: Endpoint, outcome: Outcome)
     case dictationDiscarded(state: DictationState)
 
+    /// Rich input (#192). What was copied is never in the stream — only which
+    /// of the four kinds it was, and, for an image, how many bytes came off the
+    /// clipboard. `DictationItemKind` is closed by construction.
+    case dictationItemCollected(kind: DictationItemKind, bytes: Int)
+    /// A row in the opened list was switched: the item's state after the click.
+    case dictationItemSwitched(kind: DictationItemKind, included: Bool)
+    /// The paste carried `included` of `items` — the receipt for what actually
+    /// travelled, which the panel deliberately does not restate on screen.
+    case dictationItemsPasted(items: Int, included: Int)
+    /// Fn+S posted the system's copy-region-to-clipboard chord. `eventsCreated`
+    /// is all this can observe, for the same reason `pasteAttempt` says so:
+    /// `CGEvent.post` returns nothing.
+    case dictationScreenshotChord(eventsCreated: Bool)
+    /// The paste-protection probe (#192, step 0) — one per read. `result` is
+    /// what that read returned: the change count, the number of types, or the
+    /// number of bytes. Removable with `ClipboardProbe`.
+    case clipboardProbeRead(read: ClipboardRead, result: Int)
+
     // MARK: - Meetings
 
     case detectionLifecycle(running: Bool)
@@ -439,7 +465,9 @@ extension DiagEvent {
             return .intelligence
 
         case .dictationRecorded, .dictationZeroFrames, .dictationPasted,
-             .dictationUpgrade, .dictationDiscarded:
+             .dictationUpgrade, .dictationDiscarded, .dictationItemCollected,
+             .dictationItemSwitched, .dictationItemsPasted, .dictationScreenshotChord,
+             .clipboardProbeRead:
             return .dictation
 
         case .detectionLifecycle, .detectionDeviceListChanged, .detectionListenerFailed,
@@ -512,6 +540,11 @@ extension DiagEvent {
         case .dictationPasted: return "dictationPasted"
         case .dictationUpgrade: return "dictationUpgrade"
         case .dictationDiscarded: return "dictationDiscarded"
+        case .dictationItemCollected: return "dictationItemCollected"
+        case .dictationItemSwitched: return "dictationItemSwitched"
+        case .dictationItemsPasted: return "dictationItemsPasted"
+        case .dictationScreenshotChord: return "dictationScreenshotChord"
+        case .clipboardProbeRead: return "clipboardProbeRead"
         case .detectionLifecycle: return "detectionLifecycle"
         case .detectionDeviceListChanged: return "detectionDeviceListChanged"
         case .detectionListenerFailed: return "detectionListenerFailed"

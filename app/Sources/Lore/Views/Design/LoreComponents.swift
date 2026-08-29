@@ -320,17 +320,24 @@ struct LorePrimaryButton: View {
 // MARK: - Popover chrome (dictation `.pop`, transform menu)
 
 extension View {
-    /// Popover container: `--popover` bg, 8px radius, 1px `--line` border,
-    /// popover shadow, 5px content inset.
-    func lorePopoverChrome() -> some View {
-        padding(5)
+    /// Popover container: `--popover` bg, 8px radius, border, popover shadow,
+    /// content inset. Defaults (5pt inset, 1px `--line` border) match every
+    /// existing caller; the indicator's item list (#192) passes its own
+    /// tighter inset and quieter `windowRim` stroke instead of copying the
+    /// chrome.
+    func lorePopoverChrome(
+        inset: CGFloat = 5,
+        stroke: Color = LoreTheme.Surface.line,
+        strokeWidth: CGFloat = 1
+    ) -> some View {
+        padding(inset)
             .background(
                 LoreTheme.Surface.popover,
                 in: RoundedRectangle(cornerRadius: LoreTheme.Radius.popover)
             )
             .overlay(
                 RoundedRectangle(cornerRadius: LoreTheme.Radius.popover)
-                    .strokeBorder(LoreTheme.Surface.line, lineWidth: 1)
+                    .strokeBorder(stroke, lineWidth: strokeWidth)
             )
             .loreShadow(LoreTheme.Shadow.popover)
     }

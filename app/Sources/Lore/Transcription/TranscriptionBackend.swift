@@ -6,6 +6,28 @@ enum BackendStatus: Equatable, Sendable {
     case needsDownload
 }
 
+/// One piece of a transcript with the seconds of audio it came from. Parakeet's
+/// tokens are sub-word pieces whose text carries the word boundary as a leading
+/// space; the times are relative to the samples that were handed in.
+struct TranscribedToken: Sendable, Equatable {
+    let text: String
+    let start: Double
+    let end: Double
+}
+
+/// A transcription with the timings the model already produced (#192). The
+/// text is identical to what `transcribe` returns; `tokens` is empty for a
+/// backend that has no timings, and the caller falls back accordingly.
+struct TranscriptionResult: Sendable, Equatable {
+    let text: String
+    let tokens: [TranscribedToken]
+
+    init(text: String, tokens: [TranscribedToken] = []) {
+        self.text = text
+        self.tokens = tokens
+    }
+}
+
 /// Interface for the transcription backend (ParakeetBackend in production,
 /// mocks in tests). The backend handles its own model lifecycle and
 /// transcription logic, and receives raw audio samples.
@@ -28,12 +50,24 @@ protocol TranscriptionBackend: Sendable {
     ///     for cross-segment continuity. Backends that don't support prompting ignore this.
     func transcribe(_ samples: [Float], previousContext: String?) async throws -> String
 
+    /// Same transcription, with the word timings the model produced — what
+    /// puts a copied item at the second of the speech it belongs to (#192).
+    /// Backends that have no timings inherit the default below and answer with
+    /// the text alone.
+    func transcribeDetailed(_ samples: [Float], previousContext: String?) async throws -> TranscriptionResult
+
     /// Remove cached model files so the next prepare() triggers a fresh download.
     func clearModelCache()
 }
 
 extension TranscriptionBackend {
     func clearModelCache() {}
+
+    func transcribeDetailed(
+        _ samples: [Float], previousContext: String?
+    ) async throws -> TranscriptionResult {
+        TranscriptionResult(text: try await transcribe(samples, previousContext: previousContext))
+    }
 
     /// Convenience overload without progress reporting.
     func prepare(onStatus: @Sendable (String) -> Void) async throws {

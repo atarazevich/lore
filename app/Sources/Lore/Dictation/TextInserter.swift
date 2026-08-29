@@ -29,6 +29,37 @@ enum SyntheticKeyEvent {
     }
 }
 
+/// The change counts of lore's own pasteboard writes (#192). The clipboard door
+/// polls `changeCount` while a dictation records, and a paste — plus the restore
+/// 800 ms behind it — moves that counter twice. Without this, lore's own paste
+/// would come back as material for the next dictation.
+///
+/// `@unchecked Sendable`: every access is behind the lock. `TextInserter` writes
+/// from wherever a paste is scheduled; `ClipboardWatcher` reads on the main
+/// actor.
+final class PasteboardWriteLedger: @unchecked Sendable {
+    static let shared = PasteboardWriteLedger()
+
+    private let lock = NSLock()
+    /// Bounded: a change count is interesting for the seconds around the write
+    /// that made it, and the poll it must beat runs every 100 ms.
+    private var counts: [Int] = []
+    private static let capacity = 8
+
+    func note(_ count: Int) {
+        lock.lock()
+        defer { lock.unlock() }
+        counts.append(count)
+        if counts.count > Self.capacity { counts.removeFirst(counts.count - Self.capacity) }
+    }
+
+    func isOurs(_ count: Int) -> Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return counts.contains(count)
+    }
+}
+
 enum TextInserter {
     private static let log = Logger(subsystem: "com.lore.app", category: "TextInserter")
 
@@ -57,8 +88,7 @@ enum TextInserter {
         let savedItems = savePasteboard(pasteboard)
 
         // Set our text
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        writeString(text, to: pasteboard)
 
         // Small delay to let clipboard settle, then simulate Cmd+V
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -95,8 +125,7 @@ enum TextInserter {
         let savedItems = savePasteboard(pasteboard)
 
         // Set new text first
-        pasteboard.clearContents()
-        pasteboard.setString(text, forType: .string)
+        writeString(text, to: pasteboard)
 
         // Cmd+Z to undo previous paste, then Cmd+V to paste new text
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
@@ -125,16 +154,21 @@ enum TextInserter {
     /// Uses cghidEventTap — more reliable for posting synthetic events to other apps.
     /// cgSessionEventTap is better for *reading* events; cghidEventTap injects at the
     /// HID level which the frontmost app reliably receives.
+    ///
+    /// `flags` defaults to Command alone — every chord here was one until the
+    /// screenshot key (#192), which is the system's own Ctrl+Shift+Cmd+4.
     @discardableResult
-    private static func postCommandChord(_ virtualKey: CGKeyCode) -> Bool {
+    private static func postCommandChord(
+        _ virtualKey: CGKeyCode, flags: CGEventFlags = .maskCommand
+    ) -> Bool {
         let source = CGEventSource(stateID: .hidSystemState)
         guard let keyDown = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: true),
               let keyUp = CGEvent(keyboardEventSource: source, virtualKey: virtualKey, keyDown: false) else {
             log.error("Failed to create CGEvent for Cmd chord (key \(virtualKey))")
             return false
         }
-        keyDown.flags = .maskCommand
-        keyUp.flags = .maskCommand
+        keyDown.flags = flags
+        keyUp.flags = flags
         // Our own chord must not count as tap-liveness evidence (#140).
         SyntheticKeyEvent.mark(keyDown)
         SyntheticKeyEvent.mark(keyUp)
@@ -153,6 +187,17 @@ enum TextInserter {
     @discardableResult
     private static func postCmdC() -> Bool { postCommandChord(0x08) } // 8 = 'C'
 
+    /// Press the system's "copy selected area to clipboard" shortcut for the
+    /// user (#192): the familiar crosshair appears, the drag lands a PNG on the
+    /// clipboard with no file and no thumbnail delay, and the clipboard door
+    /// picks it up at the second it happened.
+    @discardableResult
+    static func postScreenshotToClipboard() -> Bool {
+        let created = postCommandChord(0x15, flags: [.maskCommand, .maskShift, .maskControl]) // 21 = '4'
+        DiagStore.record(.dictationScreenshotChord(eventsCreated: created))
+        return created
+    }
+
     // MARK: - Selection capture (Read Aloud, #105)
 
     /// Capture the frontmost app's selection via synthesized ⌘C, preserving
@@ -168,6 +213,7 @@ enum TextInserter {
 
         pasteboard.clearContents()
         let clearedCount = pasteboard.changeCount
+        PasteboardWriteLedger.shared.note(clearedCount)
         _ = postCmdC()
 
         // Poll for the copy to land — apps take tens of ms to service ⌘C.
@@ -227,6 +273,15 @@ enum TextInserter {
         let data: Data
     }
 
+    /// The one place lore puts a string on the pasteboard, so the clipboard
+    /// door (#192) has one place to learn the change count it must ignore.
+    private static func writeString(_ text: String, to pasteboard: NSPasteboard) {
+        pasteboard.clearContents()
+        PasteboardWriteLedger.shared.note(pasteboard.changeCount)
+        pasteboard.setString(text, forType: .string)
+        PasteboardWriteLedger.shared.note(pasteboard.changeCount)
+    }
+
     private static func savePasteboard(_ pasteboard: NSPasteboard) -> [[PasteboardItem]] {
         var savedItems: [[PasteboardItem]] = []
         for item in pasteboard.pasteboardItems ?? [] {
@@ -244,12 +299,16 @@ enum TextInserter {
     private static func restorePasteboard(_ pasteboard: NSPasteboard, items: [[PasteboardItem]]) {
         guard !items.isEmpty else { return }
         pasteboard.clearContents()
+        PasteboardWriteLedger.shared.note(pasteboard.changeCount)
         for itemData in items {
             let item = NSPasteboardItem()
             for entry in itemData {
                 item.setData(entry.data, forType: entry.type)
             }
             pasteboard.writeObjects([item])
+            // The restore lands 800 ms after the paste — inside a following
+            // dictation, if the user started one immediately (#192).
+            PasteboardWriteLedger.shared.note(pasteboard.changeCount)
         }
     }
 }

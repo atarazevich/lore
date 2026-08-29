@@ -62,6 +62,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         case apiCall
         case dictationRecorded, dictationZeroFrames, dictationPasted
         case dictationUpgrade, dictationDiscarded
+        case dictationItemCollected, dictationItemSwitched, dictationItemsPasted
+        case dictationScreenshotChord, clipboardProbeRead
         case detectionLifecycle, detectionDeviceListChanged, detectionListenerFailed
         case detectionSignal, detectionAppScan, detectionPrompt
         case notificationAuthorization, notificationPosted
@@ -123,6 +125,11 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .dictationPasted: return .dictationPasted
         case .dictationUpgrade: return .dictationUpgrade
         case .dictationDiscarded: return .dictationDiscarded
+        case .dictationItemCollected: return .dictationItemCollected
+        case .dictationItemSwitched: return .dictationItemSwitched
+        case .dictationItemsPasted: return .dictationItemsPasted
+        case .dictationScreenshotChord: return .dictationScreenshotChord
+        case .clipboardProbeRead: return .clipboardProbeRead
         case .detectionLifecycle: return .detectionLifecycle
         case .detectionDeviceListChanged: return .detectionDeviceListChanged
         case .detectionListenerFailed: return .detectionListenerFailed
@@ -221,6 +228,13 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .dictationPasted: return .dictationPasted(characters: transcript.count, cleaned: true)
         case .dictationUpgrade: return .dictationUpgrade(endpoint: .translate, outcome: .failed)
         case .dictationDiscarded: return .dictationDiscarded(state: .processing)
+        case .dictationItemCollected:
+            return .dictationItemCollected(kind: .image, bytes: .max)
+        case .dictationItemSwitched:
+            return .dictationItemSwitched(kind: .text, included: false)
+        case .dictationItemsPasted: return .dictationItemsPasted(items: .max, included: .max)
+        case .dictationScreenshotChord: return .dictationScreenshotChord(eventsCreated: false)
+        case .clipboardProbeRead: return .clipboardProbeRead(read: .data, result: .max)
 
         case .detectionLifecycle: return .detectionLifecycle(running: true)
         case .detectionDeviceListChanged:
@@ -273,6 +287,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         allowed.formUnion(DiagEvent.OnboardingStep.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.RepairReason.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.RepairOutcome.allCases.map(\.rawValue))
+        allowed.formUnion(DiagEvent.ClipboardRead.allCases.map(\.rawValue))
+        allowed.formUnion(DictationItemKind.allCases.map(\.rawValue))
         allowed.formUnion(DictationState.allCases.map(\.rawValue))
         return allowed
     }()

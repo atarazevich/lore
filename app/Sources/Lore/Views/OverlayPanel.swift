@@ -90,7 +90,19 @@ final class TopCenteredPanel<Content: View> {
     func resizeToContent() {
         guard let screen = Self.screenForMouse() else { return }
         hostingView.layoutSubtreeIfNeeded()
-        let size = hostingView.fittingSize
+        // `fittingSize` is the *smallest* size the content can be pressed into,
+        // not the size it wants: a panel sized from it squeezes its own
+        // contents, which is how a 19-minute dictation's timer ended up broken
+        // across two lines once another group joined the row (#192). The
+        // hosting view's intrinsic size is the content's own ideal — the
+        // content-driven number `.intrinsicContentSize` sizing exists to give.
+        // The larger of the two, so no panel is ever smaller than it was.
+        let ideal = hostingView.intrinsicContentSize
+        let minimum = hostingView.fittingSize
+        let size = NSSize(
+            width: max(ideal.width, minimum.width),
+            height: max(ideal.height, minimum.height)
+        )
         guard size.width > 10 && size.height > 5 else { return }
 
         // Detect cross-screen move by identity, not dimensions

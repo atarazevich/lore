@@ -33,6 +33,12 @@ final class DictationCoordinator {
     private(set) var bluetoothMicRedirected = false
     /// True when the audio bus reports zero signal (dead mic input).
     private(set) var noSignal = false
+    /// What the user copied or screenshotted while this dictation was being
+    /// spoken (#192), oldest first — the indicator's count and list read this,
+    /// and the paste carries every item still switched on. Cleared when the
+    /// next recording is confirmed and when one is discarded; the pipeline
+    /// takes them with it.
+    private(set) var items: [DictationItem] = []
 
     private let log = Logger(subsystem: "com.lore.app", category: "DictationCoordinator")
     private var busConsumerID: UUID?
@@ -57,9 +63,19 @@ final class DictationCoordinator {
     private var liveRecording: LiveDictationRecording?
     private var converter: AVAudioConverter?
     private let cleanupClient: any CleanupProviding
+    /// The clipboard door (#192): open between the confirmed hold and the end
+    /// of the capture, never outside it.
+    private let clipboard: ClipboardWatcher
+    /// When the hold was confirmed, and how much audio the pre-buffer already
+    /// held at that instant. Together they place "now" in this dictation's own
+    /// audio, whose t=0 is the pre-buffer's first sample — the same t=0 the
+    /// model's token timings count from.
+    private var confirmedHoldAt: Date?
+    private var preBufferSeconds: Double = 0
 
     private static let minimumSpeechSamples = 8000
     private static let maxChunkSamples = 480_000
+    private static let sampleRate = 16000.0
     static let upgradePanelDuration: Double = 3.0
 
     /// User-facing paste-time failure messages (#50). Raw text is still
@@ -118,7 +134,7 @@ final class DictationCoordinator {
     /// finalizes the capture synchronously, and parks the samples — and the
     /// recording they were written to — in `cutTail` for the pipeline to pick up.
     private var tailTask: Task<Void, Never>?
-    private var cutTail: (samples: [Float], recording: LiveDictationRecording?)?
+    private var cutTail: (samples: [Float], recording: LiveDictationRecording?, items: [DictationItem])?
 
     /// Enqueue the newest transcription (#104). `work` receives the session
     /// epoch it was enqueued under and the previous link, which it must await
@@ -152,10 +168,12 @@ final class DictationCoordinator {
     init(
         history: DictationHistory = DictationHistory(),
         cleanupClient: any CleanupProviding = CleanupClient(),
-        backend: (any TranscriptionBackend)? = nil
+        backend: (any TranscriptionBackend)? = nil,
+        clipboard: ClipboardWatcher = ClipboardWatcher()
     ) {
         self.history = history
         self.cleanupClient = cleanupClient
+        self.clipboard = clipboard
         self.ownCache = backend.map { stub in SharedBackendCache(makeBackend: { stub }) }
             ?? SharedBackendCache()
     }
@@ -181,7 +199,10 @@ final class DictationCoordinator {
             guard latestTranscription?.epoch == sessionEpoch, let tailTask else { return }
             tailTask.cancel()
             self.tailTask = nil
-            cutTail = (samples: accumulatedSamples, recording: stopMicCapture())
+            // The items go with the recording they were collected during, not
+            // with the one this press is starting (#192).
+            cutTail = (samples: accumulatedSamples, recording: stopMicCapture(), items: items)
+            items.removeAll()
             accumulatedSamples.removeAll()
             state = .processing
         }
@@ -328,7 +349,35 @@ final class DictationCoordinator {
         // nothing must leave a file. What it already holds goes in first.
         liveRecording = history.beginRecording()
         liveRecording?.append(accumulatedSamples)
+        // The audio's t=0 is the pre-buffer's first sample, so "now" in this
+        // dictation is however much audio the pre-buffer already holds, plus
+        // whatever elapses from here (#192). Measured, not assumed at 150 ms:
+        // a hold that beat the threshold by a few ms carries less.
+        confirmedHoldAt = Date()
+        preBufferSeconds = Double(accumulatedSamples.count) / Self.sampleRate
+        items.removeAll()
+        clipboard.start(
+            offset: { [weak self] in self?.audioOffsetNow() ?? 0 },
+            onItem: { [weak self] item in self?.items.append(item) }
+        )
         log.debug("recording confirmed (pre-buffer kept)")
+    }
+
+    /// How far into this dictation's audio "now" is. Zero before a hold is
+    /// confirmed — nothing collects then.
+    private func audioOffsetNow() -> Double {
+        guard let confirmedHoldAt else { return 0 }
+        return Date().timeIntervalSince(confirmedHoldAt) + preBufferSeconds
+    }
+
+    /// Switch one item between in the prompt and left out (#192) — the row in
+    /// the indicator's list is the switch, and the count follows.
+    func toggleItem(id: UUID) {
+        guard let index = items.firstIndex(where: { $0.id == id }) else { return }
+        items[index].included.toggle()
+        DiagStore.record(.dictationItemSwitched(
+            kind: items[index].kind, included: items[index].included
+        ))
     }
 
     /// Cancel pre-buffer (user tapped instead of holding).
@@ -374,11 +423,15 @@ final class DictationCoordinator {
         // The recording this pipeline now owns: adopted into history below, or
         // abandoned on the way out (#182).
         let recording: LiveDictationRecording?
+        // What was copied while it was being spoken (#192) — this pipeline's,
+        // not the next recording's.
+        let collected: [DictationItem]
         if let cut = cutTail {
             // Tail cut by a new press — capture already finalized for us.
             cutTail = nil
             samples = cut.samples
             recording = cut.recording
+            collected = cut.items
         } else {
             // Re-check state — may have been discarded during the tail
             // (which abandoned the recording along with it).
@@ -386,9 +439,11 @@ final class DictationCoordinator {
             recording = stopMicCapture()
             samples = accumulatedSamples
             accumulatedSamples.removeAll()
+            collected = items
+            items.removeAll()
         }
 
-        let durationSeconds = Double(samples.count) / 16000.0
+        let durationSeconds = Double(samples.count) / Self.sampleRate
         DiagStore.record(.dictationRecorded(
             samples: samples.count,
             durationMs: Int(durationSeconds * 1000)
@@ -447,6 +502,11 @@ final class DictationCoordinator {
             if pendingOperatorAddressed { entry.operatorAddressed = true }
             pendingOperatorAddressed = false
         }
+        // Rich input (#192): the clipboard images become files beside the entry
+        // they belong to, so the prompt can name a path a CLI agent can open.
+        // On the entry before `add`, so its first write already carries them —
+        // and so a retry re-composes the same text from the same items.
+        entry.items = Self.materialize(collected, entryID: entry.id)
         history.add(entry)
         if isCurrentSession(epoch) { currentEntryID = entry.id }
         log.debug("audio saved: \(entry.audioFilename ?? "FAILED", privacy: .private)")
@@ -522,6 +582,11 @@ final class DictationCoordinator {
             // The pasted text is exactly what the user dictated and is already
             // visible in the app's own history UI — only its length is recorded.
             DiagStore.record(.dictationPasted(characters: text.count, cleaned: didCleanup))
+            if let items = entry.items, !items.isEmpty {
+                DiagStore.record(.dictationItemsPasted(
+                    items: items.count, included: items.filter(\.included).count
+                ))
+            }
         }
 
         history.update(entry)
@@ -537,6 +602,29 @@ final class DictationCoordinator {
         } else {
             showUpgradeOptions(didCleanup: didCleanup)
         }
+    }
+
+    /// Clipboard images become PNGs under lore's own Application Support — the
+    /// one thing this feature stores (#192, D4). An image whose file could not
+    /// be written is dropped rather than carried: a prompt must never name a
+    /// picture that is not there. Nil when nothing survived, so a dictation
+    /// with nothing attached keeps its byte-identical JSON.
+    private static func materialize(_ items: [DictationItem], entryID: UUID) -> [DictationItem]? {
+        var kept: [DictationItem] = []
+        for (index, item) in items.enumerated() {
+            var item = item
+            if item.kind == .image {
+                guard let data = item.imageData,
+                      let path = RichInputStore.writePNG(data, entryID: entryID, index: index)
+                else { continue }
+                item.path = path
+            }
+            // The bytes are a file now; a second copy inside the entry's JSON
+            // would be the same picture twice.
+            item.imageData = nil
+            kept.append(item)
+        }
+        return kept.isEmpty ? nil : kept
     }
 
     // MARK: - Upgrade Panel
@@ -665,6 +753,9 @@ final class DictationCoordinator {
         // already adopted the recording, and then there is nothing to hand over.
         stopMicCapture()?.abandon()
         accumulatedSamples.removeAll()
+        // A discarded dictation takes its items with it — there is no inbox of
+        // things that were copied during a recording that never happened.
+        items.removeAll()
         pendingCleanupMode = nil
         pendingOperatorAddressed = false
         state = .idle
@@ -783,6 +874,10 @@ final class DictationCoordinator {
     /// can leave a file behind. Nil when the gesture never became a recording.
     private func stopMicCapture() -> LiveDictationRecording? {
         captureEpoch += 1
+        // The clipboard door is open only between the confirmed hold and the
+        // end of the capture (#192); this is the chokepoint every stop crosses.
+        clipboard.stop()
+        confirmedHoldAt = nil
         firstFrameWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
         audioLevelTask?.cancel()
@@ -962,20 +1057,26 @@ final class DictationCoordinator {
 
         if isCurrentSession(epoch) { state = .processing }
 
-        // Build chunks, merging short tails into the previous chunk
-        var chunks: [[Float]] = []
+        // Build chunks, merging short tails into the previous chunk. Each keeps
+        // the sample it starts at: a chunk's timings are its own, so placing an
+        // item past the 30 s boundary needs the offset added back (#192).
+        var chunks: [(samples: [Float], startSample: Int)] = []
         for start in stride(from: 0, to: samples.count, by: Self.maxChunkSamples) {
             let end = min(start + Self.maxChunkSamples, samples.count)
             let chunk = Array(samples[start..<end])
             if chunk.count < Self.minimumSpeechSamples && !chunks.isEmpty {
-                chunks[chunks.count - 1].append(contentsOf: chunk)
+                chunks[chunks.count - 1].samples.append(contentsOf: chunk)
             } else {
-                chunks.append(chunk)
+                chunks.append((samples: chunk, startSample: start))
             }
         }
 
         let transcribeStart = Date()
         var segments: [String] = []
+        /// Every word of the transcript with its end time and whether a
+        /// clause ended with it, in dictation-audio seconds — what an item's
+        /// own second is measured against.
+        var words: [RichInput.Word] = []
         var failedChunks = 0
 
         // Only a *thrown* attempt is retried — an empty success is silence into
@@ -986,9 +1087,11 @@ final class DictationCoordinator {
         for (i, chunk) in chunks.enumerated() {
             if Task.isCancelled { return }
             do {
-                let segment = try await Self.withRetries(attempts: Self.retryAttempts) {
+                let result = try await Self.withRetries(attempts: Self.retryAttempts) {
                     do {
-                        return try await backend.transcribe(chunk, previousContext: nil)
+                        return try await backend.transcribeDetailed(
+                            chunk.samples, previousContext: nil
+                        )
                     } catch {
                         log.error("""
                             chunk \(i + 1, privacy: .public)/\(chunks.count, privacy: .public) attempt failed: \
@@ -997,8 +1100,14 @@ final class DictationCoordinator {
                         throw error
                     }
                 }
-                if !segment.isEmpty {
-                    segments.append(segment)
+                if !result.text.isEmpty {
+                    segments.append(result.text)
+                    // Words and their times are appended together, so a chunk
+                    // lost after retries drops both and the rest stay aligned.
+                    words += RichInput.words(
+                        tokens: result.tokens,
+                        audioOffset: Double(chunk.startSample) / Self.sampleRate
+                    )
                 }
             } catch is CancellationError {
                 return
@@ -1026,7 +1135,13 @@ final class DictationCoordinator {
             entry.errorMessage = "Transcription produced empty result"
         } else {
             entry.status = .transcribed
-            entry.rawText = text
+            // The spoken words with every kept item at the end of the clause
+            // it happened in (#192). Identical to `text` when the dictation
+            // carried nothing, and re-derived on a retry from the entry's own
+            // items.
+            entry.rawText = RichInput.compose(
+                spoken: text, items: entry.items ?? [], words: words
+            )
             log.debug("raw transcription: \(text, privacy: .private)")
         }
     }
@@ -1110,36 +1225,20 @@ final class DictationCoordinator {
         let apiKey = settings.openaiApiKey
 
         do {
-            // One `apiCall` event per attempt, wrapping the HTTP call itself —
-            // retries show in the stream as failed→ok sequences (#103).
-            let cleaned = try await Self.withRetries(
-                attempts: Self.retryAttempts,
-                backoff: [.milliseconds(500), .seconds(1)],
-                isTransient: Self.isTransientCleanupError
-            ) {
-                let startedAt = Date()
-                do {
-                    let cleaned = try await cleanupClient.cleanup(
-                        rawText: rawText, prompt: effectivePrompt, apiKey: apiKey
-                    )
-                    // `CleanupProviding` reports success as a String, not a status code —
-                    // nil is the honest answer, and `.ok` already carries the verdict.
-                    DiagStore.record(.apiCall(
-                        endpoint: endpoint,
-                        outcome: .ok,
-                        httpStatus: nil,
-                        ms: Int(Date().timeIntervalSince(startedAt) * 1000)
-                    ))
-                    return cleaned
-                } catch {
-                    DiagStore.record(.apiCall(
-                        endpoint: endpoint,
-                        outcome: .failed,
-                        httpStatus: Self.httpStatus(from: error),
-                        ms: Int(Date().timeIntervalSince(startedAt) * 1000)
-                    ))
-                    throw error
-                }
+            // Only the spoken words go to the model (#192, D5): the text is cut
+            // at the items it carries, the spoken parts go out in parallel, and
+            // what was inserted comes back byte for byte. A dictation with no
+            // items splits into one segment and this is one call, as before.
+            let split = RichInput.split(rawText, items: entry.items ?? [])
+            let cleaned: String
+            if split.isWhole {
+                cleaned = try await cleanupCall(
+                    rawText, prompt: effectivePrompt, apiKey: apiKey, endpoint: endpoint
+                )
+            } else {
+                cleaned = try await cleanupSegments(
+                    split, prompt: effectivePrompt, apiKey: apiKey, endpoint: endpoint
+                )
             }
             entry.cleanedText = cleaned
             entry.status = .cleaned
@@ -1156,6 +1255,67 @@ final class DictationCoordinator {
             }
             return false
         }
+    }
+
+    /// One cleanup call, with the retries and the `apiCall` event that wrap it —
+    /// one event per attempt, so retries show in the stream as failed→ok
+    /// sequences (#103).
+    private func cleanupCall(
+        _ text: String, prompt: String, apiKey: String, endpoint: DiagEvent.Endpoint
+    ) async throws -> String {
+        try await Self.withRetries(
+            attempts: Self.retryAttempts,
+            backoff: [.milliseconds(500), .seconds(1)],
+            isTransient: Self.isTransientCleanupError
+        ) {
+            let startedAt = Date()
+            do {
+                let cleaned = try await cleanupClient.cleanup(
+                    rawText: text, prompt: prompt, apiKey: apiKey
+                )
+                // `CleanupProviding` reports success as a String, not a status code —
+                // nil is the honest answer, and `.ok` already carries the verdict.
+                DiagStore.record(.apiCall(
+                    endpoint: endpoint,
+                    outcome: .ok,
+                    httpStatus: nil,
+                    ms: Int(Date().timeIntervalSince(startedAt) * 1000)
+                ))
+                return cleaned
+            } catch {
+                DiagStore.record(.apiCall(
+                    endpoint: endpoint,
+                    outcome: .failed,
+                    httpStatus: Self.httpStatus(from: error),
+                    ms: Int(Date().timeIntervalSince(startedAt) * 1000)
+                ))
+                throw error
+            }
+        }
+    }
+
+    /// The spoken parts of a dictation that carries items, cleaned in parallel
+    /// and put back around the items untouched (#192). A segment that is only
+    /// whitespace is not sent — there is nothing in it to clean. Any segment
+    /// failing after its retries fails the whole cleanup, exactly as the single
+    /// call does: the raw text is what gets pasted, items and all.
+    private func cleanupSegments(
+        _ split: RichInput.Split, prompt: String, apiKey: String, endpoint: DiagEvent.Endpoint
+    ) async throws -> String {
+        let spoken = split.segments.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let cleaned = try await withThrowingTaskGroup(of: (Int, String).self) { group in
+            for (index, segment) in spoken.enumerated() where !segment.isEmpty {
+                group.addTask {
+                    (index, try await self.cleanupCall(
+                        segment, prompt: prompt, apiKey: apiKey, endpoint: endpoint
+                    ))
+                }
+            }
+            var result = spoken
+            for try await (index, text) in group { result[index] = text }
+            return result
+        }
+        return split.reassembled(with: cleaned)
     }
 
     /// HTTP status behind a cleanup failure, when the error carries one.
