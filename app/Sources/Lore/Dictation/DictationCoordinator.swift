@@ -8,6 +8,10 @@ enum UpgradeAction: Sendable {
     case translate
 }
 
+/// How a dictation's words leave: posted by the call, answered by the task
+/// (#195, #211). `TextInserter.paste` is the only one the app ever builds.
+typealias DictationDelivery = @MainActor ([RichInput.DeliveryStep]) -> Task<Bool, Never>
+
 @Observable
 @MainActor
 final class DictationCoordinator {
@@ -179,19 +183,35 @@ final class DictationCoordinator {
     let history: DictationHistory
     var settings: AppSettings?
 
+    /// How this dictation's words leave (#195, #211).
+    ///
+    /// Called for its effect and answered later: the call *posts* the paste, and
+    /// the task it hands back reports only whether the keystrokes could be
+    /// created (`TextInserter.paste`). Nothing on the way out waits for that.
+    @ObservationIgnored
+    private let deliver: DictationDelivery
+
     /// `history` is injectable so tests can back it with an ephemeral
     /// UserDefaults suite instead of the user's real dictation history;
     /// `cleanupClient` so tests can force LLM failures without the network;
-    /// `backend` so tests can drive the chunk loop without the local model.
+    /// `backend` so tests can drive the chunk loop without the local model;
+    /// `deliver` so tests can reach the paste at all — the real one writes the
+    /// pasteboard and presses Cmd+V into whatever the developer has in front of
+    /// them — and because the order the paste moment turns on, the words posted
+    /// before the shape starts leaving, can only be read from inside it (#211).
     init(
         history: DictationHistory = DictationHistory(),
         cleanupClient: any CleanupProviding = CleanupClient(),
         backend: (any TranscriptionBackend)? = nil,
-        clipboard: ClipboardWatcher = ClipboardWatcher()
+        clipboard: ClipboardWatcher = ClipboardWatcher(),
+        deliver: @escaping DictationDelivery = { steps in
+            Task { @MainActor in await TextInserter.paste(steps) }
+        }
     ) {
         self.history = history
         self.cleanupClient = cleanupClient
         self.clipboard = clipboard
+        self.deliver = deliver
         self.ownCache = backend.map { stub in SharedBackendCache(makeBackend: { stub }) }
             ?? SharedBackendCache()
     }
@@ -693,7 +713,7 @@ final class DictationCoordinator {
             // Started here, answered below (#209, F5). A web composer is handed
             // its steps 250–600 ms apart, and nothing in this function may wait
             // for that: the shape leaves at STEP 4 and this outlives it.
-            delivery = Task { @MainActor in await TextInserter.paste(steps) }
+            delivery = deliver(steps)
             // The pasted text is exactly what the user dictated and is already
             // visible in the app's own history UI — only its length is recorded.
             DiagStore.record(.dictationPasted(characters: text.count, cleaned: didCleanup))
@@ -739,14 +759,16 @@ final class DictationCoordinator {
             scheduleAutoHide()
             return
         }
-        // V-A (#209): no confirmation face. "Pasted" is a fact the app is not
-        // in a position to assert — `TextInserter` can confirm only that the
-        // Cmd+V was created, never that the target received it — and with the
-        // words away there is nothing left for anyone to decide (rule 7). The
-        // shape simply goes.
-        autoHideTask?.cancel()
-        autoHideTask = nil
-        state = .idle
+        // The paste moment (#211). The words went at `deliver` above — before
+        // this write, with nothing between the two that waits — and the shape
+        // says so on its way out: the spinner's slot becomes a green checkmark,
+        // the mark detaches and falls toward the cursor, and the bubble fades
+        // with it. What V-A refused (#209) is refused still: nothing is claimed
+        // about the words *arriving* — `TextInserter` can confirm only that the
+        // Cmd+V was created — and nothing is parked for anyone to dismiss. This
+        // is the shape leaving, drawn.
+        state = .done
+        scheduleAutoHide(after: PasteFall.hold)
     }
 
     /// Clipboard images become PNGs under lore's own Application Support — the
@@ -777,13 +799,15 @@ final class DictationCoordinator {
     /// `startPreBuffer`, and so a flicker that re-arms a release path simply
     /// restarts it.
     ///
-    /// One delay, because every face that reaches here is a failure now: the
-    /// success path takes the shape straight to `.idle` (#209, V-A) instead of
-    /// parking a checkmark for the ~800 ms flash this used to default to.
-    private func scheduleAutoHide() {
+    /// Two delays: a failure face's four seconds — long enough to read one
+    /// sentence and reach for its button — and `PasteFall.hold`, which is not
+    /// reading time at all but the length of the mark's own fall (#211).
+    /// Both end the same way, so they are one task and one slot; neither is the
+    /// ~800 ms "Done" flash this used to default to (#209).
+    private func scheduleAutoHide(after delay: Duration = DictationCoordinator.faceReadingTime) {
         autoHideTask?.cancel()
         autoHideTask = Task { [weak self] in
-            try? await Task.sleep(for: Self.faceReadingTime)
+            try? await Task.sleep(for: delay)
             guard let self, self.state == .done else { return }
             self.state = .idle
         }

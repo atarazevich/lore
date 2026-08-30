@@ -583,6 +583,67 @@ final class RecordingBubbleRenderTests: XCTestCase {
         )
     }
 
+    /// The paste moment is the transcribing row with a green mark in the icon
+    /// slot (#211, the board's frame 2). Everything else in it stands exactly
+    /// where it stood: same width, same height, same ink past the slot.
+    ///
+    /// The spinner draws nothing offscreen — an `ImageRenderer` runs no
+    /// animations — so the slot is bare in the one and inked in the other, which
+    /// is precisely the difference this face is.
+    func testThePasteFaceIsTheTranscribingRowWithAGreenMarkInTheSlot() throws {
+        let transcribing = try raster(face(.processing, seconds: 66, items: [chip(0), chip(1)]))
+        let delivered = try raster(
+            face(.processing, seconds: 66, items: [chip(0), chip(1)], delivered: true)
+        )
+        XCTAssertEqual(
+            delivered.paintedWidth, transcribing.paintedWidth, accuracy: 0.5,
+            "the mark moved the row it stands in"
+        )
+        XCTAssertEqual(
+            delivered.paintedHeight, transcribing.paintedHeight, accuracy: 0.5,
+            "the mark made the row taller"
+        )
+
+        // The slot itself, and the 10 pt of gap after it the 14 pt glyph bleeds
+        // into — the same bleed every failure face's `xmark.circle.fill` has.
+        // Bare while the spinner is there (an `ImageRenderer` draws none), inked
+        // once the mark arrives, and the mark is the design's own green.
+        let slot = Int(DictationIndicatorView.rowPaddingH * Self.scale)
+            ..< Int((DictationIndicatorView.rowPaddingH + DictationIndicatorView.faceIconSide + 10)
+                    * Self.scale)
+        let mark = compare(transcribing, delivered, columns: slot, of: delivered)
+        print("[#211] the icon slot: \(mark.moved) px differ between the spinner and the "
+              + "mark over \(mark.columns)×\(mark.rows), worst delta \(mark.worstDelta)")
+        XCTAssertGreaterThan(mark.moved, 0, "the mark was not drawn")
+        try assertGreen(delivered, columns: slot)
+
+        // And from the label onward nothing changed at all.
+        let rest = slot.upperBound..<Int(delivered.paintedWidth * Self.scale)
+        let after = compare(transcribing, delivered, columns: rest, of: delivered)
+        print("[#211] past the slot: \(after.moved) px differ over \(after.columns)×"
+              + "\(after.rows), worst delta \(after.worstDelta)")
+        XCTAssertEqual(after.moved, 0, "the mark moved the rest of the row")
+    }
+
+    /// The mark is `LoreTheme.Accent.green` and nothing near it: the brightest
+    /// pixel in the slot is more green than it is red or blue, by more than the
+    /// material's own variation.
+    private func assertGreen(_ raster: Raster, columns: Range<Int>) throws {
+        let rows = Int(raster.paintedHeight * Self.scale)
+        var best: (r: Int, g: Int, b: Int) = (0, 0, 0)
+        for y in 0..<rows {
+            for x in columns {
+                let (r, g, b, _) = raster.pixel(x: x, y: y)
+                if Int(g) > best.g { best = (Int(r), Int(g), Int(b)) }
+            }
+        }
+        print("[#211] the mark's brightest pixel: r \(best.r) g \(best.g) b \(best.b) "
+              + "(the token is 50, 215, 75)")
+        XCTAssertGreaterThan(best.g, 150, "nothing bright enough to be the mark")
+        XCTAssertGreaterThan(best.g - best.r, 80, "the mark is not green")
+        XCTAssertGreaterThan(best.g - best.b, 80, "the mark is not green")
+    }
+
     /// A frozen timer is a timer: the face draws the dictation's own length, and
     /// a run with no length of its own — a history retry — draws none.
     func testTheTranscribingFaceFreezesTheTimerAndDrawsNoneWithoutOne() throws {
@@ -663,10 +724,12 @@ final class RecordingBubbleRenderTests: XCTestCase {
 
     private func face(
         _ state: DictationState, error: DictationFace? = nil,
-        seconds: Int = 0, items: [DictationItemChip] = []
+        seconds: Int = 0, items: [DictationItemChip] = [], delivered: Bool = false
     ) -> DictationIndicatorHost {
         let model = DictationIndicatorModel()
-        model.state = state
+        // The paste moment is `.done` with nothing wrong (#211) — the same row
+        // the transcribing face draws, with a mark where the spinner was.
+        model.state = delivered ? .done : state
         model.lastError = error
         model.recordingSeconds = seconds
         model.items = items

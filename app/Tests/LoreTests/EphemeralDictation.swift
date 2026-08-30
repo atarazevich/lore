@@ -55,14 +55,19 @@ final class EphemeralDictation {
     /// Settings are deliberately not wired here: a coordinator with none behaves
     /// differently from one with an empty key, and which of the two a test wants
     /// is the test's business.
+    ///
+    /// `deliver` answers "posted" and touches nothing: the real one presses
+    /// Cmd+V into whatever the developer has in front of them, so a test that
+    /// runs the pipeline past transcription has to hand its own in (#211).
     func coordinator(
         backend: (any TranscriptionBackend)? = nil,
         cleanupClient: any CleanupProviding = CleanupClient(),
-        clipboard: ClipboardWatcher = ClipboardWatcher()
+        clipboard: ClipboardWatcher = ClipboardWatcher(),
+        deliver: @escaping DictationDelivery = { _ in Task { true } }
     ) -> DictationCoordinator {
         DictationCoordinator(
             history: history(), cleanupClient: cleanupClient,
-            backend: backend, clipboard: clipboard
+            backend: backend, clipboard: clipboard, deliver: deliver
         )
     }
 

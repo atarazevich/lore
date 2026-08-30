@@ -406,6 +406,11 @@ struct DictationIndicatorView: View {
     /// count as they were, and `Continue` past a hairline. The lock is untouched
     /// — pausing is not an ending.
     var paused = false
+    /// The paste's checkmark has started to leave (#211) — nil until the words
+    /// are away and the mark detaches, and what it holds is where the mark goes.
+    /// Its arrival is also the shape's own goodbye: the bubble fades over the
+    /// same quarter second the mark takes to fall.
+    var fall: PasteFall?
     @State private var showBluetoothInfo = false
     /// How many items have arrived during this dictation (#210). Not a count of
     /// the list — a number that changes once per arrival, which is what the
@@ -621,15 +626,34 @@ struct DictationIndicatorView: View {
 
     private func paddedRow(open: Bool, measuring: Bool, paused: Bool) -> some View {
         panel(open: open, measuring: measuring, paused: paused)
-            .padding(.horizontal, 20)
-            .padding(.vertical, 12)
+            .padding(.horizontal, Self.rowPaddingH)
+            .padding(.vertical, Self.rowPaddingV)
     }
+
+    /// The board's own row padding, 20 across and 12 down. Constants because the
+    /// falling checkmark leaves from a point measured with them (#211).
+    static let rowPaddingH: CGFloat = 20
+    static let rowPaddingV: CGFloat = 12
+
+    /// Where the icon slot's centre stands in the shape, from its top-left
+    /// corner. The record dot, the spinner, a failure's glyph and the paste's
+    /// checkmark all stand here — and it is the point the mark detaches from,
+    /// which is why it is a number and not a layout accident (#211).
+    static let iconCentre = CGPoint(
+        x: rowPaddingH + faceIconSide / 2, y: rowPaddingV + faceRowHeight / 2
+    )
 
     /// The bubble the user sees, and the only part of the canvas that answers a
     /// pointer — the margin around it belongs to whatever window is underneath.
     private var bubble: some View {
         shape(open: expanded, measuring: false, paused: paused, listWidth: topRowWidth)
             .fixedSize()
+            // The paste's goodbye (#211): the shape fades over the same quarter
+            // second the mark takes to fall, so the bubble is gone by the time
+            // it lands. Coming back is not a fade — a new dictation opening
+            // where the last one left off must arrive, not dissolve in.
+            .opacity(fall == nil ? 1 : 0)
+            .animation(fall == nil ? nil : fallAnimation, value: fall)
             .contentShape(RoundedRectangle(cornerRadius: 12))
             // On the shape, past its own content shape, so the transparent
             // margin is not a handle (#213) — and after the keycaps, the rows
@@ -822,6 +846,19 @@ struct DictationIndicatorView: View {
 
     private static let faceFade: Animation = .easeInOut(duration: 0.2)
 
+    /// The paste's fall (#211): the mark's travel and the shape's fade, one
+    /// curve for both.
+    ///
+    /// Under Reduce Motion the shape leaves on the close the bubble already had
+    /// — the board's Reduce Motion row says exactly that, and by then
+    /// `PasteFall.resolve` has already refused the travel, so there is no fall
+    /// left for a fall's curve to carry.
+    private var fallAnimation: Animation {
+        reduceMotion ? Self.closeCurve : Self.fallCurve
+    }
+
+    private static let fallCurve: Animation = .easeIn(duration: PasteFall.duration)
+
     /// One face dissolving into the next, on its own curve rather than the
     /// scope's spring.
     private static let faceDissolve: AnyTransition = .opacity.animation(faceFade)
@@ -830,8 +867,10 @@ struct DictationIndicatorView: View {
     /// outlast it are one fact, so they are one number.
     private static let closeDuration: TimeInterval = 0.2
 
+    private static let closeCurve: Animation = .easeOut(duration: closeDuration)
+
     private var closeAnimation: Animation? {
-        reduceMotion ? nil : .easeOut(duration: Self.closeDuration)
+        reduceMotion ? nil : Self.closeCurve
     }
 
     private var railFade: Animation? {
@@ -873,25 +912,26 @@ struct DictationIndicatorView: View {
             }
         case .loadingModel:
             workingRow(label: "Downloading model\u{2026}").transition(Self.faceDissolve)
-        case .processing:
+        case .processing, .done:
             // T1 (#209): the spinner stands where the dot did, the timer is
             // frozen at the dictation's own length, and the clip with its count
             // stays put so the person can see their items are still riding
             // along. Nothing else in the row.
-            workingRow(label: "Transcribing") {
-                frozenTimer
-                if clipBright { clipReport }
-            }
-            .transition(Self.faceDissolve)
-        case .done:
-            if let error = lastError {
+            //
+            // The paste is the same face, not the next one (#211): when the
+            // words go, the slot's spinner becomes a green checkmark and every
+            // other thing in the row stands exactly where it stood (the board's
+            // frame 2). Two switch cases would be two views, and the dissolve
+            // between them would cross-fade a label into an identical label.
+            // `.processing` ignores a failure exactly as it always did.
+            if let error = lastError, state == .done {
                 failureFace(error).transition(Self.faceDissolve)
             } else {
-                // V-A (#209): the words are away, and there is no face for
-                // that — the coordinator takes the shape to `.idle` instead of
-                // parking a checkmark here. Reachable only for the instant
-                // between the two writes.
-                EmptyView()
+                workingRow(label: "Transcribing", delivered: state == .done) {
+                    frozenTimer
+                    if clipBright { clipReport }
+                }
+                .transition(Self.faceDissolve)
             }
         case .idle:
             EmptyView()
@@ -1591,6 +1631,11 @@ struct DictationIndicatorView: View {
     /// red dot was.
     static let faceIconSide: CGFloat = 15
 
+    /// What a glyph standing in that slot is drawn at. One number, because the
+    /// failure faces' `xmark.circle.fill` and the paste's `checkmark.circle.fill`
+    /// (#211) occupy the same slot and may not be two sizes.
+    static let faceGlyphSize: CGFloat = 14
+
     /// Where a face's sentence wraps. Long enough for the two that need it, and
     /// no wider than the shape the recording bubble opens to.
     static let faceWrapWidth: CGFloat = 260
@@ -1606,11 +1651,11 @@ struct DictationIndicatorView: View {
     /// model download (F3). One row — the spinner where the dot stands, the
     /// sentence beside it, and whatever else that face carries after it.
     private func workingRow<Trailing: View>(
-        label: String, @ViewBuilder trailing: () -> Trailing = { EmptyView() }
+        label: String, delivered: Bool = false,
+        @ViewBuilder trailing: () -> Trailing = { EmptyView() }
     ) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            ProgressView()
-                .controlSize(.small)
+            workingIcon(delivered: delivered)
                 .frame(width: Self.faceIconSide, height: Self.faceIconSide)
                 .onTextBaseline()
             Text(label)
@@ -1619,6 +1664,38 @@ struct DictationIndicatorView: View {
             trailing()
         }
         .frame(minHeight: Self.faceRowHeight)
+    }
+
+    /// What stands in the working row's icon slot: the spinner while the
+    /// pipeline works, and the paste's green checkmark once the words are away
+    /// (#211). One replaces the other on the board's own 0.2 s dissolve.
+    @ViewBuilder
+    private func workingIcon(delivered: Bool) -> some View {
+        if delivered {
+            mark.transition(Self.faceDissolve)
+        } else {
+            ProgressView().controlSize(.small).transition(Self.faceDissolve)
+        }
+    }
+
+    /// The mark, wherever the fall has taken it (#211). One view carrying three
+    /// animatable modifiers rather than a case per phase: a switch would make
+    /// each phase a different view, and the travel would come out as a
+    /// cross-fade between two standing marks.
+    private var mark: some View {
+        PasteCheckmarkGlyph()
+            .offset(markTravel)
+            .scaleEffect(markTravel == .zero ? 1 : PasteFall.shrink)
+            // It left this window — a second one is carrying it to the cursor,
+            // and two marks would read as two marks.
+            .opacity(fall == .toCursor ? 0 : 1)
+    }
+
+    /// How far the mark has fallen inside this window. Zero everywhere else:
+    /// under Reduce Motion it does not travel at all, and a mark bound for the
+    /// cursor travels in a window of its own.
+    private var markTravel: CGSize {
+        if case .inside(let travel) = fall { travel } else { .zero }
     }
 
     /// The dictation's own clock, stopped where it stopped (#209, T1) — the
@@ -1663,7 +1740,7 @@ struct DictationIndicatorView: View {
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
                 Image(systemName: "xmark.circle.fill")
-                    .font(.system(size: 14))
+                    .font(.system(size: Self.faceGlyphSize))
                     // Silence is not a bug the app caused, so it reads in the
                     // row's own muted tone; every other face reports a failure
                     // and reads red. Decoration either way — the sentence is
@@ -1763,6 +1840,8 @@ final class DictationIndicatorModel {
     var held = false
     /// Esc has suspended the capture (#206).
     var paused = false
+    /// The paste's checkmark is on its way out (#211).
+    var fall: PasteFall?
     /// Render-only — see `BubbleRenderPreview`.
     var renderPreview = BubbleRenderPreview()
     var onToggleItem: ((UUID) -> Void)?
@@ -1807,6 +1886,7 @@ struct DictationIndicatorHost: View {
             screenshotsEnabled: model.screenshotsEnabled,
             held: model.held,
             paused: model.paused,
+            fall: model.fall,
             renderPreview: model.renderPreview,
             onToggleItem: model.onToggleItem,
             onToggleLock: model.onToggleLock,
@@ -1832,9 +1912,18 @@ final class DictationIndicatorManager {
     /// Observable dictation state mirror; the shell reads `model.isLocked`
     /// for the Dictation nav live dot (SHELL-10).
     let model = DictationIndicatorModel()
+    /// How often the shape reads the coordinator. Named because the paste's own
+    /// clock has to allow for it (#211): the mark can only start standing at the
+    /// first tick that notices the words went, so `PasteFall.notice` covers this
+    /// and `PasteCheckmarkTests` holds the two together.
+    static let pollInterval: Duration = .milliseconds(50)
     /// One decode per collected image, not one per 50 ms poll (#192). Keyed by
     /// the item's id and emptied with the items themselves.
     private var thumbnails: [UUID: NSImage] = [:]
+    /// The beat the mark stands in the slot before it detaches (#211).
+    private var fallTask: Task<Void, Never>?
+    /// The window carrying the mark to the cursor, while there is one.
+    private var checkmarkFall: PasteCheckmarkFall?
     func start(coordinator: DictationCoordinator, hotkeyManager: HotkeyManager) {
         guard let panel = TopCenteredPanel(
             content: DictationIndicatorHost(model: model), topInset: 8
@@ -1920,7 +2009,7 @@ final class DictationIndicatorManager {
         // Poll coordinator state and push into model
         observationTask = Task { [weak self, weak coordinator, weak hotkeyManager] in
             while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(50))
+                try? await Task.sleep(for: Self.pollInterval)
                 guard let self, let coordinator else { break }
 
                 let newState = coordinator.state
@@ -1968,6 +2057,11 @@ final class DictationIndicatorManager {
                 // opens, arriving through the poll that already reads the lock.
                 self.model.held = hotkeyManager?.isFnHoldingBubble ?? false
                 self.model.paused = coordinator.isPaused
+                // The paste moment (#211): `.done` with nothing wrong is the one
+                // edge that says the words are away.
+                self.followPasteMoment(
+                    delivered: newState == .done && coordinator.lastError == nil
+                )
                 let chips = self.chips(for: coordinator.items)
                 if chips != self.model.items { self.model.items = chips }
 
@@ -1984,7 +2078,54 @@ final class DictationIndicatorManager {
     func stop() {
         observationTask?.cancel()
         observationTask = nil
+        followPasteMoment(delivered: false)
         panel?.hide()
+    }
+
+    /// The checkmark's quarter second (#211).
+    ///
+    /// The mark stands in the spinner's slot for a beat and then detaches: it
+    /// falls to the cursor in a window of its own, or inside the bubble's if the
+    /// cursor is already there, or — under Reduce Motion — not at all, fading
+    /// where it stands. All of it is undone the moment the shape is anything
+    /// else, so a new dictation started mid-fall finds nothing left of it.
+    private func followPasteMoment(delivered: Bool) {
+        guard delivered else {
+            guard fallTask != nil || checkmarkFall != nil || model.fall != nil else { return }
+            fallTask?.cancel()
+            fallTask = nil
+            checkmarkFall?.cancel()
+            checkmarkFall = nil
+            model.fall = nil
+            return
+        }
+        guard fallTask == nil else { return }
+        fallTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: PasteFall.standing)
+            guard !Task.isCancelled, let self else { return }
+            // Where the mark stands: the shape's top-left corner is the
+            // window's own, because a face after release has no canvas around
+            // it (#204). No window means nowhere to fall from.
+            let frame = self.panel?.lastFrame ?? .zero
+            guard frame.width > 0 else {
+                self.model.fall = .still
+                return
+            }
+            let mark = NSPoint(
+                x: frame.minX + DictationIndicatorView.iconCentre.x,
+                y: frame.maxY - DictationIndicatorView.iconCentre.y
+            )
+            let cursor = NSEvent.mouseLocation
+            let fall = PasteFall.resolve(
+                mark: mark, cursor: cursor, window: frame,
+                reduceMotion: NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+            )
+            self.model.fall = fall
+            guard fall == .toCursor else { return }
+            let flight = PasteCheckmarkFall()
+            flight.fly(from: mark, to: cursor)
+            self.checkmarkFall = flight
+        }
     }
 
     /// The list's own view of the coordinator's items (#192). An image is
