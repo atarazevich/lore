@@ -368,6 +368,12 @@ enum DiagEvent: Codable, Sendable, Equatable {
     case dictationPasted(characters: Int, cleaned: Bool)
     case dictationUpgrade(endpoint: Endpoint, outcome: Outcome)
     case dictationDiscarded(state: DictationState)
+    /// Esc suspended capture in place, and `Continue` (or a second Esc) brought
+    /// it back (#206). The pair replaces what Esc used to leave behind — a
+    /// `dictationDiscarded{state: recording}` and no recording — so a pause is
+    /// legible in the stream as the reversible thing it is.
+    case dictationPaused
+    case dictationResumed
 
     /// Rich input (#192). What was copied is never in the stream — only which
     /// of the four kinds it was, and, for an image, how many bytes came off the
@@ -480,7 +486,8 @@ extension DiagEvent {
             return .intelligence
 
         case .dictationRecorded, .dictationZeroFrames, .dictationPasted,
-             .dictationUpgrade, .dictationDiscarded, .dictationItemCollected,
+             .dictationUpgrade, .dictationDiscarded,
+             .dictationPaused, .dictationResumed, .dictationItemCollected,
              .dictationItemSwitched, .dictationItemsPasted, .dictationItemsPruned,
              .dictationScreenshotChord, .dictationScreenshotRedirected,
              .clipboardProbeRead:
@@ -556,6 +563,8 @@ extension DiagEvent {
         case .dictationPasted: return "dictationPasted"
         case .dictationUpgrade: return "dictationUpgrade"
         case .dictationDiscarded: return "dictationDiscarded"
+        case .dictationPaused: return "dictationPaused"
+        case .dictationResumed: return "dictationResumed"
         case .dictationItemCollected: return "dictationItemCollected"
         case .dictationItemSwitched: return "dictationItemSwitched"
         case .dictationItemsPasted: return "dictationItemsPasted"

@@ -62,6 +62,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case apiCall
         case dictationRecorded, dictationZeroFrames, dictationPasted
         case dictationUpgrade, dictationDiscarded
+        case dictationPaused, dictationResumed
         case dictationItemCollected, dictationItemSwitched, dictationItemsPasted
         case dictationItemsPruned
         case dictationScreenshotChord, dictationScreenshotRedirected, clipboardProbeRead
@@ -126,6 +127,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .dictationPasted: return .dictationPasted
         case .dictationUpgrade: return .dictationUpgrade
         case .dictationDiscarded: return .dictationDiscarded
+        case .dictationPaused: return .dictationPaused
+        case .dictationResumed: return .dictationResumed
         case .dictationItemCollected: return .dictationItemCollected
         case .dictationItemSwitched: return .dictationItemSwitched
         case .dictationItemsPasted: return .dictationItemsPasted
@@ -231,6 +234,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .dictationPasted: return .dictationPasted(characters: transcript.count, cleaned: true)
         case .dictationUpgrade: return .dictationUpgrade(endpoint: .translate, outcome: .failed)
         case .dictationDiscarded: return .dictationDiscarded(state: .processing)
+        case .dictationPaused: return .dictationPaused
+        case .dictationResumed: return .dictationResumed
         case .dictationItemCollected:
             return .dictationItemCollected(kind: .image, bytes: .max)
         case .dictationItemSwitched:

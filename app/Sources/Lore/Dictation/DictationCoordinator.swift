@@ -30,6 +30,25 @@ final class DictationCoordinator {
     private(set) var bluetoothMicRedirected = false
     /// True when the audio bus reports zero signal (dead mic input).
     private(set) var noSignal = false
+    /// Esc has suspended capture in place (#206). Deliberately a flag beside
+    /// `state` rather than a sixth `DictationState`: a paused dictation *is* a
+    /// recording — one session, one entry, one audio file — and everything that
+    /// asks `state == .recording` (the quit guard, the Fn+V/T/K/S chords, the
+    /// bubble's own canvas) means to include it. What changes is only what the
+    /// capture is doing, and that is what this says.
+    private(set) var isPaused = false
+    /// `stopRecording` has enqueued this session's pipeline and the pipeline has
+    /// not yet taken the capture (#206). `state` stays `.recording` across that
+    /// gap — the 300 ms audio tail — so both Esc gestures have to refuse inside
+    /// it: a resume would open a microphone the pipeline is about to close, and
+    /// a pause would cut the tail short, fire a `dictationPaused` with no pair,
+    /// and flash the paused face on its way to Transcribing.
+    ///
+    /// Its own fact rather than `latestTranscription?.epoch == sessionEpoch`,
+    /// which is the same thing only until a history retry is started during a
+    /// live recording — that enqueues under this epoch too, and Esc would go
+    /// quiet for as long as the retry ran.
+    private var endingInFlight = false
     /// What the user copied or screenshotted while this dictation was being
     /// spoken (#192), oldest first — the indicator's count and list read this,
     /// and the paste carries every item still switched on. Cleared when the
@@ -63,12 +82,19 @@ final class DictationCoordinator {
     /// The clipboard door (#192): open between the confirmed hold and the end
     /// of the capture, never outside it.
     private let clipboard: ClipboardWatcher
-    /// When the hold was confirmed, and how much audio the pre-buffer already
-    /// held at that instant. Together they place "now" in this dictation's own
-    /// audio, whose t=0 is the pre-buffer's first sample — the same t=0 the
-    /// model's token timings count from.
-    private var confirmedHoldAt: Date?
-    private var preBufferSeconds: Double = 0
+    /// Where this dictation's t=0 sits on the wall clock: the instant the
+    /// running capture leg began, moved back by however much audio the dictation
+    /// already held when it did. That t=0 is the pre-buffer's first sample — the
+    /// same t=0 the model's token timings count from — so `audioOffsetNow` is one
+    /// subtraction.
+    ///
+    /// A leg, not the recording: the first starts at the confirmed hold and
+    /// carries the pre-buffer, and a resume after Esc starts another carrying
+    /// everything spoken before the pause (#206). Re-placing t=0 is the whole of
+    /// what a resume has to do about time — the pause is in no leg, so it is in
+    /// neither the audio nor the offsets stamped on what was copied. Nil while
+    /// no leg is running.
+    private var legEpochStart: Date?
 
     /// How long a failure face stays up before the shape leaves — long enough
     /// to read one sentence and reach for its button.
@@ -327,6 +353,12 @@ final class DictationCoordinator {
         autoHideTask?.cancel()
         autoHideTask = nil
         currentEntryID = nil
+        // An earlier dictation's ending is not this one's (#206). Every route
+        // out of one already crosses `stopMicCapture`, which clears it; this is
+        // here because the cost of being wrong about that is a latch that takes
+        // Esc away for the rest of the session, and because "the new recording
+        // owns the shared state" is exactly what this block is.
+        endingInFlight = false
         pendingCleanupMode = nil
         pendingOperatorAddressed = false
         lastError = nil
@@ -341,21 +373,89 @@ final class DictationCoordinator {
         // dictation is however much audio the pre-buffer already holds, plus
         // whatever elapses from here (#192). Measured, not assumed at 150 ms:
         // a hold that beat the threshold by a few ms carries less.
-        confirmedHoldAt = Date()
-        preBufferSeconds = Double(accumulatedSamples.count) / Self.sampleRate
+        beginCaptureLeg()
         items.removeAll()
+        openClipboardDoor()
+        log.debug("recording confirmed (pre-buffer kept)")
+    }
+
+    /// Place this dictation's t=0 for the leg about to run (#206). Whatever is
+    /// already in `accumulatedSamples` is behind it, so the first leg carries the
+    /// pre-buffer and a resume carries everything spoken before the pause —
+    /// measured, never assumed, so no wall clock that ran while nothing was
+    /// captured can get into the numbers.
+    private func beginCaptureLeg() {
+        legEpochStart = Date().addingTimeInterval(-capturedSeconds)
+    }
+
+    /// How long this dictation's audio is. Sample-accurate by construction — it
+    /// counts what was captured — so it stops of its own accord when Esc pauses
+    /// the capture and picks up exactly where it stopped.
+    private var capturedSeconds: Double {
+        Double(accumulatedSamples.count) / Self.sampleRate
+    }
+
+    /// The same figure in whole seconds, which is what the floating bubble's
+    /// timer shows (#206). The bubble reads this rather than keeping a clock of
+    /// its own: a poller that started and stopped one by noticing `isPaused`
+    /// flip was deriving both pause edges from when it happened to look, and
+    /// paid up to a poll interval of drift for each of them.
+    var elapsedCaptureSeconds: Int { Int(capturedSeconds) }
+
+    /// The clipboard door (#192), opened at the confirmed hold and at every
+    /// resume. `start` re-reads the pasteboard's change count, so what was
+    /// copied while the dictation stood paused is not something that happened
+    /// during it — the same rule the beginning of a recording already applies.
+    private func openClipboardDoor() {
         clipboard.start(
             offset: { [weak self] in self?.audioOffsetNow() ?? 0 },
             onItem: { [weak self] item in self?.items.append(item) }
         )
-        log.debug("recording confirmed (pre-buffer kept)")
+    }
+
+    // MARK: - Pause (#206)
+
+    /// Esc: suspend capture in place. One session, one entry, one audio file —
+    /// the recording's file stays open behind every buffer already queued, and a
+    /// resume appends to it, so the audio is contiguous samples with no gap
+    /// spliced into the middle of it (#182 writes a raw stream; a pause is
+    /// simply the absence of the next append, and needs no silence pad the way a
+    /// meeting's two tracks do).
+    ///
+    /// What goes down is the capture and the doors that only make sense beside
+    /// it: the bus subscription, the level meter, the first-frame watchdog and
+    /// the clipboard. Nothing collects while paused, and no watchdog can accuse
+    /// a microphone of failing to deliver frames nobody asked it for.
+    /// Never against a dictation that is already ending — see `endingInFlight`.
+    func pauseRecording() {
+        guard state == .recording, !isPaused, !endingInFlight else { return }
+        isPaused = true
+        tearDownCapture()
+        DiagStore.record(.dictationPaused)
+        log.debug("recording paused (Esc)")
+    }
+
+    /// `Continue`: the same recording, carrying on. Capture comes back up on the
+    /// device the pinned selection resolves to, the clipboard door reopens, and
+    /// the offsets pick up from the audio already held rather than from a wall
+    /// clock that ran through the pause.
+    ///
+    /// Never against a dictation that is already ending — see `endingInFlight`.
+    func resumeRecording() {
+        guard state == .recording, isPaused, !endingInFlight else { return }
+        isPaused = false
+        beginCaptureLeg()
+        startMicCapture()
+        openClipboardDoor()
+        DiagStore.record(.dictationResumed)
+        log.debug("recording resumed")
     }
 
     /// How far into this dictation's audio "now" is. Zero before a hold is
-    /// confirmed — nothing collects then.
+    /// confirmed and while one is paused — nothing collects then.
     private func audioOffsetNow() -> Double {
-        guard let confirmedHoldAt else { return 0 }
-        return Date().timeIntervalSince(confirmedHoldAt) + preBufferSeconds
+        guard let legEpochStart else { return 0 }
+        return Date().timeIntervalSince(legEpochStart)
     }
 
     /// Switch one item between in the prompt and left out (#192) — the row in
@@ -384,6 +484,7 @@ final class DictationCoordinator {
     /// transcription and lost the dictation. Now the debounce only debounces.
     func stopRecording() {
         guard state == .recording else { return }
+        endingInFlight = true
         enqueueTranscription { [weak self] epoch, previous in
             await self?.runDictationPipeline(epoch: epoch, previous: previous)
         }
@@ -748,7 +849,7 @@ final class DictationCoordinator {
         Task { @MainActor [weak self] in
             let selection = await AudioBus.resolveBestInputDevice(requested: requestedDevice)
             guard let self, self.captureEpoch == epoch, let bus = self.audioBus else { return }
-            guard self.isPreBuffering || self.state == .recording else { return }
+            guard self.isPreBuffering || (self.state == .recording && !self.isPaused) else { return }
             self.beginMicCapture(on: bus, selection: selection)
         }
     }
@@ -785,17 +886,30 @@ final class DictationCoordinator {
             }
         }
 
-        // First-frame watchdog: if the HAL IOProc stalls (macOS 27) and this recording
+        // First-frame watchdog: if the HAL IOProc stalls (macOS 27) and this leg
         // captures no audio within 5s while still active, surface it loudly instead of
-        // appearing to record normally. Keyed on this recording's own accumulatedSamples
-        // (cleared at startPreBuffer), not AudioBus's process-global hasCapturedFrames —
+        // appearing to record normally. Keyed on this leg's own share of
+        // accumulatedSamples, not AudioBus's process-global hasCapturedFrames —
         // which never resets after the first capture, so it would let the watchdog fire
-        // only on the first capture after launch. This makes the guard fire per-recording.
+        // only on the first capture after launch. The leg's own count rather than
+        // "empty" so a leg brought back up by `Continue` is watched too (#206): after a
+        // resume the dictation already holds audio, and an emptiness test could never
+        // be true again. The pause itself is not watched at all — the task is cancelled
+        // with the capture, so no microphone is accused of withholding frames nobody
+        // asked it for.
+        let heldAtLegStart = accumulatedSamples.count
         firstFrameWatchdogTask = Task { @MainActor [weak self, weak bus] in
             try? await Task.sleep(for: .seconds(5))
+            // A cancelled sleep returns rather than throwing past `try?`, so
+            // without this the body runs the instant the capture is torn down —
+            // and a pause inside the first five seconds would accuse a microphone
+            // of delivering nothing when nothing had been asked of it
+            // (`no-false-positives.md`). The stop path was one main-actor yield
+            // away from the same accusation.
+            guard !Task.isCancelled else { return }
             guard let self, let bus else { return }
             guard self.isPreBuffering || self.state == .recording else { return }
-            if self.accumulatedSamples.isEmpty && bus.captureError == nil {
+            if self.accumulatedSamples.count == heldAtLegStart && bus.captureError == nil {
                 log.error("no mic audio after 5s")
                 self.lastError = .micUnavailable(await self.micUnavailableMessage())
             }
@@ -805,7 +919,10 @@ final class DictationCoordinator {
             var everHadSignal = false
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(50))
-                guard let self, let bus else { break }
+                // As above: the cancelled sleep falls through, and one more pass
+                // here would put a level and a no-signal verdict back on a
+                // capture that has just been torn down.
+                guard !Task.isCancelled, let self, let bus else { break }
                 self.audioLevel = bus.audioLevel
 
                 if bus.hasSignal { everHadSignal = true }
@@ -849,11 +966,35 @@ final class DictationCoordinator {
     /// history, parked for the pipeline that owns it, or abandoned — so no path
     /// can leave a file behind. Nil when the gesture never became a recording.
     private func stopMicCapture() -> LiveDictationRecording? {
+        tearDownCapture()
+        // A dictation that ends while paused ends as a dictation: the file is
+        // closed and handed on below, exactly as a release would (#206). The
+        // ending it was refusing Esc for is over at the same instant.
+        isPaused = false
+        endingInFlight = false
+        // After `tearDownCapture` cancelled the capture loop: it appends on this
+        // actor, so no buffer reaches the file past this point, and `finish`
+        // closes it behind every buffer already queued.
+        let recording = liveRecording
+        liveRecording = nil
+        recording?.finish()
+        onCaptureEnded?(!captureConfirmed)
+        return recording
+    }
+
+    /// Everything the capture leg owns, dropped: the bus subscription, the
+    /// buffer loop, the level meter, the first-frame watchdog and the clipboard
+    /// door (#192 — open only while a leg is running). Shared by the stop that
+    /// ends a dictation and the Esc that pauses one (#206); what tells them
+    /// apart is what becomes of the recording's file, which is
+    /// `stopMicCapture`'s alone. Idempotent, so a stop after a pause crosses it
+    /// harmlessly a second time.
+    private func tearDownCapture() {
         captureEpoch += 1
-        // The clipboard door is open only between the confirmed hold and the
-        // end of the capture (#192); this is the chokepoint every stop crosses.
         clipboard.stop()
-        confirmedHoldAt = nil
+        // The leg's clock goes with the leg: nothing collects once the door is
+        // shut, and a resume places a new t=0 rather than remembering this one.
+        legEpochStart = nil
         firstFrameWatchdogTask?.cancel()
         firstFrameWatchdogTask = nil
         audioLevelTask?.cancel()
@@ -865,16 +1006,8 @@ final class DictationCoordinator {
         }
         recordingTask?.cancel()
         recordingTask = nil
-        // After the cancel: the capture loop appends on this actor, so no buffer
-        // reaches the file past this point, and `finish` closes it behind every
-        // buffer already queued.
-        let recording = liveRecording
-        liveRecording = nil
-        recording?.finish()
         bluetoothMicRedirected = false
         noSignal = false
-        onCaptureEnded?(!captureConfirmed)
-        return recording
     }
 
     /// Toggle pre-paste cleanup mode during recording.

@@ -170,7 +170,8 @@ final class LiveDictationRecording: @unchecked Sendable {
 
     /// Leave nothing behind — audio and entry file go together, behind every
     /// buffer already queued. Every gesture that does not become a dictation
-    /// ends here: a tap, an Esc, a slip under half a second.
+    /// ends here: a tap, and a slip under half a second. (Esc did too, until
+    /// #206 made it a pause.)
     func abandon() {
         queue.sync {
             close()

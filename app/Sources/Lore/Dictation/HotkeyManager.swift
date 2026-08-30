@@ -238,8 +238,10 @@ final class HotkeyManager {
                 return nil // swallow the Space
             }
 
-            // Esc while locked → discard (consume)
-            if event.keyCode == 53, self.isLocked {
+            // Esc inside a recording → pause or continue, and consume (#206).
+            // Only when the key is lore's: while the system screenshot crosshair
+            // is up it belongs to the crosshair, and falls through untouched.
+            if event.keyCode == DictationEscape.keyCode, self.escapeAction != .passThrough {
                 Task { @MainActor in
                     self.handleKeyDown(event)
                 }
@@ -468,7 +470,10 @@ final class HotkeyManager {
                 return
             } else if event.keyCode == 1, RichInputSettings.screenshotsEnabled,
                       modifierOn({ $0.modifierUpgradeKeysEnabled }) { // S (#192/#198)
-                TextInserter.postScreenshotToClipboard()
+                // Still consumed while paused, and deliberately does nothing:
+                // the clipboard door is shut (#206), so a screenshot taken here
+                // would land on the user's clipboard and join no prompt.
+                if !coordinator.isPaused { TextInserter.postScreenshotToClipboard() }
                 if isLocked { fnHeldAtLock = true }
                 HotkeyManager.hkLog.debug("[HOTKEY] Fn+S → screenshot to clipboard")
                 return
@@ -483,13 +488,9 @@ final class HotkeyManager {
             return
         }
 
-        // Esc while locked → discard
-        if event.keyCode == 53 && isLocked {
-            isLocked = false
-            isLockedFlag = false
-            isRecordingFlag = false
-            HotkeyManager.hkLog.debug("[HOTKEY] Esc while locked → discard")
-            coordinator.discardRecording()
+        // Esc inside a recording → pause, or continue a paused one (#206).
+        if event.keyCode == DictationEscape.keyCode {
+            handleEscape()
             return
         }
 
@@ -498,6 +499,45 @@ final class HotkeyManager {
             coordinator.pasteLastTranscript()
         }
     }
+
+    // MARK: - Escape (#206)
+
+    /// What Esc means right now — the one decision both event paths take, so a
+    /// key cannot be consumed by the local monitor and ignored by the tap.
+    ///
+    /// `state == .recording` is what makes it lore's: a pre-buffer is a gesture
+    /// that may still turn out to be a tap, and there is nothing there to pause.
+    /// It is also read first, and short-circuits: the crosshair reading walks
+    /// every running application and every on-screen window, this runs inside a
+    /// system-wide event tap on the main thread, and Esc is pressed all day long
+    /// outside a dictation.
+    private var escapeAction: DictationEscape {
+        guard let coordinator, coordinator.state == .recording else { return .passThrough }
+        return DictationEscape.decide(
+            paused: coordinator.isPaused,
+            screenshotUIIsUp: DictationEscape.screenshotUIIsUp
+        )
+    }
+
+    /// Esc taken. The lock is untouched either way: pausing is not an ending,
+    /// and a paused recording is still hands-free if that is how it was left.
+    ///
+    /// Internal, not private, so `DictationPauseTests` drives the one function
+    /// both event paths converge on — the same reason `handleFlagsChanged` is.
+    func handleEscape() {
+        guard let coordinator else { return }
+        switch escapeAction {
+        case .passThrough:
+            HotkeyManager.hkLog.debug("[HOTKEY] Esc → not ours, passed through")
+        case .pause:
+            HotkeyManager.hkLog.debug("[HOTKEY] Esc → paused")
+            coordinator.pauseRecording()
+        case .resume:
+            HotkeyManager.hkLog.debug("[HOTKEY] Esc → continue")
+            coordinator.resumeRecording()
+        }
+    }
+
 
     // MARK: - The lock, by pointer (#201)
 
@@ -668,8 +708,11 @@ final class HotkeyManager {
                         Task { @MainActor in
                             // The system's own crosshair, pressed for the user —
                             // the image lands on the clipboard and the door
-                            // collects it at the second it happened.
-                            TextInserter.postScreenshotToClipboard()
+                            // collects it at the second it happened. Not while
+                            // paused: that door is shut (#206).
+                            if manager.coordinator?.isPaused != true {
+                                TextInserter.postScreenshotToClipboard()
+                            }
                             if manager.isLocked { manager.fnHeldAtLock = true }
                             HotkeyManager.hkLog.debug("[HOTKEY] Fn+S (CGEvent) → screenshot to clipboard")
                         }
@@ -724,7 +767,12 @@ final class HotkeyManager {
                 if manager.isRecordingFlag,
                    let shortcut = ScreenshotShortcut(keyCode: keyCode, flags: flags),
                    RichInputSettings.screenshotsEnabled,
-                   RichInputSettings.redirectsSystemScreenshot {
+                   RichInputSettings.redirectsSystemScreenshot,
+                   // Nothing collects while the dictation stands paused (#206),
+                   // so nothing is redirected either: a picture sent to the
+                   // clipboard that no door is open for is a screenshot the user
+                   // asked their own system for and lore quietly moved.
+                   !MainActor.assumeIsolated({ manager.coordinator?.isPaused ?? false }) {
                     let fullScreen = shortcut.isFullScreen
                     DiagStore.record(.dictationScreenshotRedirected(fullScreen: fullScreen))
                     Task { @MainActor in
@@ -769,15 +817,18 @@ final class HotkeyManager {
                     }
                 }
 
-                // Esc while locked → consume and discard
-                if keyCode == 53 && manager.isLockedFlag {
-                    manager.isLockedFlag = false
-                    manager.isRecordingFlag = false
-                    Task { @MainActor in
-                        manager.isLocked = false
-                        manager.coordinator?.discardRecording()
-                        HotkeyManager.hkLog.debug("[HOTKEY] Esc (CGEvent tap) → discard")
+                // Esc inside a recording → consume, and pause or continue
+                // (#206). The decision is taken here rather than in the Task, so
+                // consuming and acting cannot disagree; the tap source is on
+                // CFRunLoopGetMain, so assumeIsolated is valid (see the Space
+                // path above). While the screenshot crosshair is up the key is
+                // not lore's and falls through to it untouched.
+                if keyCode == DictationEscape.keyCode {
+                    let action = MainActor.assumeIsolated { manager.escapeAction }
+                    guard action != .passThrough else {
+                        return Unmanaged.passRetained(event)
                     }
+                    Task { @MainActor in manager.handleEscape() }
                     return nil
                 }
 

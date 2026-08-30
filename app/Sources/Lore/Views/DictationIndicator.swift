@@ -1713,7 +1713,6 @@ final class DictationIndicatorManager {
     /// Observable dictation state mirror; the shell reads `model.isLocked`
     /// for the Dictation nav live dot (SHELL-10).
     let model = DictationIndicatorModel()
-    private var recordingStartDate: Date?
     /// One decode per collected image, not one per 50 ms poll (#192). Keyed by
     /// the item's id and emptied with the items themselves.
     private var thumbnails: [UUID: NSImage] = [:]
@@ -1801,19 +1800,22 @@ final class DictationIndicatorManager {
 
                 let newState = coordinator.state
 
-                // Track recording duration from pre-buffer start (when audio
-                // actually begins), and freeze it there when capture ends: the
-                // transcribing face shows the dictation's own length (#209,
-                // T1), so the number stops rather than falling to zero. It is
-                // cleared with the shape itself.
-                let isCapturing = newState == .recording || coordinator.isPreBuffering
+                // The dictation's own length, read off the audio it has
+                // captured (`elapsedCaptureSeconds`) rather than timed here: a
+                // clock kept in this poll would learn that Esc had paused the
+                // capture only when it next looked, and pay up to 50 ms of drift
+                // at each edge. It also stops by itself while paused, because
+                // no samples arrive.
+                //
+                // Once the capture is over the number is frozen where it
+                // stopped: the transcribing face shows the dictation's own
+                // length (#209, T1), and the samples it was counting have gone
+                // to the pipeline by then. It is cleared with the shape itself.
+                let live = newState == .recording || coordinator.isPreBuffering
                 let newSeconds: Int
-                if isCapturing {
-                    let start = self.recordingStartDate ?? Date()
-                    self.recordingStartDate = start
-                    newSeconds = Int(Date().timeIntervalSince(start))
+                if live {
+                    newSeconds = coordinator.elapsedCaptureSeconds
                 } else if newState == .idle {
-                    self.recordingStartDate = nil
                     newSeconds = 0
                 } else {
                     newSeconds = self.model.recordingSeconds
