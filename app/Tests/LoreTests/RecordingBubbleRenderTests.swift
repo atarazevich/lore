@@ -95,13 +95,13 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// rest against opened, for every state the resting bubble can be in.
     func testOpeningTheBubbleMovesNothingThatWasAlreadyOnScreen() throws {
         for (name, make) in [
-            ("nothing armed", { self.bubble(held: $0, railStartsVisible: $0) }),
-            ("T armed", { self.bubble(pendingMode: .translate, held: $0, railStartsVisible: $0) }),
+            ("nothing armed", { self.bubble(held: $0, railShown: $0) }),
+            ("T armed", { self.bubble(pendingMode: .translate, held: $0, railShown: $0) }),
             ("K armed alone", {
-                self.bubble(operatorAddressed: true, held: $0, railStartsVisible: $0)
+                self.bubble(operatorAddressed: true, held: $0, railShown: $0)
             }),
             ("two items", {
-                self.bubble(items: [self.chip(0), self.chip(1)], held: $0, railStartsVisible: $0)
+                self.bubble(items: [self.chip(0), self.chip(1)], held: $0, railShown: $0)
             }),
         ] as [(String, (Bool) -> DictationIndicatorHost)] {
             let rest = try raster(make(false))
@@ -121,12 +121,12 @@ final class RecordingBubbleRenderTests: XCTestCase {
 
     /// And the open render really is drawing the rail. The letters fade in 120 ms
     /// behind the widening, which is a task no offscreen render runs, so without
-    /// `railStartsVisible` the appended region would hold nothing but the shape's
+    /// the preview's `railVisible` the appended region would hold nothing but the shape's
     /// own surface and the comparison above would be measuring an empty margin.
     func testTheOpenedRenderActuallyDrawsTheRail() throws {
         let rest = try raster(bubble())
         let faded = try raster(bubble(held: true))
-        let shown = try raster(bubble(held: true, railStartsVisible: true))
+        let shown = try raster(bubble(held: true, railShown: true))
 
         // Past where the resting bubble ended is where the rail is appended.
         let appended = Int((rest.paintedWidth - Self.rowPadding) * Self.scale)
@@ -237,6 +237,83 @@ final class RecordingBubbleRenderTests: XCTestCase {
         )
     }
 
+    // MARK: - An item arrives (#210)
+
+    /// The paperclip bounces and the count rolls; nothing else in the row moves.
+    /// The bounce is a transform on a glyph whose layout box is fixed, so the
+    /// comparison is the whole shape *minus* that box and the 4 pt of margin
+    /// around it — everything before the paperclip and everything after it, the
+    /// list included. Drawn at a scale past anything the effect reaches, so what
+    /// holds here holds for the effect.
+    ///
+    /// Both at rest and open: the trigger is a change in `items`, which the
+    /// shape watches whatever width it is at.
+    func testAnArrivalBouncesTheGlyphAndMovesNothingElse() throws {
+        // The glyph's box in the closed row — the paperclip is the last thing in
+        // it, so its right edge is the row's own trailing padding in from the
+        // shape's. The row is laid out from the left, so the same band holds when
+        // the shape is open and the rail follows it.
+        let closed = try raster(bubble(items: [chip(0)]))
+        let glyphRight = closed.paintedWidth - Self.rowPadding
+        let band = Int((glyphRight - DictationIndicatorView.clipHitBox.width) * Self.scale)
+            ..< Int((glyphRight + DictationIndicatorView.clipHitMargin) * Self.scale)
+
+        for (name, open) in [("at rest", false), ("open", true)] {
+            let rest = try raster(
+                bubble(items: [chip(0)], held: open, railShown: open)
+            )
+            let bouncing = try raster(
+                bubble(items: [chip(0)], held: open, railShown: open, clipBounce: true)
+            )
+            XCTAssertEqual(bouncing.width, rest.width, "\(name): the canvas changed size")
+            XCTAssertEqual(
+                bouncing.paintedWidth, rest.paintedWidth, accuracy: 0.0001,
+                "\(name): the shape changed width"
+            )
+            let before = compare(
+                rest, bouncing,
+                columns: Int(Self.bubbleCorner * Self.scale)..<band.lowerBound, of: rest
+            )
+            let after = compare(
+                rest, bouncing,
+                columns: band.upperBound..<Int(rest.paintedWidth * Self.scale), of: rest
+            )
+            let glyph = compare(rest, bouncing, columns: band, of: rest)
+            print(
+                "[#210] \(name): rest vs mid-bounce — moved \(before.moved) px over the "
+                + "\(before.columns)×\(before.rows) before the paperclip, \(after.moved) px over "
+                + "the \(after.columns)×\(after.rows) after it; the glyph's own band changed "
+                + "\(glyph.moved) px, worst delta \(glyph.worstDelta)"
+            )
+            XCTAssertEqual(before.moved, 0, "\(name): something before the paperclip moved")
+            XCTAssertEqual(after.moved, 0, "\(name): something after the paperclip moved")
+            XCTAssertGreaterThan(glyph.moved, 0, "\(name): the glyph did not grow at all")
+        }
+    }
+
+    /// Reduce Motion drops the bounce and keeps the count. What it leaves is two
+    /// still frames with different digits in them — and two still frames are
+    /// exactly what an offscreen render produces, since it runs no animations at
+    /// all. So this is that path, measured: the digit changes, and nothing before
+    /// the paperclip does. (The bounce's *absence* cannot be rendered for the
+    /// same reason its presence cannot: the preview's `clipBouncing` stands in for the
+    /// one, and the pinned trigger — `reduceMotion ? 0 : arrivals` — is the
+    /// whole of the other.)
+    func testTheCountStillChangesWithNoAnimationAtAll() throws {
+        let one = try raster(bubble(items: [chip(0)]))
+        let two = try raster(bubble(items: [chip(0), chip(1)]))
+        let glyphLeft = one.paintedWidth - Self.rowPadding - DictationIndicatorView.clipHitBox.width
+        let digit = compare(
+            one, two,
+            columns: Int(glyphLeft * Self.scale)..<Int(one.paintedWidth * Self.scale), of: one
+        )
+        print("[#210] 1 → 2 items, no animation: the badge's band changed \(digit.moved) px")
+        XCTAssertGreaterThan(digit.moved, 0, "the count did not change")
+        try assertIdentical(
+            one, two, upToPoint: glyphLeft, what: "1 vs 2 items, the count alone"
+        )
+    }
+
     // MARK: - The card is as wide as its line (#212)
 
     /// A short line makes a short card. The card was a fixed 222 pt whatever it
@@ -330,7 +407,8 @@ final class RecordingBubbleRenderTests: XCTestCase {
         operatorAddressed: Bool = false,
         items: [DictationItemChip] = [],
         held: Bool = false,
-        railStartsVisible: Bool = false,
+        railShown: Bool = false,
+        clipBounce: Bool = false,
         tip: String? = nil
     ) -> DictationIndicatorHost {
         let model = DictationIndicatorModel()
@@ -344,8 +422,9 @@ final class RecordingBubbleRenderTests: XCTestCase {
         model.collecting = true
         model.screenshotsEnabled = true
         model.held = held
-        model.railStartsVisible = railStartsVisible
-        model.tipStartsShown = tip
+        model.renderPreview = BubbleRenderPreview(
+            railVisible: railShown, tip: tip, clipBouncing: clipBounce
+        )
         return DictationIndicatorHost(model: model)
     }
 

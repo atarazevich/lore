@@ -68,6 +68,35 @@ final class RecordingBubbleClipTests: XCTestCase {
         XCTAssertTrue(target.contains(glyphOnly), "the glyph's own target shrank")
     }
 
+    // MARK: - What counts as an arrival (#210)
+
+    /// The bounce plays for an item that was not there a moment ago — and for
+    /// nothing else. A row switched off and on rewrites `items` without anything
+    /// arriving, and the end of a dictation empties the list.
+    func testOnlyANewItemCountsAsAnArrival() {
+        let first = chip()
+        let second = chip()
+        let leftOut = chip(id: first.id, included: false)
+        XCTAssertTrue(DictationIndicatorView.itemArrived(from: [], to: [first]))
+        XCTAssertTrue(DictationIndicatorView.itemArrived(from: [first], to: [first, second]))
+        XCTAssertFalse(DictationIndicatorView.itemArrived(from: [first], to: [first]))
+        XCTAssertFalse(
+            DictationIndicatorView.itemArrived(from: [first], to: [leftOut]),
+            "a row left out of the prompt is not an arrival"
+        )
+        XCTAssertFalse(
+            DictationIndicatorView.itemArrived(from: [first, second], to: []),
+            "the dictation ending is not an arrival"
+        )
+    }
+
+    private func chip(id: UUID = UUID(), included: Bool = true) -> DictationItemChip {
+        DictationItemChip(
+            id: id, kind: .text, preview: DictationItemChip.quoted("stack trace"),
+            thumbnail: nil, seconds: 4, included: included
+        )
+    }
+
     /// And it grew only where the badge is. Left, down and up to the glyph's own
     /// margin the target is still #203's box, so nothing beside the paperclip —
     /// the timer at 10 pt, the hairline past it — lost any ground to it.

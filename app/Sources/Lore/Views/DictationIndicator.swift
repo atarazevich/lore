@@ -322,6 +322,30 @@ private extension HorizontalAlignment {
     static let bubbleTipArrow = HorizontalAlignment(BubbleTipArrow.self)
 }
 
+/// What an offscreen render is handed in place of the motion it cannot run
+/// (#204, #207, #210).
+///
+/// An `ImageRenderer` runs no tasks and no animations, so a rendered bubble
+/// draws its rail at zero opacity behind a fade that never starts, no tooltip at
+/// all behind a 300 ms wait that never ends, and a paperclip at rest — and a
+/// comparison of any of those would be a comparison of nothing. Each field is
+/// one such thing, held at the state the user sees.
+///
+/// Only `RecordingBubbleRenderTests` sets this; nothing in the app does. It is
+/// one value rather than three flags because it was three flags, and each of
+/// them had to be threaded through the model, the host and the view by hand.
+struct BubbleRenderPreview: Equatable {
+    /// The rail as it stands 120 ms in, past its fade.
+    var railVisible = false
+    /// The line the pointer would have waited out its 300 ms for.
+    var tip: String?
+    /// The paperclip at the top of a bounce: the symbol drawn larger than the
+    /// effect ever grows it, inside the same fixed box — which is the whole of
+    /// what the invariant is about, since whatever the glyph does inside that
+    /// box, nothing beside it moves.
+    var clipBouncing = false
+}
+
 /// The pointer's place inside the shape, deliberately off the view's state:
 /// it changes with every mouse move, and a `@State` write per move would
 /// re-render the bubble — probes and all — for a number that is only read when
@@ -367,6 +391,10 @@ struct DictationIndicatorView: View {
     /// those chords apply.
     var held = false
     @State private var showBluetoothInfo = false
+    /// How many items have arrived during this dictation (#210). Not a count of
+    /// the list — a number that changes once per arrival, which is what the
+    /// symbol effect watches; what the list holds is `items`.
+    @State private var arrivals = 0
     /// The pointer is on the bubble. Everything the bubble can show — the key
     /// rail and the list — is this one state (#201): pointing at the shape
     /// widens it and, if anything has been collected, grows it downward.
@@ -381,19 +409,11 @@ struct DictationIndicatorView: View {
     /// The letters and the gear are readable only once the shape has room for
     /// them, so they fade in behind the widening (#201 motion table).
     @State private var railFadedIn = false
-    /// The fade is a 120 ms task, and an offscreen render runs no tasks — so a
-    /// rendered open bubble would draw its letters at zero opacity and a
-    /// comparison of them would be a comparison of nothing. This starts the rail
-    /// where the user sees it 120 ms in. Only `RecordingBubbleRenderTests` sets
-    /// it; nothing in the app does.
-    var railStartsVisible = false
-    private var railVisible: Bool { railFadedIn || railStartsVisible }
-    /// The line an offscreen render draws under the shape (#207). A tooltip
-    /// waits out a 300 ms task and an offscreen render runs no tasks, so a
-    /// rendered bubble would never show one and a comparison of it would be a
-    /// comparison of nothing. Only `RecordingBubbleRenderTests` sets it;
+    /// What an offscreen render is handed in place of what it cannot run
+    /// (`BubbleRenderPreview`). Only `RecordingBubbleRenderTests` sets it;
     /// nothing in the app does.
-    var tipStartsShown: String?
+    var renderPreview = BubbleRenderPreview()
+    private var railVisible: Bool { railFadedIn || renderPreview.railVisible }
     /// The element the pointer is on, and the line it carries (#207).
     @State private var hoveredTip: BubbleTip?
     /// The line actually on screen — the same value, 300 ms later.
@@ -462,6 +482,14 @@ struct DictationIndicatorView: View {
                 // measurement that does not exist.
                 guard let measured else { return }
                 onCanvasChange?(measured)
+            }
+            // An item landing bounces the paperclip once (#210). A row switched
+            // off and on changes `items` too and nothing arrived, so the trigger
+            // is a new id and not a new list — and the end of a dictation, which
+            // empties it, is not an arrival either.
+            .onChange(of: items) { previous, current in
+                guard Self.itemArrived(from: previous, to: current) else { return }
+                arrivals += 1
             }
             .onChange(of: canExpand, initial: true) { _, expandable in
                 // Processing, done, the upgrade panel, an error: not a canvas.
@@ -538,9 +566,23 @@ struct DictationIndicatorView: View {
         )
     }
 
+    /// Something in the list was not in it a moment ago (#210). Not private:
+    /// the rule is the whole of the bounce's trigger, and
+    /// `RecordingBubbleClipTests` reads it.
+    static func itemArrived(from previous: [DictationItemChip], to current: [DictationItemChip]) -> Bool {
+        let known = Set(previous.map(\.id))
+        return current.contains { !known.contains($0.id) }
+    }
+
+    /// What the bounce watches. Under Reduce Motion it is pinned, so the value
+    /// never changes and the glyph never bounces — while the count goes on
+    /// changing, because the badge's own animation is already nil there and a
+    /// `numericText` transition with no animation is a swap (#210).
+    private var bounceTrigger: Int { reduceMotion ? 0 : arrivals }
+
     /// The line on screen — or the one an offscreen render was handed.
     private var visibleTip: BubbleTip? {
-        shownTip ?? tipStartsShown.map { BubbleTip(owner: .timer, text: $0) }
+        shownTip ?? renderPreview.tip.map { BubbleTip(owner: .timer, text: $0) }
     }
 
     /// One shape: the row, and — when something has been collected — the list
@@ -1004,8 +1046,22 @@ struct DictationIndicatorView: View {
     private var clipSymbol: some View {
         Image(systemName: "paperclip")
             .font(.system(size: Self.clipSide, weight: .regular))
+            // One bounce per item that lands (#210, the board's A3): a copy
+            // happens many times in a dictation, so the feedback is the smallest
+            // motion that reads — the glyph and the digit beside it, nothing
+            // else. On the symbol rather than on the composed glyph, so the
+            // slashed face bounces too: the off state's mask is a stencil over
+            // this same box and cannot suppress what the symbol does inside it.
+            .symbolEffect(.bounce, value: bounceTrigger)
+            .scaleEffect(renderPreview.clipBouncing ? Self.clipBouncePeak : 1)
             .frame(width: Self.clipBox.width, height: Self.clipBox.height)
     }
+
+    /// Bigger than the bounce ever grows the glyph, so a render that holds at
+    /// this scale holds for the effect. The box does not care either way — that
+    /// is the point of it — and 1.3 of a 15×17 symbol still stops 1.75 pt inside
+    /// the 4 pt of margin around the box.
+    private static let clipBouncePeak: CGFloat = 1.3
 
     private static let clipSide: CGFloat = 13
 
@@ -1532,9 +1588,8 @@ final class DictationIndicatorModel {
     var collecting = true
     var screenshotsEnabled = true
     var held = false
-    var railStartsVisible = false
-    /// Render-only (#207) — see `DictationIndicatorView.tipStartsShown`.
-    var tipStartsShown: String?
+    /// Render-only — see `BubbleRenderPreview`.
+    var renderPreview = BubbleRenderPreview()
     var onUpgrade: ((UpgradeAction) -> Void)?
     var onOperatorToggle: (() -> Void)?
     var onToggleItem: ((UUID) -> Void)?
@@ -1578,8 +1633,7 @@ struct DictationIndicatorHost: View {
             collecting: model.collecting,
             screenshotsEnabled: model.screenshotsEnabled,
             held: model.held,
-            railStartsVisible: model.railStartsVisible,
-            tipStartsShown: model.tipStartsShown,
+            renderPreview: model.renderPreview,
             onUpgrade: model.onUpgrade,
             onOperatorToggle: model.onOperatorToggle,
             onToggleItem: model.onToggleItem,
