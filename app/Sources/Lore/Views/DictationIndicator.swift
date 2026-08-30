@@ -348,6 +348,16 @@ struct BubbleRenderPreview: Equatable {
     var clipBouncing = false
 }
 
+/// What counts as a different face (#211): the pipeline's own state, the
+/// failure standing on top of it, and the pause. Not the timer and not the
+/// pointer — a number that ticks and a shape that widens are the same face
+/// still, and cross-fading either of them would dissolve a row nobody replaced.
+private struct BubbleFaceKey: Equatable {
+    let state: DictationState
+    let error: DictationFace?
+    let paused: Bool
+}
+
 /// The pointer's place inside the shape, deliberately off the view's state:
 /// it changes with every mouse move, and a `@State` write per move would
 /// re-render the bubble — probes and all — for a number that is only read when
@@ -791,9 +801,30 @@ struct DictationIndicatorView: View {
         }
     }
 
+    /// The shape's own spring — what the pointer's widening has always used
+    /// (#201), and what a face change resizes on, so a longer sentence never
+    /// reads as a different control replacing the old one.
+    private static let widenSpring: Animation = .spring(response: 0.35, dampingFraction: 0.85)
+
     private var widenAnimation: Animation? {
-        reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.85)
+        reduceMotion ? nil : Self.widenSpring
     }
+
+    /// The scope a face change happens in (#211, the board's motion table). The
+    /// width springs; the faces themselves fade on the 0.2 s curve their own
+    /// transition carries, so the dissolve is not stretched over the spring.
+    ///
+    /// Not nil under Reduce Motion, unlike everything else here: a dissolve is
+    /// what Reduce Motion asks *for* rather than against — the board's own
+    /// Reduce Motion row has the paste checkmark cross-fading in place — so what
+    /// is dropped there is the spring, never the fade.
+    private var faceChange: Animation { reduceMotion ? Self.faceFade : Self.widenSpring }
+
+    private static let faceFade: Animation = .easeInOut(duration: 0.2)
+
+    /// One face dissolving into the next, on its own curve rather than the
+    /// scope's spring.
+    private static let faceDissolve: AnyTransition = .opacity.animation(faceFade)
 
     /// How long the shape takes to close — the easing and the wait that has to
     /// outlast it are one fact, so they are one number.
@@ -814,19 +845,34 @@ struct DictationIndicatorView: View {
 
     /// `measuring` marks a copy of the shape that is laid out and never drawn,
     /// so anything that would animate stands still in it (#204, `probes`).
-    @ViewBuilder
+    ///
+    /// One face dissolves into the next inside the same shape (#211) instead of
+    /// the hard cut this switch used to make. A measuring copy's key never
+    /// changes — `state` and `lastError` are the shape's, `paused` is the
+    /// probe's own argument — so nothing here can catch a probe mid-fade, which
+    /// would report a size mid-fade and move the window (#204).
     private func panel(open: Bool, measuring: Bool, paused: Bool) -> some View {
+        face(open: open, measuring: measuring, paused: paused)
+            .animation(
+                faceChange,
+                value: BubbleFaceKey(state: state, error: lastError, paused: paused)
+            )
+    }
+
+    @ViewBuilder
+    private func face(open: Bool, measuring: Bool, paused: Bool) -> some View {
         switch state {
         case .recording:
             if let error = lastError {
                 // Mic stall surfaced by the first-frame watchdog — show it loudly
                 // instead of a normal-looking recording meter (#209, F1).
-                failureFace(error)
+                failureFace(error).transition(Self.faceDissolve)
             } else {
                 recordingContent(open: open, measuring: measuring, paused: paused)
+                    .transition(Self.faceDissolve)
             }
         case .loadingModel:
-            workingRow(label: "Downloading model\u{2026}")
+            workingRow(label: "Downloading model\u{2026}").transition(Self.faceDissolve)
         case .processing:
             // T1 (#209): the spinner stands where the dot did, the timer is
             // frozen at the dictation's own length, and the clip with its count
@@ -836,9 +882,10 @@ struct DictationIndicatorView: View {
                 frozenTimer
                 if clipBright { clipReport }
             }
+            .transition(Self.faceDissolve)
         case .done:
             if let error = lastError {
-                failureFace(error)
+                failureFace(error).transition(Self.faceDissolve)
             } else {
                 // V-A (#209): the words are away, and there is no face for
                 // that — the coordinator takes the shape to `.idle` instead of
