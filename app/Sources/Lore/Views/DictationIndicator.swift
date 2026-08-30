@@ -93,6 +93,14 @@ struct DictationIndicatorView: View {
     /// The letters and the gear are readable only once the shape has room for
     /// them, so they fade in behind the widening (#201 motion table).
     @State private var railVisible = false
+    /// The shape is the resting bubble: not widened, and not still collapsing
+    /// back. Only a resting report re-centres the window — while the shape is
+    /// wider than that, the panel keeps the resting shape's left edge, so the
+    /// widening moves one edge instead of sliding the whole bubble sideways.
+    @State private var restSettled = true
+    /// The shape's own size, as of the last layout pass, so the moment it
+    /// settles can be reported with the size it settled at.
+    @State private var bubbleSize: CGSize = .zero
     /// The top row's own width, which the list then stretches to exactly. The
     /// list must contribute nothing to the shape's width — a long copied line
     /// ellipsises instead of pushing the bubble wider.
@@ -107,14 +115,17 @@ struct DictationIndicatorView: View {
     var onToggleLock: (() -> Void)?
     /// The paperclip turns collecting off and on (#201).
     var onToggleCollecting: (() -> Void)?
-    /// `T` and `K` arm and disarm exactly as Fn+T and Fn+K do (#201).
+    /// `C`, `T` and `K` arm and disarm exactly as Fn+V, Fn+T and Fn+K do
+    /// (#201).
+    var onArmCleanup: (() -> Void)?
     var onArmTranslate: (() -> Void)?
     var onArmOperator: (() -> Void)?
     /// The gear opens Settings → Copying (#201).
     var onOpenSettings: (() -> Void)?
     /// The shape reports itself, so the panel around it can be exactly its
-    /// size at every step of the spring (#201, `TopCenteredPanel`).
-    var onSizeChange: (@MainActor (CGSize) -> Void)?
+    /// size at every step of the spring, and knows when that size is the
+    /// resting one (#201, `TopCenteredPanel`).
+    var onFrameChange: (@MainActor (PanelContentFrame) -> Void)?
 
     var body: some View {
         bubble
@@ -124,11 +135,22 @@ struct DictationIndicatorView: View {
             // Coming back cancels the close — the task is keyed on being
             // outside, and on the recording still being there to widen for.
             .task(id: [pointerOnBubble, canExpand]) { await followPointer() }
-            .task(id: expanded) { await revealRail() }
+            .task(id: [expanded, canExpand]) { await followExpansion() }
             .animation(expanded ? widenAnimation : closeAnimation, value: expanded)
             .animation(railFade, value: railVisible)
-            .onGeometryChange(for: CGSize.self, of: \.size) { onSizeChange?($0) }
+            .onGeometryChange(for: CGSize.self, of: \.size) { size in
+                bubbleSize = size
+                report(size)
+            }
+            // The shape settles a moment after its last layout pass, and the
+            // window's anchor is only allowed to move then.
+            .onChange(of: restSettled) { _, _ in report(bubbleSize) }
             .environment(\.colorScheme, .dark)
+    }
+
+    private func report(_ size: CGSize) {
+        guard size.width > 0, size.height > 0 else { return }
+        onFrameChange?(PanelContentFrame(size: size, atRest: restSettled))
     }
 
     /// One shape: the row, and — when something has been collected — the list
@@ -178,17 +200,40 @@ struct DictationIndicatorView: View {
         expanded = false
     }
 
-    private func revealRail() async {
+    private func followExpansion() async {
+        // The recording the rail and the anchor belong to is over. The panel
+        // is about to hold different content, and neither the letters nor the
+        // resting width of the shape that just left may reach it — a stale
+        // anchor would hang the next shape off to one side.
+        guard canExpand else {
+            railVisible = false
+            restSettled = true
+            return
+        }
+        // Nothing is animating, so there is nothing to wait out: waiting the
+        // collapse's length over a layout that already snapped is how the
+        // window ends up holding an anchor the shape has left behind.
+        guard !reduceMotion else {
+            railVisible = expanded
+            restSettled = !expanded
+            return
+        }
         if expanded {
+            // The shape is on the move from this instant, so the window stops
+            // re-centring before the first widened layout reaches it.
+            restSettled = false
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled else { return }
             railVisible = true
         } else {
             // Reset behind the collapse, never during it: the letters leave
             // with the shape, as one movement.
-            try? await Task.sleep(for: .milliseconds(200))
+            try? await Task.sleep(for: .seconds(Self.closeDuration))
             guard !Task.isCancelled else { return }
             railVisible = false
+            try? await Task.sleep(for: Self.settleGrace)
+            guard !Task.isCancelled else { return }
+            restSettled = true
         }
     }
 
@@ -196,8 +241,15 @@ struct DictationIndicatorView: View {
         reduceMotion ? nil : .spring(response: 0.35, dampingFraction: 0.85)
     }
 
+    /// How long the shape takes to close — the easing and the wait that has to
+    /// outlast it are one fact, so they are one number.
+    private static let closeDuration: TimeInterval = 0.2
+    /// A frame past that close, so the width the window adopts as the resting
+    /// one is the width the shape stopped at and not a step of the collapse.
+    private static let settleGrace: Duration = .milliseconds(60)
+
     private var closeAnimation: Animation? {
-        reduceMotion ? nil : .easeOut(duration: 0.2)
+        reduceMotion ? nil : .easeOut(duration: Self.closeDuration)
     }
 
     private var railFade: Animation? {
@@ -235,52 +287,115 @@ struct DictationIndicatorView: View {
 
     // MARK: - Recording
 
-    /// The bubble at rest, and the rail it widens to show (#201). At rest
-    /// there are no letters at all — a modifier exists only once someone has
-    /// reached for it — and no hairline between the timer and the paperclip.
+    /// The bubble at rest, and the rail it widens to show (#201). At rest the
+    /// only letters are the armed ones: what will happen to these words is a
+    /// fact about the dictation in progress, and a fact the bubble hides until
+    /// it is pointed at is a fact the user does not have (the shipped bubble
+    /// said nothing at all while translate was armed). Everything else — `S`,
+    /// the unarmed letters, the gear — arrives with the pointer.
     private var recordingContent: some View {
         HStack(spacing: 10) {
             statusGroup
             clip
+            if !railKeys.isEmpty {
+                groupDivider
+                    .opacity(armedKeys.isEmpty && !railVisible ? 0 : 1)
+                HStack(spacing: 6) {
+                    ForEach(railKeys) { key in
+                        // An armed letter was already standing there, so it
+                        // does not fade in with the rail and does not blink
+                        // out under the pointer that came to read it; a hint
+                        // is nothing to click, or speak, before it can be
+                        // read.
+                        keycap(key.letter.rawValue, bright: key.bright,
+                               help: key.help, action: key.action)
+                            .opacity(key.armed || railVisible ? 1 : 0)
+                            .allowsHitTesting(key.armed || railVisible)
+                    }
+                }
+            }
             if expanded {
-                keyRail
+                groupDivider
                     .opacity(railVisible ? 1 : 0)
-                    // Nothing is clickable, or speaks, before it can be read.
+                gear
+                    .opacity(railVisible ? 1 : 0)
                     .allowsHitTesting(railVisible)
             }
         }
     }
 
-    /// Past the timer's own end of the shape: the keys someone can press, and
-    /// the gear past its own hairline. Bright = on or armed, dim = off.
-    private var keyRail: some View {
-        HStack(spacing: 10) {
-            // DSET-06: with the keycap hints turned off, the letters are not
-            // drawn — the same setting that already hid `S` and the C/T hints.
-            if showUpgradeKeycaps {
-                groupDivider
-                HStack(spacing: 6) {
-                    keycap(
-                        "S", bright: screenshotsEnabled,
-                        help: "Screenshot into the prompt (Fn+S)", action: nil
-                    )
-                    keycap(
-                        "T", bright: pendingMode == .translate,
-                        help: pendingMode == .translate
-                            ? "Translating on paste" : "Translate on paste (Fn+T)",
-                        action: onArmTranslate
-                    )
-                    keycap(
-                        "K", bright: operatorAddressed,
-                        help: operatorAddressed
-                            ? "Going to the operator" : "Send to the operator (Fn+K)",
-                        action: onArmOperator
-                    )
-                }
-            }
-            groupDivider
-            gear
+    /// One letter in the bubble (#201). `armed` is what the letter reports
+    /// about this dictation — cleanup or translate on paste, the operator —
+    /// and it is also why the letter stands in the resting bubble. `S` is
+    /// never armed: its brightness reports a setting, and it is a key you
+    /// press, not a switch you flip.
+    private struct RailKey: Identifiable {
+        /// The letter is the key on the keyboard, and the keyboard has these
+        /// four.
+        enum Letter: String {
+            case screenshot = "S"
+            case cleanup = "C"
+            case translate = "T"
+            case operatorSend = "K"
         }
+
+        let letter: Letter
+        let bright: Bool
+        let help: String
+        let action: (() -> Void)?
+        let armed: Bool
+        var id: Letter { letter }
+    }
+
+    private var cleanupKey: RailKey {
+        let armed = pendingMode == .cleanup
+        return RailKey(
+            letter: .cleanup, bright: armed,
+            help: armed ? "Cleaning up on paste" : "Clean up on paste (Fn+V)",
+            action: onArmCleanup, armed: armed
+        )
+    }
+
+    private var translateKey: RailKey {
+        let armed = pendingMode == .translate
+        return RailKey(
+            letter: .translate, bright: armed,
+            help: armed ? "Translating on paste" : "Translate on paste (Fn+T)",
+            action: onArmTranslate, armed: armed
+        )
+    }
+
+    private var operatorKey: RailKey {
+        RailKey(
+            letter: .operatorSend, bright: operatorAddressed,
+            help: operatorAddressed ? "Going to the operator" : "Send to the operator (Fn+K)",
+            action: onArmOperator, armed: operatorAddressed
+        )
+    }
+
+    /// What is armed, in the order `C` `T` `K` — the letters the resting
+    /// bubble carries. DSET-06 turns the *hints* off, not the facts, so this
+    /// list is drawn whatever `showUpgradeKeycaps` says.
+    private var armedKeys: [RailKey] {
+        [cleanupKey, translateKey, operatorKey].filter(\.armed)
+    }
+
+    /// Widened, the board's `S T K` — with `C` before `T` while cleanup is
+    /// armed, because a letter that was standing in the resting bubble may not
+    /// disappear when the shape opens. With the keycap hints off, only the
+    /// armed letters, for the same reason.
+    private var railKeys: [RailKey] {
+        guard expanded, showUpgradeKeycaps else { return armedKeys }
+        var keys = [
+            RailKey(
+                letter: .screenshot, bright: screenshotsEnabled,
+                help: "Screenshot into the prompt (Fn+S)", action: nil, armed: false
+            )
+        ]
+        if pendingMode == .cleanup { keys.append(cleanupKey) }
+        keys.append(translateKey)
+        keys.append(operatorKey)
+        return keys
     }
 
     private var groupDivider: some View {
@@ -299,11 +414,16 @@ struct DictationIndicatorView: View {
 
     private var clipSwitch: some View {
         clipGlyph
-            .frame(width: 20, height: 17)
-            .background(
-                RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
-                    .fill(Color.white.opacity(clipBright ? 0.12 : 0.04))
-            )
+            // The tint reaches the slash as well as the symbol, so the two
+            // strokes of one glyph are never two colours.
+            .foregroundStyle(clipBright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
+            // No plate under it, at rest or bright: the dot, the lock, the
+            // waveform and the timer beside it stand on the bubble itself, and
+            // a glyph on its own tile read as a button pasted into the row.
+            // What the paperclip is doing is said by its brightness, by the
+            // badge and by the slash. The pointer gets the same lift the gear
+            // gets, and nothing before that.
+            .loreHoverFill(cornerRadius: LoreTheme.Radius.button)
             .contentShape(Rectangle())
             .onTapGesture { onToggleCollecting?() }
             .help(collecting ? "What you copy joins the prompt" : "Copies stay out of the prompt")
@@ -321,47 +441,80 @@ struct DictationIndicatorView: View {
     /// also exactly when the badge has a number to show.
     private var clipBright: Bool { collecting && includedCount > 0 }
 
-    /// The glyph, and — collecting off — the `.slash` idiom the board draws:
-    /// one thin stroke falling left-to-right, with the paperclip knocked out
-    /// where it crosses, so the slash never reads as a third clip stroke.
-    /// Proportions from the board's 24-unit box: the stroke runs corner to
-    /// corner inset 3.4/24, 1.7/24 wide, over a 4.4/24 gap cut under it.
+    /// The glyph, and — collecting off — the `.slash` idiom the board draws
+    /// (there is no `paperclip.slash` symbol): one thin stroke falling
+    /// left-to-right, with the paperclip knocked out where it crosses, so the
+    /// slash never reads as a third clip stroke. The mask exists only for that
+    /// knockout: a mask over the collecting glyph is a mask that can only cut
+    /// it, which is exactly what a 13×13 box did to a 15×17 symbol — the
+    /// shipped paperclip was clipped on every side.
+    @ViewBuilder
     private var clipGlyph: some View {
-        Image(systemName: "paperclip")
-            .font(.system(size: Self.clipSide, weight: .regular))
-            .frame(width: Self.clipSide, height: Self.clipSide)
-            .mask {
-                if collecting {
-                    Rectangle()
-                } else {
+        if collecting {
+            clipSymbol
+        } else {
+            clipSymbol
+                .mask {
                     ZStack {
                         Rectangle().fill(Color.white)
                         slash.stroke(
                             Color.white,
-                            style: StrokeStyle(lineWidth: Self.clipSide * 4.4 / 24, lineCap: .round)
+                            style: StrokeStyle(lineWidth: Self.clipKnockout, lineCap: .round)
                         )
                         .blendMode(.destinationOut)
                     }
                     .compositingGroup()
                 }
-            }
-            .overlay {
-                if !collecting {
-                    slash.stroke(
-                        style: StrokeStyle(lineWidth: Self.clipSide * 1.7 / 24, lineCap: .round)
-                    )
+                .overlay {
+                    slash.stroke(style: StrokeStyle(lineWidth: Self.clipStroke, lineCap: .round))
                 }
-            }
-            .foregroundStyle(clipBright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
+        }
+    }
+
+    /// The symbol in the box it is drawn in — the box the mask, the slash and
+    /// the hover lift are all measured against.
+    private var clipSymbol: some View {
+        Image(systemName: "paperclip")
+            .font(.system(size: Self.clipSide, weight: .regular))
+            .frame(width: Self.clipBox.width, height: Self.clipBox.height)
     }
 
     private static let clipSide: CGFloat = 13
 
+    /// The box the paperclip is drawn in: the symbol's own bounds at that
+    /// point size, and a point of slack around them. Asked for rather than
+    /// assumed — a 13pt `paperclip` measures 15×17, so the square box it was
+    /// given cut the glyph rather than holding it.
+    private static let clipBox: CGSize = {
+        let bounds = NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: clipSide, weight: .regular))?.size
+            ?? CGSize(width: clipSide, height: clipSide)
+        return CGSize(width: ceil(bounds.width) + clipSlack, height: ceil(bounds.height) + clipSlack)
+    }()
+
+    /// The slack, split around the glyph, so nothing it draws lands on the
+    /// frame's edge.
+    private static let clipSlack: CGFloat = 1
+
+    /// The board hangs the badge 5pt above the glyph's box and 6pt past its
+    /// right edge (`.bdg`: top −5, right −6). The overlay is measured against
+    /// `clipBox`, which holds the glyph with half the slack on each side, so
+    /// half of it comes back off both numbers — the badge sits on the glyph
+    /// the board drew it on, not on the box that carries it.
+    private static let badgeOffset = CGSize(width: 6 - clipSlack / 2, height: -5 + clipSlack / 2)
+
+    /// The board's 24-unit proportions, read against the box the glyph
+    /// actually got: 1.7/24 of it wide, over a 4.4/24 gap cut under it.
+    private static let clipStroke: CGFloat = min(clipBox.width, clipBox.height) * 1.7 / 24
+    private static let clipKnockout: CGFloat = min(clipBox.width, clipBox.height) * 4.4 / 24
+
+    /// Corner to corner of that same box, inset 3.4/24 of it.
     private var slash: Path {
-        let inset = Self.clipSide * 3.4 / 24
+        let box = Self.clipBox
+        let inset = CGSize(width: box.width * 3.4 / 24, height: box.height * 3.4 / 24)
         var path = Path()
-        path.move(to: CGPoint(x: inset, y: inset))
-        path.addLine(to: CGPoint(x: Self.clipSide - inset, y: Self.clipSide - inset))
+        path.move(to: CGPoint(x: inset.width, y: inset.height))
+        path.addLine(to: CGPoint(x: box.width - inset.width, y: box.height - inset.height))
         return path
     }
 
@@ -380,7 +533,7 @@ struct DictationIndicatorView: View {
             .frame(minWidth: 13, minHeight: 13)
             .background(Capsule().fill(Color.white.opacity(0.20)))
             .background(Capsule().fill(LoreTheme.Surface.window).padding(-1.5))
-            .offset(x: 6, y: -5)
+            .offset(Self.badgeOffset)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: includedCount)
             .help("\(includedCount) in the prompt")
             .accessibilityElement(children: .ignore)
@@ -752,13 +905,14 @@ final class DictationIndicatorModel {
     var onToggleItem: ((UUID) -> Void)?
     var onToggleLock: (() -> Void)?
     var onToggleCollecting: (() -> Void)?
+    var onArmCleanup: (() -> Void)?
     var onArmTranslate: (() -> Void)?
     var onArmOperator: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     /// Synchronous on purpose (#201): the panel's frame is set from the same
     /// layout pass that produced the size, so the window is never a frame
     /// behind the shape it holds.
-    var onSizeChange: (@MainActor (CGSize) -> Void)?
+    var onFrameChange: (@MainActor (PanelContentFrame) -> Void)?
 }
 
 /// SwiftUI wrapper that reads the observable model.
@@ -789,10 +943,11 @@ private struct DictationIndicatorHost: View {
             onToggleItem: model.onToggleItem,
             onToggleLock: model.onToggleLock,
             onToggleCollecting: model.onToggleCollecting,
+            onArmCleanup: model.onArmCleanup,
             onArmTranslate: model.onArmTranslate,
             onArmOperator: model.onArmOperator,
             onOpenSettings: model.onOpenSettings,
-            onSizeChange: model.onSizeChange
+            onFrameChange: model.onFrameChange
         )
     }
 }
@@ -838,7 +993,12 @@ final class DictationIndicatorManager {
                 hotkeyManager?.toggleLockByClick()
             }
         }
-        // `T` and `K` are the Fn+T / Fn+K chords, taken by pointer.
+        // `C`, `T` and `K` are the Fn+V / Fn+T / Fn+K chords, taken by pointer.
+        model.onArmCleanup = { [weak coordinator] in
+            Task { @MainActor in
+                coordinator?.setPendingMode(.cleanup)
+            }
+        }
         model.onArmTranslate = { [weak coordinator] in
             Task { @MainActor in
                 coordinator?.setPendingMode(.translate)
@@ -863,8 +1023,8 @@ final class DictationIndicatorManager {
         model.onOpenSettings = { SettingsSection.open(.copying) }
         // The frame is set from the layout pass that produced the size, so the
         // window is exactly the shape SwiftUI is springing open (#201).
-        model.onSizeChange = { [weak self] size in
-            self?.panel?.setContentSize(size)
+        model.onFrameChange = { [weak self] frame in
+            self?.panel?.setContentFrame(frame)
         }
 
         // Poll coordinator state and push into model
