@@ -425,13 +425,13 @@ final class DictationCoordinator {
         let recording: LiveDictationRecording?
         // What was copied while it was being spoken (#192) — this pipeline's,
         // not the next recording's.
-        let collected: [DictationItem]
+        let gathered: [DictationItem]
         if let cut = cutTail {
             // Tail cut by a new press — capture already finalized for us.
             cutTail = nil
             samples = cut.samples
             recording = cut.recording
-            collected = cut.items
+            gathered = cut.items
         } else {
             // Re-check state — may have been discarded during the tail
             // (which abandoned the recording along with it).
@@ -439,9 +439,15 @@ final class DictationCoordinator {
             recording = stopMicCapture()
             samples = accumulatedSamples
             accumulatedSamples.removeAll()
-            collected = items
+            gathered = items
             items.removeAll()
         }
+        // The paperclip's state at release decides (#208), read live here and
+        // nowhere downstream: off means nothing rides along, and the items
+        // stay on the entry marked left out so history still shows them.
+        let collected = RichInput.atRelease(
+            gathered, collecting: RichInputSettings.isOn(.collect)
+        )
 
         let durationSeconds = Double(samples.count) / Self.sampleRate
         DiagStore.record(.dictationRecorded(

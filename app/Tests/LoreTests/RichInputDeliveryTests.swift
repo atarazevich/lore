@@ -222,6 +222,26 @@ final class RichInputDeliveryTests: XCTestCase {
         )
     }
 
+    // MARK: - The paperclip at release
+
+    /// The paperclip off at release means no file paste either (#208): the web
+    /// composer gets one step, the words, and is handed nothing — the same
+    /// dictation `testACopiedParagraphAndAScreenshotAreThreeSteps` delivers in
+    /// three steps with a picture attached.
+    func testCollectingOffAtReleaseHandsTheComposerNoFile() {
+        let copied = DictationItem(kind: .text, offset: 0.2, text: "the paragraph he copied")
+        let shot = image(shotA, at: 0.6)
+        let words = spokenWords([0.2, 0.4, 0.6, 0.9, 1.2], endingClauseAt: [0, 2])
+        let spoken = "Смотри, вот скриншот, что скажешь"
+
+        let left = RichInput.atRelease([copied, shot], collecting: false)
+        let composed = RichInput.compose(spoken: spoken, items: left, words: words)
+        XCTAssertEqual(composed, spoken)
+        XCTAssertEqual(
+            RichInput.delivery(text: composed, items: left, target: .web), [.text(spoken)]
+        )
+    }
+
     /// A row switched off travels as nothing at all, and an item whose tag is
     /// no longer in the text is left alone rather than guessed at — the same
     /// discipline `split` uses.

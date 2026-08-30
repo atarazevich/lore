@@ -369,6 +369,47 @@ final class RichInputTests: XCTestCase {
         )
     }
 
+    // MARK: - The paperclip at release
+
+    /// The owner's case (#208): three things copied while speaking, the
+    /// paperclip switched off before letting go. Nothing rides along — the
+    /// paste is the words, with no tag anywhere in it — and the items are
+    /// still on the entry, marked left out, for history to show (#200).
+    func testCollectingOffAtReleaseLeavesEveryItemOutOfTheWords() {
+        let items = [
+            DictationItem(kind: .text, offset: 0.3, text: "the paragraph he copied"),
+            DictationItem(kind: .image, offset: 0.6, path: "/Users/a/Lore/RichInput/x-0.png"),
+            DictationItem(kind: .fileURL, offset: 0.9, path: "/Users/a/notes 2026.md"),
+        ]
+        let words = spokenWords([0.3, 0.6, 0.9, 1.2], endingClauseAt: [0, 1, 2])
+        let spoken = "смотри вот это, что скажешь"
+
+        let released = RichInput.atRelease(items, collecting: false)
+        XCTAssertEqual(released.map(\.included), [false, false, false])
+        XCTAssertEqual(released.map(\.id), items.map(\.id))
+        XCTAssertEqual(released.map(\.kind), items.map(\.kind))
+        XCTAssertEqual(released.map(\.offset), items.map(\.offset))
+        XCTAssertEqual(
+            RichInput.compose(spoken: spoken, items: released, words: words), spoken
+        )
+        // The terminal form is one paste of the bare words, and cleanup sees
+        // the whole thing because there is nothing to protect.
+        XCTAssertEqual(
+            RichInput.delivery(text: spoken, items: released, target: .path), [.text(spoken)]
+        )
+        XCTAssertTrue(RichInput.split(spoken, items: released).isWhole)
+    }
+
+    /// On, the same dictation is unchanged — the gate is the switch, not a
+    /// filter that also drops something else.
+    func testCollectingOnAtReleaseChangesNothing() {
+        let items = [
+            DictationItem(kind: .text, offset: 0.3, text: "COPIED"),
+            DictationItem(kind: .image, offset: 0.6, path: "/Users/a/x-0.png"),
+        ]
+        XCTAssertEqual(RichInput.atRelease(items, collecting: true), items)
+    }
+
     // MARK: - Split (cleanup and translation never touch inserted material)
 
     func testSplitCutsTheTextAtItsItems() {

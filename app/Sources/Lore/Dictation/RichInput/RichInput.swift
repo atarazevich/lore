@@ -120,6 +120,20 @@ enum RichInput {
 
     // MARK: - Compose
 
+    /// What the dictation carries when the user lets go. The paperclip's state
+    /// at release decides (#208): with collecting off nothing rides along —
+    /// no tag in the words, no file handed to the composer, `included: 0` in
+    /// the trace — because `compose`, `delivery` and `split` all read
+    /// `included`. Switching the paperclip off mid-dictation used to hide the
+    /// list while everything already collected still pasted.
+    ///
+    /// The items are kept, marked left out, rather than dropped: the entry is
+    /// the record of what was copied while this was spoken, which is what
+    /// history shows (#200), and a retry re-composes from the same list.
+    static func atRelease(_ items: [DictationItem], collecting: Bool) -> [DictationItem] {
+        collecting ? items : items.map { var left = $0; left.included = false; return left }
+    }
+
     /// One string: the spoken words with every kept item at the clause it
     /// happened in. Each item is its own block between blank lines, tagged by
     /// what it is, so the model reading the paste can tell what was spoken
