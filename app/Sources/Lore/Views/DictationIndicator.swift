@@ -371,7 +371,8 @@ struct DictationIndicatorView: View {
     /// DSET-05: with Space-lock turned off there is no lock to offer, so the
     /// glyph is not drawn at all rather than standing there inert (#201).
     var lockEnabled = true
-    var lastError: String?
+    /// The failure face on screen, if any (#209).
+    var lastError: DictationFace?
     var bluetoothRedirected = false
     var noSignal = false
     /// What rides along with this dictation (#192), oldest first.
@@ -453,6 +454,8 @@ struct DictationIndicatorView: View {
     var onArmOperator: (() -> Void)?
     /// The gear opens Settings → Copying (#201).
     var onOpenSettings: (() -> Void)?
+    /// A failure face's one action (#209) — which one it is, never what it does.
+    var onFaceAction: ((DictationFaceAction) -> Void)?
     /// The shape is being dragged (#213): where the user puts the bubble is
     /// where it stays, for the rest of this recording and for the next one.
     var onDrag: ((BubbleDrag) -> Void)?
@@ -799,20 +802,31 @@ struct DictationIndicatorView: View {
         case .recording:
             if let error = lastError {
                 // Mic stall surfaced by the first-frame watchdog — show it loudly
-                // instead of a normal-looking recording meter.
-                statusRow(icon: "xmark.circle.fill", iconColor: LoreTheme.Accent.red, text: error, wrap: true)
+                // instead of a normal-looking recording meter (#209, F1).
+                failureFace(error)
             } else {
                 recordingContent(open: open, measuring: measuring)
             }
         case .loadingModel:
-            statusRow(icon: "arrow.down.circle", text: "Downloading model...")
+            workingRow(label: "Downloading model\u{2026}")
         case .processing:
-            processingContent
+            // T1 (#209): the spinner stands where the dot did, the timer is
+            // frozen at the dictation's own length, and the clip with its count
+            // stays put so the person can see their items are still riding
+            // along. Nothing else in the row.
+            workingRow(label: "Transcribing") {
+                frozenTimer
+                if clipBright { clipReport }
+            }
         case .done:
             if let error = lastError {
-                statusRow(icon: "xmark.circle.fill", iconColor: LoreTheme.Accent.red, text: error, wrap: true)
+                failureFace(error)
             } else {
-                statusRow(icon: "checkmark.circle.fill", iconColor: LoreTheme.Accent.green, text: "Done")
+                // V-A (#209): the words are away, and there is no face for
+                // that — the coordinator takes the shape to `.idle` instead of
+                // parking a checkmark here. Reachable only for the instant
+                // between the two writes.
+                EmptyView()
             }
         case .idle:
             EmptyView()
@@ -844,8 +858,16 @@ struct DictationIndicatorView: View {
                         // out under the pointer that came to read it; a hint
                         // is nothing to click, or speak, before it can be
                         // read.
-                        keycap(key.letter, bright: key.bright,
-                               help: key.help, action: key.action)
+                        // The letter is the key on the keyboard, so the letters
+                        // teach the shortcut by standing there. `S` carries a
+                        // tooltip and no click: it is a key you press, not a
+                        // switch you flip.
+                        pill(key.letter.rawValue, .keycap(bright: key.bright), action: key.action)
+                            .bubbleTip(.letter(key.letter), key.help,
+                                       hovered: $hoveredTip, pointer: pointer)
+                            .accessibilityElement(children: .ignore)
+                            .accessibilityLabel(key.help)
+                            .accessibilityAddTraits(key.action == nil ? .isStaticText : .isToggle)
                             .opacity(key.armed || railVisible ? 1 : 0)
                             .allowsHitTesting(key.armed || railVisible)
                     }
@@ -1121,6 +1143,20 @@ struct DictationIndicatorView: View {
         return path
     }
 
+    /// The clip as the transcribing face carries it (#209, T1): the same glyph
+    /// and the same count, reporting what rode along with these words. Not a
+    /// switch — the dictation is over, and a paperclip that could still be
+    /// turned off here would be offering to leave out items that have already
+    /// gone (`ui-language.md` rule 8).
+    private var clipReport: some View {
+        HStack(spacing: Self.glyphGap) {
+            clipSymbol.foregroundStyle(LoreTheme.TextColor.primary)
+            count
+        }
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(includedCount) in the prompt")
+    }
+
     /// The count beside the clip (#209, B2): plain mono text, muted whatever the
     /// paperclip's own brightness is doing, tabular so the shape never twitches
     /// as it counts. Read, never clicked — it counts what the switch holds, and
@@ -1151,32 +1187,57 @@ struct DictationIndicatorView: View {
 
     private var includedCount: Int { items.filter(\.included).count }
 
-    /// The letter is the key on the keyboard, so the letters teach the
-    /// shortcut by standing there. `S` carries a tooltip and no click: it is a
-    /// key you press, not a switch you flip.
-    private func keycap(
-        _ letter: BubbleRailLetter, bright: Bool, help: String, action: (() -> Void)?
+    /// The plate a label stands on. The rail's letter — lit or dim — and the two
+    /// plates a face's action can wear are one recipe at two sizes: same corner,
+    /// same fill idiom, same hit shape. One builder, so a plate cannot drift
+    /// from a plate (#209).
+    struct BubblePill {
+        let font: Font
+        let insets: EdgeInsets
+        let minWidth: CGFloat
+        let minHeight: CGFloat
+        let plate: Double
+        let ink: Color
+
+        /// The rail's keycap, and P1's inline action wearing it (`.kb`/`.kb.on`).
+        /// No hover lift on either: the fill is what says armed or not, and a
+        /// brightening dim key would read as the armed one.
+        static func keycap(bright: Bool) -> BubblePill {
+            BubblePill(
+                font: LoreTheme.Typography.mono(11, weight: .semibold),
+                insets: EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4),
+                minWidth: 18, minHeight: 17,
+                plate: bright ? 0.12 : 0.04,
+                ink: bright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted
+            )
+        }
+
+        /// The button a face stands on its own line (the board's `.actbtn`).
+        static let button = BubblePill(
+            font: .system(size: 12, weight: .semibold),
+            insets: EdgeInsets(top: 5, leading: 10, bottom: 5, trailing: 10),
+            minWidth: 0, minHeight: 0,
+            plate: 0.07, ink: LoreTheme.TextColor.primary
+        )
+    }
+
+    private func pill(
+        _ label: String, _ style: BubblePill, action: (() -> Void)?
     ) -> some View {
-        Text(letter.rawValue)
-            .font(LoreTheme.Typography.mono(11, weight: .semibold))
-            .foregroundStyle(bright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
-            .padding(.horizontal, 4)
-            .frame(minWidth: 18, minHeight: 17)
-            // No hover lift: the fill is what says armed or not, and a
-            // brightening dim key would read as the armed one.
+        Text(label)
+            .font(style.font)
+            .foregroundStyle(style.ink)
+            .padding(style.insets)
+            .frame(minWidth: style.minWidth, minHeight: style.minHeight)
             .background(
                 RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
-                    .fill(Color.white.opacity(bright ? 0.12 : 0.04))
+                    .fill(Color.white.opacity(style.plate))
             )
             .contentShape(Rectangle())
             .onTapGesture {
                 hideTip()
                 action?()
             }
-            .bubbleTip(.letter(letter), help, hovered: $hoveredTip, pointer: pointer)
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(help)
-            .accessibilityAddTraits(action == nil ? .isStaticText : .isToggle)
     }
 
     private var gear: some View {
@@ -1285,18 +1346,26 @@ struct DictationIndicatorView: View {
         elapsedWidth(items.map(\.seconds).max() ?? 0, size: 11)
     }
 
+    /// The row the recording is read off, on one baseline (#209): a plain label
+    /// and the mono figures beside it are set on the same line, which
+    /// centre-alignment does not give — a proportional label's line box and a
+    /// monospaced figure's do not centre alike, and the timer sat visibly a
+    /// point high. Everything in it that is a glyph rather than text carries the
+    /// row's own baseline (`onTextBaseline`).
     private func statusGroup(measuring: Bool) -> some View {
-        HStack(spacing: 10) {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
             Circle()
                 // No-signal keeps its distinct dimmed look (not a token color
                 // — it must read as "not recording red").
                 .fill(noSignal ? Color.white.opacity(0.3) : LoreTheme.Accent.red)
                 .frame(width: 8, height: 8)
+                .onTextBaseline()
                 .bubbleTip(.dot, "Recording", hovered: $hoveredTip, pointer: pointer)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Recording")
-            if lockEnabled { lockGlyph }
+            if lockEnabled { lockGlyph.onTextBaseline() }
             waveform(measuring: measuring)
+                .onTextBaseline()
                 .bubbleTip(.waveform, "Your voice level", hovered: $hoveredTip, pointer: pointer)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Your voice level")
@@ -1305,18 +1374,7 @@ struct DictationIndicatorView: View {
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(LoreTheme.TextColor.muted)
             } else {
-                Text(elapsed(recordingSeconds))
-                    .font(LoreTheme.Typography.mono(13))
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-                    .monospacedDigit()
-                    // The panel grows; the number does not break. With a mode
-                    // armed beside it, a 19-minute dictation showed `19` over
-                    // `:3` — the panel was sized to the smallest its content
-                    // could be pressed into (#192, `resizeToContent`). Fixed
-                    // size refuses the squeeze; the template width keeps a
-                    // digit change from shifting everything beside it.
-                    .fixedSize()
-                    .frame(minWidth: elapsedWidth(recordingSeconds, size: 13), alignment: .leading)
+                timerText(recordingSeconds, color: LoreTheme.TextColor.muted)
                     // Two sentences, because the second one is the answer.
                     // The same two facts in a third of the words (#212).
                     .bubbleTip(
@@ -1326,23 +1384,30 @@ struct DictationIndicatorView: View {
                     .accessibilityLabel(Self.timerHelp)
             }
             if bluetoothRedirected {
-                Group {
-                    if showBluetoothInfo {
-                        Text("Using laptop mic — AirPods mic compresses audio below what speech recognition needs")
-                            .font(LoreTheme.Typography.meta)
-                            .foregroundStyle(LoreTheme.TextColor.muted)
-                            .lineLimit(2)
-                            .fixedSize(horizontal: false, vertical: true)
-                    } else {
-                        Image(systemName: "laptopcomputer.and.arrow.down")
-                            .font(.system(size: 11))
-                            .foregroundStyle(LoreTheme.TextColor.muted)
-                    }
-                }
-                .onTapGesture { showBluetoothInfo.toggle() }
-                .onHover { hovering in showBluetoothInfo = hovering }
+                bluetoothGlyph
             }
         }
+    }
+
+    /// The redirect note, which is a glyph until it is pointed at.
+    @ViewBuilder
+    private var bluetoothGlyph: some View {
+        Group {
+            if showBluetoothInfo {
+                Text("Using laptop mic — AirPods mic compresses audio below what speech recognition needs")
+                    .font(LoreTheme.Typography.meta)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            } else {
+                Image(systemName: "laptopcomputer.and.arrow.down")
+                    .font(.system(size: 11))
+                    .foregroundStyle(LoreTheme.TextColor.muted)
+            }
+        }
+        .onTextBaseline()
+        .onTapGesture { showBluetoothInfo.toggle() }
+        .onHover { hovering in showBluetoothInfo = hovering }
     }
 
     /// The lock, both ways round (#201). It stands in the bubble from the
@@ -1405,38 +1470,161 @@ struct DictationIndicatorView: View {
         .frame(height: 18)
     }
 
-    // MARK: - Status rows (processing, downloading, done, error)
+    // MARK: - The faces after release (#209)
 
-    private var processingContent: some View {
-        HStack(spacing: 10) {
+    /// The icon slot every face reports through — the same 15×15 box the lock
+    /// glyph stands in, so a face's icon is a citizen of the row rather than a
+    /// badge on top of it. The spinner stands here too, where the recording's
+    /// red dot was.
+    static let faceIconSide: CGFloat = 15
+
+    /// Where a face's sentence wraps. Long enough for the two that need it, and
+    /// no wider than the shape the recording bubble opens to.
+    static let faceWrapWidth: CGFloat = 260
+
+    /// The row's own line (the board's `.top { line-height: 18px }`), which the
+    /// recording row gets for free from the waveform's 18 pt. Held here too, so
+    /// the shape's height is the same across every face that fits on one line —
+    /// a keycap, a spinner and a sentence do not agree on it by themselves, and
+    /// the height is one of the two things a face change may not move.
+    static let faceRowHeight: CGFloat = 18
+
+    /// The two faces that report work in progress: transcribing (T1) and the
+    /// model download (F3). One row — the spinner where the dot stands, the
+    /// sentence beside it, and whatever else that face carries after it.
+    private func workingRow<Trailing: View>(
+        label: String, @ViewBuilder trailing: () -> Trailing = { EmptyView() }
+    ) -> some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
             ProgressView()
                 .controlSize(.small)
-            Text("Processing...")
+                .frame(width: Self.faceIconSide, height: Self.faceIconSide)
+                .onTextBaseline()
+            Text(label)
                 .font(LoreTheme.Typography.body)
                 .foregroundStyle(LoreTheme.TextColor.primary)
+            trailing()
+        }
+        .frame(minHeight: Self.faceRowHeight)
+    }
+
+    /// The dictation's own clock, stopped where it stopped (#209, T1) — the
+    /// live timer in a quieter tone, and drawn at all only when this run had a
+    /// length of its own, which a history retry does not.
+    @ViewBuilder
+    private var frozenTimer: some View {
+        if recordingSeconds > 0 {
+            timerText(recordingSeconds, color: LoreTheme.TextColor.faint)
         }
     }
 
-    private func statusRow(icon: String, iconColor: Color = LoreTheme.TextColor.muted, text: String, wrap: Bool = false) -> some View {
-        HStack(spacing: 10) {
-            Image(systemName: icon)
-                .foregroundStyle(iconColor)
-                .font(.system(size: 14))
-            // Errors can carry a longer message — wrap at a capped width instead of stretching
-            // the panel into one wide line. The panel is `.fixedSize()`, so the width must be
-            // constrained BEFORE `.fixedSize(vertical:)` measures height — otherwise the text is
-            // measured at unbounded width (one line), that 1-line height is locked in, and the
-            // later wrap clips vertically. A definite `.frame(width:)` is proposed to the Text so
-            // it wraps; `fixedSize(vertical:)` then reports the true multi-line height the panel
-            // grows to. No line limit on wrap so the full message always shows.
-            Text(text)
-                .font(LoreTheme.Typography.body)
-                .foregroundStyle(LoreTheme.TextColor.primary)
-                .lineLimit(wrap ? nil : 1)
-                .multilineTextAlignment(.leading)
-                .frame(width: wrap ? 260 : nil, alignment: .leading)
-                .fixedSize(horizontal: false, vertical: true)
+    /// The clock, live or frozen: one face, one template width, so the number
+    /// that stops is the same number in the same place.
+    ///
+    /// The panel grows; the number does not break. With a mode armed beside it,
+    /// a 19-minute dictation showed `19` over `:3` — the panel was sized to the
+    /// smallest its content could be pressed into (#192, `resizeToContent`).
+    /// Fixed size refuses the squeeze; the template width keeps a digit change
+    /// from shifting everything beside it.
+    private func timerText(_ seconds: Int, color: Color) -> some View {
+        Text(elapsed(seconds))
+            .font(LoreTheme.Typography.mono(13))
+            .foregroundStyle(color)
+            .monospacedDigit()
+            .fixedSize()
+            .frame(minWidth: elapsedWidth(seconds, size: 13), alignment: .leading)
+    }
+
+    /// One failure face (#209): its icon, its one sentence, and at most one
+    /// action.
+    ///
+    /// A sentence too wide for the row wraps at the cap instead of stretching
+    /// the shape into one wide line — measured here, in the face the row draws
+    /// with, the way the timer's own template width is measured. The panel is
+    /// `.fixedSize()`, so the width must be constrained BEFORE
+    /// `.fixedSize(vertical:)` measures height — otherwise the text is measured
+    /// at unbounded width (one line), that 1-line height is locked in, and the
+    /// later wrap clips vertically.
+    private func failureFace(_ face: DictationFace) -> some View {
+        let wraps = Self.wraps(face.sentence)
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .firstTextBaseline, spacing: 10) {
+                Image(systemName: "xmark.circle.fill")
+                    .font(.system(size: 14))
+                    // Silence is not a bug the app caused, so it reads in the
+                    // row's own muted tone; every other face reports a failure
+                    // and reads red. Decoration either way — the sentence is
+                    // the message (ui-language.md rule 4).
+                    .foregroundStyle(
+                        face == .nothingCameThrough
+                            ? LoreTheme.TextColor.muted : LoreTheme.Accent.red
+                    )
+                    .frame(width: Self.faceIconSide, height: Self.faceIconSide)
+                    .onTextBaseline()
+                Text(face.sentence)
+                    .font(LoreTheme.Typography.body)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                    .lineLimit(wraps ? nil : 1)
+                    .multilineTextAlignment(.leading)
+                    .frame(width: wraps ? Self.faceWrapWidth : nil, alignment: .leading)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let action = face.action, face.actionIsInline {
+                    groupDivider.onTextBaseline()
+                    faceAction(action, .keycap(bright: true)).onTextBaseline()
+                }
+            }
+            .frame(minHeight: Self.faceRowHeight)
+            if let action = face.action, !face.actionIsInline {
+                faceAction(action, .button)
+            }
         }
+        .accessibilityElement(children: .contain)
+        .accessibilityLabel(face.sentence)
+        // The secondary detail is spoken rather than drawn: it is not
+        // load-bearing on the row (ui-language.md rule 3), and the shape draws
+        // its own hover cards only over the recording canvas (#207).
+        .accessibilityHint(face.detail ?? "")
+    }
+
+    /// A face's one action on the plate the board gives it: P1's inline keycap,
+    /// or the button standing on its own line.
+    private func faceAction(_ action: DictationFaceAction, _ style: BubblePill) -> some View {
+        pill(action.label, style) { onFaceAction?(action) }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(action.label)
+            .accessibilityAddTraits(.isButton)
+    }
+
+    /// Whether a sentence needs the row's wrapping width — measured, never
+    /// declared beside the sentence, so the two cannot disagree when one of them
+    /// is edited. One `NSString` size in the row's own face, the same way
+    /// `elapsedWidth` sizes the timer's template.
+    static func wraps(_ sentence: String) -> Bool {
+        let font = NSFont.systemFont(ofSize: 13)
+        return ceil((sentence as NSString).size(withAttributes: [.font: font]).width)
+            > faceWrapWidth
+    }
+}
+
+/// How far the row's text baseline sits below the middle of the line its labels
+/// are set on, at the 13 pt the bubble uses — `(ascender + descender) / 2`, the
+/// descender being negative. Measured off the font, never guessed.
+private let rowBaselineBelowCentre: CGFloat = {
+    let font = NSFont.systemFont(ofSize: 13)
+    return (font.ascender + font.descender) / 2
+}()
+
+extension View {
+    /// What a glyph wears in a `.firstTextBaseline` row (#209).
+    ///
+    /// A label and the mono figures beside it share a baseline; a dot, a lock, a
+    /// waveform, a spinner or a paperclip has none of its own, and SwiftUI hands
+    /// such a view its *bottom* edge as a first-baseline guide — which would hang
+    /// the whole row off the glyph's underside. It carries the row's baseline
+    /// instead, taken through its own middle, so it stays centred on the line
+    /// exactly as it was while the row was centre-aligned.
+    fileprivate func onTextBaseline() -> some View {
+        alignmentGuide(.firstTextBaseline) { $0.height / 2 + rowBaselineBelowCentre }
     }
 }
 
@@ -1453,7 +1641,7 @@ final class DictationIndicatorModel {
     var recordingSeconds: Int = 0
     var showUpgradeKeycaps = true
     var lockEnabled = true
-    var lastError: String?
+    var lastError: DictationFace?
     var bluetoothRedirected = false
     var noSignal = false
     var items: [DictationItemChip] = []
@@ -1469,6 +1657,7 @@ final class DictationIndicatorModel {
     var onArmTranslate: (() -> Void)?
     var onArmOperator: (() -> Void)?
     var onOpenSettings: (() -> Void)?
+    var onFaceAction: ((DictationFaceAction) -> Void)?
     /// Where the user drags the bubble (#213).
     var onDrag: ((BubbleDrag) -> Void)?
     /// The window the shape wants (#204): the canvas it grows inside while
@@ -1508,6 +1697,7 @@ struct DictationIndicatorHost: View {
             onArmTranslate: model.onArmTranslate,
             onArmOperator: model.onArmOperator,
             onOpenSettings: model.onOpenSettings,
+            onFaceAction: model.onFaceAction,
             onDrag: model.onDrag,
             onCanvasChange: model.onCanvasChange
         )
@@ -1572,6 +1762,21 @@ final class DictationIndicatorManager {
         // The gear names the section it belongs to and the shell fronts the
         // window (#198) — the one door, installed by the scene.
         model.onOpenSettings = { SettingsSection.open(.copying) }
+        // A face's one action, resolved where the side effects live (#209).
+        // The mic faces land on Settings → Meetings, whose Microphone row
+        // already governs dictation's own capture — no section was built for
+        // them; `Try again` runs the download the next dictation would run
+        // anyway; the paste face opens the pane the grant lives in.
+        model.onFaceAction = { [weak coordinator] action in
+            switch action {
+            case .openLoreSettings:
+                SettingsSection.open(.meetings)
+            case .openSettings(let pane):
+                pane.open()
+            case .tryAgain:
+                Task { @MainActor in await coordinator?.retryModelDownload() }
+            }
+        }
         // Where the bubble is dragged to is where it stays (#213). The pointer
         // is read here, off the screen, rather than taken from the gesture:
         // SwiftUI measures a drag in the window's own space, and that number
@@ -1596,18 +1801,22 @@ final class DictationIndicatorManager {
 
                 let newState = coordinator.state
 
-                // Track recording duration from pre-buffer start (when audio actually begins)
+                // Track recording duration from pre-buffer start (when audio
+                // actually begins), and freeze it there when capture ends: the
+                // transcribing face shows the dictation's own length (#209,
+                // T1), so the number stops rather than falling to zero. It is
+                // cleared with the shape itself.
                 let isCapturing = newState == .recording || coordinator.isPreBuffering
-                if isCapturing && self.recordingStartDate == nil {
-                    self.recordingStartDate = Date()
-                } else if !isCapturing {
-                    self.recordingStartDate = nil
-                }
                 let newSeconds: Int
-                if let start = self.recordingStartDate {
+                if isCapturing {
+                    let start = self.recordingStartDate ?? Date()
+                    self.recordingStartDate = start
                     newSeconds = Int(Date().timeIntervalSince(start))
-                } else {
+                } else if newState == .idle {
+                    self.recordingStartDate = nil
                     newSeconds = 0
+                } else {
+                    newSeconds = self.model.recordingSeconds
                 }
 
                 // Push to model

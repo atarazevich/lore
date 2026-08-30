@@ -423,6 +423,233 @@ final class RecordingBubbleRenderTests: XCTestCase {
         return CGFloat(last + 1) / Self.scale
     }
 
+    // MARK: - The faces after release (#209)
+
+    /// Every face the board draws, rendered at the shape's own width. The
+    /// numbers are the acceptance: one shape per face, no wider than the
+    /// recording bubble opens to, one row unless the board gives the face a
+    /// button of its own line.
+    func testEveryFaceRendersAsOneShapeNoWiderThanTheBubble() throws {
+        // The widest any face may be: the wrapped sentence's cap, the icon, the
+        // 10 pt beside it and the row's own padding.
+        let ceiling = DictationIndicatorView.faceWrapWidth
+            + DictationIndicatorView.faceIconSide + 10 + 2 * Self.rowPadding
+
+        var drawn: [(String, CGFloat, CGFloat)] = []
+        for (name, host) in try faces() {
+            let render = try raster(host)
+            drawn.append((name, render.paintedWidth, render.paintedHeight))
+            XCTAssertGreaterThan(render.paintedWidth, 0, "\(name): nothing was drawn")
+            XCTAssertLessThanOrEqual(
+                render.paintedWidth, ceiling + 0.5, "\(name): wider than the shape may be"
+            )
+        }
+        for (name, width, height) in drawn {
+            print("[#209] \(name): \(String(format: "%.1f", width)) × "
+                  + "\(String(format: "%.1f", height)) pt (the board's row is "
+                  + "\(Self.boardRowHeight) pt, ceiling \(ceiling) pt)")
+        }
+
+        func size(_ name: String) throws -> (width: CGFloat, height: CGFloat) {
+            let found = try XCTUnwrap(drawn.first { $0.0 == name })
+            return (found.1, found.2)
+        }
+        // Every face that fits on one line is the board's own row, exactly as
+        // tall as the recording bubble it replaces — the height is one of the
+        // two things a face change may not move.
+        for name in ["T1 transcribing", "F3 downloading", "F5 paste failed", "F6 cleanup failed"] {
+            XCTAssertEqual(
+                try size(name).height, Self.boardRowHeight, accuracy: 0.5,
+                "\(name): it is not the board's row"
+            )
+        }
+        // A face whose action stands on its own line is a row taller; F5's is
+        // inline (P1), which is the whole point of P1.
+        for name in ["F1 mic stall", "F2 nothing came through", "F4 download failed"] {
+            XCTAssertGreaterThan(
+                try size(name).height, Self.boardRowHeight + 10,
+                "\(name): its button is not on its own line"
+            )
+        }
+        // The two long sentences wrap, so both are exactly the row's own cap.
+        for name in ["F1 mic stall", "F4 download failed"] {
+            XCTAssertEqual(
+                try size(name).width, ceiling, accuracy: 0.5,
+                "\(name): the wrapped sentence is not at the row's cap"
+            )
+        }
+    }
+
+    /// T1 keeps the clip and its count: the items are still riding along, and
+    /// the person can see it. The face without them is the same row, narrower by
+    /// exactly what the clip and its count take.
+    func testTheTranscribingFaceKeepsTheClipAndItsCount() throws {
+        let bare = try raster(face(.processing, seconds: 66))
+        let carrying = try raster(face(.processing, seconds: 66, items: [chip(0), chip(1)]))
+        let grew = carrying.paintedWidth - bare.paintedWidth
+        print("[#209] the transcribing face grew \(String(format: "%.2f", grew)) pt for the clip "
+              + "and its count (glyph \(DictationIndicatorView.clipBox.width) + gap "
+              + "\(DictationIndicatorView.glyphGap) + figure "
+              + "\(DictationIndicatorView.countDigitWidth) + 10 pt beside it)")
+        XCTAssertEqual(
+            grew,
+            10 + DictationIndicatorView.clipBox.width + DictationIndicatorView.glyphGap
+                + DictationIndicatorView.countDigitWidth,
+            accuracy: 1,
+            "the clip and its count are not in the transcribing face"
+        )
+        XCTAssertEqual(
+            carrying.paintedHeight, bare.paintedHeight, accuracy: 0.5,
+            "the clip made the row taller"
+        )
+    }
+
+    /// A frozen timer is a timer: the face draws the dictation's own length, and
+    /// a run with no length of its own — a history retry — draws none.
+    func testTheTranscribingFaceFreezesTheTimerAndDrawsNoneWithoutOne() throws {
+        let timed = try raster(face(.processing, seconds: 66))
+        let untimed = try raster(face(.processing, seconds: 0))
+        print("[#209] transcribing at 1:06 is \(String(format: "%.1f", timed.paintedWidth)) pt, "
+              + "with no length of its own \(String(format: "%.1f", untimed.paintedWidth)) pt")
+        XCTAssertGreaterThan(
+            timed.paintedWidth, untimed.paintedWidth + 20, "the frozen timer was not drawn"
+        )
+    }
+
+    // MARK: - One baseline (#209)
+
+    /// The label and the mono figures beside it stand on one line. Centre
+    /// alignment did not give that — a proportional label's line box and a
+    /// monospaced figure's do not centre alike, and the owner saw the digits
+    /// sitting high beside "Transcribing".
+    ///
+    /// Measured off the ink: the bottom of each element's first glyph, which is
+    /// a flat stroke on the baseline for `T`, `N` and every figure. Only a
+    /// run's own tail can carry a descender, so the first glyph is the safe one.
+    func testTheLabelAndTheMonoTimerShareABaseline() throws {
+        let render = try raster(face(.processing, seconds: 66))
+        let runs = inkRuns(render, gap: 5)
+        // The spinner draws nothing offscreen (an `ImageRenderer` runs no
+        // animations), so the runs are the label and then the timer.
+        XCTAssertGreaterThanOrEqual(runs.count, 2, "the face drew fewer elements than it has")
+        let label = try baseline(of: runs[runs.count - 2], in: render)
+        let timer = try baseline(of: runs[runs.count - 1], in: render)
+        print("[#209] transcribing: the label's baseline \(String(format: "%.2f", label)) pt, "
+              + "the timer's \(String(format: "%.2f", timer)) pt, "
+              + "\(runs.count) runs of ink across the row")
+        XCTAssertEqual(label, timer, accuracy: 1, "the label and the timer sit on two lines")
+    }
+
+    /// The same for the recording row, where the label and the timer are the two
+    /// faces of one slot: a live dictation shows `1:13`, one with a dead mic
+    /// shows the sentence in its place. Both stand on the row's own baseline.
+    func testTheRecordingRowsLabelAndTimerShareABaseline() throws {
+        let running = try raster(bubble())
+        let dead = try raster(bubble(noSignal: true))
+        // The slot is the third run in either render: the dot, the lock and the
+        // waveform come before it, and the paperclip after.
+        let timer = try baseline(of: inkRuns(running, gap: 5)[3], in: running)
+        let label = try baseline(of: inkRuns(dead, gap: 5)[3], in: dead)
+        print("[#209] the recording row: the timer's baseline "
+              + "\(String(format: "%.2f", timer)) pt, the no-signal label's "
+              + "\(String(format: "%.2f", label)) pt")
+        XCTAssertEqual(label, timer, accuracy: 1, "the row's two labels sit on two lines")
+    }
+
+    /// And the row is still the board's own row: switching it to a baseline
+    /// alignment moved nothing and grew nothing.
+    func testTheRecordingRowIsStillOneBoardRowTall() throws {
+        let rest = try raster(bubble())
+        print("[#209] the resting row is \(String(format: "%.2f", rest.paintedHeight)) pt tall")
+        XCTAssertEqual(rest.paintedHeight, Self.boardRowHeight, accuracy: 0.5)
+    }
+
+    /// 12 pt of padding, the waveform's own 18, and 12 again — the board's row.
+    private static let boardRowHeight: CGFloat = 42
+
+    /// Every face on the board, named as the board names them.
+    private func faces() throws -> [(String, DictationIndicatorHost)] {
+        [
+            ("T1 transcribing", face(.processing, seconds: 66, items: [chip(0), chip(1)])),
+            ("F3 downloading", face(.loadingModel)),
+            ("F1 mic stall", face(.done, error: .micUnavailable(
+                "The AirPods Pro microphone is unavailable."
+            ))),
+            ("F2 nothing came through", face(.done, error: .nothingCameThrough)),
+            ("F4 download failed", face(.done, error: .modelDownloadFailed)),
+            ("F5 paste failed", face(.done, error: .pasteFailed)),
+            ("F6 cleanup failed", face(.done, error: .cleanupFailed)),
+        ]
+    }
+
+    private func face(
+        _ state: DictationState, error: DictationFace? = nil,
+        seconds: Int = 0, items: [DictationItemChip] = []
+    ) -> DictationIndicatorHost {
+        let model = DictationIndicatorModel()
+        model.state = state
+        model.lastError = error
+        model.recordingSeconds = seconds
+        model.items = items
+        model.collecting = true
+        return DictationIndicatorHost(model: model)
+    }
+
+    /// What counts as a stroke rather than the surface under it. Offscreen the
+    /// material fills the whole shape at full alpha, so ink is told from surface
+    /// by brightness, not by coverage: the surface renders at ~48, the faintest
+    /// text the row draws (the frozen timer, `--faint`) at ~108, and the
+    /// brightest at ~224. Halfway between the first two.
+    private static let inkLevel = 80
+
+    /// The runs of ink across a rendered row, split wherever it leaves `gap`
+    /// points or more of surface — the 10 pt the shape puts between its
+    /// elements, never the point or two between the letters of one word.
+    private func inkRuns(_ raster: Raster, gap: CGFloat) -> [Range<Int>] {
+        painted(raster, minimumGap: Int(gap * Self.scale))
+    }
+
+    private func painted(_ raster: Raster, minimumGap: Int) -> [Range<Int>] {
+        let rows = Int(raster.paintedHeight * Self.scale)
+        var runs: [Range<Int>] = []
+        var start: Int?
+        var blank = 0
+        for x in 0..<raster.width {
+            let inked = (0..<rows).contains { Int(raster.pixel(x: x, y: $0).0) > Self.inkLevel }
+            if inked {
+                if start == nil { start = x }
+                blank = 0
+            } else if let began = start {
+                blank += 1
+                if blank >= minimumGap {
+                    runs.append(began..<(x - blank + 1))
+                    start = nil
+                    blank = 0
+                }
+            }
+        }
+        if let began = start { runs.append(began..<raster.width) }
+        return runs
+    }
+
+    /// Where a run of ink stands: the bottom of its first glyph. Sub-split at
+    /// any column of bare surface, so the run's own tail — the only place a
+    /// descender can be in these strings — is never what is measured.
+    private func baseline(of run: Range<Int>, in raster: Raster) throws -> CGFloat {
+        let glyph = try XCTUnwrap(
+            painted(raster, minimumGap: 1).first { run.contains($0.lowerBound) }
+        )
+        let rows = Int(raster.paintedHeight * Self.scale)
+        var last = -1
+        for y in 0..<rows {
+            for x in glyph where Int(raster.pixel(x: x, y: y).0) > Self.inkLevel {
+                last = max(last, y)
+            }
+        }
+        XCTAssertGreaterThan(last, 0, "the run carried no ink at all")
+        return CGFloat(last + 1) / Self.scale
+    }
+
     private func bubble(
         pendingMode: UpgradeAction? = nil,
         operatorAddressed: Bool = false,
@@ -430,6 +657,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         held: Bool = false,
         railShown: Bool = false,
         clipBounce: Bool = false,
+        noSignal: Bool = false,
         tip: String? = nil
     ) -> DictationIndicatorHost {
         let model = DictationIndicatorModel()
@@ -440,6 +668,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         model.pendingMode = pendingMode
         model.operatorAddressed = operatorAddressed
         model.items = items
+        model.noSignal = noSignal
         model.collecting = true
         model.screenshotsEnabled = true
         model.held = held

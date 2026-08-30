@@ -14,7 +14,10 @@ final class DictationCoordinator {
     private(set) var state: DictationState = .idle
     private(set) var audioLevel: Float = 0
     private(set) var lastTranscript: String?
-    private(set) var lastError: String?
+    /// The failure face the bubble is showing, if any (#209) — the sentence
+    /// and its one action as one value, never a string a button has to be
+    /// guessed from.
+    private(set) var lastError: DictationFace?
     /// Pre-paste cleanup mode set during recording via Fn+V/Fn+T.
     private(set) var pendingCleanupMode: UpgradeAction?
     /// Fn+K "send to operator" (#122): armed during recording, lands on the
@@ -31,7 +34,8 @@ final class DictationCoordinator {
     /// spoken (#192), oldest first — the indicator's count and list read this,
     /// and the paste carries every item still switched on. Cleared when the
     /// next recording is confirmed and when one is discarded; the pipeline
-    /// takes them with it.
+    /// takes a copy with it, and what stays is what the transcribing face
+    /// keeps counting until the next dictation replaces it (#209).
     private(set) var items: [DictationItem] = []
 
     private let log = Logger(subsystem: "com.lore.app", category: "DictationCoordinator")
@@ -66,14 +70,13 @@ final class DictationCoordinator {
     private var confirmedHoldAt: Date?
     private var preBufferSeconds: Double = 0
 
+    /// How long a failure face stays up before the shape leaves — long enough
+    /// to read one sentence and reach for its button.
+    private static let faceReadingTime: Duration = .seconds(4)
+
     private static let minimumSpeechSamples = 8000
     private static let maxChunkSamples = 480_000
     private static let sampleRate = 16000.0
-
-    /// User-facing paste-time failure messages (#50). Raw text is still
-    /// pasted (DIC-48 fallback unchanged) — these only make the silence visible.
-    static let cleanupFailedPastedRaw = "Cleanup failed \u{2014} pasted raw text"
-    static let translateFailedPastedRaw = "Translation failed \u{2014} pasted raw text"
 
     /// Shared audio bus — set by AppDelegate during dictation setup.
     var audioBus: AudioBus?
@@ -237,14 +240,14 @@ final class DictationCoordinator {
                 guard let self, !granted else { return }
                 // The key was released while the OS prompt was up, so use the grace
                 // hide directly rather than waiting for a release that already happened.
-                self.surfaceMicError(await self.micUnavailableMessage(), hide: .grace)
+                self.surfaceFace(.micUnavailable(await self.micUnavailableMessage()), hide: .grace)
             }
         @unknown default:
             failPreBuffer(MicrophonePermission.unknownMessage)
         }
     }
 
-    /// How a surfaced mic error should hide.
+    /// How a surfaced failure face should hide.
     private enum MicErrorHide {
         /// Fn may still be held — keep it visible (no timer) until release starts the grace hide.
         case sticky
@@ -257,7 +260,7 @@ final class DictationCoordinator {
     /// the Fn key is still down, so the error stays sticky until release.
     private func failPreBuffer(_ message: String) {
         isPreBuffering = false
-        surfaceMicError(message, hide: .sticky)
+        surfaceFace(.micUnavailable(message), hide: .sticky)
     }
 
     /// Same abort, but for the mic-unavailable message, whose device-name lookup hops
@@ -274,15 +277,15 @@ final class DictationCoordinator {
             self.stickyErrorInFlight = false
             let hide: MicErrorHide = self.pendingStickyRelease ? .grace : .sticky
             self.pendingStickyRelease = false
-            self.surfaceMicError(message, hide: hide)
+            self.surfaceFace(.micUnavailable(message), hide: hide)
         }
     }
 
-    /// Show a mic error in the floating indicator. The indicator only renders while
-    /// non-idle, so we park in `.done`. A sticky error stays until the Fn release
-    /// (`dismissMicErrorAfterRelease`); a grace error hides after a readable ~4s.
-    private func surfaceMicError(_ message: String, hide: MicErrorHide) {
-        lastError = message
+    /// Show a failure face in the floating indicator. The indicator only renders
+    /// while non-idle, so we park in `.done`. A sticky error stays until the Fn
+    /// release (`dismissMicErrorAfterRelease`); a grace error hides after a readable ~4s.
+    private func surfaceFace(_ face: DictationFace, hide: MicErrorHide) {
+        lastError = face
         state = .done
         switch hide {
         case .sticky:
@@ -291,7 +294,7 @@ final class DictationCoordinator {
             micErrorSticky = true
         case .grace:
             micErrorSticky = false
-            scheduleAutoHide(after: .seconds(4))
+            scheduleAutoHide()
         }
     }
 
@@ -307,7 +310,7 @@ final class DictationCoordinator {
         }
         guard micErrorSticky, state == .done else { return }
         micErrorSticky = false
-        scheduleAutoHide(after: .seconds(4))
+        scheduleAutoHide()
     }
 
     /// Confirm that the hold gesture was detected — transition to visible recording.
@@ -425,7 +428,11 @@ final class DictationCoordinator {
             samples = accumulatedSamples
             accumulatedSamples.removeAll()
             gathered = items
-            items.removeAll()
+            // Not cleared here: the transcribing face keeps showing the clip
+            // and its count, so the person can see their items are still
+            // riding along (#209, T1). They go when the next recording is
+            // confirmed, or when one is discarded — which is what this
+            // property's own contract already said.
         }
         // The paperclip's state at release decides (#208), read live here and
         // nowhere downstream: off means nothing rides along, and the items
@@ -449,13 +456,15 @@ final class DictationCoordinator {
             // Prefer a concrete bus capture error if one was recorded; otherwise the
             // unified message. Fn is already released here (stop came from the release
             // path), so use the grace hide directly.
-            let message = if let lastError { lastError } else { await micUnavailableMessage() }
+            let face = if let lastError { lastError } else {
+                DictationFace.micUnavailable(await micUnavailableMessage())
+            }
             DiagStore.record(.dictationZeroFrames)
-            // The message can name the resolved input device.
-            log.error("zero frames captured — mic failure: \(message, privacy: .private)")
+            // The sentence can name the resolved input device.
+            log.error("zero frames captured — mic failure: \(face.sentence, privacy: .private)")
             // The async message lookup may have lost the session to a newer press.
             guard isCurrentSession(epoch) else { return }
-            surfaceMicError(message, hide: .grace)
+            surfaceFace(face, hide: .grace)
             return
         }
 
@@ -524,6 +533,10 @@ final class DictationCoordinator {
             // the indicator is touched only while this is the current session.
             history.update(entry)
             guard isCurrentSession(epoch) else { return }
+            // The app knew this had happened and said "Done" anyway (#209, F2).
+            // A model download that failed already put its own face up; anything
+            // else here is a dictation that came back with nothing in it.
+            if lastError == nil { lastError = .nothingCameThrough }
             state = .done
             scheduleAutoHide()
             return
@@ -567,6 +580,7 @@ final class DictationCoordinator {
         // Paste immediately (always paste the best version) — even when a
         // newer recording session is already underway (#104): a completed
         // dictation still lands where the cursor is.
+        var delivery: Task<Bool, Never>?
         if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
             // Where the words are about to land decides the form the items take
@@ -575,7 +589,10 @@ final class DictationCoordinator {
             // while this was being transcribed.
             let target = PasteTarget.frontmost
             let steps = RichInput.delivery(text: text, items: entry.items ?? [], target: target)
-            TextInserter.paste(steps)
+            // Started here, answered below (#209, F5). A web composer is handed
+            // its steps 250–600 ms apart, and nothing in this function may wait
+            // for that: the shape leaves at STEP 4 and this outlives it.
+            delivery = Task { @MainActor in await TextInserter.paste(steps) }
             // The pasted text is exactly what the user dictated and is already
             // visible in the app's own history UI — only its length is recorded.
             DiagStore.record(.dictationPasted(characters: text.count, cleaned: didCleanup))
@@ -601,9 +618,34 @@ final class DictationCoordinator {
 
         // STEP 4: the indicator belongs to the newest session.
         guard isCurrentSession(epoch) else { return }
-        state = .done
-        // A cleanup/translate failure stays up long enough to read (#50).
-        scheduleAutoHide(after: lastError == nil ? .milliseconds(800) : .seconds(4))
+        // Whether the keystrokes could be created is the one thing this side
+        // can observe — `CGEvent.post` returns no receipt — and the answer
+        // arrives after the shape has already gone, which is the honest order:
+        // as far as this side could tell the words were away, and then they
+        // were not. Watched from here rather than after the writes below, so a
+        // cleanup failure's own face is replaced by this one — "pasted raw
+        // text" is not true of a paste that never happened.
+        if let delivery {
+            Task { @MainActor [weak self] in
+                let posted = await delivery.value
+                guard !posted, let self, self.isCurrentSession(epoch) else { return }
+                self.surfaceFace(.pasteFailed, hide: .grace)
+            }
+        }
+        guard lastError == nil else {
+            // F6: the raw text landed, and the row says why it is unedited.
+            state = .done
+            scheduleAutoHide()
+            return
+        }
+        // V-A (#209): no confirmation face. "Pasted" is a fact the app is not
+        // in a position to assert — `TextInserter` can confirm only that the
+        // Cmd+V was created, never that the target received it — and with the
+        // words away there is nothing left for anyone to decide (rule 7). The
+        // shape simply goes.
+        autoHideTask?.cancel()
+        autoHideTask = nil
+        state = .idle
     }
 
     /// Clipboard images become PNGs under lore's own Application Support — the
@@ -629,14 +671,18 @@ final class DictationCoordinator {
         return kept.isEmpty ? nil : kept
     }
 
-    /// Hide the indicator after a grace period. The default ~800ms covers the normal
-    /// `.done` flash; the mic-error grace path passes ~4s so the message stays readable.
-    /// Uses the single `autoHideTask` slot so a subsequent Fn press cancels it via
-    /// `startPreBuffer`, and so a flicker that re-arms a release path simply restarts it.
-    private func scheduleAutoHide(after delay: Duration = .milliseconds(800)) {
+    /// Hide the indicator once its face has had time to be read. Uses the single
+    /// `autoHideTask` slot so a subsequent Fn press cancels it via
+    /// `startPreBuffer`, and so a flicker that re-arms a release path simply
+    /// restarts it.
+    ///
+    /// One delay, because every face that reaches here is a failure now: the
+    /// success path takes the shape straight to `.idle` (#209, V-A) instead of
+    /// parking a checkmark for the ~800 ms flash this used to default to.
+    private func scheduleAutoHide() {
         autoHideTask?.cancel()
         autoHideTask = Task { [weak self] in
-            try? await Task.sleep(for: delay)
+            try? await Task.sleep(for: Self.faceReadingTime)
             guard let self, self.state == .done else { return }
             self.state = .idle
         }
@@ -722,9 +768,21 @@ final class DictationCoordinator {
         // `subscribe` starts the new capture asynchronously on AudioBus's halQueue, so
         // this check can't observe the new subscription's outcome — the new capture's
         // immediate stall is the watchdog's job below.
+        //
+        // The driver's own string never reaches the row (#209, F1): both paths
+        // read the one plain sentence, which the watchdog below already used.
+        // Resolving the device name hops to the HAL queue (#64), so the capture
+        // epoch is what keeps a message from landing on a recording that has
+        // already been stopped or discarded.
         if let micError = bus.captureError {
             log.error("mic capture error: \(micError, privacy: .private)")
-            lastError = micError
+            let epoch = captureEpoch
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                let message = await self.micUnavailableMessage()
+                guard self.captureEpoch == epoch else { return }
+                self.lastError = .micUnavailable(message)
+            }
         }
 
         // First-frame watchdog: if the HAL IOProc stalls (macOS 27) and this recording
@@ -739,7 +797,7 @@ final class DictationCoordinator {
             guard self.isPreBuffering || self.state == .recording else { return }
             if self.accumulatedSamples.isEmpty && bus.captureError == nil {
                 log.error("no mic audio after 5s")
-                self.lastError = await self.micUnavailableMessage()
+                self.lastError = .micUnavailable(await self.micUnavailableMessage())
             }
         }
 
@@ -851,11 +909,11 @@ final class DictationCoordinator {
 
     func pasteLastTranscript() {
         // Respect activeVersion of the most recent entry
-        if let entry = history.entries.first, let text = entry.displayText {
-            TextInserter.paste(text)
-        } else if let text = lastTranscript {
-            TextInserter.paste(text)
-        }
+        let text = history.entries.first?.displayText ?? lastTranscript
+        guard let text else { return }
+        // Nothing here reads the answer: this is the menu's own re-paste, and
+        // it has no face to put a failure on.
+        Task { @MainActor in await TextInserter.paste(text) }
     }
 
     /// Retry transcription for a failed or audio-only entry. Registered in
@@ -876,6 +934,11 @@ final class DictationCoordinator {
             return
         }
 
+        // A retry must not carry a stale face into a success (#50, #209): the
+        // last dictation's failure is still parked here until a new recording
+        // is confirmed, and this is not one.
+        if isCurrentSession(epoch) { lastError = nil }
+
         entry.status = .audioSaved
         entry.rawText = nil
         entry.cleanedText = nil
@@ -894,12 +957,21 @@ final class DictationCoordinator {
 
         // Indicator state belongs to the newest session (#104).
         guard isCurrentSession(epoch) else { return }
-        if entry.status == .transcribed || entry.status == .cleaned {
+        // The same face the dictation path shows (#209, F2): a retry that came
+        // back with nothing says so, instead of closing as though it worked.
+        if lastError == nil, entry.status != .transcribed, entry.status != .cleaned {
+            lastError = .nothingCameThrough
+        }
+        guard lastError == nil else {
+            // A model download that failed put its own face up (#209, F4) and
+            // needs its reading time.
             state = .done
             scheduleAutoHide()
-        } else {
-            state = .idle
+            return
         }
+        // A history retry has no confirmation face of its own: the row it
+        // rewrote is the answer, and it is already on screen (#209, V-A).
+        state = .idle
     }
 
     // MARK: - Transcription
@@ -914,6 +986,29 @@ final class DictationCoordinator {
     func prewarm() async {
         _ = try? await backendCache?.prepare()
         _ = try? await ownCache.prepare()
+    }
+
+    /// F4's one action (#209): the download the next dictation would attempt
+    /// anyway, run now, for whoever has just fixed their connection. The
+    /// automatic retry stays what it always was — this only saves the wait.
+    ///
+    /// The face goes back up if the connection is still down, and the shape
+    /// leaves on success: there is no "downloaded" face, for the same reason
+    /// there is no "pasted" one.
+    func retryModelDownload() async {
+        guard lastError == .modelDownloadFailed else { return }
+        autoHideTask?.cancel()
+        autoHideTask = nil
+        lastError = nil
+        state = .loadingModel
+        do {
+            _ = try await backendCache?.prepare()
+            _ = try await ownCache.prepare()
+            state = .idle
+        } catch {
+            log.error("model download retry failed: \(error.localizedDescription, privacy: .private)")
+            surfaceFace(.modelDownloadFailed, hide: .grace)
+        }
     }
 
     private func transcribeEntry(
@@ -932,9 +1027,14 @@ final class DictationCoordinator {
                 // scary "Model loading failed: cancelled".
                 return
             } catch {
+                // One plain sentence for both this and the private instance
+                // below (#209, F4) — the two raw NSError descriptions were the
+                // same event to whoever read them. The description itself goes
+                // to the log, where detail belongs.
+                log.error("model download failed: \(error.localizedDescription, privacy: .private)")
                 entry.status = .failed
-                entry.errorMessage = "Model loading failed: \(error.localizedDescription)"
-                if isCurrentSession(epoch) { lastError = entry.errorMessage }
+                entry.errorMessage = DictationFace.modelDownloadFailed.sentence
+                if isCurrentSession(epoch) { lastError = .modelDownloadFailed }
                 history.update(entry)
                 return
             }
@@ -951,9 +1051,10 @@ final class DictationCoordinator {
             // Deliberate discard (#104): quiet stop, entry stays retryable.
             return
         } catch {
+            log.error("backend prepare failed: \(error.localizedDescription, privacy: .private)")
             entry.status = .failed
-            entry.errorMessage = "Backend prepare failed: \(error.localizedDescription)"
-            if isCurrentSession(epoch) { lastError = entry.errorMessage }
+            entry.errorMessage = DictationFace.modelDownloadFailed.sentence
+            if isCurrentSession(epoch) { lastError = .modelDownloadFailed }
             history.update(entry)
             return
         }
@@ -1035,7 +1136,8 @@ final class DictationCoordinator {
         ))
         if text.isEmpty {
             entry.status = .failed
-            entry.errorMessage = "Transcription produced empty result"
+            // One sentence for the bubble and the row alike (#209, F2).
+            entry.errorMessage = DictationFace.nothingCameThrough.sentence
         } else {
             entry.status = .transcribed
             // The spoken words with every kept item at the end of the clause
@@ -1062,20 +1164,20 @@ final class DictationCoordinator {
         let prompt: String
         let modeName: String
         let translatedTo: String?
-        let failureMessage: String
+        let failureMessage: DictationFace
         let endpoint: DiagEvent.Endpoint
         switch action {
         case .cleanup:
             prompt = basePrompt
             modeName = "Cleanup"
             translatedTo = nil
-            failureMessage = Self.cleanupFailedPastedRaw
+            failureMessage = .cleanupFailed
             endpoint = .cleanup
         case .translate:
             prompt = basePrompt + CleanupMode.translateSuffix()
             modeName = "Translate"
             translatedTo = TranslationLanguage.english.key
-            failureMessage = Self.translateFailedPastedRaw
+            failureMessage = .translateFailed
             endpoint = .translate
         }
 
@@ -1097,16 +1199,16 @@ final class DictationCoordinator {
     /// gate every mode/method/language meta write on this (DIC-37/48).
     ///
     /// `failureMessage`, when provided, is surfaced as `lastError` if the API
-    /// call itself fails — the floating indicator renders it as the red
-    /// status row instead of a fake success panel (#50). Paths with their own
-    /// failure UI (row transforms) pass nil. Internal (not private) so tests
-    /// can drive the failure path directly with a stubbed client.
+    /// call itself fails — the floating indicator renders it as the F6 face
+    /// instead of a fake success (#50). Paths with their own failure UI (row
+    /// transforms) pass nil. Internal (not private) so tests can drive the
+    /// failure path directly with a stubbed client.
     @discardableResult
     func cleanupEntry(
         _ entry: inout DictationHistoryEntry,
         rawText: String,
         prompt: String? = nil,
-        failureMessage: String? = nil,
+        failureMessage: DictationFace? = nil,
         endpoint: DiagEvent.Endpoint,
         epoch: Int? = nil
     ) async -> Bool {

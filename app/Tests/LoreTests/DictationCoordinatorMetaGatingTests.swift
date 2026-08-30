@@ -105,12 +105,12 @@ final class DictationCoordinatorMetaGatingTests: XCTestCase {
 
         let ok = await coordinator.cleanupEntry(
             &entry, rawText: "hello world", prompt: "clean it up",
-            failureMessage: DictationCoordinator.cleanupFailedPastedRaw,
+            failureMessage: .cleanupFailed,
             endpoint: .cleanup
         )
 
         XCTAssertFalse(ok)
-        XCTAssertEqual(coordinator.lastError, DictationCoordinator.cleanupFailedPastedRaw)
+        XCTAssertEqual(coordinator.lastError, .cleanupFailed)
         // Raw-paste fallback data unchanged: no cleaned text, no relabeling.
         XCTAssertNil(entry.cleanedText)
         XCTAssertEqual(entry.status, .transcribed)

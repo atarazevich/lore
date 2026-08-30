@@ -197,7 +197,7 @@ struct DictationView: View {
             Spacer()
 
             if let error = dictation.lastError {
-                Text(error)
+                Text(error.sentence)
                     .font(.system(size: 11))
                     .foregroundStyle(LoreTheme.Accent.red)
                     .lineLimit(1)

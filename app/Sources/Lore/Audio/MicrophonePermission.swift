@@ -38,11 +38,15 @@ enum MicrophonePermission {
     /// failure. `deviceName` is the resolved input device; a trailing
     /// " Microphone"/" Mic" is stripped so "MacBook Air Microphone" reads naturally.
     /// Used by the dictation path only; the meeting path keeps the strings above.
+    ///
+    /// What happened, and nothing else (#209, F1): the second clause — "Check
+    /// your input device and try again" — is the button under the sentence now,
+    /// which names the same thing without asking anyone to read it twice.
     static func micUnavailableMessage(deviceName: String?) -> String {
         guard let name = strippedMicName(deviceName) else {
-            return "The microphone is unavailable. Check your input device and try again."
+            return "The microphone is unavailable."
         }
-        return "The \(name) microphone is unavailable. Check your input device and try again."
+        return "The \(name) microphone is unavailable."
     }
 
     private static func strippedMicName(_ name: String?) -> String? {

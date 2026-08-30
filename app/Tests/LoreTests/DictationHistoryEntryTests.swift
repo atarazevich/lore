@@ -105,24 +105,32 @@ final class DictationHistoryEntryTests: XCTestCase {
     /// Fn+K contract (#122): `operatorAddressed` is `Bool?` so the
     /// synthesized encoder omits it unless set — old and non-flagged
     /// entries stay byte-identical — and an entry without the key decodes
-    /// as nil (readers check `== true`). Unflagging writes nil back, so a
-    /// flag-then-unflag round trip is byte-identical to never flagging
-    /// (the double bare-K toggle).
+    /// as nil (readers check `== true`). Clearing the flag writes nil back, so
+    /// an entry that carried it and lost it is byte-identical to one that never
+    /// carried it. (Until #209 the post-paste bare K was what could clear it;
+    /// the arming is Fn+K during the recording now, and the round trip is still
+    /// the Codable contract every reader of the file depends on.)
+    ///
+    /// Encoded with `.sortedKeys` on both sides: `JSONEncoder`'s key order is
+    /// not stable across calls, so a bare `encode` == `encode` comparison was a
+    /// coin flip that had nothing to do with the field being tested.
     func testOperatorAddressedEncodedOnlyWhenTrue() throws {
         var entry = DictationHistoryEntry(durationSeconds: 2.0, audioFilename: nil)
         entry.status = .transcribed
         entry.rawText = "send this to the operator"
 
-        let unflagged = try JSONEncoder().encode(entry)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        let unflagged = try encoder.encode(entry)
         XCTAssertFalse(String(data: unflagged, encoding: .utf8)!.contains("operatorAddressed"))
         XCTAssertNil(try JSONDecoder().decode(DictationHistoryEntry.self, from: unflagged).operatorAddressed)
 
         entry.operatorAddressed = true
-        let flagged = try JSONEncoder().encode(entry)
+        let flagged = try encoder.encode(entry)
         XCTAssertTrue(String(data: flagged, encoding: .utf8)!.contains("\"operatorAddressed\":true"))
         XCTAssertEqual(try JSONDecoder().decode(DictationHistoryEntry.self, from: flagged).operatorAddressed, true)
 
-        entry.operatorAddressed = nil    // double bare-K: toggled off
-        XCTAssertEqual(try JSONEncoder().encode(entry), unflagged)
+        entry.operatorAddressed = nil
+        XCTAssertEqual(try encoder.encode(entry), unflagged)
     }
 }

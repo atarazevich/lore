@@ -166,6 +166,36 @@ final class DictationRetryTests: XCTestCase {
         XCTAssertEqual(updated.status, .failed)
     }
 
+    /// A retry that comes back with nothing says so (#209, F2). It used to end
+    /// in silence — the same lie the dictation path told with a green checkmark
+    /// — and the history row is given the one sentence too, not an engineer's.
+    func testARetryThatTranscribesToNothingShowsTheFace() async {
+        let backend = ScriptedBackend([.success("")])
+        let coordinator = makeCoordinator(backend: backend)
+        let entry = addAudioEntry(to: coordinator, sampleCount: 20_000)
+
+        await coordinator.retryTranscription(entryID: entry.id)
+
+        XCTAssertEqual(coordinator.lastError, .nothingCameThrough)
+        XCTAssertEqual(coordinator.state, .done, "the face needs the shape to stand in")
+        let updated = coordinator.history.entries.first { $0.id == entry.id }!
+        XCTAssertEqual(updated.status, .failed)
+        XCTAssertEqual(updated.errorMessage, DictationFace.nothingCameThrough.sentence)
+    }
+
+    /// And one that comes back with words leaves no face behind it: the row it
+    /// rewrote is the answer, and it is already on screen (#209, V-A).
+    func testARetryThatSucceedsLeavesNoFace() async {
+        let backend = ScriptedBackend([.success("hello there")])
+        let coordinator = makeCoordinator(backend: backend)
+        let entry = addAudioEntry(to: coordinator, sampleCount: 20_000)
+
+        await coordinator.retryTranscription(entryID: entry.id)
+
+        XCTAssertNil(coordinator.lastError)
+        XCTAssertEqual(coordinator.state, .idle)
+    }
+
     // MARK: - Cleanup retries
 
     func testCleanupTransientFailureThenSuccessNoFallback() async {
@@ -182,7 +212,7 @@ final class DictationRetryTests: XCTestCase {
 
         let ok = await coordinator.cleanupEntry(
             &entry, rawText: "hello world", prompt: "clean it up",
-            failureMessage: DictationCoordinator.cleanupFailedPastedRaw,
+            failureMessage: .cleanupFailed,
             endpoint: .cleanup
         )
 
@@ -205,13 +235,13 @@ final class DictationRetryTests: XCTestCase {
 
         let ok = await coordinator.cleanupEntry(
             &entry, rawText: "hello world", prompt: "clean it up",
-            failureMessage: DictationCoordinator.cleanupFailedPastedRaw,
+            failureMessage: .cleanupFailed,
             endpoint: .cleanup
         )
 
         XCTAssertFalse(ok)
         XCTAssertEqual(client.calls, 1, "a 4xx must not be retried")
-        XCTAssertEqual(coordinator.lastError, DictationCoordinator.cleanupFailedPastedRaw)
+        XCTAssertEqual(coordinator.lastError, .cleanupFailed)
         XCTAssertEqual(apiCallOutcomes(since: mark), [.failed])
         XCTAssertNil(entry.cleanedText)
     }
@@ -231,13 +261,13 @@ final class DictationRetryTests: XCTestCase {
 
         let ok = await coordinator.cleanupEntry(
             &entry, rawText: "hello world", prompt: "clean it up",
-            failureMessage: DictationCoordinator.cleanupFailedPastedRaw,
+            failureMessage: .cleanupFailed,
             endpoint: .cleanup
         )
 
         XCTAssertFalse(ok)
         XCTAssertEqual(client.calls, 3)
-        XCTAssertEqual(coordinator.lastError, DictationCoordinator.cleanupFailedPastedRaw)
+        XCTAssertEqual(coordinator.lastError, .cleanupFailed)
         XCTAssertEqual(apiCallOutcomes(since: mark), [.failed, .failed, .failed])
         XCTAssertNil(entry.cleanedText)
         XCTAssertEqual(entry.status, .transcribed)

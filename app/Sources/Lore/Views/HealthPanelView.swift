@@ -118,7 +118,7 @@ struct HealthPanelView: View {
     private func perform(_ action: HealthRemedyAction) {
         switch action {
         case .openSettings(let pane):
-            if let url = pane.settingsURL { NSWorkspace.shared.open(url) }
+            pane.open()
         case .restartApp:
             AppRelauncher.relaunch()
         case .openLoreSettings:

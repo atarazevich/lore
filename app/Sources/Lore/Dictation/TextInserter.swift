@@ -72,8 +72,10 @@ enum TextInserter {
         AXIsProcessTrustedWithOptions(options)
     }
 
-    static func paste(_ text: String) {
-        paste([.text(text)])
+    @MainActor
+    @discardableResult
+    static func paste(_ text: String) async -> Bool {
+        await paste([.text(text)])
     }
 
     /// A dictation's delivery, in order (#195). One step for a terminal; for a
@@ -85,8 +87,17 @@ enum TextInserter {
     /// clipboard is saved once before the first step and restored once after
     /// the last, because restoring between steps would hand the target its own
     /// old clipboard mid-sequence.
-    static func paste(_ steps: [RichInput.DeliveryStep]) {
-        guard !steps.isEmpty else { return }
+    ///
+    /// Answers whether every step's keystrokes could be **created** (#209) —
+    /// the only fact this path has, and the whole of what the bubble's
+    /// paste-failed face is allowed to claim. Whoever wants that answer waits
+    /// for it; whoever does not, does not, which is how the bubble leaves at the
+    /// first step while a web composer is still being handed its third.
+    @MainActor
+    @discardableResult
+    static func paste(_ steps: [RichInput.DeliveryStep]) async -> Bool {
+        // Nothing was asked for, so nothing failed.
+        guard !steps.isEmpty else { return true }
         let granted = isAccessibilityGranted
 
         // Even if AXIsProcessTrusted returns false, try the paste anyway —
@@ -101,40 +112,47 @@ enum TextInserter {
         // Save current clipboard
         let savedItems = savePasteboard(pasteboard)
 
-        Task { @MainActor in
-            for (index, step) in steps.enumerated() {
-                switch step {
-                case .text(let text): writeString(text, to: pasteboard)
-                case .files(let paths): writeFileURLs(paths, to: pasteboard)
-                }
-
-                // Small delay to let clipboard settle, then simulate Cmd+V.
-                try? await Task.sleep(for: .milliseconds(50))
-
-                // `postCmdV` reports only whether the CGEvents could be *created*.
-                // `CGEvent.post` returns nothing, so whether the paste reached an app is
-                // unobservable from here — an `Outcome.ok` would have read "fine" in
-                // precisely the incident this feature exists to diagnose. One event per
-                // step, so a sequence that stopped halfway says where.
-                let eventsCreated = postCmdV()
-                DiagStore.record(.pasteAttempt(
-                    kind: .paste,
-                    eventsCreated: eventsCreated,
-                    accessibilityTrusted: granted
-                ))
-                // Nothing was posted, so nothing later will land in the right
-                // place either: stop, restore, and leave the words that did
-                // arrive where they are.
-                guard eventsCreated else { break }
-                guard index < steps.count - 1 else { break }
-                try? await Task.sleep(for: settle(after: step))
+        var allPosted = true
+        for (index, step) in steps.enumerated() {
+            switch step {
+            case .text(let text): writeString(text, to: pasteboard)
+            case .files(let paths): writeFileURLs(paths, to: pasteboard)
             }
 
-            // Restore clipboard after target app processes the paste
+            // Small delay to let clipboard settle, then simulate Cmd+V.
+            try? await Task.sleep(for: .milliseconds(50))
+
+            // `postCmdV` reports only whether the CGEvents could be *created*.
+            // `CGEvent.post` returns nothing, so whether the paste reached an app is
+            // unobservable from here — an `Outcome.ok` would have read "fine" in
+            // precisely the incident this feature exists to diagnose. One event per
+            // step, so a sequence that stopped halfway says where.
+            let eventsCreated = postCmdV()
+            DiagStore.record(.pasteAttempt(
+                kind: .paste,
+                eventsCreated: eventsCreated,
+                accessibilityTrusted: granted
+            ))
+            // Nothing was posted, so nothing later will land in the right
+            // place either: stop, restore, and leave the words that did
+            // arrive where they are.
+            guard eventsCreated else {
+                allPosted = false
+                break
+            }
+            guard index < steps.count - 1 else { break }
+            try? await Task.sleep(for: settle(after: step))
+        }
+
+        // The clipboard goes back behind the answer, not in front of it: the
+        // 800 ms the target needs to absorb the last paste is not the caller's
+        // wait, and the caller's question was answered a line ago.
+        Task { @MainActor in
             try? await Task.sleep(for: .milliseconds(800))
             restorePasteboard(NSPasteboard.general, items: savedItems)
             log.debug("clipboard restored")
         }
+        return allPosted
     }
 
     /// How long the target needs before the next step. A composer attaches a
@@ -145,42 +163,6 @@ enum TextInserter {
         switch step {
         case .text: .milliseconds(250)
         case .files: .milliseconds(600)
-        }
-    }
-
-    /// Undo the previous paste (Cmd+Z), then paste new text (Cmd+V).
-    /// Used by the upgrade flow to replace previously pasted text.
-    static func undoAndPaste(_ text: String) {
-        let granted = isAccessibilityGranted
-
-        if !granted {
-            log.error("accessibility reports false — attempting undo+paste anyway")
-        }
-
-        let pasteboard = NSPasteboard.general
-        let savedItems = savePasteboard(pasteboard)
-
-        // Set new text first
-        writeString(text, to: pasteboard)
-
-        // Cmd+Z to undo previous paste, then Cmd+V to paste new text
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) {
-            let undone = postCmdZ()
-
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-                let eventsCreated = undone && postCmdV()
-                DiagStore.record(.pasteAttempt(
-                    kind: .undoAndPaste,
-                    eventsCreated: eventsCreated,
-                    accessibilityTrusted: granted
-                ))
-
-                Task { @MainActor in
-                    try? await Task.sleep(for: .milliseconds(800))
-                    restorePasteboard(NSPasteboard.general, items: savedItems)
-                    log.debug("clipboard restored")
-                }
-            }
         }
     }
 
@@ -213,9 +195,6 @@ enum TextInserter {
         keyUp.post(tap: .cghidEventTap)
         return true
     }
-
-    @discardableResult
-    private static func postCmdZ() -> Bool { postCommandChord(0x06) } // 6 = 'Z'
 
     @discardableResult
     private static func postCmdV() -> Bool { postCommandChord(0x09) } // 9 = 'V'

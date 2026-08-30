@@ -125,6 +125,11 @@ enum DiagEvent: Codable, Sendable, Equatable {
 
     enum PasteKind: String, Codable, Sendable, CaseIterable {
         case paste
+        /// Retired (#209) with the post-paste upgrade panel, the only thing that
+        /// ever posted a Cmd+Z before a Cmd+V. Nothing produces this any more;
+        /// it stays so a persisted events.json carrying it still decodes rather
+        /// than being moved aside as corrupt — the same reason
+        /// `tapEventsStalled` survives.
         case undoAndPaste
     }
 

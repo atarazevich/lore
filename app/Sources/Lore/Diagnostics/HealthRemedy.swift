@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 
 /// A System Settings pane a remedy can deep-link to. The URL is the documented
@@ -29,6 +30,16 @@ enum SettingsPane: String, CaseIterable, Equatable, Sendable {
         case .keyboard:
             return URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension")
         }
+    }
+
+    /// The one line that opens a pane, wherever the offer is made (#209): the
+    /// health panel's remedy button and the bubble's paste-failed face go to the
+    /// same place by the same route. Only the opening lives here — which pane a
+    /// failure deserves is still decided by a pure mapping (`HealthRemedyAction`,
+    /// `DictationFace`) that this never reaches back into.
+    @MainActor func open() {
+        guard let url = settingsURL else { return }
+        NSWorkspace.shared.open(url)
     }
 
     var buttonLabel: String {
