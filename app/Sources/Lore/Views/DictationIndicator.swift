@@ -94,7 +94,7 @@ enum BubbleRail {
 /// line down: SwiftUI may report the neighbour's arrival before the departure,
 /// and a blind clear there would swallow the line that just replaced it.
 private enum BubbleTipOwner: Hashable {
-    case dot, lock, waveform, timer, clip, badge, gear
+    case dot, lock, waveform, timer, clip, gear
     case letter(BubbleRailLetter)
     case row(UUID)
 }
@@ -164,18 +164,20 @@ struct BubbleTipCard: View {
     /// off the right edge of the window.
     let canvasWidth: CGFloat
 
-    /// The board's card: 222 across, 9 and 5 inside it, 11.5 text.
-    static let width: CGFloat = 222
+    /// The board's card: 9 and 5 inside it, 11.5 text, and 222 as the widest it
+    /// may be — a cap now, not the width (#212). Every card was 222 across
+    /// whatever it held, so `Settings` was drawn on a card two thirds empty.
+    static let maxWidth: CGFloat = 222
     private static let fontSize: CGFloat = 11.5
     private static let padY: CGFloat = 5
     private static let padX: CGFloat = 9
     private static let arrowSide: CGFloat = 8
 
     /// Two lines of that face, the card's own padding, and a couple of points
-    /// of slack around its half-point border — measured off the font rather
-    /// than assumed, the way the paperclip's box is. The longest line in the
-    /// copy table takes two lines; `lineLimit(2)` is what makes this a ceiling
-    /// and not an estimate.
+    /// of slack around its half-point border. Only the cap can put a line on a
+    /// second row, and `lineLimit(2)` is what makes this a ceiling and not an
+    /// estimate: it is the room the canvas keeps under the shape whatever the
+    /// line turns out to be, so no line appearing ever resizes the window.
     static let height: CGFloat = {
         let font = NSFont.systemFont(ofSize: fontSize)
         return ceil(font.ascender - font.descender + font.leading) * 2 + 2 * padY + 3
@@ -188,25 +190,37 @@ struct BubbleTipCard: View {
     /// so one appearing never resizes the window (#204).
     static var room: CGFloat { gap + height }
 
-    /// Centred on what is being pointed at, pushed back inside the canvas.
-    private var leading: CGFloat {
-        min(max(pointerX - Self.width / 2, 0), max(canvasWidth - Self.width, 0))
+    /// Where the card's left edge lands, given the width SwiftUI gave the line:
+    /// centred on what is being pointed at, pushed back inside the canvas.
+    ///
+    /// Taken during layout rather than from a width measured beforehand — the
+    /// card is as wide as the line SwiftUI laid out, and asking a second text
+    /// engine what that will be is a guess that needs a fudge factor to survive.
+    private func leading(cardWidth: CGFloat) -> CGFloat {
+        min(max(pointerX - cardWidth / 2, 0), max(canvasWidth - cardWidth, 0))
     }
 
     /// The arrow stays on what is being pointed at even where the card could
-    /// not follow, and clear of the card's own corners.
-    private var arrowX: CGFloat {
+    /// not follow, and clear of the card's own corners — which, on a card as
+    /// narrow as `Settings`, is the middle of it.
+    private func arrowX(cardWidth: CGFloat) -> CGFloat {
         let margin = LoreTheme.Radius.popover + Self.arrowSide
-        return min(max(pointerX - leading, margin), Self.width - margin)
+        return min(
+            max(pointerX - leading(cardWidth: cardWidth), margin),
+            max(margin, cardWidth - margin)
+        )
     }
 
     var body: some View {
-        Text(text)
-            .font(.system(size: Self.fontSize))
-            .foregroundStyle(LoreTheme.TextColor.primary)
-            .lineLimit(2)
-            .fixedSize(horizontal: false, vertical: true)
-            .frame(width: Self.width - 2 * Self.padX, alignment: .leading)
+        // The cap reaches the line as a *proposal*, and the card is the size the
+        // line answers with. Nothing here measures text.
+        CardWidthCap(maxWidth: Self.maxWidth - 2 * Self.padX) {
+            Text(text)
+                .font(.system(size: Self.fontSize))
+                .foregroundStyle(LoreTheme.TextColor.primary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+        }
             // No shadow: the bubble this hangs under carries none either
             // (`TopCenteredPanel` sets `hasShadow = false`, the shape draws
             // none), and one here would need window room the canvas would have
@@ -215,8 +229,17 @@ struct BubbleTipCard: View {
                 inset: Self.padY, horizontalInset: Self.padX,
                 stroke: LoreTheme.Shadow.windowRim, strokeWidth: 0.5, shadow: false
             )
-            .overlay(alignment: .topLeading) { arrow }
-            .offset(x: leading)
+            // The arrow stands on the card at `arrowX`, which is a fact about
+            // the card's own width — so the card carries it as an alignment
+            // guide and the overlay reads it off, rather than either of them
+            // being told a number from outside.
+            .alignmentGuide(.bubbleTipArrow) { arrowX(cardWidth: $0.width) }
+            .overlay(alignment: Alignment(horizontal: .bubbleTipArrow, vertical: .top)) { arrow }
+            // And the same for where the card itself stands: its leading guide
+            // is pushed right by `leading`, inside a box the width of the
+            // canvas, so the placement is done with the width SwiftUI settled on.
+            .alignmentGuide(.leading) { -leading(cardWidth: $0.width) }
+            .frame(width: canvasWidth, alignment: .leading)
             // It explains what the pointer is on; it is never what the pointer
             // is on. A card that answered the mouse would be a click the app
             // underneath the canvas never receives.
@@ -241,8 +264,56 @@ struct BubbleTipCard: View {
             }
             .frame(width: Self.arrowSide, height: Self.arrowSide)
             .rotationEffect(.degrees(45))
-            .offset(x: arrowX - Self.arrowSide / 2, y: -Self.arrowSide / 2 - 0.5)
+            // Its own centre is where the guide puts it; only the lift onto the
+            // card's top edge is left to say.
+            .offset(y: -Self.arrowSide / 2 - 0.5)
     }
+}
+
+/// Proposes at most `maxWidth` to the one view it holds, and is exactly the
+/// size that comes back (#212).
+///
+/// `frame(maxWidth:)` cannot do this either way round. Handed a width it takes
+/// that width and clamps it, so every card is the full 222 whatever the line is
+/// — the thing being undone. Handed none it clamps its own size without passing
+/// the cap on, so a long line stays on one row and runs out of the plate
+/// (measured: the over-cap line drew a 33 pt card where two rows are 46). The
+/// cap has to arrive at the text as a proposal, and the card has to be what the
+/// text answers with.
+private struct CardWidthCap: Layout {
+    let maxWidth: CGFloat
+
+    func sizeThatFits(
+        proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
+    ) -> CGSize {
+        subviews.first?.sizeThatFits(capped(proposal)) ?? .zero
+    }
+
+    func placeSubviews(
+        in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()
+    ) {
+        subviews.first?.place(at: bounds.origin, anchor: .topLeading, proposal: capped(proposal))
+    }
+
+    /// Whatever is going, but never more than the cap — and the cap itself when
+    /// nothing is proposed at all, which is what a `fixedSize` ancestor hands
+    /// down.
+    private func capped(_ proposal: ProposedViewSize) -> ProposedViewSize {
+        ProposedViewSize(width: min(proposal.width ?? maxWidth, maxWidth), height: proposal.height)
+    }
+}
+
+/// Where the tooltip card's arrow stands on it. A custom guide, because the
+/// only view that knows the number is the card itself, during its own layout:
+/// the arrow is an overlay on it and reads the guide off it (#212).
+private extension HorizontalAlignment {
+    enum BubbleTipArrow: AlignmentID {
+        static func defaultValue(in dimensions: ViewDimensions) -> CGFloat {
+            dimensions[HorizontalAlignment.center]
+        }
+    }
+
+    static let bubbleTipArrow = HorizontalAlignment(BubbleTipArrow.self)
 }
 
 /// The pointer's place inside the shape, deliberately off the view's state:
@@ -446,14 +517,14 @@ struct DictationIndicatorView: View {
     }
 
     /// The window while a dictation records: the shape's own canvas with the
-    /// tooltip's room kept under it (#207) and at least the tooltip's width
-    /// across, so a line appearing never resizes the window and never hangs off
-    /// its edge. Zero until the probes have reported, which is what leaves the
+    /// tooltip's room kept under it (#207) and at least the widest a card may
+    /// be across, so a line appearing never resizes the window and never hangs
+    /// off its edge. Zero until the probes have reported, which is what leaves the
     /// first frame of a recording to the window's own fitting (#204).
     private var canvasWithTip: CGSize {
         guard canvasSize.width > 0, canvasSize.height > 0 else { return .zero }
         return CGSize(
-            width: max(canvasSize.width, BubbleTipCard.width),
+            width: max(canvasSize.width, BubbleTipCard.maxWidth),
             height: canvasSize.height + BubbleTipCard.room
         )
     }
@@ -809,7 +880,8 @@ struct DictationIndicatorView: View {
     }
 
     private var clipSwitch: some View {
-        clipGlyph
+        let insets = Self.clipTargetInsets(withBadge: clipBright)
+        return clipGlyph
             // The tint reaches the slash as well as the symbol, so the two
             // strokes of one glyph are never two colours.
             .foregroundStyle(clipBright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
@@ -824,16 +896,23 @@ struct DictationIndicatorView: View {
             // badge and by the slash. The pointer gets the same lift the gear
             // gets, and nothing before that.
             .loreHoverFill(cornerRadius: LoreTheme.Radius.button)
+            // The badge hangs past that target's top-right corner, and a click
+            // there landed on nothing (#212). While one is drawn the shape the
+            // pointer answers is the two rects as one — the badge counts what
+            // the switch is holding, so a click on it is a click on the switch.
+            // With nothing collected there is nothing out there and this is
+            // zero on every side.
+            .padding(insets.out)
             .contentShape(Rectangle())
             .onTapGesture {
                 hideTip()
                 onToggleCollecting?()
             }
-            .bubbleTip(
-                .clip,
-                collecting ? "What you copy joins the prompt" : "Copies stay out of the prompt",
-                hovered: $hoveredTip, pointer: pointer
-            )
+            // One switch, one name, on and off alike (#212): two sentences for
+            // the two faces of one control read as two different things.
+            .bubbleTip(.clip, "Toggle prompt attachments", hovered: $hoveredTip, pointer: pointer)
+            // The spoken name still says which way it is set — a screen reader
+            // has no brightness, no badge and no slash to read it off.
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(
                 collecting ? "What you copy joins the prompt" : "Copies stay out of the prompt"
@@ -845,8 +924,8 @@ struct DictationIndicatorView: View {
             // The margin is given straight back to the layout: the row lays
             // this out as the glyph's own box, so the badge overlay above, the
             // 10 pt beside it and everything past it are where the board draws
-            // them, and only the fill and the hit shape grew (#203).
-            .padding(-Self.clipHitMargin)
+            // them, and only the fill and the hit shape grew (#203, #212).
+            .padding(insets.back)
     }
 
     /// Bright is "holding something that is going to the prompt" — which is
@@ -916,9 +995,10 @@ struct DictationIndicatorView: View {
     /// it, on any side, toggles collecting.
     static let clipHitMargin: CGFloat = 4
 
-    /// What the pointer hits, and what the hover fill covers. Never what the row
-    /// lays out: `clipSwitch` takes the margin back with negative padding, so
-    /// this box grows without moving anything beside it.
+    /// What the hover fill covers, and the greater part of what the pointer
+    /// hits — `clipTarget` adds the badge to it. Never what the row lays out:
+    /// `clipSwitch` takes the margin back with negative padding, so this box
+    /// grows without moving anything beside it.
     static let clipHitBox = CGSize(
         width: clipBox.width + 2 * clipHitMargin,
         height: clipBox.height + 2 * clipHitMargin
@@ -930,6 +1010,59 @@ struct DictationIndicatorView: View {
     /// half of it comes back off both numbers — the badge sits on the glyph
     /// the board drew it on, not on the box that carries it.
     static let badgeOffset = CGSize(width: 6 - clipSlack / 2, height: -5 + clipSlack / 2)
+
+    /// The figure's own square. A second digit widens it leftward, into the
+    /// target, so one digit is the badge that reaches furthest out and this is
+    /// the box the target has to hold.
+    static let badgeSide: CGFloat = 13
+
+    /// Where that square sits, in the glyph box's own coordinates: hung off the
+    /// top-trailing corner and pushed out by `badgeOffset`.
+    static var badgeBox: CGRect {
+        CGRect(
+            x: clipBox.width - badgeSide + badgeOffset.width, y: badgeOffset.height,
+            width: badgeSide, height: badgeSide
+        )
+    }
+
+    /// The 24×26 pt target of #203, same coordinates — the glyph's box with
+    /// `clipHitMargin` on every side.
+    static var clipGlyphTarget: CGRect {
+        CGRect(
+            x: -clipHitMargin, y: -clipHitMargin,
+            width: clipHitBox.width, height: clipHitBox.height
+        )
+    }
+
+    /// What the pointer answers (#212): #203's target, and the badge with it
+    /// while there is a badge on screen. The count hangs past the target's
+    /// top-right corner and a click on it used to land on nothing at all — it
+    /// counts what the switch is holding, so it is part of the switch. With
+    /// nothing collected there is nothing drawn out there to click, and the
+    /// target is #203's 24×26 exactly. Read by `RecordingBubbleClipTests`.
+    static func clipTarget(withBadge: Bool) -> CGRect {
+        withBadge ? clipGlyphTarget.union(badgeBox) : clipGlyphTarget
+    }
+
+    /// The one pair of insets that target needs: out to it from #203's box
+    /// before the shape is taken, and every point of it back — #203's own margin
+    /// included — so what the row lays out is still the glyph's 16×18 box. Both
+    /// come off the same rect, and both are zero-sum by construction.
+    private static func clipTargetInsets(withBadge: Bool) -> (out: EdgeInsets, back: EdgeInsets) {
+        let target = clipTarget(withBadge: withBadge)
+        return (
+            EdgeInsets(
+                top: clipGlyphTarget.minY - target.minY,
+                leading: clipGlyphTarget.minX - target.minX,
+                bottom: target.maxY - clipGlyphTarget.maxY,
+                trailing: target.maxX - clipGlyphTarget.maxX
+            ),
+            EdgeInsets(
+                top: target.minY, leading: target.minX,
+                bottom: clipBox.height - target.maxY, trailing: clipBox.width - target.maxX
+            )
+        )
+    }
 
     /// The board's 24-unit proportions, read against the box the glyph
     /// actually got: 1.7/24 of it wide, over a 4.4/24 gap cut under it.
@@ -958,12 +1091,17 @@ struct DictationIndicatorView: View {
             .contentTransition(.numericText())
             .foregroundStyle(LoreTheme.TextColor.primary)
             .padding(.horizontal, 3)
-            .frame(minWidth: 13, minHeight: 13)
+            .frame(minWidth: Self.badgeSide, minHeight: Self.badgeSide)
             .background(Capsule().fill(Color.white.opacity(0.20)))
             .background(Capsule().fill(LoreTheme.Surface.window).padding(-1.5))
             .offset(Self.badgeOffset)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: includedCount)
-            .bubbleTip(.badge, "\(includedCount) in the prompt", hovered: $hoveredTip, pointer: pointer)
+            // It is drawn on the switch, never in front of it (#212): the
+            // pointer goes through to the shape underneath, which now reaches
+            // out here, so pointing at the count says what the switch says and
+            // clicking it flips the switch. It keeps its own voice for VoiceOver,
+            // which has no pointer to be in the way of.
+            .allowsHitTesting(false)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(includedCount) in the prompt")
     }
@@ -1137,12 +1275,12 @@ struct DictationIndicatorView: View {
                     .fixedSize()
                     .frame(minWidth: elapsedWidth(recordingSeconds, size: 13), alignment: .leading)
                     // Two sentences, because the second one is the answer.
+                    // The same two facts in a third of the words (#212).
                     .bubbleTip(
-                        .timer, "Dictate as long as you like. Audio is saved as you speak.",
-                        hovered: $hoveredTip, pointer: pointer
+                        .timer, Self.timerHelp, hovered: $hoveredTip, pointer: pointer
                     )
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Dictate as long as you like. Audio is saved as you speak.")
+                    .accessibilityLabel(Self.timerHelp)
             }
             if bluetoothRedirected {
                 Group {
@@ -1185,9 +1323,16 @@ struct DictationIndicatorView: View {
             .accessibilityAddTraits(.isToggle)
     }
 
+    /// What the timer answers: how long it may run, and where the words are
+    /// meanwhile. Two facts, and after #212 six words — the sentence it
+    /// replaces said the same thing in three times the room.
+    private static let timerHelp = "Unlimited dictation. Locally saved."
+
+    /// Both ways out, not only the stop (#212): the owner locked a dictation
+    /// and had to guess whether Esc kept the words.
     private var lockHelp: String {
         isLocked
-            ? "Locked, hands free \u{2014} press Fn to stop"
+            ? "Press Fn to paste, Esc to stop"
             : "Space locks recording, hands free"
     }
 

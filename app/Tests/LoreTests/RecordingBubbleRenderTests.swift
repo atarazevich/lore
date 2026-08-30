@@ -189,9 +189,16 @@ final class RecordingBubbleRenderTests: XCTestCase {
 
     // MARK: - The bubble's own tooltip (#207)
 
-    /// The longest line in the copy table — the one that takes two lines of the
-    /// card, so it is what the canvas's reserved room has to hold.
-    private static let longestTip = "Dictate as long as you like. Audio is saved as you speak."
+    /// A line past the card's 222 pt cap, so it wraps to the two rows the
+    /// canvas keeps room for — the worst case that room exists to hold. It was
+    /// the timer's own line until #212 shortened it; no string in the copy table
+    /// reaches the cap any more, which is exactly why the ceiling is tested with
+    /// one that does.
+    private static let wrappingTip = "Dictate as long as you like. Audio is saved as you speak."
+
+    /// The longest line the copy table actually carries, and the shortest.
+    private static let longestRealTip = "Screenshot into the prompt (Fn+S)"
+    private static let shortestRealTip = "Settings"
 
     /// A tooltip appears under the shape and the resting row is the same
     /// picture, pixel for pixel: the canvas kept the room for it before the
@@ -199,7 +206,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// it moves (#204's invariant, on #207's surface).
     func testATooltipMovesNothingInTheRestingRow() throws {
         let rest = try raster(bubble())
-        let tipped = try raster(bubble(tip: Self.longestTip))
+        let tipped = try raster(bubble(tip: Self.wrappingTip))
         XCTAssertEqual(tipped.width, rest.width, "the canvas widened for a tooltip")
         XCTAssertEqual(tipped.height, rest.height, "the canvas grew taller for a tooltip")
         // `assertIdentical` bounds the compared rows by the resting render's own
@@ -214,7 +221,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// bottom would still have passed the comparison above.
     func testTheTooltipIsDrawnInsideTheRoomTheCanvasKept() throws {
         let rest = try raster(bubble())
-        let tipped = try raster(bubble(tip: Self.longestTip))
+        let tipped = try raster(bubble(tip: Self.wrappingTip))
         print(
             "[#207] tooltip ink: resting shape ends at \(rest.paintedHeight) pt, "
             + "the tooltip's last row is \(tipped.paintedHeight) pt of a "
@@ -228,6 +235,94 @@ final class RecordingBubbleRenderTests: XCTestCase {
             tipped.paintedHeight, tipped.pointHeight,
             "the card runs to the canvas's last row — it is being cut off"
         )
+    }
+
+    // MARK: - The card is as wide as its line (#212)
+
+    /// A short line makes a short card. The card was a fixed 222 pt whatever it
+    /// held, so `Settings` was drawn on a plate two thirds empty; it now hugs
+    /// its own text and only the cap can stop it.
+    func testTheCardHugsAShortLineAndCapsALongOne() throws {
+        let rest = try raster(bubble())
+        // The line's own ink, measured here in AppKit against a card SwiftUI
+        // sized — two text engines on purpose, and with a couple of points of
+        // tolerance, which is what makes this a check on the layout rather than
+        // a restatement of it.
+        let font = NSFont.systemFont(ofSize: 11.5)
+        func padded(_ line: String) -> CGFloat {
+            let ink = ceil((line as NSString).size(withAttributes: [.font: font]).width)
+            return min(ink + 2 * 9, BubbleTipCard.maxWidth)
+        }
+        var drawn: [String: CGFloat] = [:]
+        for line in [Self.shortestRealTip, Self.longestRealTip, Self.wrappingTip] {
+            let width = try cardWidth(of: line, under: rest.paintedHeight)
+            drawn[line] = width
+            print(
+                "[#212] card for \"\(line)\": \(String(format: "%.2f", width)) pt drawn, "
+                + "\(String(format: "%.2f", padded(line))) pt of ink and padding, "
+                + "cap \(BubbleTipCard.maxWidth)"
+            )
+            XCTAssertLessThanOrEqual(
+                width, BubbleTipCard.maxWidth + 0.5, "\(line) ran past the cap"
+            )
+        }
+        // The two that fit on one row are that row's own width.
+        for line in [Self.shortestRealTip, Self.longestRealTip] {
+            XCTAssertEqual(try XCTUnwrap(drawn[line]), padded(line), accuracy: 2, "\(line)")
+        }
+        XCTAssertLessThan(
+            try XCTUnwrap(drawn[Self.shortestRealTip]), try XCTUnwrap(drawn[Self.longestRealTip]),
+            "the two cards are the same width — it is still a fixed box"
+        )
+        // The one past the cap breaks at it and then hugs the longer of the two
+        // rows it broke into, which is wider than any card that fits on one row
+        // and still inside the cap. `testOnlyTheCapPutsALineOnASecondRow` is
+        // what holds the break itself.
+        XCTAssertGreaterThan(
+            try XCTUnwrap(drawn[Self.wrappingTip]), try XCTUnwrap(drawn[Self.longestRealTip]),
+            "a line past the cap made a narrower card than one inside it"
+        )
+    }
+
+    /// And a short line stays on one row: the two-row card is only ever what the
+    /// cap forces. Measured as ink, because a card that wrapped for no reason
+    /// would still have hugged its width.
+    func testOnlyTheCapPutsALineOnASecondRow() throws {
+        let rest = try raster(bubble())
+        let short = try raster(bubble(tip: Self.longestRealTip))
+        let wrapped = try raster(bubble(tip: Self.wrappingTip))
+        let oneRow = short.paintedHeight - rest.paintedHeight
+        let twoRows = wrapped.paintedHeight - rest.paintedHeight
+        print(
+            "[#212] card depth under the shape: \(String(format: "%.2f", oneRow)) pt for the "
+            + "longest line in the copy table, \(String(format: "%.2f", twoRows)) pt for one past the cap"
+        )
+        // A whole row deeper, not a point deeper: capping the width without
+        // passing the cap on to the text left the long line on one row, running
+        // out of the plate, and a bare `<` did not notice.
+        XCTAssertGreaterThan(
+            twoRows - oneRow, 10, "the line past the cap was not put on a second row"
+        )
+    }
+
+    /// The card's own width, read off the render. The card is the only thing
+    /// drawn under the shape, and an offscreen render reports the pointer at 0,
+    /// so it is pushed as far left as it goes and its last painted column is its
+    /// width.
+    private func cardWidth(of line: String, under shapeHeight: CGFloat) throws -> CGFloat {
+        let tipped = try raster(bubble(tip: line))
+        let firstRow = Int((shapeHeight + 1) * Self.scale)
+        var last = -1
+        var first = tipped.width
+        for y in firstRow..<tipped.height {
+            for x in 0..<tipped.width where tipped.pixel(x: x, y: y).3 > 0 {
+                last = max(last, x)
+                first = min(first, x)
+            }
+        }
+        XCTAssertGreaterThan(last, 0, "nothing was drawn under the shape")
+        XCTAssertEqual(first, 0, "the card is not against the canvas's left edge")
+        return CGFloat(last + 1) / Self.scale
     }
 
     private func bubble(
