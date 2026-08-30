@@ -149,6 +149,85 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertGreaterThan(letters.moved, 0, "the rail drew nothing")
     }
 
+    // MARK: - Paused by Esc (#206)
+
+    /// The window is the same window when Esc pauses. The paused row is wider —
+    /// a 15 pt pause glyph where the 8 pt dot was, and `Continue` past a hairline
+    /// — and the canvas already held all of it, because the probes lay the paused
+    /// row out beside the live one whether this recording is paused or not.
+    /// #204's invariant, on the face #206 adds.
+    func testEscDoesNotResizeTheWindow() throws {
+        let live = try raster(bubble())
+        let paused = try raster(bubble(paused: true))
+        print(
+            "[#206] canvas live \(live.pointWidth)×\(live.pointHeight) pt, paused "
+            + "\(paused.pointWidth)×\(paused.pointHeight) pt; the shape itself "
+            + "\(String(format: "%.2f", live.paintedWidth)) → "
+            + "\(String(format: "%.2f", paused.paintedWidth)) pt"
+        )
+        XCTAssertEqual(paused.width, live.width, "the canvas widened for the paused row")
+        XCTAssertEqual(paused.height, live.height, "the canvas grew taller for the paused row")
+        XCTAssertGreaterThan(
+            paused.paintedWidth, live.paintedWidth, "the paused row drew no Continue"
+        )
+    }
+
+    /// And the paused row is still one board row tall: a keycap in the row does
+    /// not decide the height any more than a spinner or a sentence does.
+    func testThePausedRowIsStillOneBoardRowTall() throws {
+        let paused = try raster(bubble(paused: true))
+        print("[#206] the paused row is \(String(format: "%.2f", paused.paintedHeight)) pt tall")
+        XCTAssertEqual(paused.paintedHeight, Self.boardRowHeight, accuracy: 0.5)
+    }
+
+    /// Opening a paused bubble appends the rail to the right of `Continue` and
+    /// moves nothing that was already on the paused row — the same promise the
+    /// live bubble makes, measured the same way.
+    func testOpeningAPausedBubbleMovesNothingThatWasAlreadyOnScreen() throws {
+        for (name, make) in [
+            ("nothing armed", { self.bubble(paused: true, held: $0, railShown: $0) }),
+            ("T armed", {
+                self.bubble(pendingMode: .translate, paused: true, held: $0, railShown: $0)
+            }),
+            ("two items", {
+                self.bubble(
+                    items: [self.chip(0), self.chip(1)], paused: true, held: $0, railShown: $0
+                )
+            }),
+        ] as [(String, (Bool) -> DictationIndicatorHost)] {
+            let rest = try raster(make(false))
+            let opened = try raster(make(true))
+            XCTAssertEqual(opened.width, rest.width, "\(name): the canvas changed size")
+            XCTAssertEqual(opened.height, rest.height, "\(name): the canvas changed size")
+            XCTAssertGreaterThan(opened.paintedWidth, rest.paintedWidth, "\(name): it did not open")
+            try assertIdentical(
+                rest, opened, upToPoint: rest.paintedWidth - Self.rowPadding,
+                what: "paused at rest vs opened, \(name)"
+            )
+        }
+    }
+
+    /// The dot's slot really did change hands: the first run of ink in the row is
+    /// a different picture, and the amber pause glyph is what is standing there.
+    func testThePauseGlyphStandsWhereTheDotDid() throws {
+        let live = try raster(bubble())
+        let paused = try raster(bubble(paused: true))
+        let slot = Int(Self.bubbleCorner * Self.scale)..<Int(24 * Self.scale)
+        let changed = compare(live, paused, columns: slot, of: live)
+        print(
+            "[#206] the dot's slot: \(changed.moved) px differ over "
+            + "\(changed.columns)×\(changed.rows), worst delta \(changed.worstDelta)"
+        )
+        XCTAssertGreaterThan(changed.moved, 0, "the dot is still the dot while paused")
+    }
+
+    /// The board's copy table is the contract, so the two strings the paused face
+    /// adds are pinned byte for byte — em dash included.
+    func testThePausedFaceCarriesTheBoardsWords() {
+        XCTAssertEqual(DictationIndicatorView.pausedHelp, "Paused \u{2014} Esc")
+        XCTAssertEqual(DictationIndicatorView.resumeHelp, "Keep recording")
+    }
+
     // MARK: - Rendering
 
     private struct Raster {
@@ -654,6 +733,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         pendingMode: UpgradeAction? = nil,
         operatorAddressed: Bool = false,
         items: [DictationItemChip] = [],
+        paused: Bool = false,
         held: Bool = false,
         railShown: Bool = false,
         clipBounce: Bool = false,
@@ -672,6 +752,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         model.collecting = true
         model.screenshotsEnabled = true
         model.held = held
+        model.paused = paused
         model.renderPreview = BubbleRenderPreview(
             railVisible: railShown, tip: tip, clipBouncing: clipBounce
         )

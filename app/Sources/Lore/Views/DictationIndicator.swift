@@ -101,6 +101,8 @@ enum BubbleRail {
 /// and a blind clear there would swallow the line that just replaced it.
 private enum BubbleTipOwner: Hashable {
     case dot, lock, waveform, timer, clip, count, gear
+    /// The `Continue` button, which stands only while paused (#206).
+    case resume
     case letter(BubbleRailLetter)
     case row(UUID)
 }
@@ -389,6 +391,11 @@ struct DictationIndicatorView: View {
     /// the moment Fn+T, Fn+K and Fn+S are pressed, so the rail is on screen when
     /// those chords apply.
     var held = false
+    /// Esc has suspended the capture (#206). The board's F7a: a pause glyph
+    /// where the dot was, the waveform flat, the timer frozen, the clip and its
+    /// count as they were, and `Continue` past a hairline. The lock is untouched
+    /// — pausing is not an ending.
+    var paused = false
     @State private var showBluetoothInfo = false
     /// How many items have arrived during this dictation (#210). Not a count of
     /// the list — a number that changes once per arrival, which is what the
@@ -454,6 +461,8 @@ struct DictationIndicatorView: View {
     var onArmOperator: (() -> Void)?
     /// The gear opens Settings → Copying (#201).
     var onOpenSettings: (() -> Void)?
+    /// `Continue` — the second Esc, taken by pointer (#206).
+    var onResume: (() -> Void)?
     /// A failure face's one action (#209) — which one it is, never what it does.
     var onFaceAction: ((DictationFaceAction) -> Void)?
     /// The shape is being dragged (#213): where the user puts the bubble is
@@ -586,9 +595,11 @@ struct DictationIndicatorView: View {
     /// One shape: the row, and — when something has been collected — the list
     /// at the bottom of the same surface (#201). Three floating surfaces for
     /// one panel read as three things; this is one.
-    private func shape(open: Bool, measuring: Bool, listWidth: CGFloat) -> some View {
+    private func shape(
+        open: Bool, measuring: Bool, paused: Bool, listWidth: CGFloat
+    ) -> some View {
         VStack(spacing: 0) {
-            paddedRow(open: open, measuring: measuring)
+            paddedRow(open: open, measuring: measuring, paused: paused)
             if showsItemList(open: open) {
                 LoreTheme.Surface.line.frame(height: 1)
                 itemList(width: listWidth)
@@ -598,8 +609,8 @@ struct DictationIndicatorView: View {
         .clipShape(RoundedRectangle(cornerRadius: 12))
     }
 
-    private func paddedRow(open: Bool, measuring: Bool) -> some View {
-        panel(open: open, measuring: measuring)
+    private func paddedRow(open: Bool, measuring: Bool, paused: Bool) -> some View {
+        panel(open: open, measuring: measuring, paused: paused)
             .padding(.horizontal, 20)
             .padding(.vertical, 12)
     }
@@ -607,7 +618,7 @@ struct DictationIndicatorView: View {
     /// The bubble the user sees, and the only part of the canvas that answers a
     /// pointer — the margin around it belongs to whatever window is underneath.
     private var bubble: some View {
-        shape(open: expanded, measuring: false, listWidth: topRowWidth)
+        shape(open: expanded, measuring: false, paused: paused, listWidth: topRowWidth)
             .fixedSize()
             .contentShape(RoundedRectangle(cornerRadius: 12))
             // On the shape, past its own content shape, so the transparent
@@ -640,8 +651,15 @@ struct DictationIndicatorView: View {
     /// can churn the window either: every size in a measuring copy is fixed.
     private var probes: some View {
         ZStack(alignment: .topLeading) {
-            shape(open: true, measuring: true, listWidth: topRowWidth)
-            paddedRow(open: false, measuring: true)
+            shape(open: true, measuring: true, paused: false, listWidth: topRowWidth)
+            // The paused row is laid out beside it, always, whether or not this
+            // recording is paused (#206): Esc puts a pause glyph where the 8 pt
+            // dot was and `Continue` past a hairline, and a canvas measured
+            // without them would resize the window the moment the key was
+            // pressed. Its list is the same list at the same width, so the row
+            // alone is what the union needs.
+            paddedRow(open: true, measuring: true, paused: true)
+            paddedRow(open: false, measuring: true, paused: false)
                 // Once per recording (#204): the window is centred on the resting
                 // row it started with, so every later reading is computed and
                 // thrown away. Cleared with the rest when the recording ends.
@@ -797,7 +815,7 @@ struct DictationIndicatorView: View {
     /// `measuring` marks a copy of the shape that is laid out and never drawn,
     /// so anything that would animate stands still in it (#204, `probes`).
     @ViewBuilder
-    private func panel(open: Bool, measuring: Bool) -> some View {
+    private func panel(open: Bool, measuring: Bool, paused: Bool) -> some View {
         switch state {
         case .recording:
             if let error = lastError {
@@ -805,7 +823,7 @@ struct DictationIndicatorView: View {
                 // instead of a normal-looking recording meter (#209, F1).
                 failureFace(error)
             } else {
-                recordingContent(open: open, measuring: measuring)
+                recordingContent(open: open, measuring: measuring, paused: paused)
             }
         case .loadingModel:
             workingRow(label: "Downloading model\u{2026}")
@@ -843,11 +861,18 @@ struct DictationIndicatorView: View {
     /// the unarmed letters, the gear — arrives with the pointer, and arrives to
     /// the right of what was already there (`BubbleRail`), so nothing the user
     /// was reading moves.
-    private func recordingContent(open: Bool, measuring: Bool) -> some View {
+    private func recordingContent(open: Bool, measuring: Bool, paused: Bool) -> some View {
         let keys = railKeys(open: open)
         return HStack(spacing: 10) {
-            statusGroup(measuring: measuring)
+            statusGroup(measuring: measuring, paused: paused)
             clip
+            // Before the rail, not after it (#206, F7a): at rest the paused row
+            // ends with `Continue`, and opening must go on appending to the right
+            // of what was already there, as everything else in this row does.
+            if paused {
+                groupDivider
+                continuePill
+            }
             if !keys.isEmpty {
                 groupDivider
                     .opacity(armedLetters.isEmpty && !railVisible ? 0 : 1)
@@ -1352,24 +1377,28 @@ struct DictationIndicatorView: View {
     /// monospaced figure's do not centre alike, and the timer sat visibly a
     /// point high. Everything in it that is a glyph rather than text carries the
     /// row's own baseline (`onTextBaseline`).
-    private func statusGroup(measuring: Bool) -> some View {
+    private func statusGroup(measuring: Bool, paused: Bool) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            Circle()
-                // No-signal keeps its distinct dimmed look (not a token color
-                // — it must read as "not recording red").
-                .fill(noSignal ? Color.white.opacity(0.3) : LoreTheme.Accent.red)
-                .frame(width: 8, height: 8)
-                .onTextBaseline()
-                .bubbleTip(.dot, "Recording", hovered: $hoveredTip, pointer: pointer)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Recording")
+            if paused {
+                pauseGlyph.onTextBaseline()
+            } else {
+                Circle()
+                    // No-signal keeps its distinct dimmed look (not a token color
+                    // — it must read as "not recording red").
+                    .fill(noSignal ? Color.white.opacity(0.3) : LoreTheme.Accent.red)
+                    .frame(width: 8, height: 8)
+                    .onTextBaseline()
+                    .bubbleTip(.dot, "Recording", hovered: $hoveredTip, pointer: pointer)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Recording")
+            }
             if lockEnabled { lockGlyph.onTextBaseline() }
-            waveform(measuring: measuring)
+            waveform(measuring: measuring, paused: paused)
                 .onTextBaseline()
                 .bubbleTip(.waveform, "Your voice level", hovered: $hoveredTip, pointer: pointer)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Your voice level")
-            if noSignal {
+            if noSignal, !paused {
                 Text("No signal from microphone")
                     .font(.system(size: 13, weight: .medium))
                     .foregroundStyle(LoreTheme.TextColor.muted)
@@ -1410,6 +1439,40 @@ struct DictationIndicatorView: View {
         .onHover { hovering in showBluetoothInfo = hovering }
     }
 
+    /// What stands where the record dot does while Esc has paused the capture
+    /// (#206, F7a). Amber, because that is already what paused means everywhere
+    /// else in the app — the meeting banner, the REC pill, the sidebar dot and
+    /// the menu-bar bead all use this token — and the same 15 pt box the lock
+    /// beside it stands in, so the two glyphs of a paused row are one pair.
+    ///
+    /// Not a control: the ways back are Esc, `Continue` and Fn, and a fourth
+    /// door on the glyph would be a fourth name for two actions.
+    private var pauseGlyph: some View {
+        Image(systemName: "pause.fill")
+            .font(.system(size: 11))
+            .foregroundStyle(LoreTheme.Accent.amber)
+            .frame(width: 15, height: 15)
+            .bubbleTip(.dot, Self.pausedHelp, hovered: $hoveredTip, pointer: pointer)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Self.pausedHelp)
+    }
+
+    /// The one button a paused dictation offers (#206). `Finish` is not beside
+    /// it: a Fn tap already finishes, so a second button would have named the
+    /// same thing twice — and there is no `Delete`, because a dictation nobody
+    /// wants is removed from history, not from here.
+    private var continuePill: some View {
+        pill("Continue", .keycap(bright: true), action: onResume)
+            .bubbleTip(.resume, Self.resumeHelp, hovered: $hoveredTip, pointer: pointer)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Self.resumeHelp)
+            .accessibilityAddTraits(.isButton)
+    }
+
+    /// The board's copy table, byte for byte — the em dash included.
+    static let pausedHelp = "Paused \u{2014} Esc"
+    static let resumeHelp = "Keep recording"
+
     /// The lock, both ways round (#201). It stands in the bubble from the
     /// first second — an open shackle is what tells someone holding Fn that
     /// they can let go — and clicking it is the Space key: it locks, and while
@@ -1447,9 +1510,12 @@ struct DictationIndicatorView: View {
     /// Shared Lore waveform while live; the no-signal state keeps its distinct
     /// flat dimmed bars. Fixed 18pt frame preserves the pre-Stage-H panel
     /// height (`.fixedSize()` sizing is load-bearing — see the manager).
-    private func waveform(measuring: Bool) -> some View {
+    private func waveform(measuring: Bool, paused: Bool) -> some View {
         Group {
-            if noSignal {
+            // Paused has no level to show, so it borrows the flat bars the dead
+            // microphone already draws (#206, F7a) rather than standing a second
+            // flat waveform beside them.
+            if noSignal || paused {
                 HStack(spacing: 2) {
                     ForEach(0..<7, id: \.self) { _ in
                         RoundedRectangle(cornerRadius: 1)
@@ -1648,6 +1714,8 @@ final class DictationIndicatorModel {
     var collecting = true
     var screenshotsEnabled = true
     var held = false
+    /// Esc has suspended the capture (#206).
+    var paused = false
     /// Render-only — see `BubbleRenderPreview`.
     var renderPreview = BubbleRenderPreview()
     var onToggleItem: ((UUID) -> Void)?
@@ -1657,6 +1725,8 @@ final class DictationIndicatorModel {
     var onArmTranslate: (() -> Void)?
     var onArmOperator: (() -> Void)?
     var onOpenSettings: (() -> Void)?
+    /// `Continue` (#206).
+    var onResume: (() -> Void)?
     var onFaceAction: ((DictationFaceAction) -> Void)?
     /// Where the user drags the bubble (#213).
     var onDrag: ((BubbleDrag) -> Void)?
@@ -1689,6 +1759,7 @@ struct DictationIndicatorHost: View {
             collecting: model.collecting,
             screenshotsEnabled: model.screenshotsEnabled,
             held: model.held,
+            paused: model.paused,
             renderPreview: model.renderPreview,
             onToggleItem: model.onToggleItem,
             onToggleLock: model.onToggleLock,
@@ -1697,6 +1768,7 @@ struct DictationIndicatorHost: View {
             onArmTranslate: model.onArmTranslate,
             onArmOperator: model.onArmOperator,
             onOpenSettings: model.onOpenSettings,
+            onResume: model.onResume,
             onFaceAction: model.onFaceAction,
             onDrag: model.onDrag,
             onCanvasChange: model.onCanvasChange
@@ -1761,6 +1833,12 @@ final class DictationIndicatorManager {
         // The gear names the section it belongs to and the shell fronts the
         // window (#198) — the one door, installed by the scene.
         model.onOpenSettings = { SettingsSection.open(.copying) }
+        // `Continue` is the second Esc, taken by pointer (#206).
+        model.onResume = { [weak coordinator] in
+            Task { @MainActor in
+                coordinator?.resumeRecording()
+            }
+        }
         // A face's one action, resolved where the side effects live (#209).
         // The mic faces land on Settings → Meetings, whose Microphone row
         // already governs dictation's own capture — no section was built for
@@ -1842,6 +1920,7 @@ final class DictationIndicatorManager {
                 // for as long as it is held (#205) — the same surface hovering
                 // opens, arriving through the poll that already reads the lock.
                 self.model.held = hotkeyManager?.isFnHoldingBubble ?? false
+                self.model.paused = coordinator.isPaused
                 let chips = self.chips(for: coordinator.items)
                 if chips != self.model.items { self.model.items = chips }
 
