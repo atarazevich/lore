@@ -417,6 +417,10 @@ struct DictationIndicatorView: View {
             // The tint reaches the slash as well as the symbol, so the two
             // strokes of one glyph are never two colours.
             .foregroundStyle(clipBright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
+            // The target is the glyph plus a margin (#203): 16×18 pt of
+            // paperclip is a click the pointer has to aim at, and it was the
+            // whole of both the hit area and the hover fill.
+            .frame(width: Self.clipHitBox.width, height: Self.clipHitBox.height)
             // No plate under it, at rest or bright: the dot, the lock, the
             // waveform and the timer beside it stand on the bubble itself, and
             // a glyph on its own tile read as a button pasted into the row.
@@ -435,6 +439,11 @@ struct DictationIndicatorView: View {
             // The one state change that has to be legible in peripheral
             // vision, so it is the fastest.
             .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: collecting)
+            // The margin is given straight back to the layout: the row lays
+            // this out as the glyph's own box, so the badge overlay above, the
+            // 10 pt beside it and everything past it are where the board draws
+            // them, and only the fill and the hit shape grew (#203).
+            .padding(-Self.clipHitMargin)
     }
 
     /// Bright is "holding something that is going to the prompt" — which is
@@ -484,8 +493,10 @@ struct DictationIndicatorView: View {
     /// The box the paperclip is drawn in: the symbol's own bounds at that
     /// point size, and a point of slack around them. Asked for rather than
     /// assumed — a 13pt `paperclip` measures 15×17, so the square box it was
-    /// given cut the glyph rather than holding it.
-    private static let clipBox: CGSize = {
+    /// given cut the glyph rather than holding it. Not private, because it and
+    /// `badgeOffset` are what `RecordingBubbleClipTests` reads to hold the
+    /// growing target away from everything beside it (#203).
+    static let clipBox: CGSize = {
         let bounds = NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil)?
             .withSymbolConfiguration(.init(pointSize: clipSide, weight: .regular))?.size
             ?? CGSize(width: clipSide, height: clipSide)
@@ -496,12 +507,26 @@ struct DictationIndicatorView: View {
     /// frame's edge.
     private static let clipSlack: CGFloat = 1
 
+    /// How far past the glyph is still the paperclip (#203). The board asks for
+    /// a target of at least 24×24 pt; 4 pt on every side of a 16×18 glyph box
+    /// gives 24×26, and 4 pt is the reach the acceptance names — a click within
+    /// it, on any side, toggles collecting.
+    static let clipHitMargin: CGFloat = 4
+
+    /// What the pointer hits, and what the hover fill covers. Never what the row
+    /// lays out: `clipSwitch` takes the margin back with negative padding, so
+    /// this box grows without moving anything beside it.
+    static let clipHitBox = CGSize(
+        width: clipBox.width + 2 * clipHitMargin,
+        height: clipBox.height + 2 * clipHitMargin
+    )
+
     /// The board hangs the badge 5pt above the glyph's box and 6pt past its
     /// right edge (`.bdg`: top −5, right −6). The overlay is measured against
     /// `clipBox`, which holds the glyph with half the slack on each side, so
     /// half of it comes back off both numbers — the badge sits on the glyph
     /// the board drew it on, not on the box that carries it.
-    private static let badgeOffset = CGSize(width: 6 - clipSlack / 2, height: -5 + clipSlack / 2)
+    static let badgeOffset = CGSize(width: 6 - clipSlack / 2, height: -5 + clipSlack / 2)
 
     /// The board's 24-unit proportions, read against the box the glyph
     /// actually got: 1.7/24 of it wide, over a 4.4/24 gap cut under it.
