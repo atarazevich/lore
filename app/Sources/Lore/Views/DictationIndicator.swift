@@ -48,6 +48,45 @@ private func elapsedWidth(_ seconds: Int, size: CGFloat) -> CGFloat {
     return ceil((template as NSString).size(withAttributes: [.font: font]).width)
 }
 
+/// One letter in the recording bubble's rail (#201) — the key on the keyboard,
+/// which is why the letters teach the shortcut by standing there.
+enum BubbleRailLetter: String, CaseIterable, Sendable {
+    case cleanup = "C"
+    case translate = "T"
+    case operatorSend = "K"
+    case screenshot = "S"
+}
+
+/// What order the letters stand in (#204).
+///
+/// Whatever is armed already stands in the bubble at rest, so opening may only
+/// append to the right of it: a letter that was on screen before the pointer
+/// arrived may not move. So the armed letters come first, in `C T K`, and
+/// whatever is not armed follows in `T K S`. An unarmed `C` never appears —
+/// an unarmed cleanup letter has nothing to say — and `S` is only ever in the
+/// tail, because it names a setting rather than something armed for this
+/// dictation.
+///
+/// A fixed `C T K S` was the first answer and it broke the invariant for a lone
+/// armed `K`: opening would insert `T` ahead of it, and the `K` the user was
+/// reading would shift right. Ordering by what is armed is what makes the
+/// closed rail a prefix of the open one for every armed set, which is the
+/// property `RecordingBubbleRailTests` checks.
+enum BubbleRail {
+    /// `C T K` — the order armed letters are read in.
+    static let armedOrder: [BubbleRailLetter] = [.cleanup, .translate, .operatorSend]
+    /// `T K S` — what opening appends, for whatever is not armed already.
+    static let restOrder: [BubbleRailLetter] = [.translate, .operatorSend, .screenshot]
+
+    /// - Parameter open: the bubble is widened. Closed, only the armed letters
+    ///   are drawn at all.
+    static func letters(armed: Set<BubbleRailLetter>, open: Bool) -> [BubbleRailLetter] {
+        let standing = armedOrder.filter(armed.contains)
+        guard open else { return standing }
+        return standing + restOrder.filter { !armed.contains($0) }
+    }
+}
+
 struct DictationIndicatorView: View {
     let state: DictationState
     let audioLevel: Float
@@ -78,6 +117,11 @@ struct DictationIndicatorView: View {
     /// Screenshots are on in Settings (#201): what the `S` keycap's brightness
     /// reports. `S` is a key you press, never a switch on the bubble.
     var screenshotsEnabled = true
+    /// The hotkey is being held inside a locked recording (#205). It opens the
+    /// bubble exactly as the pointer does, for as long as it is held — which is
+    /// the moment Fn+T, Fn+K and Fn+S are pressed, so the rail is on screen when
+    /// those chords apply.
+    var held = false
     @State private var showBluetoothInfo = false
     /// The pointer is on the bubble. Everything the bubble can show — the key
     /// rail and the list — is this one state (#201): pointing at the shape
@@ -88,19 +132,29 @@ struct DictationIndicatorView: View {
     /// hovering the rows themselves was never enough, because the way down to
     /// them crossed padding that belongs to no row, and a list that closed
     /// there shut and reopened under the moving pointer (#192).
-    @State private var expanded = false
+    @State private var pointerExpanded = false
     @State private var pointerOnBubble = false
     /// The letters and the gear are readable only once the shape has room for
     /// them, so they fade in behind the widening (#201 motion table).
-    @State private var railVisible = false
-    /// The shape is the resting bubble: not widened, and not still collapsing
-    /// back. Only a resting report re-centres the window — while the shape is
-    /// wider than that, the panel keeps the resting shape's left edge, so the
-    /// widening moves one edge instead of sliding the whole bubble sideways.
-    @State private var restSettled = true
-    /// The shape's own size, as of the last layout pass, so the moment it
-    /// settles can be reported with the size it settled at.
-    @State private var bubbleSize: CGSize = .zero
+    @State private var railFadedIn = false
+    /// The fade is a 120 ms task, and an offscreen render runs no tasks — so a
+    /// rendered open bubble would draw its letters at zero opacity and a
+    /// comparison of them would be a comparison of nothing. This starts the rail
+    /// where the user sees it 120 ms in. Only `RecordingBubbleRenderTests` sets
+    /// it; nothing in the app does.
+    var railStartsVisible = false
+    private var railVisible: Bool { railFadedIn || railStartsVisible }
+    /// The open shape's size, measured off a copy of it that is never drawn —
+    /// the window's own size while a dictation records (#204).
+    @State private var canvasSize: CGSize = .zero
+    /// The resting row's width, measured the same way. It is what the window is
+    /// centred on, and it cannot be read off the visible shape once that shape
+    /// has widened.
+    @State private var restingRowWidth: CGFloat = 0
+    /// Open, by pointer or by key (#205). The 300 ms grace on the way out is the
+    /// pointer's alone: it exists for a pointer travelling down to a row, and a
+    /// key that has been let go is not travelling anywhere.
+    private var expanded: Bool { pointerExpanded || held }
     /// The top row's own width, which the list then stretches to exactly. The
     /// list must contribute nothing to the shape's width — a long copied line
     /// ellipsises instead of pushing the bubble wider.
@@ -122,53 +176,140 @@ struct DictationIndicatorView: View {
     var onArmOperator: (() -> Void)?
     /// The gear opens Settings → Copying (#201).
     var onOpenSettings: (() -> Void)?
-    /// The shape reports itself, so the panel around it can be exactly its
-    /// size at every step of the spring, and knows when that size is the
-    /// resting one (#201, `TopCenteredPanel`).
-    var onFrameChange: (@MainActor (PanelContentFrame) -> Void)?
+    /// The shape measures the window it wants (#204, `TopCenteredPanel`): the
+    /// canvas it may grow inside while recording, and `nil` for every other
+    /// state, where the window simply fits what it holds.
+    var onCanvasChange: (@MainActor (BubbleCanvas?) -> Void)?
 
     var body: some View {
-        bubble
+        content
             .fixedSize()
-            .contentShape(RoundedRectangle(cornerRadius: 12))
-            .onHover { pointerOnBubble = $0 }
             // Coming back cancels the close — the task is keyed on being
             // outside, and on the recording still being there to widen for.
             .task(id: [pointerOnBubble, canExpand]) { await followPointer() }
             .task(id: [expanded, canExpand]) { await followExpansion() }
             .animation(expanded ? widenAnimation : closeAnimation, value: expanded)
             .animation(railFade, value: railVisible)
-            .onGeometryChange(for: CGSize.self, of: \.size) { size in
-                bubbleSize = size
-                report(size)
+            .onChange(of: canvas, initial: true) { _, measured in
+                // A canvas that has not been laid out yet is not a report: the
+                // window keeps the frame it has rather than fitting itself to a
+                // measurement that does not exist.
+                guard let measured else { return }
+                onCanvasChange?(measured)
             }
-            // The shape settles a moment after its last layout pass, and the
-            // window's anchor is only allowed to move then.
-            .onChange(of: restSettled) { _, _ in report(bubbleSize) }
+            .onChange(of: canExpand, initial: true) { _, expandable in
+                // Processing, done, the upgrade panel, an error: not a canvas.
+                // The window goes back to fitting its content and centring it,
+                // and the measurements leave with the shape they were taken
+                // from — the next recording measures its own rather than
+                // opening inside the last one's.
+                guard !expandable else { return }
+                canvasSize = .zero
+                restingRowWidth = 0
+                onCanvasChange?(nil)
+            }
             .environment(\.colorScheme, .dark)
     }
 
-    private func report(_ size: CGSize) {
-        guard size.width > 0, size.height > 0 else { return }
-        onFrameChange?(PanelContentFrame(size: size, atRest: restSettled))
+    /// The bubble, and — while a dictation records — the transparent canvas it
+    /// hangs in (#204).
+    ///
+    /// The canvas is a clear rectangle of the size the probes measured, with the
+    /// bubble in its top-leading corner, so everything the shape gains it gains
+    /// into the margin and nothing that was on screen at rest moves.
+    ///
+    /// Until the probes have reported, the canvas is nothing at all and this is
+    /// just the bubble — so the window's own fallback fits and centres the
+    /// resting bubble, which is exactly where the canvas is about to put it. The
+    /// first frame of a recording has nowhere to jump from.
+    @ViewBuilder
+    private var content: some View {
+        if canExpand {
+            ZStack(alignment: .topLeading) {
+                Color.clear.frame(width: canvasSize.width, height: canvasSize.height)
+                bubble
+            }
+            // Measured, never drawn, and contributing nothing to the layout:
+            // a background is proposed the primary view's size and the probes
+            // ignore the proposal, so they can be bigger than what they measure
+            // for without becoming it.
+            .background(alignment: .topLeading) { probes }
+        } else {
+            bubble
+        }
+    }
+
+    /// What the window is while a dictation records (#204). Nil until both
+    /// probes have been laid out, and for every state that is not the recording
+    /// bubble.
+    private var canvas: BubbleCanvas? {
+        guard canExpand, canvasSize.width > 0, canvasSize.height > 0, restingRowWidth > 0 else {
+            return nil
+        }
+        return BubbleCanvas(size: canvasSize, restingWidth: restingRowWidth)
     }
 
     /// One shape: the row, and — when something has been collected — the list
     /// at the bottom of the same surface (#201). Three floating surfaces for
     /// one panel read as three things; this is one.
-    private var bubble: some View {
+    private func shape(open: Bool, measuring: Bool, listWidth: CGFloat) -> some View {
         VStack(spacing: 0) {
-            panel
-                .padding(.horizontal, 20)
-                .padding(.vertical, 12)
-                .onGeometryChange(for: CGFloat.self, of: \.size.width) { topRowWidth = $0 }
-            if showItemList {
+            paddedRow(open: open, measuring: measuring)
+            if showsItemList(open: open) {
                 LoreTheme.Surface.line.frame(height: 1)
-                itemList
+                itemList(width: listWidth)
             }
         }
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
         .clipShape(RoundedRectangle(cornerRadius: 12))
+    }
+
+    private func paddedRow(open: Bool, measuring: Bool) -> some View {
+        panel(open: open, measuring: measuring)
+            .padding(.horizontal, 20)
+            .padding(.vertical, 12)
+    }
+
+    /// The bubble the user sees, and the only part of the canvas that answers a
+    /// pointer — the margin around it belongs to whatever window is underneath.
+    private var bubble: some View {
+        shape(open: expanded, measuring: false, listWidth: topRowWidth)
+            .fixedSize()
+            .contentShape(RoundedRectangle(cornerRadius: 12))
+            .onHover { pointerOnBubble = $0 }
+            .onGeometryChange(for: CGFloat.self, of: \.size.width) { topRowWidth = $0 }
+    }
+
+    /// The canvas, measured from the shape rather than guessed at (#204).
+    ///
+    /// The open shape is laid out here too and never drawn, so the window is
+    /// already the size the shape may need before the pointer arrives — which is
+    /// what lets the arrival change nothing about the window. The resting row is
+    /// measured beside it because that is what the window is centred on, and it
+    /// cannot be read off the visible shape once that shape has widened: reading
+    /// it there is what 3900a37 did, and it made the answer depend on the order
+    /// of a geometry callback against a state flip.
+    ///
+    /// They are laid out and never drawn, and they draw the waveform as a clear
+    /// box of its exact width rather than running a `TimelineView` of their own,
+    /// so a recording still has one animation in it and not three. Nothing here
+    /// can churn the window either: every size in a measuring copy is fixed.
+    private var probes: some View {
+        ZStack(alignment: .topLeading) {
+            shape(open: true, measuring: true, listWidth: topRowWidth)
+            paddedRow(open: false, measuring: true)
+                // Once per recording (#204): the window is centred on the resting
+                // row it started with, so every later reading is computed and
+                // thrown away. Cleared with the rest when the recording ends.
+                .onGeometryChange(for: CGFloat.self, of: \.size.width) { width in
+                    if restingRowWidth == 0 { restingRowWidth = width }
+                }
+        }
+        .fixedSize()
+        .onGeometryChange(for: CGSize.self, of: \.size) { canvasSize = $0 }
+        .hidden()
+        .allowsHitTesting(false)
+        .accessibilityHidden(true)
     }
 
     // MARK: - Hover, and the motion it drives
@@ -180,16 +321,18 @@ struct DictationIndicatorView: View {
     /// There is something collected, and a recording to show it for. With
     /// collecting off nothing is in the prompt, so there is no list either —
     /// turning it back on brings both back.
-    private var showItemList: Bool { canExpand && expanded && collecting && !items.isEmpty }
+    private func showsItemList(open: Bool) -> Bool {
+        canExpand && open && collecting && !items.isEmpty
+    }
 
     private func followPointer() async {
         guard canExpand else {
-            expanded = false
-            railVisible = false
+            pointerExpanded = false
+            railFadedIn = false
             return
         }
         guard !pointerOnBubble else {
-            expanded = true
+            pointerExpanded = true
             return
         }
         // The grace absorbs the hover that blinks off while the shape moves
@@ -197,43 +340,30 @@ struct DictationIndicatorView: View {
         // a row without the bubble shutting under it.
         try? await Task.sleep(for: .milliseconds(300))
         guard !Task.isCancelled else { return }
-        expanded = false
+        pointerExpanded = false
     }
 
     private func followExpansion() async {
-        // The recording the rail and the anchor belong to is over. The panel
-        // is about to hold different content, and neither the letters nor the
-        // resting width of the shape that just left may reach it — a stale
-        // anchor would hang the next shape off to one side.
+        // The recording the rail belongs to is over.
         guard canExpand else {
-            railVisible = false
-            restSettled = true
+            railFadedIn = false
             return
         }
-        // Nothing is animating, so there is nothing to wait out: waiting the
-        // collapse's length over a layout that already snapped is how the
-        // window ends up holding an anchor the shape has left behind.
+        // Nothing is animating, so there is nothing to wait out.
         guard !reduceMotion else {
-            railVisible = expanded
-            restSettled = !expanded
+            railFadedIn = expanded
             return
         }
         if expanded {
-            // The shape is on the move from this instant, so the window stops
-            // re-centring before the first widened layout reaches it.
-            restSettled = false
             try? await Task.sleep(for: .milliseconds(120))
             guard !Task.isCancelled else { return }
-            railVisible = true
+            railFadedIn = true
         } else {
             // Reset behind the collapse, never during it: the letters leave
             // with the shape, as one movement.
             try? await Task.sleep(for: .seconds(Self.closeDuration))
             guard !Task.isCancelled else { return }
-            railVisible = false
-            try? await Task.sleep(for: Self.settleGrace)
-            guard !Task.isCancelled else { return }
-            restSettled = true
+            railFadedIn = false
         }
     }
 
@@ -244,9 +374,6 @@ struct DictationIndicatorView: View {
     /// How long the shape takes to close — the easing and the wait that has to
     /// outlast it are one fact, so they are one number.
     private static let closeDuration: TimeInterval = 0.2
-    /// A frame past that close, so the width the window adopts as the resting
-    /// one is the width the shape stopped at and not a step of the collapse.
-    private static let settleGrace: Duration = .milliseconds(60)
 
     private var closeAnimation: Animation? {
         reduceMotion ? nil : .easeOut(duration: Self.closeDuration)
@@ -256,32 +383,33 @@ struct DictationIndicatorView: View {
         reduceMotion ? nil : .easeOut(duration: 0.12)
     }
 
-    private var panel: some View {
-        Group {
-            switch state {
-            case .recording:
-                if let error = lastError {
-                    // Mic stall surfaced by the first-frame watchdog — show it loudly
-                    // instead of a normal-looking recording meter.
-                    statusRow(icon: "xmark.circle.fill", iconColor: LoreTheme.Accent.red, text: error, wrap: true)
-                } else {
-                    recordingContent
-                }
-            case .loadingModel:
-                statusRow(icon: "arrow.down.circle", text: "Downloading model...")
-            case .processing:
-                processingContent
-            case .done:
-                if showUpgradeButtons {
-                    upgradeContent
-                } else if let error = lastError {
-                    statusRow(icon: "xmark.circle.fill", iconColor: LoreTheme.Accent.red, text: error, wrap: true)
-                } else {
-                    statusRow(icon: "checkmark.circle.fill", iconColor: LoreTheme.Accent.green, text: "Done")
-                }
-            case .idle:
-                EmptyView()
+    /// `measuring` marks a copy of the shape that is laid out and never drawn,
+    /// so anything that would animate stands still in it (#204, `probes`).
+    @ViewBuilder
+    private func panel(open: Bool, measuring: Bool) -> some View {
+        switch state {
+        case .recording:
+            if let error = lastError {
+                // Mic stall surfaced by the first-frame watchdog — show it loudly
+                // instead of a normal-looking recording meter.
+                statusRow(icon: "xmark.circle.fill", iconColor: LoreTheme.Accent.red, text: error, wrap: true)
+            } else {
+                recordingContent(open: open, measuring: measuring)
             }
+        case .loadingModel:
+            statusRow(icon: "arrow.down.circle", text: "Downloading model...")
+        case .processing:
+            processingContent
+        case .done:
+            if showUpgradeButtons {
+                upgradeContent
+            } else if let error = lastError {
+                statusRow(icon: "xmark.circle.fill", iconColor: LoreTheme.Accent.red, text: error, wrap: true)
+            } else {
+                statusRow(icon: "checkmark.circle.fill", iconColor: LoreTheme.Accent.green, text: "Done")
+            }
+        case .idle:
+            EmptyView()
         }
     }
 
@@ -292,16 +420,19 @@ struct DictationIndicatorView: View {
     /// fact about the dictation in progress, and a fact the bubble hides until
     /// it is pointed at is a fact the user does not have (the shipped bubble
     /// said nothing at all while translate was armed). Everything else — `S`,
-    /// the unarmed letters, the gear — arrives with the pointer.
-    private var recordingContent: some View {
-        HStack(spacing: 10) {
-            statusGroup
+    /// the unarmed letters, the gear — arrives with the pointer, and arrives to
+    /// the right of what was already there (`BubbleRail`), so nothing the user
+    /// was reading moves.
+    private func recordingContent(open: Bool, measuring: Bool) -> some View {
+        let keys = railKeys(open: open)
+        return HStack(spacing: 10) {
+            statusGroup(measuring: measuring)
             clip
-            if !railKeys.isEmpty {
+            if !keys.isEmpty {
                 groupDivider
-                    .opacity(armedKeys.isEmpty && !railVisible ? 0 : 1)
+                    .opacity(armedLetters.isEmpty && !railVisible ? 0 : 1)
                 HStack(spacing: 6) {
-                    ForEach(railKeys) { key in
+                    ForEach(keys) { key in
                         // An armed letter was already standing there, so it
                         // does not fade in with the rail and does not blink
                         // out under the pointer that came to read it; a hint
@@ -314,7 +445,7 @@ struct DictationIndicatorView: View {
                     }
                 }
             }
-            if expanded {
+            if open {
                 groupDivider
                     .opacity(railVisible ? 1 : 0)
                 gear
@@ -330,21 +461,12 @@ struct DictationIndicatorView: View {
     /// never armed: its brightness reports a setting, and it is a key you
     /// press, not a switch you flip.
     private struct RailKey: Identifiable {
-        /// The letter is the key on the keyboard, and the keyboard has these
-        /// four.
-        enum Letter: String {
-            case screenshot = "S"
-            case cleanup = "C"
-            case translate = "T"
-            case operatorSend = "K"
-        }
-
-        let letter: Letter
+        let letter: BubbleRailLetter
         let bright: Bool
         let help: String
         let action: (() -> Void)?
         let armed: Bool
-        var id: Letter { letter }
+        var id: BubbleRailLetter { letter }
     }
 
     private var cleanupKey: RailKey {
@@ -373,29 +495,40 @@ struct DictationIndicatorView: View {
         )
     }
 
-    /// What is armed, in the order `C` `T` `K` — the letters the resting
-    /// bubble carries. DSET-06 turns the *hints* off, not the facts, so this
-    /// list is drawn whatever `showUpgradeKeycaps` says.
-    private var armedKeys: [RailKey] {
-        [cleanupKey, translateKey, operatorKey].filter(\.armed)
+    private var screenshotKey: RailKey {
+        RailKey(
+            letter: .screenshot, bright: screenshotsEnabled,
+            help: "Screenshot into the prompt (Fn+S)", action: nil, armed: false
+        )
     }
 
-    /// Widened, the board's `S T K` — with `C` before `T` while cleanup is
-    /// armed, because a letter that was standing in the resting bubble may not
-    /// disappear when the shape opens. With the keycap hints off, only the
-    /// armed letters, for the same reason.
-    private var railKeys: [RailKey] {
-        guard expanded, showUpgradeKeycaps else { return armedKeys }
-        var keys = [
-            RailKey(
-                letter: .screenshot, bright: screenshotsEnabled,
-                help: "Screenshot into the prompt (Fn+S)", action: nil, armed: false
-            )
-        ]
-        if pendingMode == .cleanup { keys.append(cleanupKey) }
-        keys.append(translateKey)
-        keys.append(operatorKey)
-        return keys
+    /// What this dictation already carries — the letters the resting bubble
+    /// stands with, and what `BubbleRail` orders the open rail around.
+    private var armedLetters: Set<BubbleRailLetter> {
+        var armed: Set<BubbleRailLetter> = []
+        if pendingMode == .cleanup { armed.insert(.cleanup) }
+        if pendingMode == .translate { armed.insert(.translate) }
+        if operatorAddressed { armed.insert(.operatorSend) }
+        return armed
+    }
+
+    /// The rail, at rest and open (#204). DSET-06 turns the *hints* off, not the
+    /// facts: with the keycaps disabled the bubble still shows what is armed,
+    /// opened or not, because a letter that stands at rest may never disappear
+    /// when the shape opens.
+    private func railKeys(open: Bool) -> [RailKey] {
+        BubbleRail
+            .letters(armed: armedLetters, open: open && showUpgradeKeycaps)
+            .map { key(for: $0) }
+    }
+
+    private func key(for letter: BubbleRailLetter) -> RailKey {
+        switch letter {
+        case .cleanup: cleanupKey
+        case .translate: translateKey
+        case .operatorSend: operatorKey
+        case .screenshot: screenshotKey
+        }
     }
 
     private var groupDivider: some View {
@@ -611,7 +744,7 @@ struct DictationIndicatorView: View {
     /// One group: every row the same height and the same three columns — the
     /// picture (or the quote mark standing in the same box), the item's first
     /// words on one line, and the moment it belongs to.
-    private var itemList: some View {
+    private func itemList(width: CGFloat) -> some View {
         VStack(spacing: 0) {
             ForEach(Array(items.enumerated()), id: \.element.id) { index, item in
                 if index > 0 {
@@ -624,7 +757,7 @@ struct DictationIndicatorView: View {
         // and exactly the top row's width — the list contributes nothing to
         // how wide the bubble is, and then stretches to all of it.
         .padding(.vertical, 4)
-        .frame(width: topRowWidth > 0 ? topRowWidth : nil)
+        .frame(width: width > 0 ? width : nil)
     }
 
     private func itemRow(_ item: DictationItemChip) -> some View {
@@ -692,7 +825,7 @@ struct DictationIndicatorView: View {
         elapsedWidth(items.map(\.seconds).max() ?? 0, size: 11)
     }
 
-    private var statusGroup: some View {
+    private func statusGroup(measuring: Bool) -> some View {
         HStack(spacing: 10) {
             Circle()
                 // No-signal keeps its distinct dimmed look (not a token color
@@ -703,7 +836,7 @@ struct DictationIndicatorView: View {
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Recording")
             if lockEnabled { lockGlyph }
-            waveform
+            waveform(measuring: measuring)
                 .help("Your voice level")
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Your voice level")
@@ -776,7 +909,7 @@ struct DictationIndicatorView: View {
     /// Shared Lore waveform while live; the no-signal state keeps its distinct
     /// flat dimmed bars. Fixed 18pt frame preserves the pre-Stage-H panel
     /// height (`.fixedSize()` sizing is load-bearing — see the manager).
-    private var waveform: some View {
+    private func waveform(measuring: Bool) -> some View {
         Group {
             if noSignal {
                 HStack(spacing: 2) {
@@ -786,6 +919,12 @@ struct DictationIndicatorView: View {
                             .frame(width: 2, height: 4)
                     }
                 }
+            } else if measuring {
+                // The bars' exact width and nothing else. The real waveform is a
+                // `TimelineView` at 30 fps, and the probes would have run one
+                // each — three timelines for one recording, two of them for
+                // shapes nobody sees. What the probes need from it is its size.
+                Color.clear.frame(width: LoreLiveWaveform.width)
             } else {
                 LoreLiveWaveform(level: audioLevel)
             }
@@ -925,6 +1064,8 @@ final class DictationIndicatorModel {
     var items: [DictationItemChip] = []
     var collecting = true
     var screenshotsEnabled = true
+    var held = false
+    var railStartsVisible = false
     var onUpgrade: ((UpgradeAction) -> Void)?
     var onOperatorToggle: (() -> Void)?
     var onToggleItem: ((UUID) -> Void)?
@@ -934,14 +1075,16 @@ final class DictationIndicatorModel {
     var onArmTranslate: (() -> Void)?
     var onArmOperator: (() -> Void)?
     var onOpenSettings: (() -> Void)?
-    /// Synchronous on purpose (#201): the panel's frame is set from the same
-    /// layout pass that produced the size, so the window is never a frame
-    /// behind the shape it holds.
-    var onFrameChange: (@MainActor (PanelContentFrame) -> Void)?
+    /// The window the shape wants (#204): the canvas it grows inside while
+    /// recording, `nil` for every other state.
+    var onCanvasChange: (@MainActor (BubbleCanvas?) -> Void)?
 }
 
-/// SwiftUI wrapper that reads the observable model.
-private struct DictationIndicatorHost: View {
+/// SwiftUI wrapper that reads the observable model. Not private, because it is
+/// the seam `RecordingBubbleRenderTests` renders the bubble through — the view
+/// itself carries private state, so its memberwise initialiser is private, and
+/// the model is how the app drives it anyway (#204).
+struct DictationIndicatorHost: View {
     @State var model: DictationIndicatorModel
 
     var body: some View {
@@ -963,6 +1106,8 @@ private struct DictationIndicatorHost: View {
             items: model.items,
             collecting: model.collecting,
             screenshotsEnabled: model.screenshotsEnabled,
+            held: model.held,
+            railStartsVisible: model.railStartsVisible,
             onUpgrade: model.onUpgrade,
             onOperatorToggle: model.onOperatorToggle,
             onToggleItem: model.onToggleItem,
@@ -972,7 +1117,7 @@ private struct DictationIndicatorHost: View {
             onArmTranslate: model.onArmTranslate,
             onArmOperator: model.onArmOperator,
             onOpenSettings: model.onOpenSettings,
-            onFrameChange: model.onFrameChange
+            onCanvasChange: model.onCanvasChange
         )
     }
 }
@@ -1046,10 +1191,10 @@ final class DictationIndicatorManager {
         // The gear names the section it belongs to and the shell fronts the
         // window (#198) — the one door, installed by the scene.
         model.onOpenSettings = { SettingsSection.open(.copying) }
-        // The frame is set from the layout pass that produced the size, so the
-        // window is exactly the shape SwiftUI is springing open (#201).
-        model.onFrameChange = { [weak self] frame in
-            self?.panel?.setContentFrame(frame)
+        // The shape measures its own window and the window stops following it
+        // (#204): one canvas per recording, and hover changes nothing about it.
+        model.onCanvasChange = { [weak self] canvas in
+            self?.panel?.setCanvas(canvas)
         }
 
         // Poll coordinator state and push into model
@@ -1094,6 +1239,10 @@ final class DictationIndicatorManager {
                 self.model.noSignal = coordinator.noSignal
                 self.model.collecting = RichInputSettings.isOn(.collect)
                 self.model.screenshotsEnabled = RichInputSettings.screenshotsEnabled
+                // Holding the hotkey inside a locked recording opens the bubble
+                // for as long as it is held (#205) — the same surface hovering
+                // opens, arriving through the poll that already reads the lock.
+                self.model.held = hotkeyManager?.isFnHoldingBubble ?? false
                 let chips = self.chips(for: coordinator.items)
                 if chips != self.model.items { self.model.items = chips }
 

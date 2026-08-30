@@ -662,7 +662,15 @@ struct LoreLiveWaveform: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     private static let barCount = 5
+    private static let barWidth: CGFloat = 3
+    private static let barSpacing: CGFloat = 3
     private static let staggerPerBar: Double = 0.08
+
+    /// The bars' own width. A layout that has to be measured but must not run
+    /// the animation stands a box of exactly this size in their place (#204,
+    /// the recording bubble's hidden probes) — asked for here rather than
+    /// copied, so a bar more or less moves both.
+    static let width = CGFloat(barCount) * barWidth + CGFloat(barCount - 1) * barSpacing
 
     var body: some View {
         if reduceMotion {
@@ -679,11 +687,11 @@ struct LoreLiveWaveform: View {
     }
 
     private func bars(scales: [CGFloat]) -> some View {
-        HStack(spacing: 3) {
+        HStack(spacing: Self.barSpacing) {
             ForEach(0..<Self.barCount, id: \.self) { index in
                 RoundedRectangle(cornerRadius: 3)
                     .fill(LoreTheme.Accent.red)
-                    .frame(width: 3, height: 13)
+                    .frame(width: Self.barWidth, height: 13)
                     .scaleEffect(y: scales[index], anchor: .center)
             }
         }

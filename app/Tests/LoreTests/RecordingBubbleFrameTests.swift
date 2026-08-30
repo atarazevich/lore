@@ -2,13 +2,18 @@ import AppKit
 import XCTest
 @testable import LoreKit
 
-/// Where the floating bubble's window sits while the shape inside it moves
-/// (#201). The shipped panel re-centred on every width it was told about, so
-/// the bubble slid left by half the growth while it sprang open to the right
-/// and slid back on the way out — the dot, the lock and the timer travelled
-/// although nothing about them had changed. The rule these tests pin: the
-/// window's left edge is the resting shape's left edge, and only a resting
-/// frame is allowed to move it.
+/// Where the floating bubble's window sits while the shape inside it grows
+/// (#204).
+///
+/// The shipped panel followed the content: it re-centred on every width it was
+/// told about (#201), and then kept the resting shape's left edge as an anchor
+/// re-derived from "at rest" reports (3900a37). Both moved the shape under a
+/// pointer reaching for it. The window now takes one input — a canvas the shape
+/// measured from its own open form before the pointer arrived — and that canvas
+/// is not a function of hover, so neither is the frame.
+///
+/// What the view *tells* the window is pinned by `RecordingBubbleRenderTests`;
+/// these are the arithmetic the window does with it.
 final class RecordingBubbleFrameTests: XCTestCase {
 
     /// One 1920-wide screen with a menu bar, and the dictation indicator's own
@@ -17,121 +22,128 @@ final class RecordingBubbleFrameTests: XCTestCase {
     private let visibleMaxY: CGFloat = 1055
     private let topInset: CGFloat = 8
 
-    /// The board's two widths: 189pt at rest, 314pt widened. Measured here as
-    /// whatever the content reports — the panel never computes either.
-    private let restWidth: CGFloat = 189
+    /// The board's two widths: 189pt at rest, 314pt widened. The canvas is the
+    /// widened one, tall enough for the row and a two-item list under it.
+    private let restingWidth: CGFloat = 189
     private let openWidth: CGFloat = 314
     private let rowHeight: CGFloat = 42
+    private let openHeight: CGFloat = 128
 
-    private func frame(_ width: CGFloat, height: CGFloat? = nil, anchor: CGFloat?) -> NSRect {
+    private func frame(_ canvas: BubbleCanvas) -> NSRect {
         TopCenteredFrame.frame(
-            size: NSSize(width: width, height: height ?? rowHeight), anchorWidth: anchor,
+            size: NSSize(width: canvas.size.width, height: canvas.size.height),
+            anchorWidth: canvas.restingWidth,
             screenFrame: screen, visibleMaxY: visibleMaxY, topInset: topInset
         )
     }
 
-    /// A spring's worth of widths between the two, overshoot included — the
-    /// shape passes through every one of them in a third of a second.
-    private var springWidths: [CGFloat] {
-        Array(stride(from: restWidth, through: openWidth, by: 7.0)) + [openWidth + 4, openWidth]
-    }
-
-    // MARK: - At rest
-
-    /// A shape no wider than its anchor is centred, whatever the anchor is.
-    func testAShapeNoWiderThanItsAnchorIsCentred() {
-        // No anchor at all: the first frame of a fresh panel, and every frame
-        // of the Read Aloud player, which never reports one.
-        XCTAssertEqual(frame(openWidth, anchor: nil).midX, screen.midX, accuracy: 0.0001)
-        // The resting bubble itself.
-        let resting = frame(restWidth, anchor: restWidth)
-        XCTAssertEqual(resting.midX, screen.midX, accuracy: 0.0001)
-        XCTAssertEqual(resting.width, restWidth, accuracy: 0.0001)
-        // A digit joins the timer, or a badge appears: the resting shape is
-        // wider than it was, and a resting shape is centred.
-        XCTAssertEqual(frame(restWidth + 12, anchor: restWidth + 12).midX, screen.midX, accuracy: 0.0001)
-        // The recording ends and a narrow status row arrives while the anchor
-        // is still the bubble's: a stale wider anchor must not hang it off to
-        // one side.
-        XCTAssertEqual(frame(120, anchor: restWidth).midX, screen.midX, accuracy: 0.0001)
-    }
-
-    // MARK: - The widening
-
-    func testWideningMovesOnlyTheRightEdge() {
-        let resting = frame(restWidth, anchor: restWidth)
-        for width in springWidths {
-            let rect = frame(width, anchor: restWidth)
-            XCTAssertEqual(rect.minX, resting.minX, accuracy: 0.0001,
-                           "the left edge moved at width \(width)")
-            // Everything the shape gained, it gained on its right.
-            XCTAssertEqual(rect.maxX - resting.maxX, width - restWidth, accuracy: 0.0001)
-        }
-    }
-
-    /// The list grows downward out of the same shape, so the top edge is the
-    /// one thing that never moves, at any width or height.
-    func testTheTopEdgeIsFixed() {
-        for width in springWidths {
-            for height in [rowHeight, rowHeight + 39, rowHeight + 86] {
-                let rect = frame(width, height: height, anchor: restWidth)
-                XCTAssertEqual(rect.maxY, visibleMaxY - topInset, accuracy: 0.0001)
-            }
-        }
-    }
-
-    // MARK: - Which report moves the anchor
-
-    func testOnlyARestingReportMovesTheAnchor() {
-        var anchor: CGFloat? = nil
-        // First layout of a recording: the resting bubble.
-        anchor = TopCenteredFrame.restWidth(
-            after: PanelContentFrame(size: CGSize(width: restWidth, height: rowHeight), atRest: true),
-            previous: anchor
+    private func canvas(
+        width: CGFloat? = nil, height: CGFloat? = nil, resting: CGFloat? = nil
+    ) -> BubbleCanvas {
+        BubbleCanvas(
+            size: CGSize(width: width ?? openWidth, height: height ?? openHeight),
+            restingWidth: resting ?? restingWidth
         )
-        XCTAssertEqual(anchor, restWidth)
-
-        // Every step of the widening, and the widened shape itself.
-        for width in springWidths {
-            anchor = TopCenteredFrame.restWidth(
-                after: PanelContentFrame(size: CGSize(width: width, height: rowHeight), atRest: false),
-                previous: anchor
-            )
-            XCTAssertEqual(anchor, restWidth, "width \(width) moved the anchor")
-        }
-
-        // The shape settles back, and only now does the anchor follow.
-        let grown = restWidth + 12
-        anchor = TopCenteredFrame.restWidth(
-            after: PanelContentFrame(size: CGSize(width: grown, height: rowHeight), atRest: true),
-            previous: anchor
-        )
-        XCTAssertEqual(anchor, grown)
     }
 
-    /// The whole movement, as the bubble performs it: rest → widened → back.
-    /// The left edge is one number from the first frame to the last.
-    func testTheLeftEdgeIsOneNumberAcrossAWholeHover() {
-        var anchor: CGFloat?
-        var lefts: Set<CGFloat> = []
-        var reports = [PanelContentFrame(size: CGSize(width: restWidth, height: rowHeight), atRest: true)]
-        reports += springWidths.map {
-            PanelContentFrame(size: CGSize(width: $0, height: rowHeight), atRest: false)
-        }
-        reports += springWidths.reversed().map {
-            PanelContentFrame(size: CGSize(width: $0, height: rowHeight), atRest: false)
-        }
-        reports.append(PanelContentFrame(size: CGSize(width: restWidth, height: rowHeight), atRest: true))
+    // MARK: - The frame a hover cannot move
 
-        for report in reports {
-            anchor = TopCenteredFrame.restWidth(after: report, previous: anchor)
-            lefts.insert(
-                TopCenteredFrame.frame(
-                    size: report.size, anchorWidth: anchor,
-                    screenFrame: screen, visibleMaxY: visibleMaxY, topInset: topInset
-                ).minX
-            )
+    /// The canvas is measured once per recording, from the open shape, so every
+    /// width the shape springs through on the way there is a width the window is
+    /// never told about. Logged, because "the window frame before and after a
+    /// hover is identical" is the acceptance and the two numbers are what make a
+    /// run of it readable.
+    func testTheWindowIsOneFrameAcrossAWholeHover() {
+        let atRest = frame(canvas())
+        // The shape springs 189 → 314 and back, opens its list and closes it.
+        // None of it reaches the window: the canvas already held all of it.
+        let springWidths = Array(stride(from: restingWidth, through: openWidth, by: 7.0))
+            + [openWidth + 4, openWidth]
+        var frames: Set<NSRect> = [atRest]
+        for width in springWidths + springWidths.reversed() {
+            XCTAssertLessThanOrEqual(width, openWidth + 4)
+            frames.insert(frame(canvas()))
         }
-        XCTAssertEqual(lefts.count, 1, "the bubble's left edge took \(lefts.count) values: \(lefts)")
+        let opened = frame(canvas())
+        print("[#204] window before hover: \(NSStringFromRect(atRest))")
+        print("[#204] window after hover:  \(NSStringFromRect(opened))")
+        XCTAssertEqual(atRest, opened)
+        XCTAssertEqual(frames.count, 1, "the window took \(frames.count) frames: \(frames)")
+    }
+
+    // MARK: - Where the canvas sits
+
+    /// What the user sees at rest is centred on screen, and every point of slack
+    /// the canvas carries lies to its right — which is the direction the rail
+    /// and the gear grow in.
+    func testTheRestingRowIsCentredAndTheSlackIsAllOnItsRight() {
+        let rect = frame(canvas())
+        XCTAssertEqual(rect.minX + restingWidth / 2, screen.midX, accuracy: 0.0001)
+        XCTAssertEqual(rect.width, openWidth, accuracy: 0.0001)
+        XCTAssertEqual(
+            rect.maxX - (rect.minX + restingWidth), openWidth - restingWidth, accuracy: 0.0001
+        )
+    }
+
+    /// The list grows downward inside the canvas, so the top edge is one number
+    /// for every canvas the shape can ask for.
+    func testTheTopEdgeIsFixedWhateverTheCanvasHolds() {
+        for height in [rowHeight, rowHeight + 39, openHeight, openHeight + 86] {
+            let rect = frame(canvas(height: height))
+            XCTAssertEqual(rect.maxY, visibleMaxY - topInset, accuracy: 0.0001)
+            XCTAssertEqual(rect.height, height, accuracy: 0.0001)
+        }
+    }
+
+    /// The recording's first resting width is the anchor for the whole of it, so
+    /// everything that happens later grows from the top-left corner: an item
+    /// arriving, the timer reaching an hour, a letter armed by click. Centring
+    /// the grown row instead would move the dot, the lock and the timer, which
+    /// had not changed at all — the very thing this is here to prevent.
+    func testEverythingAfterTheFirstCanvasGrowsFromTheTopLeftCorner() {
+        let anchor = restingWidth
+        let first = frame(canvas())
+        for later in [
+            canvas(width: openWidth + 22, resting: restingWidth + 16),   // a letter armed
+            canvas(height: openHeight + 39, resting: restingWidth),      // one more item
+            canvas(width: openWidth + 8, resting: restingWidth + 8),     // the badge arrives
+            canvas(resting: restingWidth + 24),                          // the timer at the hour
+        ] {
+            // The anchor is the one the recording started with, not the one this
+            // canvas carries — that is what `TopCenteredPanel` latches.
+            let rect = TopCenteredFrame.frame(
+                size: NSSize(width: later.size.width, height: later.size.height),
+                anchorWidth: anchor,
+                screenFrame: screen, visibleMaxY: visibleMaxY, topInset: topInset
+            )
+            XCTAssertEqual(rect.minX, first.minX, accuracy: 0.0001, "the left edge moved")
+            XCTAssertEqual(rect.maxY, first.maxY, accuracy: 0.0001, "the top edge moved")
+        }
+    }
+
+    // MARK: - Everything that is not a recording bubble
+
+    /// Processing, done, the upgrade panel, an error, the Read Aloud player: no
+    /// canvas, so the window fits the content and centres it on itself.
+    func testContentWithoutACanvasIsCentredOnItself() {
+        for width in [120.0, 240.0, 420.0] as [CGFloat] {
+            let rect = TopCenteredFrame.frame(
+                size: NSSize(width: width, height: 44), anchorWidth: nil,
+                screenFrame: screen, visibleMaxY: visibleMaxY, topInset: topInset
+            )
+            XCTAssertEqual(rect.midX, screen.midX, accuracy: 0.0001)
+            XCTAssertEqual(rect.maxY, visibleMaxY - topInset, accuracy: 0.0001)
+        }
+    }
+
+    /// A resting width wider than the window it anchors is not a thing the
+    /// bubble reports, but the arithmetic must not hang the window off to one
+    /// side if it ever is.
+    func testAnAnchorWiderThanTheWindowFallsBackToCentringIt() {
+        let rect = TopCenteredFrame.frame(
+            size: NSSize(width: 120, height: 44), anchorWidth: 400,
+            screenFrame: screen, visibleMaxY: visibleMaxY, topInset: topInset
+        )
+        XCTAssertEqual(rect.midX, screen.midX, accuracy: 0.0001)
     }
 }

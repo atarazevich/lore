@@ -30,16 +30,27 @@ final class OverlayPanel: NSPanel {
     }
 }
 
-// MARK: - What a self-animating shape tells its panel
+// MARK: - The canvas a self-growing shape hangs in
 
-/// One layout pass of a content view that animates its own size (#201).
-struct PanelContentFrame {
-    /// The size SwiftUI just laid the content out at.
+/// The window a recording bubble lives in (#204), measured by the shape itself.
+///
+/// The bubble only grows: the rail appends to its right, the list opens
+/// downward. A window that follows that growth frame by frame moves the shape
+/// under the pointer — the paperclip slid out from under a pointer reaching for
+/// it — and an anchor re-derived from "at rest" reports (3900a37) depended on the
+/// order of a geometry callback against a state flip and did not hold in use. So
+/// the window stops following. While a dictation records it is a transparent
+/// canvas already big enough for everything the shape may become, with the shape
+/// laid out at its top-leading corner, and the pointer's arrival changes nothing
+/// about it.
+struct BubbleCanvas: Equatable {
+    /// Everything the shape may occupy while this recording runs: the widened
+    /// row's width, and the open shape's height with its list.
     let size: CGSize
-    /// This is the content at rest — not opened, and not still animating back
-    /// to its resting size. A resting frame is the one the window re-centres
-    /// on; every wider one keeps the resting shape's left edge.
-    let atRest: Bool
+    /// The resting row's width. The window is centred on *this*, not on itself,
+    /// so what the user sees at rest is centred on screen and every growth
+    /// happens into the margin at its right.
+    let restingWidth: CGFloat
 }
 
 /// Where a top-centred panel's frame lands. Pure, because the anchoring is the
@@ -49,11 +60,12 @@ struct PanelContentFrame {
 /// timer moved although nothing about them had changed).
 enum TopCenteredFrame {
     /// - Parameters:
-    ///   - size: what the content is now.
-    ///   - anchorWidth: the resting shape's width. The window's left edge is
-    ///     the resting shape's left edge, so a shape wider than that grows to
-    ///     the right and moves nothing else. Nil — or wider than the content
-    ///     itself — centres the content.
+    ///   - size: the window's size — a recording bubble's whole canvas, or the
+    ///     measured size of any other content.
+    ///   - anchorWidth: the width to centre on. A canvas centres on the resting
+    ///     row it started with, so that row is centred on screen and the
+    ///     canvas's spare width lies to its right. Nil — or wider than the
+    ///     window itself — centres the window.
     ///   - visibleMaxY: the top of the screen's visible frame; the panel hangs
     ///     `topInset` under it and grows downward.
     static func frame(
@@ -67,13 +79,6 @@ enum TopCenteredFrame {
             width: size.width, height: size.height
         )
     }
-
-    /// The resting width the panel carries into the next frame: a report the
-    /// content calls resting *is* the measurement, and every other report
-    /// leaves the anchor exactly where the resting one put it.
-    static func restWidth(after report: PanelContentFrame, previous: CGFloat?) -> CGFloat? {
-        report.atRest ? report.size.width : previous
-    }
 }
 
 // MARK: - Top-centered content-sized panel
@@ -83,8 +88,8 @@ enum TopCenteredFrame {
 /// wrapping an intrinsic-size `NSHostingView`, resize-to-content pinned
 /// `topInset` points under the menu bar of the mouse's screen, and show/hide.
 /// Managers keep their own polling loops and call `show`/`hide`/
-/// `resizeToContent` — or, when the content animates its own shape,
-/// `setContentFrame` (#201).
+/// `resizeToContent` — or, when the content is a shape that grows inside a
+/// window of its own measuring, `setCanvas` (#204).
 @MainActor
 final class TopCenteredPanel<Content: View> {
     private let panel: OverlayPanel
@@ -92,13 +97,16 @@ final class TopCenteredPanel<Content: View> {
     private let topInset: CGFloat
     private var lastFrame: NSRect = .zero
     private var currentScreen: NSScreen?
-    /// What the content last reported for itself (#201). Once it has spoken,
-    /// it is the only source of the frame: a poll's own measurement would
-    /// fight it mid-animation.
-    private var reported: PanelContentFrame?
-    /// The resting shape's width — the anchor its left edge is kept at while
-    /// the content is wider than that.
-    private var restWidth: CGFloat?
+    /// The canvas the content measured for itself (#204). While it is set it is
+    /// the only source of the frame: a poll's own measurement of a shape
+    /// mid-spring would fight it, and the window would move.
+    private var canvas: BubbleCanvas?
+    /// The resting width the window was centred on when this recording's first
+    /// canvas arrived, kept for the whole of it. A resting row that grows later
+    /// — a timer digit at the hour, the badge arriving — grows to the right like
+    /// everything else: re-centring it would move the dot, the lock and the
+    /// timer, which had not changed at all (#204).
+    private var restingAnchor: CGFloat?
 
     /// Nil when no screen can be resolved for the mouse (headless edge case).
     init?(content: Content, topInset: CGFloat) {
@@ -115,7 +123,12 @@ final class TopCenteredPanel<Content: View> {
         panel.styleMask = [.nonactivatingPanel, .fullSizeContentView]
         panel.titlebarAppearsTransparent = true
         panel.titleVisibility = .hidden
-        panel.isMovableByWindowBackground = true
+        // A canvas is mostly transparent margin (#204), and a window that is
+        // movable by its background answers a mouse-down anywhere the content
+        // did not — which is a click the app below never receives. The frame is
+        // set by the owner's poll anyway, so the window was never draggable in
+        // practice; this only stops it from swallowing the attempt.
+        panel.isMovableByWindowBackground = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
         panel.becomesKeyOnlyIfNeeded = true
@@ -141,40 +154,62 @@ final class TopCenteredPanel<Content: View> {
         lastFrame = .zero
     }
 
-    /// The frame the content asked for, applied at once and with no animation
-    /// of its own (#201).
+    /// The canvas the content measured for itself, applied at once and with no
+    /// animation of its own (#204) — or `nil` when the content is not that
+    /// shape, and the window goes back to fitting and centring what it holds
+    /// (processing, done, the upgrade panel, an error, the Read Aloud player).
     ///
-    /// The bubble springs its own shape open in SwiftUI. A window animating on
-    /// a second curve underneath cannot keep up with that: while the frame
-    /// eased toward the widened size, the window clipped the very shape it was
-    /// meant to be revealing, and the 50 ms poll restarted the easing on every
-    /// tick. So the window stops animating entirely and becomes an exact
-    /// follower — one frame change per layout pass, always the size SwiftUI
-    /// just laid out, so the content is never wider than the window that holds
-    /// it and only one animation is ever running.
-    ///
-    /// Following the size is not enough on its own: a window centred on every
-    /// width slides half the growth to the left while the shape springs open to
-    /// the right. So the report also says whether the content is at rest, and
-    /// only a resting one moves the anchor.
-    func setContentFrame(_ frame: PanelContentFrame) {
-        let size = NSSize(width: ceil(frame.size.width), height: ceil(frame.size.height))
-        guard size.width > 10, size.height > 5 else { return }
-        let report = PanelContentFrame(size: size, atRest: frame.atRest)
-        reported = report
-        restWidth = TopCenteredFrame.restWidth(after: report, previous: restWidth)
-        applyFrame(size: size, animated: false, tolerance: 0.5)
+    /// A canvas is set once per recording and re-applied unchanged by the poll.
+    /// It changes only when the resting row's own width changes (a timer digit,
+    /// the badge) or the list's height does — never as a side effect of the
+    /// pointer arriving, because the shape it was measured from was the open one
+    /// from the start. Every such change grows the window from its top-left
+    /// corner, which is where the recording's first canvas put it.
+    func setCanvas(_ canvas: BubbleCanvas?) {
+        guard let canvas else {
+            restingAnchor = nil
+            guard self.canvas != nil else { return }
+            self.canvas = nil
+            resizeToContent()
+            return
+        }
+        let size = NSSize(width: ceil(canvas.size.width), height: ceil(canvas.size.height))
+        guard size.width > 10, size.height > 5, canvas.restingWidth > 0 else { return }
+        self.canvas = BubbleCanvas(
+            size: CGSize(width: size.width, height: size.height),
+            restingWidth: ceil(canvas.restingWidth)
+        )
+        restingAnchor = restingAnchor ?? ceil(canvas.restingWidth)
+        applyCanvas()
+    }
+
+    private func applyCanvas() {
+        guard let canvas else { return }
+        applyFrame(
+            size: NSSize(width: canvas.size.width, height: canvas.size.height),
+            animated: false, tolerance: 0.5
+        )
     }
 
     func resizeToContent() {
-        // Content-driven since the first report: re-apply what it asked for, so
-        // the poll still follows the pointer across screens without measuring
-        // (and re-animating) a shape mid-spring.
-        if let reported {
-            applyFrame(size: reported.size, animated: false, tolerance: 0.5)
+        // Canvas-driven while one is set: re-apply it, so the poll still follows
+        // the pointer across screens without measuring (and re-animating) a
+        // shape mid-spring.
+        if canvas != nil {
+            applyCanvas()
             return
         }
         hostingView.layoutSubtreeIfNeeded()
+        // Laying out is what makes a recording bubble measure and report its
+        // canvas, and that report arrives inside the call above. Ask again
+        // before falling back: otherwise the first poll tick of a dictation
+        // would overwrite the canvas frame it had just been given with one
+        // centred on the whole canvas, drawing the bubble half a margin off
+        // centre until the next tick.
+        if canvas != nil {
+            applyCanvas()
+            return
+        }
         // `fittingSize` is the *smallest* size the content can be pressed into,
         // not the size it wants: a panel sized from it squeezes its own
         // contents, which is how a 19-minute dictation's timer ended up broken
@@ -202,14 +237,13 @@ final class TopCenteredPanel<Content: View> {
         }
 
         let newFrame = TopCenteredFrame.frame(
-            size: size, anchorWidth: restWidth,
+            size: size, anchorWidth: restingAnchor,
             screenFrame: screen.frame, visibleMaxY: screen.visibleFrame.maxY, topInset: topInset
         )
 
         // Only move when the frame actually changes (the 50 ms poll re-applies
-        // the same one 20x/sec). The origin counts, not just the size: a
-        // resting report can leave the shape the width it already was and
-        // still be the one that re-centres it.
+        // the same one 20x/sec). The origin counts, not just the size: crossing
+        // to another screen re-centres a window that is the size it already was.
         let moved = abs(newFrame.origin.x - lastFrame.origin.x) > tolerance
             || abs(newFrame.origin.y - lastFrame.origin.y) > tolerance
             || abs(newFrame.width - lastFrame.width) > tolerance
