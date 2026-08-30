@@ -15,23 +15,14 @@ import XCTest
 @MainActor
 final class DictationPauseTests: XCTestCase {
 
-    private var tempRoot: URL!
-    private var suiteName: String!
-    private var defaults: UserDefaults!
+    private var storage: EphemeralDictation!
     private var hotkeys: HotkeyManager!
     /// Held strongly for the test's length: `HotkeyManager.coordinator` is weak.
     private var coordinator: DictationCoordinator!
 
-    private var entriesDir: URL { tempRoot.appendingPathComponent("entries") }
-    private var audioDir: URL { tempRoot.appendingPathComponent("audio") }
-
     override func setUpWithError() throws {
         try super.setUpWithError()
-        tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("DictationPauseTests-\(UUID().uuidString)", isDirectory: true)
-        suiteName = "com.lore.test.\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
+        storage = EphemeralDictation("DictationPauseTests")
         // The gesture starts behind the microphone-permission gate, and an
         // undetermined status would put a system prompt on the user's screen.
         try XCTSkipUnless(
@@ -44,8 +35,8 @@ final class DictationPauseTests: XCTestCase {
         hotkeys?.uninstall()
         hotkeys = nil
         coordinator = nil
-        defaults.removePersistentDomain(forName: suiteName)
-        try? FileManager.default.removeItem(at: tempRoot)
+        storage.tearDown()
+        storage = nil
         super.tearDown()
     }
 
@@ -100,17 +91,17 @@ final class DictationPauseTests: XCTestCase {
     func testEscKeepsBothFilesAndTheEntry() async {
         let coordinator = makeRecording()
         speak(coordinator, samples: 20_000)
-        let landed = await waitForSamplesOnDisk(20_000)
+        let landed = await storage.waitForSamplesOnDisk(20_000)
         XCTAssertTrue(landed)
-        let mark = diagMark()
+        let mark = DiagStream.mark()
 
         coordinator.pauseRecording()
 
         XCTAssertTrue(coordinator.isPaused)
         XCTAssertEqual(coordinator.state, .recording, "a paused dictation is still a recording")
-        XCTAssertEqual(files(in: audioDir).count, 1, "the audio is where it was")
-        XCTAssertEqual(files(in: entriesDir).count, 1, "and so is its entry")
-        let seen = events(since: mark)
+        XCTAssertEqual(storage.audioFiles.count, 1, "the audio is where it was")
+        XCTAssertEqual(storage.entryFiles.count, 1, "and so is its entry")
+        let seen = DiagStream.events(since: mark)
         XCTAssertTrue(seen.contains(.dictationPaused), "the pause left a trace")
         XCTAssertFalse(
             seen.contains { if case .dictationDiscarded = $0 { true } else { false } },
@@ -137,27 +128,25 @@ final class DictationPauseTests: XCTestCase {
     func testContinueKeepsOneEntryAndOneContiguousStream() async throws {
         let coordinator = makeRecording()
         coordinator.appendCapturedSamples([Float](repeating: 0.25, count: 16_000))
-        let firstLeg = await waitForSamplesOnDisk(16_000)
+        let firstLeg = await storage.waitForSamplesOnDisk(16_000)
         XCTAssertTrue(firstLeg)
 
-        let mark = diagMark()
+        let mark = DiagStream.mark()
         coordinator.pauseRecording()
         coordinator.resumeRecording()
         XCTAssertFalse(coordinator.isPaused)
-        XCTAssertTrue(events(since: mark).contains(.dictationResumed))
+        XCTAssertTrue(DiagStream.events(since: mark).contains(.dictationResumed))
 
         coordinator.appendCapturedSamples([Float](repeating: -0.5, count: 8_000))
-        let bothLegs = await waitForSamplesOnDisk(24_000)
+        let bothLegs = await storage.waitForSamplesOnDisk(24_000)
         XCTAssertTrue(bothLegs)
 
-        XCTAssertEqual(files(in: audioDir).count, 1, "the resume opened a second file")
-        XCTAssertEqual(files(in: entriesDir).count, 1, "the resume started a second entry")
+        XCTAssertEqual(storage.audioFiles.count, 1, "the resume opened a second file")
+        XCTAssertEqual(storage.entryFiles.count, 1, "the resume started a second entry")
 
         // Read back through the store the next launch would use: one stream, the
         // second leg beginning exactly where the first ended.
-        let recovered = DictationHistory(
-            defaults: defaults, entriesDirectory: entriesDir, audioDirectory: audioDir
-        )
+        let recovered = storage.history()
         let entry = try XCTUnwrap(recovered.entries.first)
         let samples = try XCTUnwrap(recovered.loadAudio(filename: try XCTUnwrap(entry.audioFilename)))
         XCTAssertEqual(samples.count, 24_000)
@@ -173,7 +162,7 @@ final class DictationPauseTests: XCTestCase {
         speak(coordinator, samples: 20_000)
         coordinator.pauseRecording()
         speak(coordinator, samples: 0) // nothing arrives while paused
-        let mark = diagMark()
+        let mark = DiagStream.mark()
 
         coordinator.stopRecording()
         let finished = await waitUntil { coordinator.state != .recording }
@@ -181,13 +170,11 @@ final class DictationPauseTests: XCTestCase {
 
         XCTAssertFalse(coordinator.isPaused, "the pause left with the recording")
         // The whole stream reached the pipeline, not the leg before the pause.
-        XCTAssertTrue(events(since: mark).contains { event in
+        XCTAssertTrue(DiagStream.events(since: mark).contains { event in
             if case .dictationRecorded(let samples, _) = event { samples == 20_000 } else { false }
         }, "the pipeline was handed the dictation's own audio")
-        XCTAssertEqual(files(in: audioDir).count, 1)
-        let recovered = DictationHistory(
-            defaults: defaults, entriesDirectory: entriesDir, audioDirectory: audioDir
-        )
+        XCTAssertEqual(storage.audioFiles.count, 1)
+        let recovered = storage.history()
         XCTAssertEqual(recovered.entries.count, 1, "one entry, finished")
         XCTAssertEqual(try XCTUnwrap(recovered.entries.first).durationSeconds, 1.25, accuracy: 0.001)
     }
@@ -219,7 +206,7 @@ final class DictationPauseTests: XCTestCase {
     func testAnEscInTheTailAfterFinishingDoesNotPause() async throws {
         let coordinator = makeRecording(backend: StubTranscriptionBackend(transcript: ""))
         speak(coordinator, samples: 20_000)
-        let mark = diagMark()
+        let mark = DiagStream.mark()
 
         coordinator.stopRecording()
         XCTAssertEqual(coordinator.state, .recording, "the tail has not reached the capture yet")
@@ -230,7 +217,7 @@ final class DictationPauseTests: XCTestCase {
         let finished = await waitUntil { coordinator.state != .recording }
         XCTAssertTrue(finished)
         XCTAssertFalse(
-            events(since: mark).contains(.dictationPaused),
+            DiagStream.events(since: mark).contains(.dictationPaused),
             "a pause with no pair went into the stream"
         )
     }
@@ -319,7 +306,7 @@ final class DictationPauseTests: XCTestCase {
         let finished = await waitUntil { self.coordinator.state != .recording }
         XCTAssertTrue(finished, "the release finished it")
         XCTAssertFalse(coordinator.isPaused)
-        XCTAssertEqual(files(in: audioDir).count, 1, "the audio is still the dictation's")
+        XCTAssertEqual(storage.audioFiles.count, 1, "the audio is still the dictation's")
     }
 
     /// Esc before the hold is confirmed is nobody's: a pre-buffer is a gesture
@@ -337,21 +324,14 @@ final class DictationPauseTests: XCTestCase {
 
     // MARK: - Fixtures
 
-    private func makeHistory() -> DictationHistory {
-        DictationHistory(defaults: defaults, entriesDirectory: entriesDir, audioDirectory: audioDir)
-    }
-
-    /// Coordinator on isolated storage with no audio bus: every gesture path
-    /// runs, no microphone opens.
     @discardableResult
     private func makeCoordinator(
         backend: (any TranscriptionBackend)? = nil, clipboard: ClipboardWatcher? = nil
     ) -> DictationCoordinator {
-        let coordinator = DictationCoordinator(
-            history: makeHistory(), backend: backend,
-            clipboard: clipboard ?? ClipboardWatcher()
+        let coordinator = storage.coordinator(
+            backend: backend, clipboard: clipboard ?? ClipboardWatcher()
         )
-        coordinator.settings = isolatedSettings("DictationPauseTests", defaults: defaults)
+        coordinator.settings = isolatedSettings("DictationPauseTests", defaults: storage.defaults)
         self.coordinator = coordinator
         return coordinator
     }
@@ -392,43 +372,5 @@ final class DictationPauseTests: XCTestCase {
             windowNumber: 0, context: nil, characters: "",
             charactersIgnoringModifiers: "", isARepeat: false, keyCode: 63
         )!
-    }
-
-    private func speak(_ coordinator: DictationCoordinator, samples: Int) {
-        guard samples > 0 else { return }
-        coordinator.appendCapturedSamples([Float](repeating: 0.05, count: samples))
-    }
-
-    private func files(in directory: URL) -> [String] {
-        ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []).sorted()
-    }
-
-    private func audioBytes() -> Int? {
-        guard let name = files(in: audioDir).first,
-              let attributes = try? FileManager.default.attributesOfItem(
-                  atPath: audioDir.appendingPathComponent(name).path
-              ) else { return nil }
-        return attributes[.size] as? Int
-    }
-
-    /// The capture queue writes off the main actor — wait for the samples to land.
-    private func waitForSamplesOnDisk(_ count: Int) async -> Bool {
-        await waitUntil { self.audioBytes() == count * MemoryLayout<Float>.size }
-    }
-
-    // MARK: - Diag stream inspection
-
-    private static var nextFenceBuild = 900_000
-
-    /// Fence, then mark — identical consecutive events fold into one record
-    /// (#149), so without the fence a test's first event could hide behind it.
-    private func diagMark() -> Int {
-        Self.nextFenceBuild += 1
-        DiagStore.record(.appLaunched(build: Self.nextFenceBuild))
-        return DiagStore.shared.recent(DiagStore.capacity).count
-    }
-
-    private func events(since mark: Int) -> [DiagEvent] {
-        Array(DiagStore.shared.recent(DiagStore.capacity).dropFirst(mark)).occurrenceEvents
     }
 }

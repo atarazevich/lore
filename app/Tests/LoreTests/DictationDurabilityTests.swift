@@ -11,20 +11,11 @@ import XCTest
 @MainActor
 final class DictationDurabilityTests: XCTestCase {
 
-    private var tempRoot: URL!
-    private var suiteName: String!
-    private var defaults: UserDefaults!
-
-    private var entriesDir: URL { tempRoot.appendingPathComponent("entries") }
-    private var audioDir: URL { tempRoot.appendingPathComponent("audio") }
+    private var storage: EphemeralDictation!
 
     override func setUpWithError() throws {
         try super.setUpWithError()
-        tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("DictationDurabilityTests-\(UUID().uuidString)", isDirectory: true)
-        suiteName = "com.lore.test.\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
+        storage = EphemeralDictation("DictationDurabilityTests")
         // The gesture starts behind the microphone-permission gate, and an
         // undetermined status would put a system prompt on the user's screen.
         try XCTSkipUnless(
@@ -34,22 +25,16 @@ final class DictationDurabilityTests: XCTestCase {
     }
 
     override func tearDown() {
-        defaults.removePersistentDomain(forName: suiteName)
-        try? FileManager.default.removeItem(at: tempRoot)
+        storage.tearDown()
+        storage = nil
         super.tearDown()
     }
 
     // MARK: - Fixtures
 
-    private func makeHistory() -> DictationHistory {
-        DictationHistory(defaults: defaults, entriesDirectory: entriesDir, audioDirectory: audioDir)
-    }
-
-    /// Coordinator on isolated storage with no audio bus: every gesture path
-    /// runs, no microphone opens.
     private func makeCoordinator(backend: (any TranscriptionBackend)? = nil) -> DictationCoordinator {
-        let coordinator = DictationCoordinator(history: makeHistory(), backend: backend)
-        coordinator.settings = isolatedSettings("DictationDurabilityTests")
+        let coordinator = storage.coordinator(backend: backend)
+        coordinator.settings = isolatedSettings("DictationDurabilityTests", defaults: storage.defaults)
         return coordinator
     }
 
@@ -65,27 +50,6 @@ final class DictationDurabilityTests: XCTestCase {
         func transcribe(_ samples: [Float], previousContext: String?) async throws -> String { "" }
     }
 
-    private func speak(_ coordinator: DictationCoordinator, samples: Int) {
-        coordinator.appendCapturedSamples([Float](repeating: 0.05, count: samples))
-    }
-
-    private func files(in directory: URL) -> [String] {
-        ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []).sorted()
-    }
-
-    private func audioBytes() -> Int? {
-        guard let name = files(in: audioDir).first,
-              let attributes = try? FileManager.default.attributesOfItem(
-                  atPath: audioDir.appendingPathComponent(name).path
-              ) else { return nil }
-        return attributes[.size] as? Int
-    }
-
-    /// The capture queue writes off the main actor — wait for the samples to land.
-    private func waitForSamplesOnDisk(_ count: Int) async -> Bool {
-        await waitUntil { self.audioBytes() == count * MemoryLayout<Float>.size }
-    }
-
     // MARK: - The window this closes
 
     func testKillMidSpeechLeavesTheDictationRecoverable() async throws {
@@ -94,12 +58,12 @@ final class DictationDurabilityTests: XCTestCase {
         coordinator.confirmRecording()
         speak(coordinator, samples: 20_000) // 1.25s of a locked recording still running
 
-        let onDisk = await waitForSamplesOnDisk(20_000)
+        let onDisk = await storage.waitForSamplesOnDisk(20_000)
         XCTAssertTrue(onDisk)
 
         // The kill: nothing stops the recording, nothing finalizes it. What the
         // next launch finds is a fresh store over the same directories.
-        let recovered = makeHistory()
+        let recovered = storage.history()
 
         XCTAssertEqual(recovered.entries.count, 1)
         let entry = try XCTUnwrap(recovered.entries.first)
@@ -119,13 +83,13 @@ final class DictationDurabilityTests: XCTestCase {
         coordinator.confirmRecording()
         speak(coordinator, samples: 20_000)
 
-        let onDisk = await waitForSamplesOnDisk(20_000)
+        let onDisk = await storage.waitForSamplesOnDisk(20_000)
         XCTAssertTrue(onDisk)
 
         // Both files are on disk from the first buffer — and the entry is
         // deliberately absent from the list the history UI (and its retry
         // button) reads: a file that is still growing has nothing to retry.
-        XCTAssertEqual(files(in: entriesDir).count, 1)
+        XCTAssertEqual(storage.entryFiles.count, 1)
         XCTAssertTrue(coordinator.history.entries.isEmpty)
     }
 
@@ -137,9 +101,9 @@ final class DictationDurabilityTests: XCTestCase {
         speak(coordinator, samples: 20_000) // pre-buffer audio: not a dictation yet
         coordinator.cancelPreBuffer()
 
-        XCTAssertEqual(files(in: audioDir), [])
-        XCTAssertEqual(files(in: entriesDir), [])
-        XCTAssertTrue(makeHistory().entries.isEmpty)
+        XCTAssertEqual(storage.audioFiles, [])
+        XCTAssertEqual(storage.entryFiles, [])
+        XCTAssertTrue(storage.history().entries.isEmpty)
     }
 
     func testDiscardWhileRecordingLeavesNothingBehind() async {
@@ -147,14 +111,14 @@ final class DictationDurabilityTests: XCTestCase {
         coordinator.startPreBuffer()
         coordinator.confirmRecording()
         speak(coordinator, samples: 20_000)
-        let onDisk = await waitForSamplesOnDisk(20_000)
+        let onDisk = await storage.waitForSamplesOnDisk(20_000)
         XCTAssertTrue(onDisk, "it really was on disk before Esc")
 
         coordinator.discardRecording()
 
-        XCTAssertEqual(files(in: audioDir), [])
-        XCTAssertEqual(files(in: entriesDir), [])
-        XCTAssertTrue(makeHistory().entries.isEmpty)
+        XCTAssertEqual(storage.audioFiles, [])
+        XCTAssertEqual(storage.entryFiles, [])
+        XCTAssertTrue(storage.history().entries.isEmpty)
     }
 
     func testSlipUnderHalfASecondLeavesNothingBehind() async {
@@ -162,16 +126,16 @@ final class DictationDurabilityTests: XCTestCase {
         coordinator.startPreBuffer()
         coordinator.confirmRecording()
         speak(coordinator, samples: 4_000) // 0.25s — dropped, as it always was
-        let onDisk = await waitForSamplesOnDisk(4_000)
+        let onDisk = await storage.waitForSamplesOnDisk(4_000)
         XCTAssertTrue(onDisk)
 
         coordinator.stopRecording()
         let settled = await waitUntil { coordinator.state == .idle }
         XCTAssertTrue(settled)
 
-        XCTAssertEqual(files(in: audioDir), [])
-        XCTAssertEqual(files(in: entriesDir), [])
-        XCTAssertTrue(makeHistory().entries.isEmpty)
+        XCTAssertEqual(storage.audioFiles, [])
+        XCTAssertEqual(storage.entryFiles, [])
+        XCTAssertTrue(storage.history().entries.isEmpty)
     }
 
     // MARK: - The finished dictation
@@ -188,9 +152,9 @@ final class DictationDurabilityTests: XCTestCase {
         XCTAssertTrue(landed)
 
         let entry = try XCTUnwrap(coordinator.history.entries.first)
-        XCTAssertEqual(files(in: audioDir).count, 1, "release copies nothing — the audio is already there")
-        XCTAssertEqual(entry.audioFilename, files(in: audioDir).first)
-        XCTAssertEqual(files(in: entriesDir), ["\(entry.id.uuidString).json"])
+        XCTAssertEqual(storage.audioFiles.count, 1, "release copies nothing — the audio is already there")
+        XCTAssertEqual(entry.audioFilename, storage.audioFiles.first)
+        XCTAssertEqual(storage.entryFiles, ["\(entry.id.uuidString).json"])
         XCTAssertEqual(entry.durationSeconds, 1.25, accuracy: 0.001)
         XCTAssertEqual(coordinator.history.loadAudio(filename: try XCTUnwrap(entry.audioFilename))?.count, 20_000)
     }
@@ -213,7 +177,7 @@ final class DictationDurabilityTests: XCTestCase {
 
         let bothLanded = await waitUntil { coordinator.history.entries.count == 2 }
         XCTAssertTrue(bothLanded)
-        XCTAssertEqual(files(in: audioDir).count, 2)
+        XCTAssertEqual(storage.audioFiles.count, 2)
         let durations = coordinator.history.entries.map(\.durationSeconds).sorted()
         XCTAssertEqual(durations, [1.25, 1.5])
         for entry in coordinator.history.entries {

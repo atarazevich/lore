@@ -7,10 +7,6 @@ import XCTest
 @MainActor
 final class DictationRetryTests: XCTestCase {
 
-    /// Distinct build numbers for the diagnostic fences below, so no two fences
-    /// can collide — deterministically, so a rerun repeats exactly.
-    private static var nextFenceBuild = 0
-
     /// Backend that replays a scripted result per `transcribe` call.
     private final class ScriptedBackend: TranscriptionBackend, @unchecked Sendable {
         private var results: [Result<String, any Error>]
@@ -38,26 +34,26 @@ final class DictationRetryTests: XCTestCase {
         }
     }
 
-    // MARK: - Fixtures (ephemeral storage, as in DictationCoordinatorMetaGatingTests)
+    // MARK: - Fixtures (ephemeral storage)
+
+    private var storage: EphemeralDictation!
+
+    override func setUp() async throws {
+        try await super.setUp()
+        storage = EphemeralDictation("DictationRetryTests")
+    }
+
+    override func tearDown() async throws {
+        storage.tearDown()
+        storage = nil
+        try await super.tearDown()
+    }
 
     private func makeCoordinator(
         backend: (any TranscriptionBackend)? = nil,
         cleanupClient: any CleanupProviding = CleanupClient()
     ) -> DictationCoordinator {
-        let name = "com.lore.test.\(UUID().uuidString)"
-        let defaults = UserDefaults(suiteName: name)!
-        defaults.removePersistentDomain(forName: name)
-        let tmp = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("DictationRetryTests-\(UUID().uuidString)", isDirectory: true)
-        return DictationCoordinator(
-            history: DictationHistory(
-                defaults: defaults,
-                entriesDirectory: tmp.appendingPathComponent("entries"),
-                audioDirectory: tmp.appendingPathComponent("audio")
-            ),
-            cleanupClient: cleanupClient,
-            backend: backend
-        )
+        storage.coordinator(backend: backend, cleanupClient: cleanupClient)
     }
 
     private func makeSettings(apiKey: String) -> AppSettings {
@@ -80,21 +76,8 @@ final class DictationRetryTests: XCTestCase {
 
     // MARK: - Diag stream inspection (the shared test store, delta since a mark)
 
-    /// Fence, then mark. Identical consecutive events share one record (#149), so
-    /// without the fence a test's first event could fold into the previous test's
-    /// last one and become invisible behind the mark.
-    private func diagMark() -> Int {
-        Self.nextFenceBuild += 1
-        DiagStore.record(.appLaunched(build: Self.nextFenceBuild))
-        return DiagStore.shared.recent(DiagStore.capacity).count
-    }
-
-    private func events(since mark: Int) -> [DiagEvent] {
-        Array(DiagStore.shared.recent(DiagStore.capacity).dropFirst(mark)).occurrenceEvents
-    }
-
     private func lastTranscribed(since mark: Int) -> (chunks: Int, failedChunks: Int)? {
-        for event in events(since: mark).reversed() {
+        for event in DiagStream.events(since: mark).reversed() {
             if case .transcribed(let chunks, let failedChunks, _, _, _) = event {
                 return (chunks, failedChunks)
             }
@@ -103,7 +86,7 @@ final class DictationRetryTests: XCTestCase {
     }
 
     private func apiCallOutcomes(since mark: Int) -> [DiagEvent.Outcome] {
-        events(since: mark).compactMap {
+        DiagStream.events(since: mark).compactMap {
             if case .apiCall(_, let outcome, _, _) = $0 { return outcome }
             return nil
         }
@@ -118,7 +101,7 @@ final class DictationRetryTests: XCTestCase {
         ])
         let coordinator = makeCoordinator(backend: backend)
         let entry = addAudioEntry(to: coordinator, sampleCount: 20_000)
-        let mark = diagMark()
+        let mark = DiagStream.mark()
 
         await coordinator.retryTranscription(entryID: entry.id)
 
@@ -140,7 +123,7 @@ final class DictationRetryTests: XCTestCase {
         ])
         let coordinator = makeCoordinator(backend: backend)
         let entry = addAudioEntry(to: coordinator, sampleCount: 500_000)
-        let mark = diagMark()
+        let mark = DiagStream.mark()
 
         await coordinator.retryTranscription(entryID: entry.id)
 
@@ -156,7 +139,7 @@ final class DictationRetryTests: XCTestCase {
         let backend = ScriptedBackend([.success("")])
         let coordinator = makeCoordinator(backend: backend)
         let entry = addAudioEntry(to: coordinator, sampleCount: 20_000)
-        let mark = diagMark()
+        let mark = DiagStream.mark()
 
         await coordinator.retryTranscription(entryID: entry.id)
 
@@ -208,7 +191,7 @@ final class DictationRetryTests: XCTestCase {
         var entry = DictationHistoryEntry(durationSeconds: 1)
         entry.status = .transcribed
         entry.rawText = "hello world"
-        let mark = diagMark()
+        let mark = DiagStream.mark()
 
         let ok = await coordinator.cleanupEntry(
             &entry, rawText: "hello world", prompt: "clean it up",
@@ -231,7 +214,7 @@ final class DictationRetryTests: XCTestCase {
         var entry = DictationHistoryEntry(durationSeconds: 1)
         entry.status = .transcribed
         entry.rawText = "hello world"
-        let mark = diagMark()
+        let mark = DiagStream.mark()
 
         let ok = await coordinator.cleanupEntry(
             &entry, rawText: "hello world", prompt: "clean it up",
@@ -257,7 +240,7 @@ final class DictationRetryTests: XCTestCase {
         var entry = DictationHistoryEntry(durationSeconds: 1)
         entry.status = .transcribed
         entry.rawText = "hello world"
-        let mark = diagMark()
+        let mark = DiagStream.mark()
 
         let ok = await coordinator.cleanupEntry(
             &entry, rawText: "hello world", prompt: "clean it up",
