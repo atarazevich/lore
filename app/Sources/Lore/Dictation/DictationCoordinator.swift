@@ -576,15 +576,30 @@ final class DictationCoordinator {
         // Paste immediately (always paste the best version) — even when a
         // newer recording session is already underway (#104): a completed
         // dictation still lands where the cursor is.
+        // A web composer takes a picture as a paste of its own (#195), so this
+        // dictation may have arrived as several. Remembered here for the
+        // upgrade panel below, which has one Cmd+Z to work with.
+        var arrivedInSeveralPastes = false
         if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
-            TextInserter.paste(text)
+            // Where the words are about to land decides the form the items take
+            // (#195): a terminal's agent opens a path, a web composer has to be
+            // handed the file. Read now — the user may have changed windows
+            // while this was being transcribed.
+            let target = PasteTarget.frontmost
+            let steps = RichInput.delivery(text: text, items: entry.items ?? [], target: target)
+            arrivedInSeveralPastes = steps.contains {
+                if case .files = $0 { return true } else { return false }
+            }
+            TextInserter.paste(steps)
             // The pasted text is exactly what the user dictated and is already
             // visible in the app's own history UI — only its length is recorded.
             DiagStore.record(.dictationPasted(characters: text.count, cleaned: didCleanup))
             if let items = entry.items, !items.isEmpty {
                 DiagStore.record(.dictationItemsPasted(
-                    items: items.count, included: items.filter(\.included).count
+                    items: items.count,
+                    included: items.filter(\.included).count,
+                    target: target
                 ))
                 // The folder that just grew is brought back under its ceiling
                 // (#196) — after the paste, off this actor, oldest first. What
@@ -608,6 +623,12 @@ final class DictationCoordinator {
         // A cleanup/translate failure keeps the panel up long enough to read (#50).
         if pending != nil {
             scheduleAutoHide(after: lastError == nil ? .milliseconds(800) : .seconds(4))
+        } else if arrivedInSeveralPastes {
+            // The panel's C and T undo the paste and replace it, and one Cmd+Z
+            // cannot undo three (#195). Nothing to offer here, so the indicator
+            // just finishes; a path-form dictation is still one paste and keeps
+            // the panel it has always had.
+            scheduleAutoHide()
         } else {
             showUpgradeOptions(didCleanup: didCleanup)
         }

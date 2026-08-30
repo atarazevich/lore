@@ -8,6 +8,17 @@ import XCTest
 @MainActor
 final class RichInputCleanupTests: XCTestCase {
 
+    // `pasteText` reads the Copying switches live (#198), and the composed text
+    // these tests assert on is built from it — on this machine the owner's own
+    // Settings would otherwise decide whether they pass.
+    override func setUp() async throws {
+        _ = isolatedRichInputDefaults("RichInputCleanupTests")
+    }
+
+    override func tearDown() async throws {
+        RichInputSettings.use(.standard)
+    }
+
     /// Uppercases what it is given and remembers it, so a test can see exactly
     /// which spans reached the model.
     private final class LoudCleanupClient: CleanupProviding, @unchecked Sendable {

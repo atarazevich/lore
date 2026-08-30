@@ -197,9 +197,10 @@ extension LoreRootApp {
             shell.presentsHealthPanel = true
             showMainWindow()
         }
-        // The recording bubble's gear (#198) — same two lines again: name the
-        // surface on the shared model, front the window. Installed here because
-        // this is the only place that can do the second half.
+        // The recording bubble's gear (#198/#201) — same two lines again: name
+        // the surface on the shared model, front the window. Installed here
+        // because this is the only place that can do the second half, and it is
+        // the one door: the gear names `.copying` through it, nothing else.
         SettingsSection.open = { [self] section in
             shell.showSettings(section)
             showMainWindow()

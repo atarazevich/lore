@@ -370,9 +370,11 @@ enum DiagEvent: Codable, Sendable, Equatable {
     case dictationItemCollected(kind: DictationItemKind, bytes: Int)
     /// A row in the opened list was switched: the item's state after the click.
     case dictationItemSwitched(kind: DictationItemKind, included: Bool)
-    /// The paste carried `included` of `items` — the receipt for what actually
-    /// travelled, which the panel deliberately does not restate on screen.
-    case dictationItemsPasted(items: Int, included: Int)
+    /// The paste carried `included` of `items`, in the form `target` reads
+    /// (#195) — the receipt for what actually travelled, which the panel
+    /// deliberately does not restate on screen. `PasteTarget` is closed by
+    /// construction, so naming the class names no app.
+    case dictationItemsPasted(items: Int, included: Int, target: PasteTarget)
     /// The collected images were pruned back under the ceiling (#196): how
     /// many files went, and how many bytes came back. Never which — a path is
     /// a name, and names do not enter the stream.

@@ -235,7 +235,8 @@ final class DiagEventPrivacyTests: XCTestCase {
             return .dictationItemCollected(kind: .image, bytes: .max)
         case .dictationItemSwitched:
             return .dictationItemSwitched(kind: .text, included: false)
-        case .dictationItemsPasted: return .dictationItemsPasted(items: .max, included: .max)
+        case .dictationItemsPasted:
+            return .dictationItemsPasted(items: .max, included: .max, target: .web)
         case .dictationItemsPruned:
             return .dictationItemsPruned(deleted: .max, bytesFreed: .max)
         case .dictationScreenshotChord: return .dictationScreenshotChord(eventsCreated: false)
@@ -296,6 +297,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         allowed.formUnion(DiagEvent.RepairOutcome.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.ClipboardRead.allCases.map(\.rawValue))
         allowed.formUnion(DictationItemKind.allCases.map(\.rawValue))
+        allowed.formUnion(PasteTarget.allCases.map(\.rawValue))
         allowed.formUnion(DictationState.allCases.map(\.rawValue))
         return allowed
     }()
