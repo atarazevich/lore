@@ -85,6 +85,35 @@ enum TopCenteredFrame {
             width: size.width, height: size.height
         )
     }
+
+    /// Where a window the user has dragged sits (#213).
+    ///
+    /// - Parameters:
+    ///   - topLeft: the corner they put it at. The *top* left, because that is
+    ///     the corner the shape grows from: a list opening or a second digit in
+    ///     the timer must push the window's bottom edge down, exactly as the
+    ///     top-centred frame keeps `maxY` fixed, and an origin kept as AppKit's
+    ///     bottom-left would have pushed the whole bubble up the screen instead.
+    ///   - visibleFrame: what the shape has to stay inside. A window dragged
+    ///     past an edge is pushed back rather than followed off the screen; the
+    ///     corner itself is kept unclamped by the caller, so coming back is the
+    ///     same movement as going.
+    static func draggedFrame(topLeft: NSPoint, size: NSSize, visibleFrame: NSRect) -> NSRect {
+        // A window with no room to be pushed into — bigger than the screen it is
+        // on — keeps its *top-left* corner on it rather than hanging off both
+        // ends at once. That corner is where the shape is drawn; the rest of a
+        // canvas is transparent margin, so it is the only one whose staying on
+        // screen means anything.
+        let x = min(
+            max(topLeft.x, visibleFrame.minX),
+            max(visibleFrame.minX, visibleFrame.maxX - size.width)
+        )
+        let top = max(
+            min(topLeft.y, visibleFrame.maxY),
+            min(visibleFrame.maxY, visibleFrame.minY + size.height)
+        )
+        return NSRect(x: x, y: top - size.height, width: size.width, height: size.height)
+    }
 }
 
 // MARK: - Top-centered content-sized panel
@@ -101,7 +130,11 @@ final class TopCenteredPanel<Content: View> {
     private let panel: OverlayPanel
     private let hostingView: NSHostingView<Content>
     private let topInset: CGFloat
-    private var lastFrame: NSRect = .zero
+    /// The frame the panel decided, last time it decided one. Not private:
+    /// `RecordingBubbleFrameTests` reads it to check that a dragged bubble stays
+    /// where it was put, and reading the decision is steadier than reading the
+    /// window back.
+    private(set) var lastFrame: NSRect = .zero
     private var currentScreen: NSScreen?
     /// The canvas the content measured for itself (#204). While it is set it is
     /// the only source of the frame: a poll's own measurement of a shape
@@ -113,6 +146,18 @@ final class TopCenteredPanel<Content: View> {
     /// everything else: re-centring it would move the dot, the lock and the
     /// timer, which had not changed at all (#204).
     private var restingAnchor: CGFloat?
+    /// Where the user has put the bubble (#213), as the top-left corner every
+    /// later frame is measured from. Once it is set nothing re-centres the
+    /// window again: not the 50 ms poll, not a canvas report, not the end of the
+    /// recording — and the next recording opens where the last one was left.
+    /// It lives on the panel and nowhere else, so quitting forgets it: where a
+    /// bubble was dragged is a decision about this session, not a setting.
+    private var draggedTopLeft: NSPoint?
+    /// Where inside the window the pointer took hold, kept for as long as the
+    /// button is down. Non-nil is what "a drag is under way" means: the frame is
+    /// applied with no animation while it is, and the offset is what keeps the
+    /// shape from jumping under the pointer on the first move.
+    private var dragGrab: CGSize?
 
     /// Nil when no screen can be resolved for the mouse (headless edge case).
     init?(content: Content, topInset: CGFloat) {
@@ -131,9 +176,9 @@ final class TopCenteredPanel<Content: View> {
         panel.titleVisibility = .hidden
         // A canvas is mostly transparent margin (#204), and a window that is
         // movable by its background answers a mouse-down anywhere the content
-        // did not — which is a click the app below never receives. The frame is
-        // set by the owner's poll anyway, so the window was never draggable in
-        // practice; this only stops it from swallowing the attempt.
+        // did not — which is a click the app below never receives. Dragging came
+        // back by the shape instead (#213, `drag(to:)`), which is the half of
+        // this the user wanted; the margin stays what it is, a hole.
         panel.isMovableByWindowBackground = false
         panel.backgroundColor = .clear
         panel.hasShadow = false
@@ -158,12 +203,44 @@ final class TopCenteredPanel<Content: View> {
     func hide() {
         panel.orderOut(nil)
         lastFrame = .zero
+        // A drag whose window went away is over; where it put the window is not.
+        dragGrab = nil
     }
+
+    /// The pointer has moved with the button down inside the shape (#213), in
+    /// screen coordinates.
+    ///
+    /// The pointer is read from AppKit rather than taken off the gesture on
+    /// purpose. SwiftUI reports a drag's translation in the window's own space,
+    /// and a window that follows that translation moves out from under it: the
+    /// pointer's position inside the window stops changing the moment the window
+    /// starts keeping up with it, so the translation collapses to nothing and
+    /// the shape springs back. The screen's own number does not care what the
+    /// window does.
+    ///
+    /// The first move is what takes hold: the offset is measured from where the
+    /// window is at that moment, so the shape does not jump the threshold's
+    /// worth of distance the instant the drag is recognised. From the frame the
+    /// panel decided, not the one AppKit rounded onto the backing grid — the
+    /// rounding is applied once, at the window, and is never read back into the
+    /// arithmetic, so it cannot accumulate across a drag.
+    func drag(to pointer: NSPoint) {
+        let held = lastFrame.width > 0 ? lastFrame : panel.frame
+        let grab = dragGrab ?? CGSize(
+            width: pointer.x - held.minX, height: pointer.y - held.maxY
+        )
+        dragGrab = grab
+        draggedTopLeft = NSPoint(x: pointer.x - grab.width, y: pointer.y - grab.height)
+        resizeToContent()
+    }
+
+    func endDrag() { dragGrab = nil }
 
     /// The canvas the content measured for itself, applied at once and with no
     /// animation of its own (#204) — or `nil` when the content is not that
-    /// shape, and the window goes back to fitting and centring what it holds
-    /// (processing, done, the upgrade panel, an error, the Read Aloud player).
+    /// shape, and the window goes back to fitting what it holds (processing,
+    /// done, the upgrade panel, an error, the Read Aloud player) and centring it
+    /// unless the user has dragged it somewhere (#213).
     ///
     /// A canvas is set once per recording and re-applied unchanged by the poll.
     /// It changes only when the resting row's own width changes (a timer digit,
@@ -185,7 +262,12 @@ final class TopCenteredPanel<Content: View> {
             size: CGSize(width: size.width, height: size.height),
             restingWidth: ceil(canvas.restingWidth)
         )
-        restingAnchor = restingAnchor ?? ceil(canvas.restingWidth)
+        // Once the bubble has been dragged, centring is over for the rest of
+        // the session (#213) — so the width it would have centred on is not
+        // latched either.
+        if draggedTopLeft == nil {
+            restingAnchor = restingAnchor ?? ceil(canvas.restingWidth)
+        }
         applyCanvas()
     }
 
@@ -242,7 +324,14 @@ final class TopCenteredPanel<Content: View> {
             currentScreen = screen
         }
 
-        let newFrame = TopCenteredFrame.frame(
+        // A bubble the user has placed is never re-centred (#213) — it only
+        // grows from the corner they left it at, the same way the top-centred
+        // one grows from the corner the recording started at.
+        let newFrame = draggedTopLeft.map {
+            TopCenteredFrame.draggedFrame(
+                topLeft: $0, size: size, visibleFrame: screen.visibleFrame
+            )
+        } ?? TopCenteredFrame.frame(
             size: size, anchorWidth: restingAnchor,
             screenFrame: screen.frame, visibleMaxY: screen.visibleFrame.maxY, topInset: topInset
         )
@@ -257,7 +346,9 @@ final class TopCenteredPanel<Content: View> {
         guard moved || screenChanged else { return }
         lastFrame = newFrame
 
-        if screenChanged || !animated {
+        // A drag is never animated: 0.15 s of easing behind a pointer is the
+        // shape lagging, not the shape moving.
+        if screenChanged || !animated || dragGrab != nil {
             // Snap instantly across screens — no sliding through the gap
             panel.setFrame(newFrame, display: true)
         } else {

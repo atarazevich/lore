@@ -28,6 +28,12 @@ struct DictationItemChip: Identifiable, Equatable {
     }
 }
 
+/// The two moments of a bubble drag the window has to hear about (#213). No
+/// translation rides along: the window reads the pointer off the screen itself,
+/// because a translation measured in the window's own space is a translation
+/// that collapses to nothing as the window follows it.
+enum BubbleDrag: Sendable { case moved, ended }
+
 /// A moment in a dictation, said the same way wherever it appears — the live
 /// timer and an item's row read the same clock: `m:ss`, and `h:mm:ss` once an
 /// hour has passed.
@@ -432,6 +438,9 @@ struct DictationIndicatorView: View {
     var onArmOperator: (() -> Void)?
     /// The gear opens Settings → Copying (#201).
     var onOpenSettings: (() -> Void)?
+    /// The shape is being dragged (#213): where the user puts the bubble is
+    /// where it stays, for the rest of this recording and for the next one.
+    var onDrag: ((BubbleDrag) -> Void)?
     /// The shape measures the window it wants (#204, `TopCenteredPanel`): the
     /// canvas it may grow inside while recording, and `nil` for every other
     /// state, where the window simply fits what it holds.
@@ -561,6 +570,11 @@ struct DictationIndicatorView: View {
         shape(open: expanded, measuring: false, listWidth: topRowWidth)
             .fixedSize()
             .contentShape(RoundedRectangle(cornerRadius: 12))
+            // On the shape, past its own content shape, so the transparent
+            // margin is not a handle (#213) — and after the keycaps, the rows
+            // and the gear have theirs, so a click still belongs to whatever it
+            // landed on.
+            .gesture(dragGesture)
             .onHover { inside in
                 pointerOnBubble = inside
                 // Leaving the shape ends the visit the tooltip's hand-off
@@ -651,6 +665,29 @@ struct DictationIndicatorView: View {
         hoveredTip = nil
         tipWarm = false
     }
+
+    /// Dragging the bubble by its own shape (#213). Before #204's fixed canvas
+    /// the window was movable by its background and the gesture came free with
+    /// it; the canvas is mostly transparent margin, so that had to go — a window
+    /// draggable by its background answers mouse-downs the app underneath never
+    /// receives.
+    ///
+    /// `minimumDistance` is the whole of what keeps a click a click: a drag
+    /// gesture that cannot be recognised before the pointer has travelled cannot
+    /// take a keycap's click, and a keycap's click cannot become a drag. Past
+    /// that distance the gesture is the one that has claimed the sequence, so
+    /// the control the press began on does not fire on release.
+    private var dragGesture: some Gesture {
+        DragGesture(minimumDistance: Self.dragThreshold)
+            .onChanged { _ in
+                // A line under a shape that is moving points at nothing.
+                if hoveredTip != nil || tipWarm { hideTip() }
+                onDrag?(.moved)
+            }
+            .onEnded { _ in onDrag?(.ended) }
+    }
+
+    private static let dragThreshold: CGFloat = 4
 
     private func followPointer() async {
         guard canExpand else {
@@ -1507,6 +1544,8 @@ final class DictationIndicatorModel {
     var onArmTranslate: (() -> Void)?
     var onArmOperator: (() -> Void)?
     var onOpenSettings: (() -> Void)?
+    /// Where the user drags the bubble (#213).
+    var onDrag: ((BubbleDrag) -> Void)?
     /// The window the shape wants (#204): the canvas it grows inside while
     /// recording, `nil` for every other state.
     var onCanvasChange: (@MainActor (BubbleCanvas?) -> Void)?
@@ -1550,6 +1589,7 @@ struct DictationIndicatorHost: View {
             onArmTranslate: model.onArmTranslate,
             onArmOperator: model.onArmOperator,
             onOpenSettings: model.onOpenSettings,
+            onDrag: model.onDrag,
             onCanvasChange: model.onCanvasChange
         )
     }
@@ -1624,6 +1664,16 @@ final class DictationIndicatorManager {
         // The gear names the section it belongs to and the shell fronts the
         // window (#198) — the one door, installed by the scene.
         model.onOpenSettings = { SettingsSection.open(.copying) }
+        // Where the bubble is dragged to is where it stays (#213). The pointer
+        // is read here, off the screen, rather than taken from the gesture:
+        // SwiftUI measures a drag in the window's own space, and that number
+        // stops moving the instant the window starts following it.
+        model.onDrag = { [weak self] phase in
+            switch phase {
+            case .moved: self?.panel?.drag(to: NSEvent.mouseLocation)
+            case .ended: self?.panel?.endDrag()
+            }
+        }
         // The shape measures its own window and the window stops following it
         // (#204): one canvas per recording, and hover changes nothing about it.
         model.onCanvasChange = { [weak self] canvas in

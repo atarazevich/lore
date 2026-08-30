@@ -1,4 +1,5 @@
 import AppKit
+import SwiftUI
 import XCTest
 @testable import LoreKit
 
@@ -145,5 +146,108 @@ final class RecordingBubbleFrameTests: XCTestCase {
             screenFrame: screen, visibleMaxY: visibleMaxY, topInset: topInset
         )
         XCTAssertEqual(rect.midX, screen.midX, accuracy: 0.0001)
+    }
+
+    // MARK: - Where the user puts it (#213)
+
+    /// The whole visible frame of that screen, menu bar taken off the top.
+    private var visibleFrame: NSRect {
+        NSRect(x: screen.minX, y: screen.minY, width: screen.width, height: visibleMaxY)
+    }
+
+    /// The corner the bubble was dragged to is the corner everything after it
+    /// grows from — the list opening, the timer reaching an hour, the next
+    /// canvas of the next recording. Top-left, because that is the corner #204
+    /// already pins: an origin kept as AppKit's bottom-left would push the whole
+    /// shape up the screen every time the list opened.
+    func testADraggedBubbleGrowsFromTheCornerItWasLeftAt() {
+        let corner = NSPoint(x: 700, y: 900)
+        for height in [rowHeight, openHeight, openHeight + 86] {
+            let rect = TopCenteredFrame.draggedFrame(
+                topLeft: corner, size: NSSize(width: openWidth, height: height),
+                visibleFrame: visibleFrame
+            )
+            print("[#213] dragged to \(NSStringFromPoint(corner)) → \(NSStringFromRect(rect))")
+            XCTAssertEqual(rect.minX, corner.x, accuracy: 0.0001, "the left edge moved")
+            XCTAssertEqual(rect.maxY, corner.y, accuracy: 0.0001, "the top edge moved")
+            XCTAssertEqual(rect.height, height, accuracy: 0.0001)
+        }
+    }
+
+    /// Dragged at an edge, the shape is pushed back inside rather than followed
+    /// off the screen.
+    func testADraggedBubbleIsPushedBackInsideTheVisibleFrame() {
+        let size = NSSize(width: openWidth, height: openHeight)
+        for (corner, expected) in [
+            (NSPoint(x: -400, y: 900), NSPoint(x: visibleFrame.minX, y: 900)),
+            (NSPoint(x: 3000, y: 900), NSPoint(x: visibleFrame.maxX - openWidth, y: 900)),
+            (NSPoint(x: 700, y: 4000), NSPoint(x: 700, y: visibleFrame.maxY)),
+            (NSPoint(x: 700, y: -50), NSPoint(x: 700, y: visibleFrame.minY + openHeight)),
+        ] {
+            let rect = TopCenteredFrame.draggedFrame(
+                topLeft: corner, size: size, visibleFrame: visibleFrame
+            )
+            XCTAssertEqual(rect.minX, expected.x, accuracy: 0.0001, "\(corner)")
+            XCTAssertEqual(rect.maxY, expected.y, accuracy: 0.0001, "\(corner)")
+            XCTAssertTrue(visibleFrame.contains(rect), "\(corner) left the screen: \(rect)")
+        }
+    }
+
+    /// A window with no room to be pushed into — one taller than the screen it
+    /// is on — keeps its top-left corner on screen instead of hanging off both
+    /// ends at once.
+    func testAWindowTallerThanTheScreenKeepsItsTopLeftCorner() {
+        let rect = TopCenteredFrame.draggedFrame(
+            topLeft: NSPoint(x: 40, y: 900),
+            size: NSSize(width: openWidth, height: visibleFrame.height + 200),
+            visibleFrame: visibleFrame
+        )
+        XCTAssertEqual(rect.minX, 40, accuracy: 0.0001)
+        XCTAssertEqual(rect.maxY, visibleFrame.maxY, accuracy: 0.0001)
+    }
+
+    /// And the window itself keeps it: a canvas report is not a reason to
+    /// re-centre a bubble the user has placed, and neither is the end of the
+    /// recording it was placed during. The next one opens where the last one was
+    /// left — until the app quits, which is the only thing that forgets.
+    @MainActor
+    func testADraggedOriginSurvivesACanvasReportAndTheNextRecording() throws {
+        let panel = try XCTUnwrap(
+            TopCenteredPanel(content: Color.clear.frame(width: 200, height: 40), topInset: 8),
+            "no screen to place a panel on"
+        )
+        panel.setCanvas(canvas())
+        XCTAssertGreaterThan(panel.lastFrame.width, 0, "the panel never placed itself")
+        // The frame the panel decided, which is the one a drag takes hold of.
+        let start = panel.lastFrame
+
+        // 40 pt right and 30 pt down, in two events. The first takes hold where
+        // the window already is, so the shape does not jump the recognition
+        // threshold's worth of distance the instant the drag is recognised.
+        panel.drag(to: NSPoint(x: start.minX + 12, y: start.maxY - 9))
+        XCTAssertEqual(panel.lastFrame, start, "taking hold moved the window")
+        panel.drag(to: NSPoint(x: start.minX + 52, y: start.maxY - 39))
+        panel.endDrag()
+        let dragged = panel.lastFrame
+        print("[#213] centred \(NSStringFromRect(start)) → dragged \(NSStringFromRect(dragged))")
+        XCTAssertEqual(dragged.minX, start.minX + 40, accuracy: 0.0001)
+        XCTAssertEqual(dragged.maxY, start.maxY - 30, accuracy: 0.0001)
+
+        // The 50 ms poll re-applies the same canvas twenty times a second.
+        panel.setCanvas(canvas())
+        XCTAssertEqual(panel.lastFrame, dragged, "the poll re-centred it")
+
+        // The list opens: downward from the corner it was left at.
+        panel.setCanvas(canvas(height: openHeight + 86))
+        XCTAssertEqual(panel.lastFrame.minX, dragged.minX, accuracy: 0.0001)
+        XCTAssertEqual(panel.lastFrame.maxY, dragged.maxY, accuracy: 0.0001)
+
+        // The recording ends — processing, done, the upgrade panel — and the
+        // next one starts.
+        panel.setCanvas(nil)
+        XCTAssertEqual(panel.lastFrame.minX, dragged.minX, accuracy: 0.0001)
+        XCTAssertEqual(panel.lastFrame.maxY, dragged.maxY, accuracy: 0.0001)
+        panel.setCanvas(canvas())
+        XCTAssertEqual(panel.lastFrame, dragged, "the next recording went back to the middle")
     }
 }
