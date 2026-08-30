@@ -71,8 +71,6 @@ final class HotkeyManager {
     nonisolated(unsafe) private var isRecordingFlag = false
     /// Synchronous mirror of isLocked for CGEvent tap callback
     nonisolated(unsafe) private var isLockedFlag = false
-    /// Synchronous mirror: true when upgrade panel is showing
-    nonisolated(unsafe) private var isUpgradeShowingFlag = false
     /// Synchronous mirror: true during pre-buffer phase (before hold confirmed)
     nonisolated(unsafe) private var isPreBufferingFlag = false
 
@@ -229,40 +227,6 @@ final class HotkeyManager {
                 }
             }
 
-            // C, T, or K while upgrade panel is showing → apply upgrade / flag operator
-            // Only match bare keypress (no Cmd/Ctrl/Option modifiers) to avoid eating Cmd+C etc.
-            if self.isUpgradeShowingFlag,
-               self.modifierOn({ $0.modifierUpgradeKeysEnabled }),
-               event.modifierFlags.intersection([.command, .control, .option]).isEmpty,
-               let chars = event.characters?.lowercased() {
-                var action: UpgradeAction?
-                if chars == "c" { action = .cleanup }
-                else if chars == "t" { action = .translate }
-                if let action {
-                    Task { @MainActor in
-                        HotkeyManager.hkLog.debug("[HOTKEY] \(String(describing: action), privacy: .public) key → apply upgrade")
-                        await self.coordinator?.applyUpgradeByKey(action)
-                    }
-                    return nil
-                }
-                if chars == "k" { // send to operator (#122)
-                    Task { @MainActor in
-                        HotkeyManager.hkLog.debug("[HOTKEY] K key → toggle operator addressed")
-                        self.coordinator?.toggleOperatorAddressedByKey()
-                    }
-                    return nil
-                }
-            }
-
-            // Esc while upgrade panel is showing → dismiss
-            if event.keyCode == 53, self.isUpgradeShowingFlag {
-                Task { @MainActor in
-                    self.coordinator?.dismissUpgrades()
-                    HotkeyManager.hkLog.debug("[HOTKEY] Esc → dismiss upgrades")
-                }
-                return nil
-            }
-
             // Space while recording or pre-buffering → lock (consume the event)
             if event.keyCode == 49,
                self.modifierOn({ $0.modifierLockEnabled }),
@@ -342,14 +306,10 @@ final class HotkeyManager {
         HotkeyManager.hkLog.info("Hotkey manager uninstalled")
     }
 
-    /// Update the upgrade-showing flag for the CGEvent tap (called from polling loop).
-    func updateUpgradeShowingFlag(_ showing: Bool) {
-        isUpgradeShowingFlag = showing
-    }
-
     /// Modifier enable toggle lookup (DSET-05/06): Space lock, Fn+V cleanup,
-    /// Fn+T translate, and the post-paste C/T upgrade keys each gate on one
-    /// SettingsStore flag; absent settings default to enabled. The NSEvent
+    /// Fn+T translate, and the Fn+K / Fn+S chords with the rail letters that
+    /// teach them each gate on one SettingsStore flag; absent settings default
+    /// to enabled. The NSEvent
     /// monitors and the CGEvent tap callback all run on the main thread (the
     /// tap source is added to CFRunLoopGetMain — see the Space path's
     /// assumeIsolated precedent), so this is a cheap cached-property read in
@@ -513,13 +473,6 @@ final class HotkeyManager {
                 HotkeyManager.hkLog.debug("[HOTKEY] Fn+S → screenshot to clipboard")
                 return
             }
-        }
-
-        // Esc while upgrade panel showing → dismiss
-        if event.keyCode == 53, coordinator.isUpgradePanelVisible {
-            coordinator.dismissUpgrades()
-            HotkeyManager.hkLog.debug("[HOTKEY] Esc → dismiss upgrades")
-            return
         }
 
         // Space while recording or pre-buffering → confirm + lock
@@ -731,32 +684,6 @@ final class HotkeyManager {
                     }
                 }
 
-                // C, T, or K while upgrade panel showing → apply upgrade / flag operator
-                // Check no modifiers (allow Cmd+C etc. through)
-                let hasModifiers = flags.contains(.maskCommand) || flags.contains(.maskControl) || flags.contains(.maskAlternate)
-                if manager.isUpgradeShowingFlag && manager.modifierOn({ $0.modifierUpgradeKeysEnabled }) && !hasModifiers {
-                    if let nsEvent = NSEvent(cgEvent: event),
-                       let chars = nsEvent.characters?.lowercased() {
-                        var action: UpgradeAction?
-                        if chars == "c" { action = .cleanup }
-                        else if chars == "t" { action = .translate }
-                        if let action {
-                            Task { @MainActor in
-                                HotkeyManager.hkLog.debug("[HOTKEY] \(String(describing: action), privacy: .public) key (CGEvent tap) → apply upgrade")
-                                await manager.coordinator?.applyUpgradeByKey(action)
-                            }
-                            return nil
-                        }
-                        if chars == "k" { // send to operator (#122)
-                            Task { @MainActor in
-                                HotkeyManager.hkLog.debug("[HOTKEY] K key (CGEvent tap) → toggle operator addressed")
-                                manager.coordinator?.toggleOperatorAddressedByKey()
-                            }
-                            return nil
-                        }
-                    }
-                }
-
                 // Fn+R (read aloud) / Fn+Q (enqueue) → consume (#105). Unlike
                 // Fn+V/T these fire regardless of recording state — the chord
                 // handler aborts any dictation gesture itself (reading and
@@ -805,15 +732,6 @@ final class HotkeyManager {
                         HotkeyManager.hkLog.debug(
                             "[HOTKEY] Cmd+Shift+3/4 (CGEvent) → screenshot to clipboard"
                         )
-                    }
-                    return nil
-                }
-
-                // Esc while upgrade panel showing → dismiss
-                if keyCode == 53 && manager.isUpgradeShowingFlag {
-                    Task { @MainActor in
-                        manager.coordinator?.dismissUpgrades()
-                        HotkeyManager.hkLog.debug("[HOTKEY] Esc (CGEvent tap) → dismiss upgrades")
                     }
                     return nil
                 }

@@ -15,12 +15,6 @@ final class DictationCoordinator {
     private(set) var audioLevel: Float = 0
     private(set) var lastTranscript: String?
     private(set) var lastError: String?
-    /// Whether the upgrade panel (C/T buttons) is visible after initial paste.
-    private(set) var isUpgradePanelVisible = false
-    /// Whether cleanup was already applied (hides [C] button, only shows [T]).
-    private(set) var cleanupAlreadyApplied = false
-    /// Countdown remaining for upgrade auto-dismiss (seconds). Nil when not showing.
-    private(set) var upgradeCountdown: Double?
     /// Pre-paste cleanup mode set during recording via Fn+V/Fn+T.
     private(set) var pendingCleanupMode: UpgradeAction?
     /// Fn+K "send to operator" (#122): armed during recording, lands on the
@@ -46,7 +40,6 @@ final class DictationCoordinator {
     private var audioLevelTask: Task<Void, Never>?
     private var firstFrameWatchdogTask: Task<Void, Never>?
     private var autoHideTask: Task<Void, Never>?
-    private var upgradeDismissTask: Task<Void, Never>?
     /// True when a mic error is parked in `.done` while Fn may still be held — it must
     /// stay visible (no auto-hide) until the genuine Fn release starts the grace hide.
     private var micErrorSticky = false
@@ -76,15 +69,11 @@ final class DictationCoordinator {
     private static let minimumSpeechSamples = 8000
     private static let maxChunkSamples = 480_000
     private static let sampleRate = 16000.0
-    static let upgradePanelDuration: Double = 3.0
 
     /// User-facing paste-time failure messages (#50). Raw text is still
     /// pasted (DIC-48 fallback unchanged) — these only make the silence visible.
     static let cleanupFailedPastedRaw = "Cleanup failed \u{2014} pasted raw text"
     static let translateFailedPastedRaw = "Translation failed \u{2014} pasted raw text"
-    /// Upgrade-key (C/T) failures keep whatever was already pasted.
-    static let cleanupFailedKeptText = "Cleanup failed \u{2014} kept pasted text"
-    static let translateFailedKeptText = "Translation failed \u{2014} kept pasted text"
 
     /// Shared audio bus — set by AppDelegate during dictation setup.
     var audioBus: AudioBus?
@@ -329,15 +318,11 @@ final class DictationCoordinator {
         // (#104): a pipeline still finishing an earlier dictation goes stale
         // for state/indicator writes (history update and paste are not
         // gated). Only now, at confirm — an unconfirmed pre-buffer (a tap)
-        // must not strip the finishing session's upgrade panel, error row,
-        // entry id, or pending auto-hide.
+        // must not strip the finishing session's error row, entry id, or
+        // pending auto-hide.
         sessionEpoch += 1
         autoHideTask?.cancel()
         autoHideTask = nil
-        upgradeDismissTask?.cancel()
-        upgradeDismissTask = nil
-        isUpgradePanelVisible = false
-        upgradeCountdown = nil
         currentEntryID = nil
         pendingCleanupMode = nil
         pendingOperatorAddressed = false
@@ -582,10 +567,6 @@ final class DictationCoordinator {
         // Paste immediately (always paste the best version) — even when a
         // newer recording session is already underway (#104): a completed
         // dictation still lands where the cursor is.
-        // A web composer takes a picture as a paste of its own (#195), so this
-        // dictation may have arrived as several. Remembered here for the
-        // upgrade panel below, which has one Cmd+Z to work with.
-        var arrivedInSeveralPastes = false
         if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
             // Where the words are about to land decides the form the items take
@@ -594,9 +575,6 @@ final class DictationCoordinator {
             // while this was being transcribed.
             let target = PasteTarget.frontmost
             let steps = RichInput.delivery(text: text, items: entry.items ?? [], target: target)
-            arrivedInSeveralPastes = steps.contains {
-                if case .files = $0 { return true } else { return false }
-            }
             TextInserter.paste(steps)
             // The pasted text is exactly what the user dictated and is already
             // visible in the app's own history UI — only its length is recorded.
@@ -621,23 +599,11 @@ final class DictationCoordinator {
 
         history.update(entry)
 
-        // STEP 4: the indicator and upgrade panel belong to the newest session.
+        // STEP 4: the indicator belongs to the newest session.
         guard isCurrentSession(epoch) else { return }
         state = .done
-
-        // Show upgrade options — skip if user explicitly chose a pre-paste mode.
-        // A cleanup/translate failure keeps the panel up long enough to read (#50).
-        if pending != nil {
-            scheduleAutoHide(after: lastError == nil ? .milliseconds(800) : .seconds(4))
-        } else if arrivedInSeveralPastes {
-            // The panel's C and T undo the paste and replace it, and one Cmd+Z
-            // cannot undo three (#195). Nothing to offer here, so the indicator
-            // just finishes; a path-form dictation is still one paste and keeps
-            // the panel it has always had.
-            scheduleAutoHide()
-        } else {
-            showUpgradeOptions(didCleanup: didCleanup)
-        }
+        // A cleanup/translate failure stays up long enough to read (#50).
+        scheduleAutoHide(after: lastError == nil ? .milliseconds(800) : .seconds(4))
     }
 
     /// Clipboard images become PNGs under lore's own Application Support — the
@@ -661,90 +627,6 @@ final class DictationCoordinator {
             kept.append(item)
         }
         return kept.isEmpty ? nil : kept
-    }
-
-    // MARK: - Upgrade Panel
-
-    /// Show upgrade panel if API key is available.
-    private func showUpgradeOptions(didCleanup: Bool) {
-        let hasApiKey = !(settings?.openaiApiKey.isEmpty ?? true)
-
-        guard hasApiKey else {
-            // No upgrades possible — just auto-hide after brief checkmark
-            scheduleAutoHide()
-            return
-        }
-
-        isUpgradePanelVisible = true
-        cleanupAlreadyApplied = didCleanup
-        upgradeCountdown = Self.upgradePanelDuration
-
-        // Start countdown timer for auto-dismiss
-        upgradeDismissTask?.cancel()
-        upgradeDismissTask = Task { [weak self] in
-            let steps = 30
-            let stepDuration = Self.upgradePanelDuration / Double(steps)
-            for i in 1...steps {
-                do {
-                    try await Task.sleep(for: .milliseconds(Int(stepDuration * 1000)))
-                } catch {
-                    return // Cancelled
-                }
-                guard let self, self.isUpgradePanelVisible else { return }
-                self.upgradeCountdown = Self.upgradePanelDuration - (Double(i) * stepDuration)
-            }
-            guard let self, self.isUpgradePanelVisible else { return }
-            self.dismissUpgrades()
-        }
-    }
-
-    /// Called when user selects an upgrade via hotkey or indicator button
-    /// (post-paste C/T): undo the previous paste and re-paste the upgraded text.
-    func applyUpgradeByKey(_ action: UpgradeAction) async {
-        guard isUpgradePanelVisible else { return }
-
-        upgradeDismissTask?.cancel()
-        upgradeDismissTask = nil
-        isUpgradePanelVisible = false
-        upgradeCountdown = nil
-
-        guard let entryID = currentEntryID,
-              var entry = history.entries.first(where: { $0.id == entryID }),
-              let rawText = entry.rawText else {
-            log.error("upgrade failed: no entry or raw text")
-            scheduleAutoHide()
-            return
-        }
-
-        state = .processing
-        // A retry must not carry a stale failure row into a success (#50).
-        lastError = nil
-        log.debug("applying upgrade: \(String(describing: action), privacy: .public)")
-
-        // Meta is written only on success: a failed upgrade keeps the
-        // previous cleaned text and whatever meta truthfully described it
-        // (DIC-37/48). `kept: true` selects the upgrade failure wording.
-        _ = await runCleanupAction(action, on: &entry, rawText: rawText, kept: true)
-
-        // Undo previous paste, then paste upgraded text
-        if let text = entry.cleanedText ?? entry.rawText {
-            lastTranscript = text
-            TextInserter.undoAndPaste(text)
-            log.debug("upgrade pasted (undo+paste): \(text, privacy: .private)")
-        }
-
-        history.update(entry)
-        state = .done
-        scheduleAutoHide(after: lastError == nil ? .milliseconds(800) : .seconds(4))
-    }
-
-    /// Dismiss upgrade panel without action.
-    func dismissUpgrades() {
-        upgradeDismissTask?.cancel()
-        upgradeDismissTask = nil
-        isUpgradePanelVisible = false
-        upgradeCountdown = nil
-        scheduleAutoHide()
     }
 
     /// Hide the indicator after a grace period. The default ~800ms covers the normal
@@ -957,25 +839,10 @@ final class DictationCoordinator {
         log.debug("operator addressed: \(self.pendingOperatorAddressed, privacy: .public)")
     }
 
-    /// Toggle the just-pasted dictation's operator-addressed flag from the
-    /// upgrade panel (bare K, #122) — the "right after" half of the gesture,
-    /// same window as the C/T upgrade keys, and the same toggle idiom as the
-    /// recording chord: pressed twice → off (nil, not false, so the entry's
-    /// JSON returns to its unflagged byte-identical form). The panel stays
-    /// up: toggling doesn't consume the C/T retry affordance.
-    func toggleOperatorAddressedByKey() {
-        guard isUpgradePanelVisible, let entryID = currentEntryID,
-              var entry = history.entries.first(where: { $0.id == entryID }) else { return }
-        entry.operatorAddressed = entry.operatorAddressed == true ? nil : true
-        history.update(entry)
-        log.debug("operator addressed toggled by key (post-paste): \(entry.operatorAddressed == true, privacy: .public)")
-    }
-
-    /// The K badge state for the indicator (#122): armed while recording
+    /// The K letter's state in the rail (#122): armed while recording
     /// (`pendingOperatorAddressed`), then — after the pipeline consumes the
-    /// arming into the entry's first write — the entry's own flag, which the
-    /// post-paste bare K toggles. Keeps the badge from vanishing at entry
-    /// write and lights the upgrade panel's K keycap.
+    /// arming into the entry's first write — the entry's own flag. Keeps the
+    /// letter from going dark at entry write, mid-dictation.
     var operatorAddressedDisplayed: Bool {
         if pendingOperatorAddressed { return true }
         guard let entryID = currentEntryID else { return false }
@@ -1183,16 +1050,12 @@ final class DictationCoordinator {
     }
 
     /// Single source of truth mapping an UpgradeAction to its prompt, meta
-    /// labels, and failure wording, shared by the paste-time defaults, the
-    /// Fn+V/Fn+T chords, and the post-paste C/T upgrade keys. Meta is written
-    /// only on success (DIC-37/48); `kept` selects the upgrade-retry failure
-    /// wording ("kept pasted text" — the previous paste survives, which may
-    /// not be raw).
+    /// labels, and failure wording, shared by the paste-time defaults and the
+    /// Fn+V/Fn+T chords. Meta is written only on success (DIC-37/48).
     private func runCleanupAction(
         _ action: UpgradeAction,
         on entry: inout DictationHistoryEntry,
         rawText: String,
-        kept: Bool = false,
         epoch: Int? = nil
     ) async -> Bool {
         let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
@@ -1206,13 +1069,13 @@ final class DictationCoordinator {
             prompt = basePrompt
             modeName = "Cleanup"
             translatedTo = nil
-            failureMessage = kept ? Self.cleanupFailedKeptText : Self.cleanupFailedPastedRaw
+            failureMessage = Self.cleanupFailedPastedRaw
             endpoint = .cleanup
         case .translate:
             prompt = basePrompt + CleanupMode.translateSuffix()
             modeName = "Translate"
             translatedTo = TranslationLanguage.english.key
-            failureMessage = kept ? Self.translateFailedKeptText : Self.translateFailedPastedRaw
+            failureMessage = Self.translateFailedPastedRaw
             endpoint = .translate
         }
 

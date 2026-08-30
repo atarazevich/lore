@@ -238,9 +238,9 @@ final class TopCenteredPanel<Content: View> {
 
     /// The canvas the content measured for itself, applied at once and with no
     /// animation of its own (#204) — or `nil` when the content is not that
-    /// shape, and the window goes back to fitting what it holds (processing,
-    /// done, the upgrade panel, an error, the Read Aloud player) and centring it
-    /// unless the user has dragged it somewhere (#213).
+    /// shape, and the window goes back to fitting what it holds (a face after
+    /// release — transcribing, a failure — or the Read Aloud player) and
+    /// centring it unless the user has dragged it somewhere (#213).
     ///
     /// A canvas is set once per recording and re-applied unchanged by the poll.
     /// It changes only when the resting row's own width changes (a timer digit,

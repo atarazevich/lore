@@ -693,9 +693,6 @@ struct DictationView: View {
             if settings.modifierTranslateEnabled {
                 kbdHint("\(hotkeyLabel)+T", "translate")
             }
-            if settings.modifierUpgradeKeysEnabled {
-                kbdHint("C/T", "after paste")
-            }
             kbdHint("Esc", "discard")
             Spacer()
         }

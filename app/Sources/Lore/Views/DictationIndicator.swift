@@ -360,19 +360,17 @@ struct DictationIndicatorView: View {
     let audioLevel: Float
     var isLocked = false
     var pendingMode: UpgradeAction?
-    /// Fn+K armed or entry flagged (#122): shows the K badge while
-    /// recording and fills the upgrade panel's K keycap after paste.
+    /// Fn+K armed or entry flagged (#122): the K letter stands lit in the rail
+    /// while the dictation carries it.
     var operatorAddressed = false
     var recordingSeconds: Int = 0
-    var showUpgradeButtons = false
-    var hideCleanupButton = false
-    /// DSET-06: the C/T keycap hints disappear when the upgrade-keys modifier
-    /// toggle is off; the buttons themselves stay clickable.
+    /// DSET-06: the rail's hint letters — the ones nothing has armed — stay off
+    /// the bubble when the upgrade-keys modifier toggle is off. What *is* armed
+    /// still stands there, opened or not.
     var showUpgradeKeycaps = true
     /// DSET-05: with Space-lock turned off there is no lock to offer, so the
     /// glyph is not drawn at all rather than standing there inert (#201).
     var lockEnabled = true
-    var upgradeCountdown: Double?
     var lastError: String?
     var bluetoothRedirected = false
     var noSignal = false
@@ -442,9 +440,6 @@ struct DictationIndicatorView: View {
     /// ellipsises instead of pushing the bubble wider.
     @State private var topRowWidth: CGFloat = 0
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
-    var onUpgrade: ((UpgradeAction) -> Void)?
-    /// Post-paste K toggle (#122) — same tap affordance as the C/T buttons.
-    var onOperatorToggle: (() -> Void)?
     /// A row is the switch: in the prompt, or left out (#192).
     var onToggleItem: ((UUID) -> Void)?
     /// The lock glyph is the Space key's other face (#201).
@@ -814,9 +809,7 @@ struct DictationIndicatorView: View {
         case .processing:
             processingContent
         case .done:
-            if showUpgradeButtons {
-                upgradeContent
-            } else if let error = lastError {
+            if let error = lastError {
                 statusRow(icon: "xmark.circle.fill", iconColor: LoreTheme.Accent.red, text: error, wrap: true)
             } else {
                 statusRow(icon: "checkmark.circle.fill", iconColor: LoreTheme.Accent.green, text: "Done")
@@ -1445,81 +1438,6 @@ struct DictationIndicatorView: View {
                 .fixedSize(horizontal: false, vertical: true)
         }
     }
-
-    // MARK: - Upgrade
-
-    @ViewBuilder
-    private var upgradeContent: some View {
-        VStack(spacing: 4) {
-            HStack(spacing: 10) {
-                // A failed cleanup/translate must not render as success (#50):
-                // red row states what happened; C/T stay available as retry.
-                if let error = lastError {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(LoreTheme.Accent.red)
-                        .font(.system(size: 12))
-                    Text(error)
-                        .font(LoreTheme.Typography.body)
-                        .foregroundStyle(LoreTheme.TextColor.primary)
-                } else {
-                    Image(systemName: "checkmark.circle.fill")
-                        .foregroundStyle(LoreTheme.Accent.green)
-                        .font(.system(size: 12))
-                    Text("Pasted")
-                        .font(LoreTheme.Typography.body)
-                        .foregroundStyle(LoreTheme.TextColor.muted)
-                }
-
-                LoreTheme.Surface.line
-                    .frame(width: 1, height: 14)
-
-                if !hideCleanupButton {
-                    upgradeButton(label: "C", subtitle: "Cleanup") { onUpgrade?(.cleanup) }
-                }
-                upgradeButton(label: "T", subtitle: "Translate") { onUpgrade?(.translate) }
-                // Fn+K (#122): filled while the entry is flagged — the bare-K
-                // press's visual feedback; tap toggles like the keycap does.
-                upgradeButton(label: "K", subtitle: "Operator",
-                              highlighted: operatorAddressed) { onOperatorToggle?() }
-            }
-
-            if let countdown = upgradeCountdown, countdown > 0 {
-                GeometryReader { geo in
-                    RoundedRectangle(cornerRadius: 1)
-                        .fill(Color.white.opacity(0.12))
-                        .frame(width: geo.size.width * (countdown / DictationCoordinator.upgradePanelDuration))
-                }
-                .frame(height: 2)
-            }
-        }
-    }
-
-    @ViewBuilder
-    private func upgradeButton(
-        label: String, subtitle: String, highlighted: Bool = false,
-        action: @escaping () -> Void
-    ) -> some View {
-        HStack(spacing: 4) {
-            if showUpgradeKeycaps {
-                Text(label)
-                    .font(LoreTheme.Typography.mono(11, weight: .semibold))
-                    .foregroundStyle(highlighted ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
-            }
-            Text(subtitle)
-                .font(.system(size: 12, weight: .medium))
-                .foregroundStyle(LoreTheme.TextColor.primary)
-        }
-        .padding(.horizontal, 8)
-        .padding(.vertical, 3)
-        .background(
-            // Design `.ibtn` fill — same white .07 as LoreIconButton; the
-            // highlighted (flagged) state fills with the selection accent.
-            RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
-                .fill(highlighted ? LoreTheme.Accent.blue.opacity(0.35) : Color.white.opacity(0.07))
-        )
-        .contentShape(Rectangle())
-        .onTapGesture(perform: action)
-    }
 }
 
 // MARK: - Model
@@ -1533,11 +1451,8 @@ final class DictationIndicatorModel {
     var pendingMode: UpgradeAction?
     var operatorAddressed = false
     var recordingSeconds: Int = 0
-    var showUpgradeButtons = false
-    var hideCleanupButton = false
     var showUpgradeKeycaps = true
     var lockEnabled = true
-    var upgradeCountdown: Double?
     var lastError: String?
     var bluetoothRedirected = false
     var noSignal = false
@@ -1547,8 +1462,6 @@ final class DictationIndicatorModel {
     var held = false
     /// Render-only — see `BubbleRenderPreview`.
     var renderPreview = BubbleRenderPreview()
-    var onUpgrade: ((UpgradeAction) -> Void)?
-    var onOperatorToggle: (() -> Void)?
     var onToggleItem: ((UUID) -> Void)?
     var onToggleLock: (() -> Void)?
     var onToggleCollecting: (() -> Void)?
@@ -1578,11 +1491,8 @@ struct DictationIndicatorHost: View {
             pendingMode: model.pendingMode,
             operatorAddressed: model.operatorAddressed,
             recordingSeconds: model.recordingSeconds,
-            showUpgradeButtons: model.showUpgradeButtons,
-            hideCleanupButton: model.hideCleanupButton,
             showUpgradeKeycaps: model.showUpgradeKeycaps,
             lockEnabled: model.lockEnabled,
-            upgradeCountdown: model.upgradeCountdown,
             lastError: model.lastError,
             bluetoothRedirected: model.bluetoothRedirected,
             noSignal: model.noSignal,
@@ -1591,8 +1501,6 @@ struct DictationIndicatorHost: View {
             screenshotsEnabled: model.screenshotsEnabled,
             held: model.held,
             renderPreview: model.renderPreview,
-            onUpgrade: model.onUpgrade,
-            onOperatorToggle: model.onOperatorToggle,
             onToggleItem: model.onToggleItem,
             onToggleLock: model.onToggleLock,
             onToggleCollecting: model.onToggleCollecting,
@@ -1625,17 +1533,6 @@ final class DictationIndicatorManager {
         ) else { return }
         self.panel = panel
 
-        // Wire up upgrade callback
-        model.onUpgrade = { [weak coordinator] action in
-            Task { @MainActor in
-                await coordinator?.applyUpgradeByKey(action)
-            }
-        }
-        model.onOperatorToggle = { [weak coordinator] in
-            Task { @MainActor in
-                coordinator?.toggleOperatorAddressedByKey()
-            }
-        }
         model.onToggleItem = { [weak coordinator] id in
             Task { @MainActor in
                 coordinator?.toggleItem(id: id)
@@ -1722,12 +1619,9 @@ final class DictationIndicatorManager {
                 if newSeconds != self.model.recordingSeconds {
                     self.model.recordingSeconds = newSeconds
                 }
-                self.model.showUpgradeButtons = coordinator.isUpgradePanelVisible
-                self.model.hideCleanupButton = coordinator.cleanupAlreadyApplied
                 self.model.showUpgradeKeycaps =
                     coordinator.settings?.modifierUpgradeKeysEnabled ?? true
                 self.model.lockEnabled = coordinator.settings?.modifierLockEnabled ?? true
-                self.model.upgradeCountdown = coordinator.upgradeCountdown
                 self.model.lastError = coordinator.lastError
                 self.model.bluetoothRedirected = coordinator.bluetoothMicRedirected
                 self.model.noSignal = coordinator.noSignal
@@ -1739,9 +1633,6 @@ final class DictationIndicatorManager {
                 self.model.held = hotkeyManager?.isFnHoldingBubble ?? false
                 let chips = self.chips(for: coordinator.items)
                 if chips != self.model.items { self.model.items = chips }
-
-                // Keep CGEvent tap flag in sync
-                hotkeyManager?.updateUpgradeShowingFlag(coordinator.isUpgradePanelVisible)
 
                 // Show/hide and resize
                 if newState == .idle {

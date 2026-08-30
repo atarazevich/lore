@@ -864,9 +864,9 @@ struct SettingsView: View {
             )
             LoreDivider()
             modifierRow(
-                key: "C/T",
-                name: "Upgrade keys",
-                sub: "Right after pasting: C cleans up, T translates",
+                key: "K/S",
+                name: "Extra keys",
+                sub: "K sends to the operator, S takes a screenshot into the prompt",
                 isOn: $settings.modifierUpgradeKeysEnabled
             )
         }
