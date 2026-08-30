@@ -70,9 +70,15 @@ enum RichInputSettings {
     /// path — with no marker around it.
     static var tagsEnabled: Bool { isOn(.tags) }
 
-    /// Whether the screenshot key does anything (#198): Fn+S, and the
+    /// Whether Lore takes a screenshot at all (#198): Fn+S, and the
     /// Cmd+Shift+3/4 redirect that rides on the same switch (#199).
-    static var screenshotsEnabled: Bool { isOn(.screenshots) }
+    ///
+    /// The master switch is half of it (#202). With collecting off the picture
+    /// has nowhere to land — the door would refuse it — so Lore must not take
+    /// one: Cmd+Shift+3/4 go wherever the user already has them configured, and
+    /// Fn+S does nothing. Standing in front of a system shortcut only to discard
+    /// what it produced is the one outcome where the screenshot exists nowhere.
+    static var screenshotsEnabled: Bool { isOn(.collect) && isOn(.screenshots) }
 
     /// Whether a system screenshot taken during a dictation goes to the prompt
     /// (#199). Only ever asked while `screenshotsEnabled`.

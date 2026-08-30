@@ -54,4 +54,24 @@ final class ScreenshotRedirectTests: XCTestCase {
         defaults.set(false, forKey: RichInputSettings.Switch.screenshots.key)
         XCTAssertFalse(RichInputSettings.screenshotsEnabled, "screenshots off closes both doors")
     }
+
+    /// The paperclip's own switch closes the door before the chord is ever stood
+    /// in for (#202). With collecting off the picture has nowhere to land, so
+    /// Lore takes none: Cmd+Shift+3/4 go the user's own way and Fn+S does
+    /// nothing. The shipped build redirected anyway and the collector then threw
+    /// the image away, leaving the screenshot nowhere at all.
+    func testCollectingOffTakesNoScreenshotAtAll() {
+        let defaults = isolatedRichInputDefaults("ScreenshotRedirectTests")
+        defer { RichInputSettings.use(.standard) }
+
+        defaults.set(false, forKey: RichInputSettings.Switch.collect.key)
+        XCTAssertFalse(RichInputSettings.screenshotsEnabled)
+        // Its own two switches are untouched — nothing was reconfigured behind
+        // the user's back, so turning collecting back on restores both doors.
+        XCTAssertTrue(RichInputSettings.isOn(.screenshots, in: defaults))
+        XCTAssertTrue(RichInputSettings.redirectsSystemScreenshot)
+
+        defaults.set(true, forKey: RichInputSettings.Switch.collect.key)
+        XCTAssertTrue(RichInputSettings.screenshotsEnabled)
+    }
 }

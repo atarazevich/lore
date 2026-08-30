@@ -85,6 +85,9 @@ final class RichInputSettingsTests: XCTestCase {
         for kind in DictationItemKind.allCases {
             XCTAssertFalse(RichInputSettings.collects(kind, in: defaults), "\(kind.rawValue)")
         }
+        // And nothing is captured either (#202): a screenshot key that fires
+        // into a closed door is a picture that ends up nowhere.
+        XCTAssertFalse(RichInputSettings.screenshotsEnabled)
     }
 
     // MARK: - The door reads them live
