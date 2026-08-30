@@ -68,18 +68,27 @@ final class RecordingBubbleRenderTests: XCTestCase {
         )
     }
 
-    /// Two items land: the paperclip brightens and takes a badge, and nothing
-    /// before it moves. The badge is drawn past the glyph's own box, so the
-    /// region that must agree ends where the paperclip begins.
+    /// Two items land: the paperclip brightens and the count appears beside it,
+    /// and nothing before it moves. The count is a sibling now (#209, B2), so
+    /// the row grows to the right by its own width — the region that must agree
+    /// still ends where the paperclip begins.
     func testCollectingSomethingMovesNothingBeforeThePaperclip() throws {
         let rest = try raster(bubble())
         let holding = try raster(bubble(items: [chip(0), chip(1)]))
-        XCTAssertEqual(
-            holding.paintedWidth, rest.paintedWidth, accuracy: 0.0001,
-            "the badge is an overlay — the resting row keeps its width"
+        let grew = holding.paintedWidth - rest.paintedWidth
+        print(
+            "[#209] two items: the row grew \(String(format: "%.2f", grew)) pt for the count, "
+            + "\(DictationIndicatorView.glyphGap) pt of gap and "
+            + "\(DictationIndicatorView.countDigitWidth) pt of figure"
         )
-        // The paperclip itself brightens and takes the badge, which is drawn
-        // past its box, so the region that must agree ends where it begins.
+        XCTAssertEqual(
+            grew,
+            DictationIndicatorView.glyphGap + DictationIndicatorView.countDigitWidth,
+            accuracy: 1,
+            "the count is one figure past a 6 pt gap"
+        )
+        // The paperclip itself brightens, so the region that must agree ends
+        // where it begins.
         try assertIdentical(
             rest, holding,
             upToPoint: rest.paintedWidth - Self.rowPadding - DictationIndicatorView.clipBox.width,
@@ -254,7 +263,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         // shape's. The row is laid out from the left, so the same band holds when
         // the shape is open and the rail follows it.
         let closed = try raster(bubble(items: [chip(0)]))
-        let glyphRight = closed.paintedWidth - Self.rowPadding
+        let glyphRight = Self.glyphRight(in: closed, digits: 1)
         let band = Int((glyphRight - DictationIndicatorView.clipHitBox.width) * Self.scale)
             ..< Int((glyphRight + DictationIndicatorView.clipHitMargin) * Self.scale)
 
@@ -302,16 +311,28 @@ final class RecordingBubbleRenderTests: XCTestCase {
     func testTheCountStillChangesWithNoAnimationAtAll() throws {
         let one = try raster(bubble(items: [chip(0)]))
         let two = try raster(bubble(items: [chip(0), chip(1)]))
-        let glyphLeft = one.paintedWidth - Self.rowPadding - DictationIndicatorView.clipHitBox.width
+        // Both counts are one figure, so the row is the same width and the only
+        // band that may differ is the count's own.
+        XCTAssertEqual(two.paintedWidth, one.paintedWidth, accuracy: 0.0001, "the row changed width")
+        let countLeft = Self.glyphRight(in: one, digits: 1) + DictationIndicatorView.glyphGap
         let digit = compare(
             one, two,
-            columns: Int(glyphLeft * Self.scale)..<Int(one.paintedWidth * Self.scale), of: one
+            columns: Int(countLeft * Self.scale)..<Int(one.paintedWidth * Self.scale), of: one
         )
-        print("[#210] 1 → 2 items, no animation: the badge's band changed \(digit.moved) px")
+        print("[#210] 1 → 2 items, no animation: the count's band changed \(digit.moved) px")
         XCTAssertGreaterThan(digit.moved, 0, "the count did not change")
         try assertIdentical(
-            one, two, upToPoint: glyphLeft, what: "1 vs 2 items, the count alone"
+            one, two, upToPoint: countLeft, what: "1 vs 2 items, the count alone"
         )
+    }
+
+    /// Where the paperclip's own box ends, in a render whose row finishes with
+    /// the clip and its count (#209, B2): back from the shape's trailing padding
+    /// through the figures and the gap beside them.
+    private static func glyphRight(in raster: Raster, digits: Int) -> CGFloat {
+        raster.paintedWidth - rowPadding
+            - CGFloat(digits) * DictationIndicatorView.countDigitWidth
+            - DictationIndicatorView.glyphGap
     }
 
     // MARK: - The card is as wide as its line (#212)

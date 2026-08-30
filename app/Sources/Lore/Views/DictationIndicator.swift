@@ -100,7 +100,7 @@ enum BubbleRail {
 /// line down: SwiftUI may report the neighbour's arrival before the departure,
 /// and a blind clear there would swallow the line that just replaced it.
 private enum BubbleTipOwner: Hashable {
-    case dot, lock, waveform, timer, clip, gear
+    case dot, lock, waveform, timer, clip, count, gear
     case letter(BubbleRailLetter)
     case row(UUID)
 }
@@ -576,7 +576,7 @@ struct DictationIndicatorView: View {
 
     /// What the bounce watches. Under Reduce Motion it is pinned, so the value
     /// never changes and the glyph never bounces — while the count goes on
-    /// changing, because the badge's own animation is already nil there and a
+    /// changing, because the count's own animation is already nil there and a
     /// `numericText` transition with no animation is a swap (#210).
     private var bounceTrigger: Int { reduceMotion ? 0 : arrivals }
 
@@ -844,7 +844,7 @@ struct DictationIndicatorView: View {
             if !keys.isEmpty {
                 groupDivider
                     .opacity(armedLetters.isEmpty && !railVisible ? 0 : 1)
-                HStack(spacing: 6) {
+                HStack(spacing: Self.glyphGap) {
                     ForEach(keys) { key in
                         // An armed letter was already standing there, so it
                         // does not fade in with the rail and does not blink
@@ -949,18 +949,23 @@ struct DictationIndicatorView: View {
     }
 
     /// The paperclip and its count together (#201): gray while collecting and
-    /// empty, bright with the badge once something is in, and a slashed glyph
-    /// when collecting is off. Click turns collecting off and on.
+    /// empty, bright with the count beside it once something is in, and a
+    /// slashed glyph when collecting is off. Click turns collecting off and on.
+    ///
+    /// The count is plain text to the right of the glyph (#209, B2), at the
+    /// same 6 pt the rail leaves between its own letters. It was a ring hung
+    /// off the glyph's top-right corner, and the ring itself was the objection:
+    /// a badge overlapping a 14 pt glyph has no room to move that reads as
+    /// deliberate rather than clipped.
     private var clip: some View {
-        clipSwitch
-            // Outside the switch's own element, so the count keeps its voice:
-            // an ignored-children container would have swallowed it.
-            .overlay(alignment: .topTrailing) { if clipBright { badge } }
+        HStack(spacing: Self.glyphGap) {
+            clipSwitch
+            if clipBright { count }
+        }
     }
 
     private var clipSwitch: some View {
-        let insets = Self.clipTargetInsets(withBadge: clipBright)
-        return clipGlyph
+        clipGlyph
             // The tint reaches the slash as well as the symbol, so the two
             // strokes of one glyph are never two colours.
             .foregroundStyle(clipBright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
@@ -972,16 +977,9 @@ struct DictationIndicatorView: View {
             // waveform and the timer beside it stand on the bubble itself, and
             // a glyph on its own tile read as a button pasted into the row.
             // What the paperclip is doing is said by its brightness, by the
-            // badge and by the slash. The pointer gets the same lift the gear
+            // count and by the slash. The pointer gets the same lift the gear
             // gets, and nothing before that.
             .loreHoverFill(cornerRadius: LoreTheme.Radius.button)
-            // The badge hangs past that target's top-right corner, and a click
-            // there landed on nothing (#212). While one is drawn the shape the
-            // pointer answers is the two rects as one — the badge counts what
-            // the switch is holding, so a click on it is a click on the switch.
-            // With nothing collected there is nothing out there and this is
-            // zero on every side.
-            .padding(insets.out)
             .contentShape(Rectangle())
             .onTapGesture {
                 hideTip()
@@ -991,7 +989,7 @@ struct DictationIndicatorView: View {
             // the two faces of one control read as two different things.
             .bubbleTip(.clip, "Toggle prompt attachments", hovered: $hoveredTip, pointer: pointer)
             // The spoken name still says which way it is set — a screen reader
-            // has no brightness, no badge and no slash to read it off.
+            // has no brightness, no count and no slash to read it off.
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(
                 collecting ? "What you copy joins the prompt" : "Copies stay out of the prompt"
@@ -1001,14 +999,14 @@ struct DictationIndicatorView: View {
             // vision, so it is the fastest.
             .animation(reduceMotion ? nil : .easeOut(duration: 0.15), value: collecting)
             // The margin is given straight back to the layout: the row lays
-            // this out as the glyph's own box, so the badge overlay above, the
-            // 10 pt beside it and everything past it are where the board draws
-            // them, and only the fill and the hit shape grew (#203, #212).
-            .padding(insets.back)
+            // this out as the glyph's own box, so the count beside it, the
+            // 10 pt past that and everything after are where the board draws
+            // them, and only the fill and the hit shape grew (#203).
+            .padding(-Self.clipHitMargin)
     }
 
     /// Bright is "holding something that is going to the prompt" — which is
-    /// also exactly when the badge has a number to show.
+    /// also exactly when there is a count to show.
     private var clipBright: Bool { collecting && includedCount > 0 }
 
     /// The glyph, and — collecting off — the `.slash` idiom the board draws
@@ -1069,7 +1067,7 @@ struct DictationIndicatorView: View {
     /// point size, and a point of slack around them. Asked for rather than
     /// assumed — a 13pt `paperclip` measures 15×17, so the square box it was
     /// given cut the glyph rather than holding it. Not private, because it and
-    /// `badgeOffset` are what `RecordingBubbleClipTests` reads to hold the
+    /// `clipGlyphTarget` are what `RecordingBubbleClipTests` reads to hold the
     /// growing target away from everything beside it (#203).
     static let clipBox: CGSize = {
         let bounds = NSImage(systemSymbolName: "paperclip", accessibilityDescription: nil)?
@@ -1088,38 +1086,19 @@ struct DictationIndicatorView: View {
     /// it, on any side, toggles collecting.
     static let clipHitMargin: CGFloat = 4
 
-    /// What the hover fill covers, and the greater part of what the pointer
-    /// hits — `clipTarget` adds the badge to it. Never what the row lays out:
-    /// `clipSwitch` takes the margin back with negative padding, so this box
-    /// grows without moving anything beside it.
+    /// What the hover fill covers, and the whole of what the pointer hits.
+    /// Never what the row lays out: `clipSwitch` takes the margin back with
+    /// negative padding, so this box grows without moving anything beside it.
     static let clipHitBox = CGSize(
         width: clipBox.width + 2 * clipHitMargin,
         height: clipBox.height + 2 * clipHitMargin
     )
 
-    /// The board hangs the badge 5pt above the glyph's box and 6pt past its
-    /// right edge (`.bdg`: top −5, right −6). The overlay is measured against
-    /// `clipBox`, which holds the glyph with half the slack on each side, so
-    /// half of it comes back off both numbers — the badge sits on the glyph
-    /// the board drew it on, not on the box that carries it.
-    static let badgeOffset = CGSize(width: 6 - clipSlack / 2, height: -5 + clipSlack / 2)
-
-    /// The figure's own square. A second digit widens it leftward, into the
-    /// target, so one digit is the badge that reaches furthest out and this is
-    /// the box the target has to hold.
-    static let badgeSide: CGFloat = 13
-
-    /// Where that square sits, in the glyph box's own coordinates: hung off the
-    /// top-trailing corner and pushed out by `badgeOffset`.
-    static var badgeBox: CGRect {
-        CGRect(
-            x: clipBox.width - badgeSide + badgeOffset.width, y: badgeOffset.height,
-            width: badgeSide, height: badgeSide
-        )
-    }
-
-    /// The 24×26 pt target of #203, same coordinates — the glyph's box with
-    /// `clipHitMargin` on every side.
+    /// What the pointer answers, in the glyph box's own coordinates: #203's
+    /// 24×26 pt target, and never a point more (#209, B2). It reached out over
+    /// the badge's own corner while the badge existed (#212); the count is a
+    /// sibling now, so there is nothing out there to click. Read by
+    /// `RecordingBubbleClipTests`.
     static var clipGlyphTarget: CGRect {
         CGRect(
             x: -clipHitMargin, y: -clipHitMargin,
@@ -1127,35 +1106,12 @@ struct DictationIndicatorView: View {
         )
     }
 
-    /// What the pointer answers (#212): #203's target, and the badge with it
-    /// while there is a badge on screen. The count hangs past the target's
-    /// top-right corner and a click on it used to land on nothing at all — it
-    /// counts what the switch is holding, so it is part of the switch. With
-    /// nothing collected there is nothing drawn out there to click, and the
-    /// target is #203's 24×26 exactly. Read by `RecordingBubbleClipTests`.
-    static func clipTarget(withBadge: Bool) -> CGRect {
-        withBadge ? clipGlyphTarget.union(badgeBox) : clipGlyphTarget
-    }
-
-    /// The one pair of insets that target needs: out to it from #203's box
-    /// before the shape is taken, and every point of it back — #203's own margin
-    /// included — so what the row lays out is still the glyph's 16×18 box. Both
-    /// come off the same rect, and both are zero-sum by construction.
-    private static func clipTargetInsets(withBadge: Bool) -> (out: EdgeInsets, back: EdgeInsets) {
-        let target = clipTarget(withBadge: withBadge)
-        return (
-            EdgeInsets(
-                top: clipGlyphTarget.minY - target.minY,
-                leading: clipGlyphTarget.minX - target.minX,
-                bottom: target.maxY - clipGlyphTarget.maxY,
-                trailing: target.maxX - clipGlyphTarget.maxX
-            ),
-            EdgeInsets(
-                top: target.minY, leading: target.minX,
-                bottom: clipBox.height - target.maxY, trailing: clipBox.width - target.maxX
-            )
-        )
-    }
+    /// What the row leaves between one glyph and the next: the rail's letters,
+    /// and the paperclip and its count (#209, B2). One value, because it is one
+    /// fact — "another glyph beside this one" — and not two numbers that happen
+    /// to agree. Not private: `RecordingBubbleRenderTests` measures the glyph's
+    /// own band off it.
+    static let glyphGap: CGFloat = 6
 
     /// The board's 24-unit proportions, read against the box the glyph
     /// actually got: 1.7/24 of it wide, over a 4.4/24 gap cut under it.
@@ -1172,32 +1128,33 @@ struct DictationIndicatorView: View {
         return path
     }
 
-    /// The macOS badge idiom: a ring painted in the bubble's own surface
-    /// colour cuts the badge out of the plate instead of letting it read as
-    /// two shapes overlapping. Tabular, so the paperclip never moves as it
-    /// counts, and read only — the list is already open, because pointing at
-    /// the bubble opened it.
-    private var badge: some View {
+    /// The count beside the clip (#209, B2): plain mono text, muted whatever the
+    /// paperclip's own brightness is doing, tabular so the shape never twitches
+    /// as it counts. Read, never clicked — it counts what the switch holds, and
+    /// the list it belongs to is already open, because pointing at the bubble
+    /// opened it. The roll it takes on an arrival is #210's, unchanged.
+    private var count: some View {
         Text("\(includedCount)")
-            .font(LoreTheme.Typography.mono(9, weight: .semibold))
+            .font(LoreTheme.Typography.mono(Self.countSize))
             .monospacedDigit()
             .contentTransition(.numericText())
-            .foregroundStyle(LoreTheme.TextColor.primary)
-            .padding(.horizontal, 3)
-            .frame(minWidth: Self.badgeSide, minHeight: Self.badgeSide)
-            .background(Capsule().fill(Color.white.opacity(0.20)))
-            .background(Capsule().fill(LoreTheme.Surface.window).padding(-1.5))
-            .offset(Self.badgeOffset)
+            .foregroundStyle(LoreTheme.TextColor.muted)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: includedCount)
-            // It is drawn on the switch, never in front of it (#212): the
-            // pointer goes through to the shape underneath, which now reaches
-            // out here, so pointing at the count says what the switch says and
-            // clicking it flips the switch. It keeps its own voice for VoiceOver,
-            // which has no pointer to be in the way of.
-            .allowsHitTesting(false)
+            .bubbleTip(.count, "\(includedCount) in the prompt", hovered: $hoveredTip, pointer: pointer)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(includedCount) in the prompt")
     }
+
+    /// The count's own size — mono 11, the board's `.cnt`.
+    static let countSize: CGFloat = 11
+
+    /// One tabular figure at that size. The count is 1…9 in practice, and this
+    /// is the room each one takes: `RecordingBubbleRenderTests` measures the
+    /// glyph's band back from the row's trailing edge through it.
+    static let countDigitWidth: CGFloat = {
+        let font = NSFont.monospacedSystemFont(ofSize: countSize, weight: .regular)
+        return ceil(("0" as NSString).size(withAttributes: [.font: font]).width)
+    }()
 
     private var includedCount: Int { items.filter(\.included).count }
 

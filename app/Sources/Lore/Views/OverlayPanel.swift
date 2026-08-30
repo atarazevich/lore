@@ -142,7 +142,7 @@ final class TopCenteredPanel<Content: View> {
     private var canvas: BubbleCanvas?
     /// The resting width the window was centred on when this recording's first
     /// canvas arrived, kept for the whole of it. A resting row that grows later
-    /// — a timer digit at the hour, the badge arriving — grows to the right like
+    /// — a timer digit at the hour, the count arriving — grows to the right like
     /// everything else: re-centring it would move the dot, the lock and the
     /// timer, which had not changed at all (#204).
     private var restingAnchor: CGFloat?
@@ -244,7 +244,7 @@ final class TopCenteredPanel<Content: View> {
     ///
     /// A canvas is set once per recording and re-applied unchanged by the poll.
     /// It changes only when the resting row's own width changes (a timer digit,
-    /// the badge) or the list's height does — never as a side effect of the
+    /// the count) or the list's height does — never as a side effect of the
     /// pointer arriving, because the shape it was measured from was the open one
     /// from the start. Every such change grows the window from its top-left
     /// corner, which is where the recording's first canvas put it.
