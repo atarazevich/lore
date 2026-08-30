@@ -6,11 +6,14 @@ enum StubBackendError: Error { case prepareFailed }
 /// Shared test double for `TranscriptionBackend` — used by the protocol-contract
 /// tests and the SharedBackendCache dedup tests. `yieldDuringPrepare` lets a
 /// racing caller enter `prepare()` before the first one finishes; `failOnPrepare`
-/// exercises the error paths.
+/// exercises the error paths; `transcript` is what it hears, and an empty one
+/// stops the dictation pipeline at its no-speech branch — before the paste,
+/// which would otherwise type into whatever the developer has in front of them.
 final class StubTranscriptionBackend: TranscriptionBackend, @unchecked Sendable {
     private let statusMessage: String
     private let failOnPrepare: Bool
     private let yieldDuringPrepare: Bool
+    private let transcript: String
     private var prepared = false
 
     /// Runs inside `prepare()`, before it returns — the seam for acting while a
@@ -21,11 +24,13 @@ final class StubTranscriptionBackend: TranscriptionBackend, @unchecked Sendable 
     init(
         statusMessage: String = "Preparing Mock...",
         failOnPrepare: Bool = false,
-        yieldDuringPrepare: Bool = false
+        yieldDuringPrepare: Bool = false,
+        transcript: String = "mock transcription"
     ) {
         self.statusMessage = statusMessage
         self.failOnPrepare = failOnPrepare
         self.yieldDuringPrepare = yieldDuringPrepare
+        self.transcript = transcript
     }
 
     func checkStatus() -> BackendStatus { .ready }
@@ -40,7 +45,7 @@ final class StubTranscriptionBackend: TranscriptionBackend, @unchecked Sendable 
 
     func transcribe(_ samples: [Float], previousContext: String? = nil) async throws -> String {
         guard prepared else { throw TranscriptionBackendError.notPrepared }
-        return "mock transcription"
+        return transcript
     }
 }
 

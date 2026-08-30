@@ -25,6 +25,46 @@ final class HotkeyManager {
     private var isHoldMode = false
     /// True when Fn was held at the moment Space locked. First Fn release after this should be ignored.
     private var fnHeldAtLock = false
+
+    /// How long the hotkey must be held to *start* a recording: the confirmation
+    /// that separates a tap from a dictation.
+    static let holdToRecordThreshold: Duration = .milliseconds(150)
+    /// How long it must be held *inside a locked recording* to open the bubble
+    /// (#205). Its own number, deliberately longer than the one above: that one
+    /// decides whether a recording begins, this one decides what an already
+    /// running one does, and a tap has to stay comfortably under it because a
+    /// tap is still the dictation's ending.
+    static let lockedHoldThreshold: Duration = .milliseconds(300)
+    /// The same figure the predicate below compares against, since a `Date`
+    /// interval is what it has to hand.
+    private static let lockedHoldSeconds = lockedHoldThreshold / .seconds(1)
+
+    /// When the press now holding the hotkey down inside a locked recording
+    /// began (#205). Set at the two moments such a press can start — locking
+    /// with the key already down, and pressing it again later — and dropped when
+    /// it is let go.
+    ///
+    /// A timestamp rather than a timer: the indicator polls every 50 ms, so the
+    /// bubble opens within a tick of the threshold either way, and one recorded
+    /// instant cannot fall out of step with itself the way a second `Task` and
+    /// the flag it sets could.
+    private var lockedHoldStart: Date?
+
+    /// This press has been down past the threshold. The one fact the bubble and
+    /// the release both read, so they cannot disagree about whether it was a
+    /// hold.
+    private var lockedHoldPassedThreshold: Bool {
+        guard let lockedHoldStart else { return false }
+        return Date().timeIntervalSince(lockedHoldStart) >= Self.lockedHoldSeconds
+    }
+
+    /// The bubble is open, held there by the key (#205) — read by the indicator's
+    /// poll beside `isLocked`.
+    ///
+    /// Derived rather than stored, so it cannot outlive what holds it: letting
+    /// go, unlocking, Esc, a dead tap and the recording ending all close the
+    /// bubble without a line of their own.
+    var isFnHoldingBubble: Bool { isLocked && fnDown && lockedHoldPassedThreshold }
     /// Locked = recording continues after Fn release; stopped by Fn or Esc
     private(set) var isLocked = false
     /// Set synchronously so the local monitor closure can check it without main actor hop
@@ -296,6 +336,7 @@ final class HotkeyManager {
         fnTimer = nil
         fnReleaseDebounce?.cancel()
         fnReleaseDebounce = nil
+        lockedHoldStart = nil
         coordinator = nil
         settings = nil
         HotkeyManager.hkLog.info("Hotkey manager uninstalled")
@@ -320,7 +361,10 @@ final class HotkeyManager {
         }
     }
 
-    private func handleFlagsChanged(_ event: NSEvent) {
+    /// Internal, not private, so `LockedFnHoldTests` can put a real
+    /// flags-changed event through the one function that decides what a press
+    /// means (#205). The NSEvent monitors are its only other callers.
+    func handleFlagsChanged(_ event: NSEvent) {
         let hotkeyKey = settings?.hotkeyKey ?? .fn
         let hotkeyPressed = hotkeyKey.matchesPress(event)
 
@@ -337,6 +381,12 @@ final class HotkeyManager {
 
             if isLocked {
                 // Don't stop yet — V/T chord may follow. Stop happens on Fn release.
+                // And the press is one of two gestures, told apart by the clock
+                // (#205): a tap stops and pastes, as a locked recording has always
+                // ended; held past the threshold it opens the bubble for as long
+                // as the key is down, which is exactly when Fn+T, Fn+K and Fn+S
+                // are pressed.
+                lockedHoldStart = Date()
                 HotkeyManager.hkLog.debug("[HOTKEY] hotkey pressed while locked → waiting for chord or release")
                 return
             }
@@ -347,7 +397,7 @@ final class HotkeyManager {
 
             isHoldMode = false
             fnTimer = Task { [weak self] in
-                try? await Task.sleep(for: .milliseconds(150))
+                try? await Task.sleep(for: Self.holdToRecordThreshold)
                 guard !Task.isCancelled, let self else { return }
                 self.isHoldMode = true
                 self.isRecordingFlag = true
@@ -359,6 +409,13 @@ final class HotkeyManager {
             fnDown = false
             fnTimer?.cancel()
             fnTimer = nil
+            // A press that lasted past the threshold was a hold: it opened the
+            // bubble, so letting go closes the bubble and does nothing else —
+            // swallowed by the latch every chord already uses (#205). Read
+            // before the timestamp is dropped, so what opened the bubble and
+            // what swallows the release are one fact and not two.
+            if isLocked && lockedHoldPassedThreshold { fnHeldAtLock = true }
+            lockedHoldStart = nil
 
             if isLocked {
                 if fnHeldAtLock {
@@ -499,6 +556,12 @@ final class HotkeyManager {
         isHoldMode = false
         isPreBufferingFlag = false
         fnHeldAtLock = fnDown  // Track: if Fn held at lock, first release should continue
+        // A hold already under way counts from here (#205). Locking with the key
+        // still down and keeping it down past the threshold opens the bubble,
+        // exactly as pressing again later does — and locking that way is the
+        // commonest route into a locked recording, so without this the gesture
+        // would be unreachable by the people most likely to reach for it.
+        lockedHoldStart = fnDown ? Date() : nil
         if coordinator.isPreBuffering {
             coordinator.confirmRecording()
         }
@@ -775,6 +838,9 @@ final class HotkeyManager {
                                 manager.coordinator?.confirmRecording()
                             }
                             manager.fnHeldAtLock = manager.fnDown
+                            // As in `lockRecording`: a hold already under way
+                            // counts from the lock (#205).
+                            manager.lockedHoldStart = manager.fnDown ? Date() : nil
                             manager.isLocked = true
                             manager.fnTimer?.cancel()
                             manager.fnTimer = nil
