@@ -151,6 +151,9 @@ final class RecordingBubbleRenderTests: XCTestCase {
         /// corner and the rest is transparent margin.
         var pointWidth: CGFloat { CGFloat(width) / RecordingBubbleRenderTests.scale }
 
+        /// The same downward — the canvas's whole height, tooltip room and all.
+        var pointHeight: CGFloat { CGFloat(height) / RecordingBubbleRenderTests.scale }
+
         /// Where the bubble itself ends: the last column that has anything drawn
         /// in it. The canvas past that is empty, so this is measured rather than
         /// assumed — and it is what the comparison regions are cut from.
@@ -184,12 +187,56 @@ final class RecordingBubbleRenderTests: XCTestCase {
         }
     }
 
+    // MARK: - The bubble's own tooltip (#207)
+
+    /// The longest line in the copy table — the one that takes two lines of the
+    /// card, so it is what the canvas's reserved room has to hold.
+    private static let longestTip = "Dictate as long as you like. Audio is saved as you speak."
+
+    /// A tooltip appears under the shape and the resting row is the same
+    /// picture, pixel for pixel: the canvas kept the room for it before the
+    /// pointer ever arrived, so the window does not resize and nothing inside
+    /// it moves (#204's invariant, on #207's surface).
+    func testATooltipMovesNothingInTheRestingRow() throws {
+        let rest = try raster(bubble())
+        let tipped = try raster(bubble(tip: Self.longestTip))
+        XCTAssertEqual(tipped.width, rest.width, "the canvas widened for a tooltip")
+        XCTAssertEqual(tipped.height, rest.height, "the canvas grew taller for a tooltip")
+        // `assertIdentical` bounds the compared rows by the resting render's own
+        // painted height, so the region is the resting row and nothing below it.
+        try assertIdentical(
+            rest, tipped, upToPoint: rest.paintedWidth - Self.rowPadding, what: "rest vs tooltip"
+        )
+    }
+
+    /// And the tooltip really is drawn: ink under the shape, inside the room the
+    /// canvas reserved rather than up against its edge — a card cut off at the
+    /// bottom would still have passed the comparison above.
+    func testTheTooltipIsDrawnInsideTheRoomTheCanvasKept() throws {
+        let rest = try raster(bubble())
+        let tipped = try raster(bubble(tip: Self.longestTip))
+        print(
+            "[#207] tooltip ink: resting shape ends at \(rest.paintedHeight) pt, "
+            + "the tooltip's last row is \(tipped.paintedHeight) pt of a "
+            + "\(tipped.pointHeight) pt canvas"
+        )
+        XCTAssertGreaterThan(
+            tipped.paintedHeight, rest.paintedHeight + BubbleTipCard.gap,
+            "nothing was drawn under the shape"
+        )
+        XCTAssertLessThan(
+            tipped.paintedHeight, tipped.pointHeight,
+            "the card runs to the canvas's last row — it is being cut off"
+        )
+    }
+
     private func bubble(
         pendingMode: UpgradeAction? = nil,
         operatorAddressed: Bool = false,
         items: [DictationItemChip] = [],
         held: Bool = false,
-        railStartsVisible: Bool = false
+        railStartsVisible: Bool = false,
+        tip: String? = nil
     ) -> DictationIndicatorHost {
         let model = DictationIndicatorModel()
         model.state = .recording
@@ -203,6 +250,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         model.screenshotsEnabled = true
         model.held = held
         model.railStartsVisible = railStartsVisible
+        model.tipStartsShown = tip
         return DictationIndicatorHost(model: model)
     }
 

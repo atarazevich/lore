@@ -321,16 +321,21 @@ struct LorePrimaryButton: View {
 
 extension View {
     /// Popover container: `--popover` bg, 8px radius, border, popover shadow,
-    /// content inset. Defaults (5pt inset, 1px `--line` border) match every
-    /// existing caller; the indicator's item list (#192) passes its own
-    /// tighter inset and quieter `windowRim` stroke instead of copying the
-    /// chrome.
+    /// content inset. Defaults (5pt inset, 1px `--line` border, shadow on)
+    /// match every existing caller; the indicator's item list (#192) passes its
+    /// own tighter inset and quieter `windowRim` stroke instead of copying the
+    /// chrome, and the recording bubble's tooltip (#207) passes an inset per
+    /// axis and drops the shadow — the bubble it hangs under carries none.
+    @ViewBuilder
     func lorePopoverChrome(
         inset: CGFloat = 5,
+        horizontalInset: CGFloat? = nil,
         stroke: Color = LoreTheme.Surface.line,
-        strokeWidth: CGFloat = 1
+        strokeWidth: CGFloat = 1,
+        shadow: Bool = true
     ) -> some View {
-        padding(inset)
+        let plate = padding(.vertical, inset)
+            .padding(.horizontal, horizontalInset ?? inset)
             .background(
                 LoreTheme.Surface.popover,
                 in: RoundedRectangle(cornerRadius: LoreTheme.Radius.popover)
@@ -339,7 +344,11 @@ extension View {
                 RoundedRectangle(cornerRadius: LoreTheme.Radius.popover)
                     .strokeBorder(stroke, lineWidth: strokeWidth)
             )
-            .loreShadow(LoreTheme.Shadow.popover)
+        if shadow {
+            plate.loreShadow(LoreTheme.Shadow.popover)
+        } else {
+            plate
+        }
     }
 }
 

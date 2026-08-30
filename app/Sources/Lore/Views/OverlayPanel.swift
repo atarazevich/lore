@@ -15,6 +15,12 @@ final class OverlayPanel: NSPanel {
 
         isFloatingPanel = true
         level = .floating
+        // The bubble draws its own tooltips and places each one under whatever
+        // the pointer is on (#207), which needs the pointer's position while it
+        // travels, not only where it crossed in. A window is sent mouse-moved
+        // events only when it asks — the default is off, and that same flag
+        // being off is half of why AppKit's own tooltips never surfaced here.
+        acceptsMouseMovedEvents = true
         sharingType = SettingsStore.screenSharingType(from: defaults)
         isMovableByWindowBackground = true
         titlebarAppearsTransparent = true

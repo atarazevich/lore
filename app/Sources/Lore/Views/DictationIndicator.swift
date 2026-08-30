@@ -87,6 +87,173 @@ enum BubbleRail {
     }
 }
 
+// MARK: - The bubble's own tooltip (#207)
+
+/// Which element of the bubble the pointer is on. Identity rather than the
+/// line it carries, so the element the pointer *left* can only take its own
+/// line down: SwiftUI may report the neighbour's arrival before the departure,
+/// and a blind clear there would swallow the line that just replaced it.
+private enum BubbleTipOwner: Hashable {
+    case dot, lock, waveform, timer, clip, badge, gear
+    case letter(BubbleRailLetter)
+    case row(UUID)
+}
+
+/// One line of the copy table, and whose it is.
+private struct BubbleTip: Equatable {
+    let owner: BubbleTipOwner
+    let text: String
+}
+
+/// The canvas's own coordinate space, so every element reports the pointer in
+/// the numbers the card is placed in.
+private let bubbleTipSpace = "lore.bubble.tip"
+
+extension View {
+    /// What every element carrying a line in the copy table wears (#207). It
+    /// reports the pointer and nothing else — no size, no padding, no
+    /// background — so a tooltip can never move anything in the shape (#204).
+    ///
+    /// Continuous, and in the canvas's space, because the card is drawn under
+    /// whatever is being pointed at: the position arrives with the crossing
+    /// into the element and then follows the pointer across it.
+    fileprivate func bubbleTip(
+        _ owner: BubbleTipOwner, _ text: String,
+        hovered: Binding<BubbleTip?>, pointer: BubblePointer
+    ) -> some View {
+        onContinuousHover(coordinateSpace: .named(bubbleTipSpace)) { phase in
+            switch phase {
+            case .active(let location):
+                pointer.x = location.x
+                // Every mouse move lands here; only a real arrival is a change
+                // the shape has to be re-rendered for.
+                let arrived = BubbleTip(owner: owner, text: text)
+                if hovered.wrappedValue != arrived { hovered.wrappedValue = arrived }
+            case .ended:
+                // Its own line only: SwiftUI may report the neighbour's
+                // arrival before this departure.
+                if hovered.wrappedValue?.owner == owner { hovered.wrappedValue = nil }
+            }
+        }
+    }
+}
+
+/// The tooltip the bubble draws for itself (#207), to the board's F6: one line
+/// on a popover card under the whole shape, clear of the list, pointing at
+/// whatever the pointer is on.
+///
+/// Lore draws it because AppKit will not. `.help()` does not put the string on
+/// the view (`NSView.toolTip` stays nil) — it registers an AppKit tooltip rect,
+/// and `NSToolTipManager` only ever shows one for a window of the *active*
+/// application. This panel is a `.nonactivatingPanel` ordered front, never made
+/// key (`canBecomeKey` is false), floating over whichever app is being dictated
+/// into; its window had never asked for the mouse-moved stream that manager
+/// tracks with either (`acceptsMouseMovedEvents` was false — `OverlayPanel`
+/// now sets it, because this card follows the pointer). Both were read off the
+/// panel. And AppKit's delay is the system's ~1.5 s where the board asks for
+/// 300 ms, so `.help` could not have delivered this even where it does show.
+///
+/// Not private: `gap` and `height` are the room the canvas keeps under the
+/// shape, and `RecordingBubbleRenderTests` reads them to check the card lands
+/// inside it (the same reason `clipBox` is not private).
+struct BubbleTipCard: View {
+    let text: String
+    /// Where the pointer was when the line appeared, in the shape's own space.
+    let pointerX: CGFloat
+    /// The canvas the card must stay inside — a line for the gear may not hang
+    /// off the right edge of the window.
+    let canvasWidth: CGFloat
+
+    /// The board's card: 222 across, 9 and 5 inside it, 11.5 text.
+    static let width: CGFloat = 222
+    private static let fontSize: CGFloat = 11.5
+    private static let padY: CGFloat = 5
+    private static let padX: CGFloat = 9
+    private static let arrowSide: CGFloat = 8
+
+    /// Two lines of that face, the card's own padding, and a couple of points
+    /// of slack around its half-point border — measured off the font rather
+    /// than assumed, the way the paperclip's box is. The longest line in the
+    /// copy table takes two lines; `lineLimit(2)` is what makes this a ceiling
+    /// and not an estimate.
+    static let height: CGFloat = {
+        let font = NSFont.systemFont(ofSize: fontSize)
+        return ceil(font.ascender - font.descender + font.leading) * 2 + 2 * padY + 3
+    }()
+
+    /// The board hangs the card 51 under a 43-tall row.
+    static let gap: CGFloat = 8
+
+    /// What the canvas keeps under the shape whether a line is showing or not,
+    /// so one appearing never resizes the window (#204).
+    static var room: CGFloat { gap + height }
+
+    /// Centred on what is being pointed at, pushed back inside the canvas.
+    private var leading: CGFloat {
+        min(max(pointerX - Self.width / 2, 0), max(canvasWidth - Self.width, 0))
+    }
+
+    /// The arrow stays on what is being pointed at even where the card could
+    /// not follow, and clear of the card's own corners.
+    private var arrowX: CGFloat {
+        let margin = LoreTheme.Radius.popover + Self.arrowSide
+        return min(max(pointerX - leading, margin), Self.width - margin)
+    }
+
+    var body: some View {
+        Text(text)
+            .font(.system(size: Self.fontSize))
+            .foregroundStyle(LoreTheme.TextColor.primary)
+            .lineLimit(2)
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: Self.width - 2 * Self.padX, alignment: .leading)
+            // No shadow: the bubble this hangs under carries none either
+            // (`TopCenteredPanel` sets `hasShadow = false`, the shape draws
+            // none), and one here would need window room the canvas would have
+            // to reserve and the user would never see.
+            .lorePopoverChrome(
+                inset: Self.padY, horizontalInset: Self.padX,
+                stroke: LoreTheme.Shadow.windowRim, strokeWidth: 0.5, shadow: false
+            )
+            .overlay(alignment: .topLeading) { arrow }
+            .offset(x: leading)
+            // It explains what the pointer is on; it is never what the pointer
+            // is on. A card that answered the mouse would be a click the app
+            // underneath the canvas never receives.
+            .allowsHitTesting(false)
+            // The line is the element's own VoiceOver name already; read here
+            // it would be read twice.
+            .accessibilityHidden(true)
+    }
+
+    /// The board's arrow: a square on the card's top edge, turned 45°, carrying
+    /// the rim on the two sides that end up facing out.
+    private var arrow: some View {
+        Rectangle()
+            .fill(LoreTheme.Surface.popover)
+            .overlay {
+                Path { path in
+                    path.move(to: CGPoint(x: 0, y: Self.arrowSide))
+                    path.addLine(to: .zero)
+                    path.addLine(to: CGPoint(x: Self.arrowSide, y: 0))
+                }
+                .stroke(LoreTheme.Shadow.windowRim, lineWidth: 0.5)
+            }
+            .frame(width: Self.arrowSide, height: Self.arrowSide)
+            .rotationEffect(.degrees(45))
+            .offset(x: arrowX - Self.arrowSide / 2, y: -Self.arrowSide / 2 - 0.5)
+    }
+}
+
+/// The pointer's place inside the shape, deliberately off the view's state:
+/// it changes with every mouse move, and a `@State` write per move would
+/// re-render the bubble — probes and all — for a number that is only read when
+/// a line appears.
+@MainActor
+private final class BubblePointer {
+    var x: CGFloat = 0
+}
+
 struct DictationIndicatorView: View {
     let state: DictationState
     let audioLevel: Float
@@ -144,6 +311,24 @@ struct DictationIndicatorView: View {
     /// it; nothing in the app does.
     var railStartsVisible = false
     private var railVisible: Bool { railFadedIn || railStartsVisible }
+    /// The line an offscreen render draws under the shape (#207). A tooltip
+    /// waits out a 300 ms task and an offscreen render runs no tasks, so a
+    /// rendered bubble would never show one and a comparison of it would be a
+    /// comparison of nothing. Only `RecordingBubbleRenderTests` sets it;
+    /// nothing in the app does.
+    var tipStartsShown: String?
+    /// The element the pointer is on, and the line it carries (#207).
+    @State private var hoveredTip: BubbleTip?
+    /// The line actually on screen — the same value, 300 ms later.
+    @State private var shownTip: BubbleTip?
+    /// Where the pointer was at that moment. Frozen with the line, so the card
+    /// does not drift under a pointer wandering inside one element.
+    @State private var tipPointerX: CGFloat = 0
+    /// A line has already appeared during this visit to the shape, so the next
+    /// element the pointer moves to swaps in with no delay of its own. Cleared
+    /// when the pointer leaves the shape, and by a click.
+    @State private var tipWarm = false
+    @State private var pointer = BubblePointer()
     /// The open shape's size, measured off a copy of it that is never drawn —
     /// the window's own size while a dictation records (#204).
     @State private var canvasSize: CGSize = .zero
@@ -188,6 +373,7 @@ struct DictationIndicatorView: View {
             // outside, and on the recording still being there to widen for.
             .task(id: [pointerOnBubble, canExpand]) { await followPointer() }
             .task(id: [expanded, canExpand]) { await followExpansion() }
+            .task(id: hoveredTip) { await followTip() }
             .animation(expanded ? widenAnimation : closeAnimation, value: expanded)
             .animation(railFade, value: railVisible)
             .onChange(of: canvas, initial: true) { _, measured in
@@ -226,9 +412,21 @@ struct DictationIndicatorView: View {
     private var content: some View {
         if canExpand {
             ZStack(alignment: .topLeading) {
-                Color.clear.frame(width: canvasSize.width, height: canvasSize.height)
+                Color.clear.frame(width: canvasWithTip.width, height: canvasWithTip.height)
                 bubble
+                if let tip = visibleTip {
+                    BubbleTipCard(
+                        text: tip.text, pointerX: tipPointerX, canvasWidth: canvasWithTip.width
+                    )
+                    // Offset, so the card contributes its own size to the
+                    // canvas and not its position: the room below the shape is
+                    // the clear rectangle's, kept there whether a line is
+                    // showing or not.
+                    .offset(y: canvasSize.height + BubbleTipCard.gap)
+                    .transition(.opacity)
+                }
             }
+            .coordinateSpace(.named(bubbleTipSpace))
             // Measured, never drawn, and contributing nothing to the layout:
             // a background is proposed the primary view's size and the probes
             // ignore the proposal, so they can be bigger than what they measure
@@ -243,10 +441,26 @@ struct DictationIndicatorView: View {
     /// probes have been laid out, and for every state that is not the recording
     /// bubble.
     private var canvas: BubbleCanvas? {
-        guard canExpand, canvasSize.width > 0, canvasSize.height > 0, restingRowWidth > 0 else {
-            return nil
-        }
-        return BubbleCanvas(size: canvasSize, restingWidth: restingRowWidth)
+        guard canExpand, canvasWithTip.width > 0, restingRowWidth > 0 else { return nil }
+        return BubbleCanvas(size: canvasWithTip, restingWidth: restingRowWidth)
+    }
+
+    /// The window while a dictation records: the shape's own canvas with the
+    /// tooltip's room kept under it (#207) and at least the tooltip's width
+    /// across, so a line appearing never resizes the window and never hangs off
+    /// its edge. Zero until the probes have reported, which is what leaves the
+    /// first frame of a recording to the window's own fitting (#204).
+    private var canvasWithTip: CGSize {
+        guard canvasSize.width > 0, canvasSize.height > 0 else { return .zero }
+        return CGSize(
+            width: max(canvasSize.width, BubbleTipCard.width),
+            height: canvasSize.height + BubbleTipCard.room
+        )
+    }
+
+    /// The line on screen — or the one an offscreen render was handed.
+    private var visibleTip: BubbleTip? {
+        shownTip ?? tipStartsShown.map { BubbleTip(owner: .timer, text: $0) }
     }
 
     /// One shape: the row, and — when something has been collected — the list
@@ -276,7 +490,12 @@ struct DictationIndicatorView: View {
         shape(open: expanded, measuring: false, listWidth: topRowWidth)
             .fixedSize()
             .contentShape(RoundedRectangle(cornerRadius: 12))
-            .onHover { pointerOnBubble = $0 }
+            .onHover { inside in
+                pointerOnBubble = inside
+                // Leaving the shape ends the visit the tooltip's hand-off
+                // belongs to (#207); crossing a gap inside it does not.
+                if !inside { tipWarm = false }
+            }
             .onGeometryChange(for: CGFloat.self, of: \.size.width) { topRowWidth = $0 }
     }
 
@@ -325,10 +544,49 @@ struct DictationIndicatorView: View {
         canExpand && open && collecting && !items.isEmpty
     }
 
+    /// The board's timing (#207): a line appears 300 ms after the pointer
+    /// arrives at an element, and — while one is already up — the next element
+    /// swaps in with none. It goes the moment the pointer leaves, or clicks.
+    private func followTip() async {
+        guard let hovered = hoveredTip, canExpand else {
+            // The elements are separated by real gaps — the row's 6, 9 and 10
+            // point spacings and its dividers — and crossing one reports the
+            // departure before the arrival. So a line already up is held for a
+            // moment: a neighbour arriving inside that cancels this task and
+            // swaps straight into it, which is the board's "no delay between
+            // neighbours". Leaving the shape is not a gap — `pointerOnBubble`
+            // is already false by the time this runs — and hides at once.
+            if shownTip != nil, pointerOnBubble, canExpand {
+                try? await Task.sleep(for: .milliseconds(150))
+                guard !Task.isCancelled else { return }
+            }
+            withAnimation(tipFade) { shownTip = nil }
+            // The hand-off was not taken, so the next line waits its own 300 ms.
+            tipWarm = false
+            return
+        }
+        if !tipWarm {
+            try? await Task.sleep(for: .milliseconds(300))
+            guard !Task.isCancelled else { return }
+        }
+        tipWarm = true
+        tipPointerX = pointer.x
+        withAnimation(tipFade) { shownTip = hovered }
+    }
+
+    /// A click takes the line down and spends the warmth with it — the next
+    /// one waits its 300 ms again.
+    private func hideTip() {
+        hoveredTip = nil
+        tipWarm = false
+    }
+
     private func followPointer() async {
         guard canExpand else {
             pointerExpanded = false
             railFadedIn = false
+            hoveredTip = nil
+            tipWarm = false
             return
         }
         guard !pointerOnBubble else {
@@ -382,6 +640,11 @@ struct DictationIndicatorView: View {
     private var railFade: Animation? {
         reduceMotion ? nil : .easeOut(duration: 0.12)
     }
+
+    /// The tooltip's own appearance, the same 120 ms — one timing for
+    /// everything that arrives behind the pointer. Under Reduce Motion the
+    /// line still shows; it just does not fade in (#207).
+    private var tipFade: Animation? { railFade }
 
     /// `measuring` marks a copy of the shape that is laid out and never drawn,
     /// so anything that would animate stands still in it (#204, `probes`).
@@ -438,7 +701,7 @@ struct DictationIndicatorView: View {
                         // out under the pointer that came to read it; a hint
                         // is nothing to click, or speak, before it can be
                         // read.
-                        keycap(key.letter.rawValue, bright: key.bright,
+                        keycap(key.letter, bright: key.bright,
                                help: key.help, action: key.action)
                             .opacity(key.armed || railVisible ? 1 : 0)
                             .allowsHitTesting(key.armed || railVisible)
@@ -562,8 +825,15 @@ struct DictationIndicatorView: View {
             // gets, and nothing before that.
             .loreHoverFill(cornerRadius: LoreTheme.Radius.button)
             .contentShape(Rectangle())
-            .onTapGesture { onToggleCollecting?() }
-            .help(collecting ? "What you copy joins the prompt" : "Copies stay out of the prompt")
+            .onTapGesture {
+                hideTip()
+                onToggleCollecting?()
+            }
+            .bubbleTip(
+                .clip,
+                collecting ? "What you copy joins the prompt" : "Copies stay out of the prompt",
+                hovered: $hoveredTip, pointer: pointer
+            )
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(
                 collecting ? "What you copy joins the prompt" : "Copies stay out of the prompt"
@@ -693,7 +963,7 @@ struct DictationIndicatorView: View {
             .background(Capsule().fill(LoreTheme.Surface.window).padding(-1.5))
             .offset(Self.badgeOffset)
             .animation(reduceMotion ? nil : .easeOut(duration: 0.2), value: includedCount)
-            .help("\(includedCount) in the prompt")
+            .bubbleTip(.badge, "\(includedCount) in the prompt", hovered: $hoveredTip, pointer: pointer)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("\(includedCount) in the prompt")
     }
@@ -704,9 +974,9 @@ struct DictationIndicatorView: View {
     /// shortcut by standing there. `S` carries a tooltip and no click: it is a
     /// key you press, not a switch you flip.
     private func keycap(
-        _ label: String, bright: Bool, help: String, action: (() -> Void)?
+        _ letter: BubbleRailLetter, bright: Bool, help: String, action: (() -> Void)?
     ) -> some View {
-        Text(label)
+        Text(letter.rawValue)
             .font(LoreTheme.Typography.mono(11, weight: .semibold))
             .foregroundStyle(bright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
             .padding(.horizontal, 4)
@@ -718,8 +988,11 @@ struct DictationIndicatorView: View {
                     .fill(Color.white.opacity(bright ? 0.12 : 0.04))
             )
             .contentShape(Rectangle())
-            .onTapGesture { action?() }
-            .help(help)
+            .onTapGesture {
+                hideTip()
+                action?()
+            }
+            .bubbleTip(.letter(letter), help, hovered: $hoveredTip, pointer: pointer)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(help)
             .accessibilityAddTraits(action == nil ? .isStaticText : .isToggle)
@@ -732,8 +1005,11 @@ struct DictationIndicatorView: View {
             .frame(width: 17, height: 17)
             .loreHoverFill(cornerRadius: LoreTheme.Radius.button)
             .contentShape(Rectangle())
-            .onTapGesture { onOpenSettings?() }
-            .help("Settings")
+            .onTapGesture {
+                hideTip()
+                onOpenSettings?()
+            }
+            .bubbleTip(.gear, "Settings", hovered: $hoveredTip, pointer: pointer)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel("Settings")
             .accessibilityAddTraits(.isButton)
@@ -788,8 +1064,11 @@ struct DictationIndicatorView: View {
         .opacity(item.included ? 1 : 0.42)
         .contentShape(Rectangle())
         .loreHoverFill()
-        .onTapGesture { onToggleItem?(item.id) }
-        .help(item.included ? "In the prompt" : "Left out")
+        .onTapGesture {
+            hideTip()
+            onToggleItem?(item.id)
+        }
+        .bubbleTip(.row(item.id), item.included ? "In the prompt" : "Left out", hovered: $hoveredTip, pointer: pointer)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(item.included ? "In the prompt" : "Left out")
         .accessibilityAddTraits(.isToggle)
@@ -832,12 +1111,12 @@ struct DictationIndicatorView: View {
                 // — it must read as "not recording red").
                 .fill(noSignal ? Color.white.opacity(0.3) : LoreTheme.Accent.red)
                 .frame(width: 8, height: 8)
-                .help("Recording")
+                .bubbleTip(.dot, "Recording", hovered: $hoveredTip, pointer: pointer)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Recording")
             if lockEnabled { lockGlyph }
             waveform(measuring: measuring)
-                .help("Your voice level")
+                .bubbleTip(.waveform, "Your voice level", hovered: $hoveredTip, pointer: pointer)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Your voice level")
             if noSignal {
@@ -858,7 +1137,10 @@ struct DictationIndicatorView: View {
                     .fixedSize()
                     .frame(minWidth: elapsedWidth(recordingSeconds, size: 13), alignment: .leading)
                     // Two sentences, because the second one is the answer.
-                    .help("Dictate as long as you like. Audio is saved as you speak.")
+                    .bubbleTip(
+                        .timer, "Dictate as long as you like. Audio is saved as you speak.",
+                        hovered: $hoveredTip, pointer: pointer
+                    )
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Dictate as long as you like. Audio is saved as you speak.")
             }
@@ -893,8 +1175,11 @@ struct DictationIndicatorView: View {
             .frame(width: 15, height: 15)
             .loreHoverFill(cornerRadius: LoreTheme.Radius.button)
             .contentShape(Rectangle())
-            .onTapGesture { onToggleLock?() }
-            .help(lockHelp)
+            .onTapGesture {
+                hideTip()
+                onToggleLock?()
+            }
+            .bubbleTip(.lock, lockHelp, hovered: $hoveredTip, pointer: pointer)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(lockHelp)
             .accessibilityAddTraits(.isToggle)
@@ -1066,6 +1351,8 @@ final class DictationIndicatorModel {
     var screenshotsEnabled = true
     var held = false
     var railStartsVisible = false
+    /// Render-only (#207) — see `DictationIndicatorView.tipStartsShown`.
+    var tipStartsShown: String?
     var onUpgrade: ((UpgradeAction) -> Void)?
     var onOperatorToggle: (() -> Void)?
     var onToggleItem: ((UUID) -> Void)?
@@ -1108,6 +1395,7 @@ struct DictationIndicatorHost: View {
             screenshotsEnabled: model.screenshotsEnabled,
             held: model.held,
             railStartsVisible: model.railStartsVisible,
+            tipStartsShown: model.tipStartsShown,
             onUpgrade: model.onUpgrade,
             onOperatorToggle: model.onOperatorToggle,
             onToggleItem: model.onToggleItem,
