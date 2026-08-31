@@ -458,10 +458,11 @@ struct DictationIndicatorView: View {
     /// pointer's alone: it exists for a pointer travelling down to a row, and a
     /// key that has been let go is not travelling anywhere.
     private var expanded: Bool { pointerExpanded || held }
-    /// The top row's own width, which the list then stretches to exactly. The
-    /// list must contribute nothing to the shape's width — a long copied line
-    /// ellipsises instead of pushing the bubble wider.
-    @State private var topRowWidth: CGFloat = 0
+    /// The visible shape's own size. Its width is what the list stretches to
+    /// exactly — the list must contribute nothing to the shape's width, so a
+    /// long copied line ellipsises instead of pushing the bubble wider — and
+    /// both are what a face after release measures its canvas against (#217).
+    @State private var bubbleSize: CGSize = .zero
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     /// A row is the switch: in the prompt, or left out (#192).
     var onToggleItem: ((UUID) -> Void)?
@@ -513,22 +514,37 @@ struct DictationIndicatorView: View {
                 guard Self.itemArrived(from: previous, to: current) else { return }
                 arrivals += 1
             }
-            .onChange(of: canExpand, initial: true) { _, expandable in
-                // Processing, done, the upgrade panel, an error: not a canvas.
-                // The window goes back to fitting its content and centring it,
-                // and the measurements leave with the shape they were taken
-                // from — the next recording measures its own rather than
-                // opening inside the last one's.
-                guard !expandable else { return }
+            .onChange(of: state, initial: true) { _, current in
+                // The shape is gone (#217). Only now does the window go back to
+                // fitting its content and centring it, and the measurements
+                // leave with the recording they were taken from — the next one
+                // measures its own rather than opening inside the last one's.
+                // Everything before this — transcribing, the paste's mark, a
+                // failure — is the same shape still, hanging in the canvas the
+                // recording gave it, which is what keeps the window's corner
+                // from moving between the Fn release and the hide.
+                //
+                // Back to back, that means the second dictation inherits the
+                // first one's resting-width anchor: a new Fn press while the
+                // previous shape is still up goes `.done` → `.recording`
+                // without passing through `.idle`, so nothing is cleared and
+                // `TopCenteredPanel.restingAnchor` is never given back. That is
+                // the wanted reading of #204's "one anchor per recording" —
+                // the two dictations are one shape on screen the whole time,
+                // and re-centring between them would be exactly the jump this
+                // issue exists to remove. A dictation that starts after the
+                // shape has left measures its own, as it always did.
+                guard current == .idle else { return }
                 canvasSize = .zero
                 restingRowWidth = 0
+                bubbleSize = .zero
                 onCanvasChange?(nil)
             }
             .environment(\.colorScheme, .dark)
     }
 
-    /// The bubble, and — while a dictation records — the transparent canvas it
-    /// hangs in (#204).
+    /// The bubble, and — from the first frame of a recording to the hide — the
+    /// transparent canvas it hangs in (#204, #217).
     ///
     /// The canvas is a clear rectangle of the size the probes measured, with the
     /// bubble in its top-leading corner, so everything the shape gains it gains
@@ -540,7 +556,11 @@ struct DictationIndicatorView: View {
     /// first frame of a recording has nowhere to jump from.
     @ViewBuilder
     private var content: some View {
-        if canExpand {
+        // A recording measures the canvas it will need, and every face after it
+        // hangs in what that recording measured (#217). Both are this branch:
+        // without the recording's own the probes would have nowhere to be laid
+        // out, and there would be no canvas to measure at all.
+        if canExpand || canvas != nil {
             ZStack(alignment: .topLeading) {
                 Color.clear.frame(width: canvasWithTip.width, height: canvasWithTip.height)
                 bubble
@@ -560,19 +580,61 @@ struct DictationIndicatorView: View {
             // Measured, never drawn, and contributing nothing to the layout:
             // a background is proposed the primary view's size and the probes
             // ignore the proposal, so they can be bigger than what they measure
-            // for without becoming it.
-            .background(alignment: .topLeading) { probes }
+            // for without becoming it. Only a recording has them: a face after
+            // release keeps the canvas they measured, and re-measuring one for
+            // a shape nobody can widen would only move the window.
+            .background(alignment: .topLeading) { if canExpand { probes } }
         } else {
             bubble
         }
     }
 
-    /// What the window is while a dictation records (#204). Nil until both
-    /// probes have been laid out, and for every state that is not the recording
-    /// bubble.
+    /// What the window is, at every moment of a dictation (#204, #217). Nil
+    /// until the probes have reported, and again once the shape is gone.
     private var canvas: BubbleCanvas? {
-        guard canExpand, canvasWithTip.width > 0, restingRowWidth > 0 else { return nil }
-        return BubbleCanvas(size: canvasWithTip, restingWidth: restingRowWidth)
+        Self.canvas(
+            state: state, measured: canvasWithTip,
+            restingWidth: restingRowWidth, shape: canExpand ? .zero : bubbleSize
+        )
+    }
+
+    /// The window the shape hangs in, held from the Fn release to the hide
+    /// (#217).
+    ///
+    /// Leaving `.recording` used to drop the canvas, and the window refitted
+    /// itself to the transcribing row and re-centred on it — "it's as if a new
+    /// bubble appears from nowhere". So the canvas outlives the recording it was
+    /// measured from: every face after release lives in it, drawn at its
+    /// top-leading corner, and the window's own corner is one point from the
+    /// release through the paste to the hide. The shape inside it is free to
+    /// close on its own spring, because closing it moves no window.
+    ///
+    /// - Parameters:
+    ///   - measured: the recording's own canvas, tooltip room included. Zero
+    ///     before the probes have laid it out — the first frame of a recording,
+    ///     and any face that never had a recording before it (a microphone that
+    ///     failed at the hold), where the window fits its content as it always
+    ///     did.
+    ///   - shape: what the visible shape needs *now*, for the one face that can
+    ///     want more than the recording did — a wrapped failure sentence is
+    ///     wider than the bubble opens to. Zero while recording, where the
+    ///     probes already hold everything the shape can become and a spring's
+    ///     own overshoot would otherwise resize the window mid-widen.
+    ///
+    /// Pure, and static, because it is the whole of the rule and
+    /// `RecordingBubbleFrameTests` drives a real panel with the sequence it
+    /// produces.
+    static func canvas(
+        state: DictationState, measured: CGSize, restingWidth: CGFloat, shape: CGSize
+    ) -> BubbleCanvas? {
+        guard state != .idle, measured.width > 0, restingWidth > 0 else { return nil }
+        return BubbleCanvas(
+            size: CGSize(
+                width: max(measured.width, shape.width),
+                height: max(measured.height, shape.height)
+            ),
+            restingWidth: restingWidth
+        )
     }
 
     /// The window while a dictation records: the shape's own canvas with the
@@ -639,7 +701,7 @@ struct DictationIndicatorView: View {
     /// The bubble the user sees, and the only part of the canvas that answers a
     /// pointer — the margin around it belongs to whatever window is underneath.
     private var bubble: some View {
-        shape(open: expanded, measuring: false, paused: paused, listWidth: topRowWidth)
+        shape(open: expanded, measuring: false, paused: paused, listWidth: bubbleSize.width)
             .fixedSize()
             // The paste's goodbye (#218): the shape closes over the same fifth
             // of a second the mark takes to burst, so the two leave as one
@@ -659,7 +721,7 @@ struct DictationIndicatorView: View {
                 // belongs to (#207); crossing a gap inside it does not.
                 if !inside { tipWarm = false }
             }
-            .onGeometryChange(for: CGFloat.self, of: \.size.width) { topRowWidth = $0 }
+            .onGeometryChange(for: CGSize.self, of: \.size) { bubbleSize = $0 }
     }
 
     /// The canvas, measured from the shape rather than guessed at (#204).
@@ -678,7 +740,7 @@ struct DictationIndicatorView: View {
     /// can churn the window either: every size in a measuring copy is fixed.
     private var probes: some View {
         ZStack(alignment: .topLeading) {
-            shape(open: true, measuring: true, paused: false, listWidth: topRowWidth)
+            shape(open: true, measuring: true, paused: false, listWidth: bubbleSize.width)
             // The paused row is laid out beside it, always, whether or not this
             // recording is paused (#206): Esc puts a pause glyph where the 8 pt
             // dot was and `Continue` past a hairline, and a canvas measured
@@ -885,69 +947,78 @@ struct DictationIndicatorView: View {
 
     @ViewBuilder
     private func face(open: Bool, measuring: Bool, paused: Bool) -> some View {
-        switch state {
-        case .recording:
-            if let error = lastError {
-                // Mic stall surfaced by the first-frame watchdog — show it loudly
-                // instead of a normal-looking recording meter (#209, F1).
-                failureFace(error).transition(Self.faceDissolve)
-            } else {
-                recordingContent(open: open, measuring: measuring, paused: paused)
-                    .transition(Self.faceDissolve)
-            }
-        case .loadingModel:
-            workingRow(label: "Downloading model\u{2026}").transition(Self.faceDissolve)
-        case .processing, .done:
-            // T1 (#209): the spinner stands where the dot did, the timer is
-            // frozen at the dictation's own length, and the clip with its count
-            // stays put so the person can see their items are still riding
-            // along. Nothing else in the row.
-            //
-            // The paste is the same face, not the next one (#211): when the
-            // words go, the slot's spinner becomes a green checkmark and every
-            // other thing in the row stands exactly where it stood (the board's
-            // frame 2). Two switch cases would be two views, and the dissolve
-            // between them would cross-fade a label into an identical label.
-            // `.processing` ignores a failure exactly as it always did.
-            if let error = lastError, state == .done {
-                failureFace(error).transition(Self.faceDissolve)
-            } else {
-                workingRow(label: "Transcribing", delivered: state == .done) {
-                    frozenTimer
-                    if clipBright { clipReport }
-                }
-                .transition(Self.faceDissolve)
-            }
-        case .idle:
+        if state == .idle {
             EmptyView()
+        } else if let error = lastError, state == .recording || state == .done {
+            // Mic stall surfaced by the first-frame watchdog while recording
+            // (#209, F1), or whatever the dictation came back with. A face that
+            // reports a failure is a different face and dissolves in as one.
+            // `.processing` ignores a failure exactly as it always did, and a
+            // model download says only what it is doing.
+            failureFace(error).transition(Self.faceDissolve)
+        } else {
+            // One row, migrating (#217). The recording's own row and the
+            // transcribing face are the same HStack with different things in
+            // it: the icon slot, the timer and the clip stay put and slide on
+            // the shape's own spring, and only what is leaving — the lock, the
+            // waveform, the rail, the list — dissolves, with the sentence
+            // dissolving in where they stood. Two branches would be two views,
+            // and the change would cross-fade a timer into the same timer while
+            // the whole shape was replaced ("it's as if a new bubble appears
+            // from nowhere").
+            liveRow(
+                open: open, measuring: measuring, paused: paused,
+                working: Self.workingLabel(for: state)
+            )
+        }
+    }
+
+    /// What the row says while the pipeline works (#209 T1, F3) — the sentence
+    /// that stands where the lock and the waveform do while a dictation records.
+    /// Nil is the recording itself.
+    static func workingLabel(for state: DictationState) -> String? {
+        switch state {
+        case .recording, .idle: nil
+        case .loadingModel: "Downloading model\u{2026}"
+        case .processing, .done: "Transcribing"
         }
     }
 
     // MARK: - Recording
 
-    /// The bubble at rest, and the rail it widens to show (#201). At rest the
-    /// only letters are the armed ones: what will happen to these words is a
-    /// fact about the dictation in progress, and a fact the bubble hides until
-    /// it is pointed at is a fact the user does not have (the shipped bubble
-    /// said nothing at all while translate was armed). Everything else — `S`,
-    /// the unarmed letters, the gear — arrives with the pointer, and arrives to
-    /// the right of what was already there (`BubbleRail`), so nothing the user
-    /// was reading moves.
-    private func recordingContent(open: Bool, measuring: Bool, paused: Bool) -> some View {
-        let keys = railKeys(open: open)
+    /// The bubble at rest, the rail it widens to show (#201), and the face it
+    /// migrates into once the words are away (#217). At rest the only letters
+    /// are the armed ones: what will happen to these words is a fact about the
+    /// dictation in progress, and a fact the bubble hides until it is pointed at
+    /// is a fact the user does not have (the shipped bubble said nothing at all
+    /// while translate was armed). Everything else — `S`, the unarmed letters,
+    /// the gear — arrives with the pointer, and arrives to the right of what was
+    /// already there (`BubbleRail`), so nothing the user was reading moves.
+    ///
+    /// Past the release (`working` is a sentence) the same row keeps its slot,
+    /// its timer and its clip and drops everything a finished dictation has no
+    /// use for: the lock, the waveform, the rail, the gear and the paused row's
+    /// own button are all offers about a capture that is over.
+    private func liveRow(
+        open: Bool, measuring: Bool, paused: Bool, working: String?
+    ) -> some View {
+        let keys = working == nil ? railKeys(open: open) : []
         return HStack(spacing: 10) {
-            statusGroup(measuring: measuring, paused: paused)
-            clip
+            statusGroup(measuring: measuring, paused: paused, working: working)
+            if showsClip(working: working) {
+                clipGroup(report: working != nil).transition(Self.faceDissolve)
+            }
             // Before the rail, not after it (#206, F7a): at rest the paused row
-            // ends with `Continue`, and opening must go on appending to the right
+            // ends with its button, and opening must go on appending to the right
             // of what was already there, as everything else in this row does.
-            if paused {
-                groupDivider
-                continuePill
+            if paused, working == nil {
+                groupDivider.transition(Self.faceDissolve)
+                continuePill.transition(Self.faceDissolve)
             }
             if !keys.isEmpty {
                 groupDivider
                     .opacity(armedLetters.isEmpty && !railVisible ? 0 : 1)
+                    .transition(Self.faceDissolve)
                 HStack(spacing: Self.glyphGap) {
                     ForEach(keys) { key in
                         // An armed letter was already standing there, so it
@@ -969,15 +1040,23 @@ struct DictationIndicatorView: View {
                             .allowsHitTesting(key.armed || railVisible)
                     }
                 }
+                .transition(Self.faceDissolve)
             }
-            if open {
+            if open, working == nil {
                 groupDivider
                     .opacity(railVisible ? 1 : 0)
+                    .transition(Self.faceDissolve)
                 gear
                     .opacity(railVisible ? 1 : 0)
                     .allowsHitTesting(railVisible)
+                    .transition(Self.faceDissolve)
             }
         }
+        // The board's own line, which the recording row gets for free from the
+        // waveform's 18 pt and the faces after release have to be given: a
+        // keycap, a spinner and a sentence do not agree on it by themselves, and
+        // the height is one of the two things a face change may not move.
+        .frame(minHeight: Self.faceRowHeight)
     }
 
     /// One letter in the bubble (#201). `armed` is what the letter reports
@@ -1069,14 +1148,27 @@ struct DictationIndicatorView: View {
     /// off the glyph's top-right corner, and the ring itself was the objection:
     /// a badge overlapping a 14 pt glyph has no room to move that reads as
     /// deliberate rather than clipped.
-    private var clip: some View {
+    /// Past the release it is the same pair reporting rather than switching
+    /// (#209 T1, #217): the same glyph in the same place, with the same count
+    /// beside it, so what rode along is still on screen while the words are
+    /// transcribed — and no longer a switch, because the dictation is over and a
+    /// paperclip that could still be turned off here would be offering to leave
+    /// out items that have already gone (`ui-language.md` rule 8).
+    private func clipGroup(report: Bool) -> some View {
         HStack(spacing: Self.glyphGap) {
-            clipSwitch
+            clipSwitch(report: report)
             if clipBright { count }
         }
     }
 
-    private var clipSwitch: some View {
+    /// Whether the row draws the clip at all: always while recording, where the
+    /// paperclip is a switch even with nothing collected yet, and only when
+    /// something rode along once the words are away.
+    private func showsClip(working: String?) -> Bool {
+        working == nil || clipBright
+    }
+
+    private func clipSwitch(report: Bool) -> some View {
         clipGlyph
             // The tint reaches the slash as well as the symbol, so the two
             // strokes of one glyph are never two colours.
@@ -1100,6 +1192,11 @@ struct DictationIndicatorView: View {
             // One switch, one name, on and off alike (#212): two sentences for
             // the two faces of one control read as two different things.
             .bubbleTip(.clip, "Toggle prompt attachments", hovered: $hoveredTip, pointer: pointer)
+            // Reporting, not switching: the pointer gets no lift and the click
+            // does nothing, and the count beside it is the one thing left to
+            // read out loud.
+            .allowsHitTesting(!report)
+            .accessibilityHidden(report)
             // The spoken name still says which way it is set — a screen reader
             // has no brightness, no count and no slash to read it off.
             .accessibilityElement(children: .ignore)
@@ -1238,20 +1335,6 @@ struct DictationIndicatorView: View {
         path.move(to: CGPoint(x: inset.width, y: inset.height))
         path.addLine(to: CGPoint(x: box.width - inset.width, y: box.height - inset.height))
         return path
-    }
-
-    /// The clip as the transcribing face carries it (#209, T1): the same glyph
-    /// and the same count, reporting what rode along with these words. Not a
-    /// switch — the dictation is over, and a paperclip that could still be
-    /// turned off here would be offering to leave out items that have already
-    /// gone (`ui-language.md` rule 8).
-    private var clipReport: some View {
-        HStack(spacing: Self.glyphGap) {
-            clipSymbol.foregroundStyle(LoreTheme.TextColor.primary)
-            count
-        }
-        .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(includedCount) in the prompt")
     }
 
     /// The count beside the clip (#209, B2): plain mono text, muted whatever the
@@ -1457,51 +1540,95 @@ struct DictationIndicatorView: View {
         elapsedWidth(items.map(\.seconds).max() ?? 0, size: 11)
     }
 
-    /// The row the recording is read off, on one baseline (#209): a plain label
+    /// The row the dictation is read off, on one baseline (#209): a plain label
     /// and the mono figures beside it are set on the same line, which
     /// centre-alignment does not give — a proportional label's line box and a
     /// monospaced figure's do not centre alike, and the timer sat visibly a
     /// point high. Everything in it that is a glyph rather than text carries the
     /// row's own baseline (`onTextBaseline`).
-    private func statusGroup(measuring: Bool, paused: Bool) -> some View {
+    ///
+    /// The slot leads it in every state and the timer follows in every state
+    /// (#217): what changes at the release is what stands between them — the
+    /// lock and the waveform go, the sentence arrives — so the two things the
+    /// eye was reading migrate rather than being replaced.
+    private func statusGroup(measuring: Bool, paused: Bool, working: String?) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            if paused {
-                pauseGlyph.onTextBaseline()
+            iconSlot(paused: paused, working: working != nil)
+            if let working {
+                Text(working)
+                    .font(LoreTheme.Typography.body)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                    .transition(Self.faceDissolve)
+            } else {
+                if lockEnabled {
+                    lockGlyph.onTextBaseline().transition(Self.faceDissolve)
+                }
+                waveform(measuring: measuring, paused: paused)
+                    .onTextBaseline()
+                    .bubbleTip(.waveform, "Your voice level", hovered: $hoveredTip, pointer: pointer)
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Your voice level")
+                    .transition(Self.faceDissolve)
+            }
+            // The timer never leaves its place (#216). Quiet is drawn, not
+            // written: the dot beside it is dimmed and the bars lie flat, and
+            // that is the whole of the message — a sentence sliding in and out
+            // of the row at the start of every dictation said no more than they
+            // do. A microphone that is truly dead is a different thing and keeps
+            // its own loud face (`lastError`, #209 F1).
+            //
+            // After the release it is the same view in a quieter tone, stopped
+            // where it stopped (#209 T1) — and drawn at all only when this run
+            // had a length of its own, which a history retry does not.
+            if working == nil || recordingSeconds > 0 {
+                timerText(
+                    recordingSeconds,
+                    color: working == nil ? LoreTheme.TextColor.muted : LoreTheme.TextColor.faint
+                )
+                    // Two sentences, because the second one is the answer.
+                    // The same two facts in a third of the words (#212).
+                    .bubbleTip(
+                        .timer, Self.timerHelp, hovered: $hoveredTip, pointer: pointer
+                    )
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel(Self.timerHelp)
+            }
+            if bluetoothRedirected, working == nil {
+                bluetoothGlyph.transition(Self.faceDissolve)
+            }
+        }
+    }
+
+    /// The row's icon slot, one box in every state (#217, #219): the record dot,
+    /// the amber pause glyph, the spinner while the pipeline works and the
+    /// paste's green mark all stand in the same 15 pt box the lock beside them
+    /// uses.
+    ///
+    /// The dot was 8 pt of its own, so pausing pushed everything right of it 7 pt
+    /// sideways ("the pause moves nothing", #219) and releasing did the same
+    /// again on the way to the spinner. Its own size is unchanged — an 8 pt dot
+    /// centred in the slot — and only what stands around it is now the same
+    /// whatever the row is doing.
+    @ViewBuilder
+    private func iconSlot(paused: Bool, working: Bool) -> some View {
+        Group {
+            if working {
+                workingIcon(delivered: state == .done)
+            } else if paused {
+                pauseGlyph
             } else {
                 Circle()
                     // No-signal keeps its distinct dimmed look (not a token color
                     // — it must read as "not recording red").
                     .fill(noSignal ? Color.white.opacity(0.3) : LoreTheme.Accent.red)
                     .frame(width: 8, height: 8)
-                    .onTextBaseline()
                     .bubbleTip(.dot, "Recording", hovered: $hoveredTip, pointer: pointer)
                     .accessibilityElement(children: .ignore)
                     .accessibilityLabel("Recording")
             }
-            if lockEnabled { lockGlyph.onTextBaseline() }
-            waveform(measuring: measuring, paused: paused)
-                .onTextBaseline()
-                .bubbleTip(.waveform, "Your voice level", hovered: $hoveredTip, pointer: pointer)
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel("Your voice level")
-            // The timer never leaves its place (#216). Quiet is drawn, not
-            // written: the dot above is dimmed and the bars beside it lie flat,
-            // and that is the whole of the message — a sentence sliding in and
-            // out of the row at the start of every dictation said no more than
-            // they do. A microphone that is truly dead is a different thing and
-            // keeps its own loud face (`lastError`, #209 F1).
-            timerText(recordingSeconds, color: LoreTheme.TextColor.muted)
-                // Two sentences, because the second one is the answer.
-                // The same two facts in a third of the words (#212).
-                .bubbleTip(
-                    .timer, Self.timerHelp, hovered: $hoveredTip, pointer: pointer
-                )
-                .accessibilityElement(children: .ignore)
-                .accessibilityLabel(Self.timerHelp)
-            if bluetoothRedirected {
-                bluetoothGlyph
-            }
         }
+        .frame(width: Self.faceIconSide, height: Self.faceIconSide)
+        .onTextBaseline()
     }
 
     /// The redirect note, which is a glyph until it is pointed at.
@@ -1528,8 +1655,8 @@ struct DictationIndicatorView: View {
     /// What stands where the record dot does while Esc has paused the capture
     /// (#206, F7a). Amber, because that is already what paused means everywhere
     /// else in the app — the meeting banner, the REC pill, the sidebar dot and
-    /// the menu-bar bead all use this token — and the same 15 pt box the lock
-    /// beside it stands in, so the two glyphs of a paused row are one pair.
+    /// the menu-bar bead all use this token. The box around it is the row's own
+    /// slot (`iconSlot`), which every state of the row now shares.
     ///
     /// Not a control: the ways back are Esc, `Continue` and Fn, and a fourth
     /// door on the glyph would be a fourth name for two actions.
@@ -1537,7 +1664,6 @@ struct DictationIndicatorView: View {
         Image(systemName: "pause.fill")
             .font(.system(size: 11))
             .foregroundStyle(LoreTheme.Accent.amber)
-            .frame(width: 15, height: 15)
             .bubbleTip(.dot, Self.pausedHelp, hovered: $hoveredTip, pointer: pointer)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(Self.pausedHelp)
@@ -1652,26 +1778,7 @@ struct DictationIndicatorView: View {
     /// the height is one of the two things a face change may not move.
     static let faceRowHeight: CGFloat = 18
 
-    /// The two faces that report work in progress: transcribing (T1) and the
-    /// model download (F3). One row — the spinner where the dot stands, the
-    /// sentence beside it, and whatever else that face carries after it.
-    private func workingRow<Trailing: View>(
-        label: String, delivered: Bool = false,
-        @ViewBuilder trailing: () -> Trailing = { EmptyView() }
-    ) -> some View {
-        HStack(alignment: .firstTextBaseline, spacing: 10) {
-            workingIcon(delivered: delivered)
-                .frame(width: Self.faceIconSide, height: Self.faceIconSide)
-                .onTextBaseline()
-            Text(label)
-                .font(LoreTheme.Typography.body)
-                .foregroundStyle(LoreTheme.TextColor.primary)
-            trailing()
-        }
-        .frame(minHeight: Self.faceRowHeight)
-    }
-
-    /// What stands in the working row's icon slot: the spinner while the
+    /// What stands in the row's icon slot while the pipeline works: the
     /// pipeline works, and the paste's green checkmark once the words are away
     /// (#211). One replaces the other on the board's own 0.2 s dissolve.
     @ViewBuilder
@@ -1699,16 +1806,6 @@ struct DictationIndicatorView: View {
             .scaleEffect(popping && !reduceMotion ? PasteMark.grow : 1)
             .opacity(popping ? 0 : 1)
             .animation(popping ? Self.burstCurve : nil, value: popping)
-    }
-
-    /// The dictation's own clock, stopped where it stopped (#209, T1) — the
-    /// live timer in a quieter tone, and drawn at all only when this run had a
-    /// length of its own, which a history retry does not.
-    @ViewBuilder
-    private var frozenTimer: some View {
-        if recordingSeconds > 0 {
-            timerText(recordingSeconds, color: LoreTheme.TextColor.faint)
-        }
     }
 
     /// The clock, live or frozen: one face, one template width, so the number

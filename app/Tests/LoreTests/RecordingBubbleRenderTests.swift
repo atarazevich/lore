@@ -625,23 +625,82 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertEqual(after.moved, 0, "the mark moved the rest of the row")
     }
 
-    /// The mark is `LoreTheme.Accent.green` and nothing near it: the brightest
-    /// pixel in the slot is more green than it is red or blue, by more than the
-    /// material's own variation.
+    /// What the paste's mark looks like and nothing else in these rows does:
+    /// bright, and further from red and blue than the material's own variation
+    /// could carry it (two levels there against eighty here). One predicate,
+    /// because two copies of "the mark's green" in one file are two chances to
+    /// disagree about it — `assertGreen` reads it in the slot, `greenCentre`
+    /// across the whole render.
+    private static func isMarkGreen(_ pixel: (UInt8, UInt8, UInt8, UInt8)) -> Bool {
+        let (r, g, b, _) = pixel
+        return Int(g) > 150 && Int(g) - Int(r) > 80 && Int(g) - Int(b) > 80
+    }
+
+    /// The mark is `LoreTheme.Accent.green` and nothing near it. The brightest
+    /// pixel in the slot is printed whatever the verdict — it is the number that
+    /// makes a run of this readable.
     private func assertGreen(_ raster: Raster, columns: Range<Int>) throws {
         let rows = Int(raster.paintedHeight * Self.scale)
         var best: (r: Int, g: Int, b: Int) = (0, 0, 0)
+        var found = false
         for y in 0..<rows {
             for x in columns {
-                let (r, g, b, _) = raster.pixel(x: x, y: y)
-                if Int(g) > best.g { best = (Int(r), Int(g), Int(b)) }
+                let pixel = raster.pixel(x: x, y: y)
+                if Int(pixel.1) > best.g { best = (Int(pixel.0), Int(pixel.1), Int(pixel.2)) }
+                if Self.isMarkGreen(pixel) { found = true }
             }
         }
         print("[#211] the mark's brightest pixel: r \(best.r) g \(best.g) b \(best.b) "
               + "(the token is 50, 215, 75)")
-        XCTAssertGreaterThan(best.g, 150, "nothing bright enough to be the mark")
-        XCTAssertGreaterThan(best.g - best.r, 80, "the mark is not green")
-        XCTAssertGreaterThan(best.g - best.b, 80, "the mark is not green")
+        XCTAssertTrue(found, "nothing in the slot is the mark's own green")
+    }
+
+    /// The mark stands exactly where the record dot stood (#217). The slot is
+    /// one 15 pt box in every state the row can be in — the dot, the amber pause
+    /// glyph, the spinner and the paste's mark all centre in it — so the release
+    /// migrates the row rather than replacing it. Measured as the centre of the
+    /// first run of ink, because the two glyphs are different sizes inside the
+    /// one box (an 8 pt dot, a 14 pt mark) and it is the box they share.
+    ///
+    /// The spinner itself draws nothing offscreen — an `ImageRenderer` runs no
+    /// animations — so the mark is the face that can be measured here.
+    func testTheMarkStandsWhereTheRecordingDotStood() throws {
+        let recording = try raster(bubble())
+        let delivered = try raster(face(.processing, seconds: 73, delivered: true))
+        // The dot is the row's first run of ink; the mark is green, which the
+        // ink test — a red-channel brightness — cannot see, so it is found by
+        // its own colour instead.
+        let dotRun = try XCTUnwrap(inkRuns(recording, gap: 5).first, "the row drew no dot")
+        let dot = CGFloat(dotRun.lowerBound + dotRun.upperBound) / 2 / Self.scale
+        let mark = try greenCentre(of: delivered)
+        print("[#217] the slot's centre: \(String(format: "%.2f", dot)) pt while recording, "
+              + "\(String(format: "%.2f", mark)) pt once the words are away "
+              + "(the row's padding \(DictationIndicatorView.rowPaddingH) pt plus half a "
+              + "\(DictationIndicatorView.faceIconSide) pt slot)")
+        XCTAssertEqual(mark, dot, accuracy: 1, "the slot changed hands and moved")
+        XCTAssertEqual(
+            dot,
+            DictationIndicatorView.rowPaddingH + DictationIndicatorView.faceIconSide / 2,
+            accuracy: 1,
+            "the dot is not centred in the row's own icon slot"
+        )
+    }
+
+    /// Where the paste's mark stands, across the render: the middle of every
+    /// column carrying its green (`isMarkGreen`), which in these rows is the
+    /// mark and nothing else.
+    private func greenCentre(of raster: Raster) throws -> CGFloat {
+        let rows = Int(raster.paintedHeight * Self.scale)
+        var first = raster.width
+        var last = -1
+        for y in 0..<rows {
+            for x in 0..<raster.width where Self.isMarkGreen(raster.pixel(x: x, y: y)) {
+                first = min(first, x)
+                last = max(last, x)
+            }
+        }
+        XCTAssertGreaterThan(last, 0, "nothing green was drawn")
+        return CGFloat(first + last + 1) / 2 / Self.scale
     }
 
     /// A frozen timer is a timer: the face draws the dictation's own length, and

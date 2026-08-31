@@ -148,6 +148,74 @@ final class RecordingBubbleFrameTests: XCTestCase {
         XCTAssertEqual(rect.midX, screen.midX, accuracy: 0.0001)
     }
 
+    // MARK: - The release does not move the window (#217)
+
+    /// From the Fn release to the hide, the window's top-left is one point.
+    ///
+    /// Leaving `.recording` used to drop the canvas, and the window refitted
+    /// itself to the transcribing row and re-centred on it — "it's as if a new
+    /// bubble appears from nowhere". The shape reports the recording's own
+    /// canvas for every face after it, grown only if that face needs more than
+    /// the recording did, so the window has nothing to re-decide until the shape
+    /// is gone. Driven through the view's own rule, so the sequence here is the
+    /// sequence a dictation produces.
+    @MainActor
+    func testTheWindowsCornerIsOnePointFromTheReleaseToTheHide() throws {
+        let panel = try XCTUnwrap(
+            TopCenteredPanel(content: Color.clear.frame(width: 200, height: 40), topInset: 8),
+            "no screen to place a panel on"
+        )
+        let measured = CGSize(width: openWidth, height: openHeight)
+        func report(_ state: DictationState, shape: CGSize = .zero) -> BubbleCanvas? {
+            DictationIndicatorView.canvas(
+                state: state, measured: measured, restingWidth: restingWidth, shape: shape
+            )
+        }
+        panel.setCanvas(report(.recording))
+        let recording = panel.lastFrame
+        XCTAssertGreaterThan(recording.width, 0, "the panel never placed itself")
+
+        // The transcribing row, the paste's mark standing in it, and a wrapped
+        // failure sentence — the one face that wants more width than the bubble
+        // ever opened to.
+        let working = CGSize(width: 230, height: 42)
+        let wrapped = CGSize(width: 325, height: 93)
+        for (name, state, shape) in [
+            ("transcribing", DictationState.processing, working),
+            ("the paste's mark", .done, working),
+            ("a wrapped failure", .done, wrapped),
+        ] as [(String, DictationState, CGSize)] {
+            let canvas = try XCTUnwrap(report(state, shape: shape), "\(name): the canvas was dropped")
+            panel.setCanvas(canvas)
+            print("[#217] \(name): \(NSStringFromRect(panel.lastFrame)) "
+                  + "(the recording's own \(NSStringFromRect(recording)))")
+            XCTAssertEqual(
+                panel.lastFrame.minX, recording.minX, accuracy: 0.0001, "\(name): the left edge moved"
+            )
+            XCTAssertEqual(
+                panel.lastFrame.maxY, recording.maxY, accuracy: 0.0001, "\(name): the top edge moved"
+            )
+        }
+        // The wrapped face is wider than the recording's canvas, so the window
+        // grew — to the right, from the corner it was already at.
+        XCTAssertEqual(panel.lastFrame.width, wrapped.width, accuracy: 0.0001)
+
+        // Only the hide gives the window back to its own fitting.
+        XCTAssertNil(report(.idle, shape: working), "the shape kept a canvas it no longer has")
+    }
+
+    /// And the first frame of a recording reports nothing at all: the probes
+    /// have not been laid out, so the window fits and centres the resting bubble
+    /// on its own — which is exactly where the canvas is about to put it.
+    func testAShapeThatHasNotBeenMeasuredReportsNoCanvas() {
+        XCTAssertNil(DictationIndicatorView.canvas(
+            state: .recording, measured: .zero, restingWidth: 0, shape: .zero
+        ))
+        XCTAssertNil(DictationIndicatorView.canvas(
+            state: .done, measured: .zero, restingWidth: 0, shape: CGSize(width: 230, height: 42)
+        ))
+    }
+
     // MARK: - Where the user puts it (#213)
 
     /// The whole visible frame of that screen, menu bar taken off the top.
