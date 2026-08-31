@@ -52,8 +52,11 @@ final class NotchPromptPresenterTests: XCTestCase {
         window = StubNotchWindow()
     }
 
+    /// `isMeetingsEnabled` has no default on the initializer itself (#227,
+    /// P5) — every existing call site below stays unchanged because this is
+    /// the one place the permissive `{ true }` now lives.
     private func makePresenter(timeout: Duration = .seconds(60)) -> NotchPromptPresenter {
-        NotchPromptPresenter(timeout: timeout, window: window)
+        NotchPromptPresenter(timeout: timeout, window: window, isMeetingsEnabled: { true })
     }
 
     /// Checked, condition-driven replacement for `window.presented[index]`:
@@ -269,16 +272,4 @@ final class NotchPromptPresenterTests: XCTestCase {
         )
     }
 
-    /// Every test above already exercises this (the default is `{ true }`),
-    /// but the contrast is worth pinning explicitly: #227 must not touch the
-    /// path where meetings really is on.
-    func testPresentStillReachesTheWindowWhenMeetingsIsEnabled() async {
-        let presenter = makePresenter()
-        presenter.isMeetingsEnabled = { true }
-
-        presenter.present(appName: "Zoom")
-
-        guard await presentedContent(at: 0) != nil else { return }
-        XCTAssertEqual(window.ops, [.present(appName: "Zoom")])
-    }
 }

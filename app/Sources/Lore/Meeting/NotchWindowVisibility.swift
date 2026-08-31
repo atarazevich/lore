@@ -61,11 +61,13 @@ final class NotchScreenChangeSweeper {
     ///     for the live re-apply branch, `false` for the ghost order-out
     ///     (#227: a re-front nobody asked for used to leave no trace at all,
     ///     the gap that made the ghost invisible in events.json). Never called
-    ///     when `window()` is nil — there is nothing to report yet.
+    ///     when `window()` is nil — there is nothing to report yet. Required,
+    ///     no default: a future caller of this shared seam must supply its
+    ///     own trace or fail to compile, not inherit silence.
     init(
         isLive: @escaping @MainActor () -> Bool,
         window: @escaping @MainActor () -> NSWindow?,
-        onSweep: @escaping @MainActor (Bool) -> Void = { _ in }
+        onSweep: @escaping @MainActor (Bool) -> Void
     ) {
         observer = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,

@@ -380,6 +380,38 @@ final class MeetingDetectionControllerTests: XCTestCase {
         XCTAssertEqual(ignoredDiagCount(), before, "no persist happened, so no diagnostic may claim it did")
     }
 
+    // MARK: - The record follows the outcome (#227, C1)
+
+    /// `present()` can itself refuse (meetings off) — a race reachable
+    /// today: `settings.meetingsEnabled` can flip on a render tick before
+    /// `disableDetection`/`teardown` runs while `detectionTask` still
+    /// delivers. Recording `.shown` regardless, as this used to, produced a
+    /// self-contradicting pair — `shown` beside the presenter's own
+    /// `presentRefusedMeetingsOff` for the same moment. The record must
+    /// follow the outcome: no `.shown`, the refusal alone, and a return
+    /// value that says so.
+    func testHandleMeetingDetectedRecordsNoShownWhenThePresenterRefuses() {
+        let controller = MeetingDetectionController()
+        let presenter = NotchPromptPresenter(isMeetingsEnabled: { false })
+        controller.injectDetectorForTesting(MeetingDetector(), presenter: presenter)
+        let mark = DiagStream.mark()
+
+        let proceeded = controller.handleMeetingDetected(
+            app: MeetingApp(bundleID: "us.zoom.xos", name: "Zoom")
+        )
+
+        XCTAssertFalse(proceeded, "the return value must be honest about a refused prompt")
+        let events = DiagStream.events(since: mark)
+        XCTAssertFalse(
+            events.contains { if case .detectionPrompt = $0 { true } else { false } },
+            ".shown must not be recorded for a prompt that never presented: \(events)"
+        )
+        XCTAssertEqual(
+            events, [.promptWindow(.presentRefusedMeetingsOff)],
+            "the refusal itself must still be traced"
+        )
+    }
+
     // MARK: - App Exit Monitoring
 
     func testAppExitMonitorYieldsEventWhenAppNotRunning() async throws {

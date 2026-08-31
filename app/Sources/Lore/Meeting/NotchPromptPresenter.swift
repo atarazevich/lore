@@ -64,9 +64,10 @@ final class NotchPromptPresenter {
     /// `present()`. Defense in depth: today unreachable — `AppContainer`
     /// tears the whole detection pipeline down with the switch, so nothing
     /// calls `present()` while this would answer false — but a guard at a
-    /// trust boundary is cheap, and the default (`true`) keeps every existing
-    /// call site and test that never wires this unchanged.
-    var isMeetingsEnabled: () -> Bool = { true }
+    /// trust boundary is cheap. No default: a caller that forgets to wire
+    /// this should not compile into "always enabled" by accident: better to
+    /// see it fail than to trust a silent permissive default.
+    var isMeetingsEnabled: () -> Bool
 
     private let timeout: Duration
     /// The one long-lived window (#141); tests substitute a fake. Defaults to
@@ -87,12 +88,17 @@ final class NotchPromptPresenter {
     /// - Parameters:
     ///   - timeout: auto-dismiss interval; injectable for tests.
     ///   - window: the surface's one window; tests substitute a stub.
+    ///   - isMeetingsEnabled: required, no default — see the property's own
+    ///     comment. Production wires the live settings read here; the test
+    ///     factory below is where the permissive `{ true }` lives now.
     init(
         timeout: Duration = .seconds(60),
-        window: NotchPromptWindow = DynamicNotchPromptWindow.shared
+        window: NotchPromptWindow = DynamicNotchPromptWindow.shared,
+        isMeetingsEnabled: @escaping () -> Bool
     ) {
         self.timeout = timeout
         self.window = window
+        self.isMeetingsEnabled = isMeetingsEnabled
     }
 
     /// Present the detection prompt. A pending prompt is replaced in place —
@@ -102,12 +108,16 @@ final class NotchPromptPresenter {
     ///
     /// Refuses at the door while meetings is off (#227) — traced, since a
     /// refusal that never happens today should still be visible in the ring
-    /// the day something upstream lets it through.
-    func present(appName: String?) {
+    /// the day something upstream lets it through. Returns whether it
+    /// actually proceeded: `MeetingDetectionController.handleMeetingDetected`
+    /// records its own `.shown` disposition only when this says true, so the
+    /// two traces can never contradict each other for the same moment.
+    @discardableResult
+    func present(appName: String?) -> Bool {
         guard isMeetingsEnabled() else {
             DiagStore.record(.promptWindow(.presentRefusedMeetingsOff))
             notchLog.debug("notch prompt refused — meetings are off")
-            return
+            return false
         }
         timeoutTask?.cancel()
         timeoutTask = nil
@@ -131,6 +141,7 @@ final class NotchPromptPresenter {
             self.dismissWindow()
             self.onTimeout?()
         }
+        return true
     }
 
     /// Withdraw any live prompt without firing callbacks.
@@ -173,38 +184,28 @@ final class NotchPromptPresenter {
 /// accumulates an instance per prompt, each rebuilding a ghost panel on every
 /// display change. Created lazily on the first prompt. Accepted residual: the
 /// observer re-creates and fronts the one panel on display changes even while
-/// hidden — a steady count of one, not growth.
-///
-/// **Verified (#227), reading the vendored source**
-/// (`DynamicNotch.swift:144-153`, `observeScreenParameters`): that Task's
-/// handle is never stored, so nothing — not even this class — can ever cancel
-/// it, and the `NotificationCenter` sequence it awaits does not complete while
-/// the process runs. So once a `DynamicNotch` is constructed, deallocating
-/// *this* wrapper cannot take it down: the library's own Task keeps it alive
-/// regardless of any reference we hold, and it keeps recreating and fronting
-/// a (masked-to-nothing, `state == .hidden`) panel on every future
-/// screen-parameter change for the rest of the process's life. `dismiss()`
-/// (below) only ever hid this instance's panel — it never touched `notch`
-/// itself, and given the above, clearing that reference would not have
-/// destroyed anything the library still owns either.
-///
-/// #221 broke the "whole app's life" half of the one-instance invariant:
-/// `MeetingDetectionController.setup()` built a fresh `NotchPromptPresenter()`
-/// — hence, on first prompt, a fresh and separately-immortal `DynamicNotch` —
-/// on every meetings-enable, with the previous cycle's instance (and its own
-/// leaked observer) still running underneath, unreachable and untorn-down.
-/// Repeated toggling could accumulate one such ghost-generator per cycle.
-/// `shared` restores the invariant: at most one `DynamicNotch` for the app's
-/// entire life, however many times meetings is toggled — which is also the
-/// one thing keeping this instance's own `screenChangeSweeper` (the
-/// reactive order-out) alive for as long as the immortal panel can still be
-/// re-fronted, i.e. forever. Tearing the presenter down on `teardown()` (as
-/// #221 did) would have discarded that sweep at exactly the moment — meetings
-/// off — the ghost most needs to keep being swept.
+/// hidden — a steady count of one, not growth (confirmed 2026-08-31 against
+/// `DynamicNotch.swift:144-153`; `.shared` below is now the only door, so a
+/// meetings-toggle cycle can never mint a second one, #227).
 @MainActor
 final class DynamicNotchPromptWindow: NotchPromptWindow {
-    /// The app-lifetime instance (#227) — see the type's own doc comment.
+    /// The app-lifetime instance (#227) and, outside of `makeForTesting()`
+    /// below, the only way to get one — see the type's own doc comment for
+    /// why a second instance is a second immortal ghost-generator.
     static let shared = DynamicNotchPromptWindow()
+
+    private init() {}
+
+    #if DEBUG
+    /// Test-only escape from `.shared` (#227): `NotchWindowVisibilityTests`
+    /// needs a standalone instance so it can drive `present()`/`dismiss()`
+    /// without perturbing the app-lifetime singleton every other test may
+    /// already be observing. No production call site exists — the same
+    /// boundary `MeetingDetectionController.injectDetectorForTesting` already
+    /// draws, documentation- rather than compiler-enforced, since dev and
+    /// release builds both compile in the debug configuration (`build.sh`).
+    static func makeForTesting() -> DynamicNotchPromptWindow { DynamicNotchPromptWindow() }
+    #endif
 
     private var notch: DynamicNotch<NotchPromptExpandedView, NotchPromptCompactIcon, NotchPromptCompactLabel>?
     private let model = NotchPromptModel()

@@ -57,10 +57,15 @@ final class MeetingDetectionController {
     /// Test seam: setup() can't run under swift test (it starts a real
     /// MeetingDetector on the CoreAudio mic listener), so tests inject a
     /// detector with a mock signal source directly. `settings` covers the
-    /// handlers that persist to `activeSettings` (#101).
-    func injectDetectorForTesting(_ detector: MeetingDetector, settings: AppSettings? = nil) {
+    /// handlers that persist to `activeSettings` (#101); `presenter` lets
+    /// `handleMeetingDetected` be driven against a real `NotchPromptPresenter`
+    /// (#227) — setup() would otherwise be the only place that wires one.
+    func injectDetectorForTesting(
+        _ detector: MeetingDetector, settings: AppSettings? = nil, presenter: NotchPromptPresenter? = nil
+    ) {
         meetingDetector = detector
         if let settings { activeSettings = settings }
+        if let presenter { notchPromptPresenter = presenter }
     }
     #endif
 
@@ -127,17 +132,20 @@ final class MeetingDetectionController {
 
         // Notch prompt: the sole detection surface (#80). No onDismiss — the
         // notch has no user-driven dismiss affordance.
-        let presenter = NotchPromptPresenter()
+        //
+        // Defense in depth (#227): today unreachable — this whole method only
+        // runs while meetings is on — but the presenter's own door-check is
+        // cheap. Reads `activeSettings` (retained above) through `[weak self]`,
+        // this file's own convention for every closure below, rather than
+        // capturing `settings` itself.
+        let presenter = NotchPromptPresenter(
+            isMeetingsEnabled: { [weak self] in self?.activeSettings?.meetingsEnabled ?? true }
+        )
         notchPromptPresenter = presenter
         presenter.onAccept = { [weak self] in self?.handleDetectionAccepted() }
         presenter.onNotAMeeting = { [weak self] in self?.handleDetectionNotAMeeting() }
         presenter.onIgnoreApp = { [weak self] in self?.handleIgnoreApp() }
         presenter.onTimeout = { [weak self] in self?.handleDetectionTimeout() }
-        // Defense in depth (#227): today unreachable — this whole method only
-        // runs while meetings is on — but the presenter's own door-check is
-        // cheap, and a weak read means a settings object that outlives this
-        // controller can't be mistaken for "still enabled".
-        presenter.isMeetingsEnabled = { [weak settings] in settings?.meetingsEnabled ?? true }
 
         // Start listening for detection events from the MeetingDetector
         detectionTask = Task { [weak self] in
@@ -336,8 +344,14 @@ final class MeetingDetectionController {
             return false
         }
 
+        // present() can itself refuse (#227, meetings off) — traced there
+        // already. Recording .shown regardless would be a self-contradicting
+        // pair for the same moment: shown beside refused. `!= false` treats a
+        // nil presenter (not expected outside tests that never call setup())
+        // the same as today — proceed and record, since there is no refusal
+        // to contradict.
+        guard notchPromptPresenter?.present(appName: app?.name) != false else { return false }
         DiagStore.record(.detectionPrompt(disposition: app == nil ? .shownUnattributed : .shown))
-        notchPromptPresenter?.present(appName: app?.name)
         return true
     }
 

@@ -162,7 +162,7 @@ final class NotchWindowVisibilityTests: XCTestCase {
 
         let before = Set(NSApp.windows.map(ObjectIdentifier.init))
         let expected = SettingsStore.screenSharingType(from: .standard)
-        let window = DynamicNotchPromptWindow()
+        let window = DynamicNotchPromptWindow.makeForTesting()
         await window.present(content: NotchPromptContent(
             appName: "Zoom", onAccept: {}, onNotAMeeting: {}, onIgnoreApp: {}
         ))
@@ -181,5 +181,65 @@ final class NotchWindowVisibilityTests: XCTestCase {
         XCTAssertNotNil(panel, "the library panel never appeared in NSApp.windows")
         XCTAssertEqual(panel?.sharingType, expected,
                        "present() must route the panel through the window-policy seam")
+    }
+
+    // MARK: - The real onSweep wiring, not a test stand-in (#227, C4)
+
+    /// `testSweeperOrdersGhostOutAndReappliesPolicyToLivePanel` above proves
+    /// `NotchScreenChangeSweeper`'s callback mechanism with a test-supplied
+    /// `onSweep`. This proves the actual production closure —
+    /// `DynamicNotchPromptWindow.ensureNotch()`'s `onSweep: { live in
+    /// DiagStore.record(...) }` — really is what gets wired, both branches,
+    /// through the presenter's own configured sweeper.
+    ///
+    /// What stays unpinnable: the *visible* race between DynamicNotchKit's
+    /// own re-front and our sweep's order-out is real compositor timing this
+    /// suite cannot measure — only that the trace lands, not how many
+    /// milliseconds a ghost was on screen before it did. See #227's own
+    /// note on that.
+    func testPresenterConfiguredSweeperRecordsToDiagStore() async throws {
+        _ = NSApplication.shared
+        try XCTSkipIf(NSScreen.screens.isEmpty, "no display — DynamicNotchKit cannot build its panel")
+
+        let window = DynamicNotchPromptWindow.makeForTesting()
+        await window.present(content: NotchPromptContent(
+            appName: "Zoom", onAccept: {}, onNotAMeeting: {}, onIgnoreApp: {}
+        ))
+
+        // Live: the prompt is showing, so a screen-parameter sweep re-applies
+        // the policy rather than ordering anything out.
+        let liveMark = DiagStream.mark()
+        NotificationCenter.default.post(
+            name: NSApplication.didChangeScreenParametersNotification, object: NSApp)
+
+        var liveEvents: [DiagEvent] = []
+        for _ in 0..<30 {
+            try await Task.sleep(for: .milliseconds(100))
+            liveEvents = DiagStream.events(since: liveMark)
+            if liveEvents.contains(.promptWindow(.sweepReaffirmedLive)) { break }
+        }
+        XCTAssertTrue(
+            liveEvents.contains(.promptWindow(.sweepReaffirmedLive)),
+            "the presenter's real sweeper must reach DiagStore while showing: \(liveEvents)"
+        )
+
+        await window.dismiss()
+
+        // Ghost: dismissed, so the next re-front DynamicNotchKit fires on its
+        // own gets ordered back out, and that must be traced too.
+        let ghostMark = DiagStream.mark()
+        NotificationCenter.default.post(
+            name: NSApplication.didChangeScreenParametersNotification, object: NSApp)
+
+        var ghostEvents: [DiagEvent] = []
+        for _ in 0..<30 {
+            try await Task.sleep(for: .milliseconds(100))
+            ghostEvents = DiagStream.events(since: ghostMark)
+            if ghostEvents.contains(.promptWindow(.sweepOrderedGhostOut)) { break }
+        }
+        XCTAssertTrue(
+            ghostEvents.contains(.promptWindow(.sweepOrderedGhostOut)),
+            "the presenter's real sweeper must reach DiagStore once dismissed: \(ghostEvents)"
+        )
     }
 }
