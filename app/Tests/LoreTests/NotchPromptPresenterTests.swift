@@ -249,4 +249,36 @@ final class NotchPromptPresenterTests: XCTestCase {
         await waitUntil(timeout: .milliseconds(200)) { !window.ops.isEmpty }
         XCTAssertTrue(window.ops.isEmpty)
     }
+
+    // MARK: - Refused at the door while meetings is off (#227)
+
+    /// Defense in depth: unreachable today (the whole detection pipeline
+    /// tears down with the master switch), but the guard must actually work
+    /// and must leave a trace — the door a future caller might reach.
+    func testPresentRefusesAndTracesWhileMeetingsIsOff() {
+        let presenter = makePresenter()
+        presenter.isMeetingsEnabled = { false }
+        let mark = DiagStream.mark()
+
+        presenter.present(appName: "Zoom")
+
+        XCTAssertTrue(window.ops.isEmpty, "a refused present must never reach the window")
+        XCTAssertEqual(
+            DiagStream.events(since: mark), [.promptWindow(.presentRefusedMeetingsOff)],
+            "the refusal must be traced"
+        )
+    }
+
+    /// Every test above already exercises this (the default is `{ true }`),
+    /// but the contrast is worth pinning explicitly: #227 must not touch the
+    /// path where meetings really is on.
+    func testPresentStillReachesTheWindowWhenMeetingsIsEnabled() async {
+        let presenter = makePresenter()
+        presenter.isMeetingsEnabled = { true }
+
+        presenter.present(appName: "Zoom")
+
+        guard await presentedContent(at: 0) != nil else { return }
+        XCTAssertEqual(window.ops, [.present(appName: "Zoom")])
+    }
 }

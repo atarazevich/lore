@@ -98,8 +98,17 @@ final class NotchWindowVisibilityTests: XCTestCase {
         let live = makeNotchStylePanel()
         live.orderFrontRegardless()
 
-        let ghostSweeper = NotchScreenChangeSweeper(isLive: { false }, window: { ghost })
-        let liveSweeper = NotchScreenChangeSweeper(isLive: { true }, window: { live })
+        // #227: the gap the ghost investigation hit was that a sweep left no
+        // trace at all. `onSweep` is the seam the real code wires to
+        // DiagStore; here it just proves both branches are observable.
+        var ghostSweeps: [Bool] = []
+        var liveSweeps: [Bool] = []
+        let ghostSweeper = NotchScreenChangeSweeper(
+            isLive: { false }, window: { ghost }, onSweep: { ghostSweeps.append($0) }
+        )
+        let liveSweeper = NotchScreenChangeSweeper(
+            isLive: { true }, window: { live }, onSweep: { liveSweeps.append($0) }
+        )
 
         NotificationCenter.default.post(
             name: NSApplication.didChangeScreenParametersNotification, object: NSApp)
@@ -112,8 +121,29 @@ final class NotchWindowVisibilityTests: XCTestCase {
 
         XCTAssertFalse(ghost.isVisible, "hidden surface: the rebuilt ghost must be ordered back out")
         XCTAssertEqual(live.sharingType, expected, "live surface: the rebuilt panel must carry the policy")
+        XCTAssertFalse(ghostSweeps.isEmpty, "the ghost sweep itself must be traceable (#227)")
+        XCTAssertTrue(ghostSweeps.allSatisfy { $0 == false }, "a ghost sweep must never report live")
+        XCTAssertFalse(liveSweeps.isEmpty, "the live re-apply must be traceable too (#227)")
+        XCTAssertTrue(liveSweeps.allSatisfy { $0 == true }, "a live re-apply must never report a ghost")
         live.orderOut(nil)
         _ = (ghostSweeper, liveSweeper)  // keep the observers alive through the poll
+    }
+
+    /// `onSweep` must stay silent before there is ever a window to act on —
+    /// nothing to report yet is not the same fact as a ghost was ordered out.
+    func testOnSweepNeverFiresWithNoWindowYet() async throws {
+        _ = NSApplication.shared
+        var sweeps: [Bool] = []
+        let sweeper = NotchScreenChangeSweeper(
+            isLive: { false }, window: { nil }, onSweep: { sweeps.append($0) }
+        )
+
+        NotificationCenter.default.post(
+            name: NSApplication.didChangeScreenParametersNotification, object: NSApp)
+        try await Task.sleep(for: .milliseconds(700)) // past both sweep passes
+
+        XCTAssertTrue(sweeps.isEmpty, "no window means nothing to sweep, traced or otherwise")
+        _ = sweeper
     }
 
     // MARK: - End to end through the presenter

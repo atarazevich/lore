@@ -60,8 +60,17 @@ final class NotchPromptPresenter {
     /// Called when the prompt times out (60 seconds, no user action).
     var onTimeout: (() -> Void)?
 
+    /// The master switch's live reading (#227), checked at the door of every
+    /// `present()`. Defense in depth: today unreachable — `AppContainer`
+    /// tears the whole detection pipeline down with the switch, so nothing
+    /// calls `present()` while this would answer false — but a guard at a
+    /// trust boundary is cheap, and the default (`true`) keeps every existing
+    /// call site and test that never wires this unchanged.
+    var isMeetingsEnabled: () -> Bool = { true }
+
     private let timeout: Duration
-    /// The one long-lived window (#141); tests substitute a fake.
+    /// The one long-lived window (#141); tests substitute a fake. Defaults to
+    /// the app-lifetime shared instance (#227) — see `DynamicNotchPromptWindow.shared`.
     private let window: NotchPromptWindow
     private var timeoutTask: Task<Void, Never>?
     /// True while a prompt is on screen and unresolved.
@@ -80,7 +89,7 @@ final class NotchPromptPresenter {
     ///   - window: the surface's one window; tests substitute a stub.
     init(
         timeout: Duration = .seconds(60),
-        window: NotchPromptWindow = DynamicNotchPromptWindow()
+        window: NotchPromptWindow = DynamicNotchPromptWindow.shared
     ) {
         self.timeout = timeout
         self.window = window
@@ -90,7 +99,16 @@ final class NotchPromptPresenter {
     /// its timeout dies and its buttons go stale, but the panel is not taken
     /// down: the new content swaps in through the window's model, so at most
     /// one prompt is live and the notch never dips mid-replace.
+    ///
+    /// Refuses at the door while meetings is off (#227) — traced, since a
+    /// refusal that never happens today should still be visible in the ring
+    /// the day something upstream lets it through.
     func present(appName: String?) {
+        guard isMeetingsEnabled() else {
+            DiagStore.record(.promptWindow(.presentRefusedMeetingsOff))
+            notchLog.debug("notch prompt refused — meetings are off")
+            return
+        }
         timeoutTask?.cancel()
         timeoutTask = nil
         generation += 1
@@ -156,8 +174,38 @@ final class NotchPromptPresenter {
 /// display change. Created lazily on the first prompt. Accepted residual: the
 /// observer re-creates and fronts the one panel on display changes even while
 /// hidden — a steady count of one, not growth.
+///
+/// **Verified (#227), reading the vendored source**
+/// (`DynamicNotch.swift:144-153`, `observeScreenParameters`): that Task's
+/// handle is never stored, so nothing — not even this class — can ever cancel
+/// it, and the `NotificationCenter` sequence it awaits does not complete while
+/// the process runs. So once a `DynamicNotch` is constructed, deallocating
+/// *this* wrapper cannot take it down: the library's own Task keeps it alive
+/// regardless of any reference we hold, and it keeps recreating and fronting
+/// a (masked-to-nothing, `state == .hidden`) panel on every future
+/// screen-parameter change for the rest of the process's life. `dismiss()`
+/// (below) only ever hid this instance's panel — it never touched `notch`
+/// itself, and given the above, clearing that reference would not have
+/// destroyed anything the library still owns either.
+///
+/// #221 broke the "whole app's life" half of the one-instance invariant:
+/// `MeetingDetectionController.setup()` built a fresh `NotchPromptPresenter()`
+/// — hence, on first prompt, a fresh and separately-immortal `DynamicNotch` —
+/// on every meetings-enable, with the previous cycle's instance (and its own
+/// leaked observer) still running underneath, unreachable and untorn-down.
+/// Repeated toggling could accumulate one such ghost-generator per cycle.
+/// `shared` restores the invariant: at most one `DynamicNotch` for the app's
+/// entire life, however many times meetings is toggled — which is also the
+/// one thing keeping this instance's own `screenChangeSweeper` (the
+/// reactive order-out) alive for as long as the immortal panel can still be
+/// re-fronted, i.e. forever. Tearing the presenter down on `teardown()` (as
+/// #221 did) would have discarded that sweep at exactly the moment — meetings
+/// off — the ghost most needs to keep being swept.
 @MainActor
 final class DynamicNotchPromptWindow: NotchPromptWindow {
+    /// The app-lifetime instance (#227) — see the type's own doc comment.
+    static let shared = DynamicNotchPromptWindow()
+
     private var notch: DynamicNotch<NotchPromptExpandedView, NotchPromptCompactIcon, NotchPromptCompactLabel>?
     private let model = NotchPromptModel()
     private var hoverObservation: AnyCancellable?
@@ -225,7 +273,12 @@ final class DynamicNotchPromptWindow: NotchPromptWindow {
         self.notch = notch
         screenChangeSweeper = NotchScreenChangeSweeper(
             isLive: { [weak self] in self?.promptShowing ?? false },
-            window: { [weak self] in self?.notch?.windowController?.window }
+            window: { [weak self] in self?.notch?.windowController?.window },
+            // The gap the ghost investigation hit (#227): a re-front nobody
+            // asked for left no trace. Both branches now do.
+            onSweep: { live in
+                DiagStore.record(.promptWindow(live ? .sweepReaffirmedLive : .sweepOrderedGhostOut))
+            }
         )
         return notch
     }

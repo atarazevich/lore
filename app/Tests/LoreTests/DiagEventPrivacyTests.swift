@@ -67,7 +67,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case dictationItemsPruned
         case dictationScreenshotChord, dictationScreenshotRedirected, clipboardProbeRead
         case detectionLifecycle, detectionDeviceListChanged, detectionListenerFailed
-        case detectionSignal, detectionAppScan, detectionPrompt
+        case detectionSignal, detectionAppScan, detectionPrompt, promptWindow
         case notificationAuthorization, notificationPosted
         case sessionPaused, sessionResumed, sessionResumeFailed
         case historyWriteFailed, historyMigrated, corruptFileAside, sessionImportFailed
@@ -142,6 +142,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .detectionSignal: return .detectionSignal
         case .detectionAppScan: return .detectionAppScan
         case .detectionPrompt: return .detectionPrompt
+        case .promptWindow: return .promptWindow
         case .notificationAuthorization: return .notificationAuthorization
         case .notificationPosted: return .notificationPosted
         case .sessionPaused: return .sessionPaused
@@ -256,6 +257,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .detectionSignal: return .detectionSignal(active: true)
         case .detectionAppScan: return .detectionAppScan(found: true)
         case .detectionPrompt: return .detectionPrompt(disposition: .suppressedSessionActive)
+        case .promptWindow: return .promptWindow(.sweepOrderedGhostOut)
         case .notificationAuthorization: return .notificationAuthorization(outcome: .failed)
         case .notificationPosted: return .notificationPosted(outcome: .ok)
         case .sessionPaused: return .sessionPaused
@@ -293,6 +295,7 @@ final class DiagEventPrivacyTests: XCTestCase {
         allowed.formUnion(DiagEvent.EchoPath.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.PasteKind.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.PromptDisposition.allCases.map(\.rawValue))
+        allowed.formUnion(DiagEvent.PromptWindowEvent.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.Artifact.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.HealthTrigger.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.NotesMigration.allCases.map(\.rawValue))

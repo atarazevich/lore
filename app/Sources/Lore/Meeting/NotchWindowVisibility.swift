@@ -57,9 +57,15 @@ final class NotchScreenChangeSweeper {
     /// - Parameters:
     ///   - isLive: whether the surface currently has content on screen.
     ///   - window: the library panel, or nil before the first show.
+    ///   - onSweep: fires once per actual sweep against a real window — `true`
+    ///     for the live re-apply branch, `false` for the ghost order-out
+    ///     (#227: a re-front nobody asked for used to leave no trace at all,
+    ///     the gap that made the ghost invisible in events.json). Never called
+    ///     when `window()` is nil — there is nothing to report yet.
     init(
         isLive: @escaping @MainActor () -> Bool,
-        window: @escaping @MainActor () -> NSWindow?
+        window: @escaping @MainActor () -> NSWindow?,
+        onSweep: @escaping @MainActor (Bool) -> Void = { _ in }
     ) {
         observer = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification,
@@ -67,22 +73,26 @@ final class NotchScreenChangeSweeper {
             queue: .main
         ) { _ in
             Task { @MainActor in
-                Self.sweep(isLive: isLive, window: window)
+                Self.sweep(isLive: isLive, window: window, onSweep: onSweep)
                 try? await Task.sleep(for: .milliseconds(500))
-                Self.sweep(isLive: isLive, window: window)
+                Self.sweep(isLive: isLive, window: window, onSweep: onSweep)
             }
         }
     }
 
     private static func sweep(
         isLive: @MainActor () -> Bool,
-        window: @MainActor () -> NSWindow?
+        window: @MainActor () -> NSWindow?,
+        onSweep: @MainActor (Bool) -> Void
     ) {
+        guard let window = window() else { return }
         guard isLive() else {
-            window()?.orderOut(nil)
+            window.orderOut(nil)
+            onSweep(false)
             return
         }
-        window()?.applyFullscreenAuxiliaryVisibility()
+        window.applyFullscreenAuxiliaryVisibility()
+        onSweep(true)
     }
 
     deinit {

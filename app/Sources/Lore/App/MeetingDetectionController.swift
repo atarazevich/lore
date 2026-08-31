@@ -133,6 +133,11 @@ final class MeetingDetectionController {
         presenter.onNotAMeeting = { [weak self] in self?.handleDetectionNotAMeeting() }
         presenter.onIgnoreApp = { [weak self] in self?.handleIgnoreApp() }
         presenter.onTimeout = { [weak self] in self?.handleDetectionTimeout() }
+        // Defense in depth (#227): today unreachable — this whole method only
+        // runs while meetings is on — but the presenter's own door-check is
+        // cheap, and a weak read means a settings object that outlives this
+        // controller can't be mistaken for "still enabled".
+        presenter.isMeetingsEnabled = { [weak settings] in settings?.meetingsEnabled ?? true }
 
         // Start listening for detection events from the MeetingDetector
         detectionTask = Task { [weak self] in

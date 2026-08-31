@@ -159,6 +159,30 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case suppressedAppIgnored
     }
 
+    /// The meeting prompt's own window-level lifecycle (#227) — traced
+    /// independently of `PromptDisposition` above, which speaks for the
+    /// *detection loop's* decisions and never runs for a re-front
+    /// DynamicNotchKit fires on its own: a screen-parameter change can
+    /// recreate and front the prompt's window without `MeetingDetectionController`
+    /// ever being asked, the ghost class `SummonWithdrawal.sweptGhost` names
+    /// for the health surface (#149) before that surface was retired (#151).
+    /// The meeting prompt cannot be retired the same way, so it is traced
+    /// instead.
+    enum PromptWindowEvent: String, Codable, Sendable, CaseIterable {
+        /// `present()` refused because meetings is off — defense in depth
+        /// (#227); unreachable today, since the whole detection pipeline
+        /// tears down with the master switch.
+        case presentRefusedMeetingsOff
+        /// The screen-parameter sweep found the surface live and re-applied
+        /// the window policy (#145) — not a ghost, the same window it
+        /// already was.
+        case sweepReaffirmedLive
+        /// The sweep found the surface should not be showing and ordered a
+        /// DynamicNotchKit re-front back out — the trace that makes an
+        /// otherwise invisible ghost visible in the ring.
+        case sweepOrderedGhostOut
+    }
+
     /// Which on-disk artifact was found corrupt and moved aside. A closed set —
     /// never the file's path, which can carry a session id.
     enum Artifact: String, Codable, Sendable, CaseIterable {
@@ -411,6 +435,10 @@ enum DiagEvent: Codable, Sendable, Equatable {
     case detectionSignal(active: Bool)
     case detectionAppScan(found: Bool)
     case detectionPrompt(disposition: PromptDisposition)
+    /// The meeting prompt's window-level show/order-out (#227) — see
+    /// `PromptWindowEvent`'s own comment for why this is not folded into
+    /// `detectionPrompt` above.
+    case promptWindow(PromptWindowEvent)
     case notificationAuthorization(outcome: Outcome)
     case notificationPosted(outcome: Outcome)
     /// The user suspended and continued a meeting (#153). The pair is what
@@ -494,7 +522,7 @@ extension DiagEvent {
             return .dictation
 
         case .detectionLifecycle, .detectionDeviceListChanged, .detectionListenerFailed,
-             .detectionSignal, .detectionAppScan, .detectionPrompt,
+             .detectionSignal, .detectionAppScan, .detectionPrompt, .promptWindow,
              .notificationAuthorization, .notificationPosted,
              .sessionPaused, .sessionResumed, .sessionResumeFailed:
             return .meetings
@@ -578,6 +606,7 @@ extension DiagEvent {
         case .detectionSignal: return "detectionSignal"
         case .detectionAppScan: return "detectionAppScan"
         case .detectionPrompt: return "detectionPrompt"
+        case .promptWindow: return "promptWindow"
         case .notificationAuthorization: return "notificationAuthorization"
         case .notificationPosted: return "notificationPosted"
         case .sessionPaused: return "sessionPaused"
