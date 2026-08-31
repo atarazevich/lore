@@ -30,6 +30,12 @@ enum LoreTheme {
         static let hover = rgb(255, 255, 255, 0.05)
         /// `--line` rgba(255,255,255,.10) — hairline dividers & 1px borders.
         static let line = rgb(255, 255, 255, 0.10)
+        /// `--line2` rgba(255,255,255,.12) — stronger hairline: the Dictation
+        /// Activity pane's stat-quadrant dividers (dictation-heatmap.html v4).
+        static let line2 = rgb(255, 255, 255, 0.12)
+        /// `--line3` rgba(255,255,255,.25) — strongest hairline: the Activity
+        /// pane's period-row rule, above the stat quadrant (dictation-heatmap.html v4).
+        static let line3 = rgb(255, 255, 255, 0.25)
     }
 
     // MARK: - Text
