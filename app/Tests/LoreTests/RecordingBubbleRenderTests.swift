@@ -929,7 +929,6 @@ final class RecordingBubbleRenderTests: XCTestCase {
         model.items = items
         model.noSignal = noSignal
         model.collecting = true
-        model.screenshotsEnabled = true
         model.held = held
         model.paused = paused
         model.renderPreview = BubbleRenderPreview(

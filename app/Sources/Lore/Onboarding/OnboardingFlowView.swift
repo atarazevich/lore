@@ -240,7 +240,7 @@ struct OnboardingFlowView: View {
         VStack(alignment: .leading, spacing: 9) {
             cheatRow("fn", "hold to talk")
             cheatRow("Space", "lock it on, hands free")
-            cheatRow("C", "clean up what you just said")
+            cheatRow("V", "clean up what you just said")
             cheatRow("T", "translate what you just said")
             cheatRow("\u{2303}\u{2318}V", "paste that take again")
         }

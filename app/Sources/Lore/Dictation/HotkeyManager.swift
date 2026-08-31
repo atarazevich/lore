@@ -177,8 +177,8 @@ final class HotkeyManager {
         // return value, and by the time its closure runs the keystroke has
         // already been delivered to the focused app. So it must never handle a
         // key that must be consumed. Every consumable key (Space lock, Esc,
-        // Fn+V/T/K, C/T/K upgrades) is owned by the CGEvent tap, which can return
-        // nil; this monitor is narrowed to the one chord it uniquely owns and
+        // Fn+V/T/K/S) is owned by the CGEvent tap, which can return nil; this
+        // monitor is narrowed to the one chord it uniquely owns and
         // that may pass through: Ctrl+Cmd+V re-paste, which the tap does not
         // carry. Routing all keys here once made Space lock leak a literal
         // space into the user's document whenever the tap missed the event.
@@ -308,10 +308,11 @@ final class HotkeyManager {
         HotkeyManager.hkLog.info("Hotkey manager uninstalled")
     }
 
-    /// Modifier enable toggle lookup (DSET-05/06): Space lock, Fn+V cleanup,
-    /// Fn+T translate, and the Fn+K / Fn+S chords with the rail letters that
-    /// teach them each gate on one SettingsStore flag; absent settings default
-    /// to enabled. The NSEvent
+    /// Modifier enable toggle lookup (DSET-05): Space lock, Fn+V cleanup,
+    /// Fn+T translate and Fn+K send-to-the-operator each gate on one
+    /// SettingsStore flag; absent settings default to enabled. (Fn+S is not
+    /// here — its switch is Copying's own, read live through
+    /// `RichInputSettings`.) The NSEvent
     /// monitors and the CGEvent tap callback all run on the main thread (the
     /// tap source is added to CFRunLoopGetMain — see the Space path's
     /// assumeIsolated precedent), so this is a cheap cached-property read in

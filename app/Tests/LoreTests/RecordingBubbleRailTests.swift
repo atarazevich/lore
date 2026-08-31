@@ -4,9 +4,12 @@ import XCTest
 /// The order the bubble's letters stand in (#204).
 ///
 /// The rule is one invariant: whatever is armed already stands in the resting
-/// bubble, so opening may only append to its right. `S T K` broke it — an armed
-/// `T` shown at rest shifted right the moment opening inserted `S` ahead of it —
-/// and so would a fixed `C T K S`, for a lone armed `K`.
+/// bubble, so opening may only append to its right. A fixed order broke it — an
+/// armed `T` shown at rest shifted right the moment opening inserted another
+/// letter ahead of it, and so would `V T K` for a lone armed `K`.
+///
+/// The letters themselves are `V T K` since #224: the key that arms cleanup is
+/// V, and `S` left the rail to the paperclip that was already its control.
 final class RecordingBubbleRailTests: XCTestCase {
 
     private func open(_ armed: BubbleRailLetter...) -> [String] {
@@ -28,26 +31,30 @@ final class RecordingBubbleRailTests: XCTestCase {
 
     /// Every case named when the rule was settled.
     func testTheOrderOpeningTakes() {
-        XCTAssertEqual(open(), ["T", "K", "S"])
-        XCTAssertEqual(open(.operatorSend), ["K", "T", "S"])
-        XCTAssertEqual(open(.translate), ["T", "K", "S"])
-        XCTAssertEqual(open(.translate, .operatorSend), ["T", "K", "S"])
-        XCTAssertEqual(open(.cleanup), ["C", "T", "K", "S"])
-        XCTAssertEqual(open(.cleanup, .translate), ["C", "T", "K", "S"])
-        XCTAssertEqual(open(.cleanup, .operatorSend), ["C", "K", "T", "S"])
-        XCTAssertEqual(open(.cleanup, .translate, .operatorSend), ["C", "T", "K", "S"])
+        XCTAssertEqual(open(), ["T", "K"])
+        XCTAssertEqual(open(.operatorSend), ["K", "T"])
+        XCTAssertEqual(open(.translate), ["T", "K"])
+        XCTAssertEqual(open(.translate, .operatorSend), ["T", "K"])
+        XCTAssertEqual(open(.cleanup), ["V", "T", "K"])
+        XCTAssertEqual(open(.cleanup, .translate), ["V", "T", "K"])
+        XCTAssertEqual(open(.cleanup, .operatorSend), ["V", "K", "T"])
+        XCTAssertEqual(open(.cleanup, .translate, .operatorSend), ["V", "T", "K"])
     }
 
-    /// At rest the bubble carries exactly what is armed, read in `C T K`, and
-    /// nothing else — `S` names a setting rather than something armed for this
-    /// dictation, and an unarmed `C` has nothing to say.
+    /// At rest the bubble carries exactly what is armed, read in `V T K`, and
+    /// nothing else — an unarmed `V` has nothing to say.
     func testAtRestTheBubbleCarriesWhatIsArmedAndNothingElse() {
         XCTAssertEqual(rest(), [])
         XCTAssertEqual(rest(.operatorSend), ["K"])
         XCTAssertEqual(rest(.translate, .operatorSend), ["T", "K"])
-        XCTAssertEqual(rest(.cleanup, .operatorSend), ["C", "K"])
-        XCTAssertEqual(rest(.cleanup, .translate, .operatorSend), ["C", "T", "K"])
-        XCTAssertEqual(rest(.screenshot), [], "S is never armed")
+        XCTAssertEqual(rest(.cleanup, .operatorSend), ["V", "K"])
+        XCTAssertEqual(rest(.cleanup, .translate, .operatorSend), ["V", "T", "K"])
+    }
+
+    /// The rail has three letters and no fourth: the cleanup letter is the key
+    /// that arms it, and `S` is not a letter at all (#224).
+    func testTheRailHasThreeLettersAndTheyAreTheKeysPressed() {
+        XCTAssertEqual(BubbleRailLetter.allCases.map(\.rawValue), ["V", "T", "K"])
     }
 
     /// With the operator switch off (#223) the `K` is not a letter the rail
@@ -55,14 +62,14 @@ final class RecordingBubbleRailTests: XCTestCase {
     /// the dictation carries the flag — which is what an entry armed before the
     /// switch was turned off looks like.
     func testTheOperatorLetterIsGoneWhileTheSwitchIsOff() {
-        XCTAssertEqual(openWithoutOperator(), ["T", "S"])
-        XCTAssertEqual(openWithoutOperator(.cleanup), ["C", "T", "S"])
-        XCTAssertEqual(openWithoutOperator(.translate), ["T", "S"])
-        XCTAssertEqual(openWithoutOperator(.operatorSend), ["T", "S"], "no K, armed or not")
-        XCTAssertEqual(openWithoutOperator(.cleanup, .translate, .operatorSend), ["C", "T", "S"])
+        XCTAssertEqual(openWithoutOperator(), ["T"])
+        XCTAssertEqual(openWithoutOperator(.cleanup), ["V", "T"])
+        XCTAssertEqual(openWithoutOperator(.translate), ["T"])
+        XCTAssertEqual(openWithoutOperator(.operatorSend), ["T"], "no K, armed or not")
+        XCTAssertEqual(openWithoutOperator(.cleanup, .translate, .operatorSend), ["V", "T"])
         XCTAssertEqual(restWithoutOperator(), [])
         XCTAssertEqual(restWithoutOperator(.operatorSend), [], "no K standing at rest either")
-        XCTAssertEqual(restWithoutOperator(.cleanup, .operatorSend), ["C"])
+        XCTAssertEqual(restWithoutOperator(.cleanup, .operatorSend), ["V"])
     }
 
     /// And the switch touches nothing else: every other letter reads the same
@@ -95,11 +102,11 @@ final class RecordingBubbleRailTests: XCTestCase {
                 "opening moved a letter that was already on screen, armed [\(named)]"
             )
             XCTAssertEqual(Set(opened).count, opened.count, "a letter is drawn twice, armed [\(named)]")
-            var offered = armed.union([.translate, .screenshot])
+            var offered = armed.union([.translate])
             if operatorSend { offered.insert(.operatorSend) } else { offered.remove(.operatorSend) }
             XCTAssertEqual(
                 Set(opened), offered,
-                "the open rail is whatever is armed, plus T S and K while the switch is on, "
+                "the open rail is whatever is armed, plus T and K while the switch is on, "
                 + "armed [\(named)]"
             )
         }

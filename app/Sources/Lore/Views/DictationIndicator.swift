@@ -56,33 +56,36 @@ private func elapsedWidth(_ seconds: Int, size: CGFloat) -> CGFloat {
 
 /// One letter in the recording bubble's rail (#201) — the key on the keyboard,
 /// which is why the letters teach the shortcut by standing there.
+///
+/// Which is also why cleanup is `V` and not the `C` it shipped as (#224): the
+/// key that arms it has always been V (keyCode 9), so the letter named a key
+/// nobody could press. `S` left the rail entirely — the paperclip beside it is
+/// already that control, and Fn+S still works with the clip's own bounce as its
+/// answer.
 enum BubbleRailLetter: String, CaseIterable, Sendable {
-    case cleanup = "C"
+    case cleanup = "V"
     case translate = "T"
     case operatorSend = "K"
-    case screenshot = "S"
 }
 
 /// What order the letters stand in (#204).
 ///
 /// Whatever is armed already stands in the bubble at rest, so opening may only
 /// append to the right of it: a letter that was on screen before the pointer
-/// arrived may not move. So the armed letters come first, in `C T K`, and
-/// whatever is not armed follows in `T K S`. An unarmed `C` never appears —
-/// an unarmed cleanup letter has nothing to say — and `S` is only ever in the
-/// tail, because it names a setting rather than something armed for this
-/// dictation.
+/// arrived may not move. So the armed letters come first, in `V T K`, and
+/// whatever is not armed follows in `T K`. An unarmed `V` never appears — an
+/// unarmed cleanup letter has nothing to say.
 ///
-/// A fixed `C T K S` was the first answer and it broke the invariant for a lone
+/// A fixed order was the first answer and it broke the invariant for a lone
 /// armed `K`: opening would insert `T` ahead of it, and the `K` the user was
 /// reading would shift right. Ordering by what is armed is what makes the
 /// closed rail a prefix of the open one for every armed set, which is the
 /// property `RecordingBubbleRailTests` checks.
 enum BubbleRail {
-    /// `C T K` — the order armed letters are read in.
+    /// `V T K` — the order armed letters are read in.
     static let armedOrder: [BubbleRailLetter] = [.cleanup, .translate, .operatorSend]
-    /// `T K S` — what opening appends, for whatever is not armed already.
-    static let restOrder: [BubbleRailLetter] = [.translate, .operatorSend, .screenshot]
+    /// `T K` — what opening appends, for whatever is not armed already.
+    static let restOrder: [BubbleRailLetter] = [.translate, .operatorSend]
 
     /// - Parameter open: the bubble is widened. Closed, only the armed letters
     ///   are drawn at all.
@@ -400,12 +403,9 @@ struct DictationIndicatorView: View {
     /// Settings → Copying carries. Off keeps its place and comes back to what
     /// it held.
     var collecting = true
-    /// Screenshots are on in Settings (#201): what the `S` keycap's brightness
-    /// reports. `S` is a key you press, never a switch on the bubble.
-    var screenshotsEnabled = true
     /// The hotkey is being held inside a locked recording (#205). It opens the
     /// bubble exactly as the pointer does, for as long as it is held — which is
-    /// the moment Fn+T, Fn+K and Fn+S are pressed, so the rail is on screen when
+    /// the moment Fn+T and Fn+K are pressed, so the rail is on screen when
     /// those chords apply.
     var held = false
     /// Esc has suspended the capture (#206). The board's F7a: a pause glyph
@@ -478,7 +478,7 @@ struct DictationIndicatorView: View {
     var onToggleLock: (() -> Void)?
     /// The paperclip turns collecting off and on (#201).
     var onToggleCollecting: (() -> Void)?
-    /// `C`, `T` and `K` arm and disarm exactly as Fn+V, Fn+T and Fn+K do
+    /// `V`, `T` and `K` arm and disarm exactly as Fn+V, Fn+T and Fn+K do
     /// (#201).
     var onArmCleanup: (() -> Void)?
     var onArmTranslate: (() -> Void)?
@@ -1000,8 +1000,8 @@ struct DictationIndicatorView: View {
     /// are the armed ones: what will happen to these words is a fact about the
     /// dictation in progress, and a fact the bubble hides until it is pointed at
     /// is a fact the user does not have (the shipped bubble said nothing at all
-    /// while translate was armed). Everything else — `S`, the unarmed letters,
-    /// the gear — arrives with the pointer, and arrives to the right of what was
+    /// while translate was armed). Everything else — the unarmed letters, the
+    /// gear — arrives with the pointer, and arrives to the right of what was
     /// already there (`BubbleRail`), so nothing the user was reading moves.
     ///
     /// Past the release (`working` is a sentence) the same row keeps its slot,
@@ -1036,9 +1036,7 @@ struct DictationIndicatorView: View {
                         // is nothing to click, or speak, before it can be
                         // read.
                         // The letter is the key on the keyboard, so the letters
-                        // teach the shortcut by standing there. `S` carries a
-                        // tooltip and no click: it is a key you press, not a
-                        // switch you flip.
+                        // teach the shortcut by standing there.
                         pill(key.letter.rawValue, .keycap(bright: key.bright), action: key.action)
                             .bubbleTip(.letter(key.letter), key.help,
                                        hovered: $hoveredTip, pointer: pointer)
@@ -1070,9 +1068,7 @@ struct DictationIndicatorView: View {
 
     /// One letter in the bubble (#201). `armed` is what the letter reports
     /// about this dictation — cleanup or translate on paste, the operator —
-    /// and it is also why the letter stands in the resting bubble. `S` is
-    /// never armed: its brightness reports a setting, and it is a key you
-    /// press, not a switch you flip.
+    /// and it is also why the letter stands in the resting bubble.
     private struct RailKey: Identifiable {
         let letter: BubbleRailLetter
         let bright: Bool
@@ -1108,13 +1104,6 @@ struct DictationIndicatorView: View {
         )
     }
 
-    private var screenshotKey: RailKey {
-        RailKey(
-            letter: .screenshot, bright: screenshotsEnabled,
-            help: "Screenshot into the prompt (Fn+S)", action: nil, armed: false
-        )
-    }
-
     /// What this dictation already carries — the letters the resting bubble
     /// stands with, and what `BubbleRail` orders the open rail around. A plain
     /// report of the dictation: whether a letter is *offered* at all is
@@ -1140,7 +1129,6 @@ struct DictationIndicatorView: View {
         case .cleanup: cleanupKey
         case .translate: translateKey
         case .operatorSend: operatorKey
-        case .screenshot: screenshotKey
         }
     }
 
@@ -1949,7 +1937,6 @@ final class DictationIndicatorModel {
     var noSignal = false
     var items: [DictationItemChip] = []
     var collecting = true
-    var screenshotsEnabled = true
     var held = false
     /// Esc has suspended the capture (#206).
     var paused = false
@@ -1996,7 +1983,6 @@ struct DictationIndicatorHost: View {
             noSignal: model.noSignal,
             items: model.items,
             collecting: model.collecting,
-            screenshotsEnabled: model.screenshotsEnabled,
             held: model.held,
             paused: model.paused,
             popping: model.popping,
@@ -2052,7 +2038,7 @@ final class DictationIndicatorManager {
                 hotkeyManager?.toggleLockByClick()
             }
         }
-        // `C`, `T` and `K` are the Fn+V / Fn+T / Fn+K chords, taken by pointer.
+        // `V`, `T` and `K` are the Fn+V / Fn+T / Fn+K chords, taken by pointer.
         model.onArmCleanup = { [weak coordinator] in
             Task { @MainActor in
                 coordinator?.setPendingMode(.cleanup)
@@ -2165,7 +2151,6 @@ final class DictationIndicatorManager {
                 self.model.bluetoothRedirected = coordinator.bluetoothMicRedirected
                 self.model.noSignal = coordinator.noSignal
                 self.model.collecting = RichInputSettings.isOn(.collect)
-                self.model.screenshotsEnabled = RichInputSettings.screenshotsEnabled
                 // Holding the hotkey inside a locked recording opens the bubble
                 // for as long as it is held (#205) — the same surface hovering
                 // opens, arriving through the poll that already reads the lock.
