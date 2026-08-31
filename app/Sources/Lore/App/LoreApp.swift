@@ -608,6 +608,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
                 lastPasted: coordinator.dictationCoordinator.lastTranscript
             )
         }
+        // The talk key (#226): the Fn step can change it, and every later step
+        // names what it set. Read through a closure so the flow's body observes
+        // the settings store itself.
+        model.readHotkeyKey = { settings.hotkeyKey }
+        model.writeHotkeyKey = { settings.hotkeyKey = $0 }
+        model.onHotkeyRecorderListening = { coordinator.hotkeyManager.isSuspended = $0 }
         model.onClosableChanged = { [weak window] in window?.setClosable($0) }
         model.onWantsFront = { [weak window] in window?.front() }
         model.onFinish = { [weak self] in self?.completeSetup() }

@@ -81,6 +81,19 @@ final class OnboardingModel {
     /// properties through it.
     @ObservationIgnored var readDictation: (() -> DictationReading)?
 
+    /// The talk key, read live and written by the Fn step (#226). Read from the
+    /// flow's body as well as from `apply`, the same way `readDictation` is, so
+    /// SwiftUI keeps observing the settings store through it. Defaults keep a
+    /// model built without a store on the shipped answer.
+    @ObservationIgnored var readHotkeyKey: () -> HotkeyKey = { .fn }
+    @ObservationIgnored var writeHotkeyKey: (HotkeyKey) -> Void = { _ in }
+
+    /// Quiets hold-to-talk while the step's key recorder listens: the press
+    /// there is the user choosing a key, not holding one. The step normally
+    /// runs before the hotkey manager exists, but a walk back from Try it
+    /// reaches it with the manager installed.
+    @ObservationIgnored var onHotkeyRecorderListening: (Bool) -> Void = { _ in }
+
     /// Setup finished — write the flag and boot the app.
     @ObservationIgnored var onFinish: (() -> Void)?
 
@@ -212,6 +225,23 @@ final class OnboardingModel {
         refreshTryIt()
     }
 
+    /// The talk key the flow is teaching.
+    var hotkeyKey: HotkeyKey { readHotkeyKey() }
+
+    /// Whether the Fn step has anything to say (#226). It is not a gate any
+    /// more: it stands only while Fn is the key the user holds *and* macOS has
+    /// taken it. Choosing another key clears it, which is the exit the step
+    /// used not to have.
+    var fnStepNeeded: Bool { hotkeyKey == .fn && fnAction.conflictsWithHotkey }
+
+    /// The step's alternatives: a key chosen here becomes the talk key, and the
+    /// step hands off to Try it exactly the way freeing up Fn does — the dwell
+    /// gives the user the moment to see what they picked.
+    func chooseHotkey(_ key: HotkeyKey) {
+        writeHotkeyKey(key)
+        refreshStepForReading()
+    }
+
     /// The steps with no button of their own advance on the reading, and a
     /// revocation takes the flow back with it — through the same `advance`, so a
     /// walk-back is traced and disarms whatever dwell was counting down.
@@ -222,7 +252,7 @@ final class OnboardingModel {
         case .fnKey:
             if !permissions.allGranted {
                 advance(to: .permissions)
-            } else if !fnAction.conflictsWithHotkey {
+            } else if !fnStepNeeded {
                 // Board 3b: "Detected — continuing…", then hand off.
                 handoffDwell.arm(for: Step.tryIt) { [weak self] in
                     guard let self, self.step == .fnKey else { return }
@@ -234,7 +264,7 @@ final class OnboardingModel {
         case .tryIt, .ready:
             if !permissions.allGranted {
                 advance(to: .permissions)
-            } else if fnAction.conflictsWithHotkey, step == .tryIt, tryIt != .landed {
+            } else if fnStepNeeded, step == .tryIt, tryIt != .landed {
                 advance(to: .fnKey)
             }
         }
@@ -250,7 +280,7 @@ final class OnboardingModel {
             advance(to: .permissions)
         case .permissions:
             guard permissions.allGranted else { return }
-            advance(to: fnAction.conflictsWithHotkey ? .fnKey : .tryIt)
+            advance(to: fnStepNeeded ? .fnKey : .tryIt)
         case .fnKey:
             break
         case .tryIt:

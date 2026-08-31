@@ -64,6 +64,8 @@ struct SettingsView: View {
     @State private var previewSynthesizer = AVSpeechSynthesizer()
     /// Which voice row's picker popover is open, keyed by the row name.
     @State private var openVoicePicker: String?
+    /// The talk-key picker (#226): two named keys and a recorder for any other.
+    @State private var showHotkeyPicker = false
 
     init(settings: AppSettings, updater: SPUUpdater, isActiveInShell: Bool = true) {
         self.settings = settings
@@ -163,10 +165,17 @@ struct SettingsView: View {
 
     private var talkSection: some View {
         SettingsSectionCard(label: "Talk") {
-            SettingsRow(name: "Hotkey", sub: "Hold to talk, anywhere") {
-                // Cycles the current option set only (Fn / Right Option, DSET-03).
+            SettingsRow(
+                name: "Hotkey",
+                sub: fnIsTakenByMacOS ? fnTakenNote : "Hold to talk, anywhere",
+                subColor: fnIsTakenByMacOS ? LoreTheme.Accent.amber : LoreTheme.TextColor.muted
+            ) {
+                // Fn, Right Option, or a key the user records (#226).
                 LoreMonoValueButton(title: settings.hotkeyKey.displayName) {
-                    settings.hotkeyKey = nextCase(after: settings.hotkeyKey)
+                    showHotkeyPicker.toggle()
+                }
+                .popover(isPresented: $showHotkeyPicker, arrowEdge: .bottom) {
+                    hotkeyPicker
                 }
             }
             LoreDivider()
@@ -221,6 +230,52 @@ struct SettingsView: View {
                 chipField("sk-...", text: $settings.openaiApiKey, isSecure: true)
             }
         }
+    }
+
+    /// The talk-key picker (#226). Two named keys, the recorded one when there
+    /// is one, and the recorder under them. Hold-to-talk is suspended while the
+    /// recorder listens, so pressing the key that is currently the talk key
+    /// records it instead of starting a dictation into this window.
+    private var hotkeyPicker: some View {
+        LorePickerPopover(
+            header: "Hold to talk",
+            items: hotkeyChoices,
+            width: 244,
+            isActive: { $0 == settings.hotkeyKey },
+            onSelect: { key in
+                settings.hotkeyKey = key
+                showHotkeyPicker = false
+            },
+            title: \.displayName
+        ) {
+            HotkeyRecorder(
+                onPick: { key in
+                    settings.hotkeyKey = key
+                    showHotkeyPicker = false
+                },
+                onListening: { coordinator.hotkeyManager.isSuspended = $0 }
+            )
+        }
+    }
+
+    /// The two named keys, plus the recorded one when there is one — anything
+    /// else is reached through the recorder rather than listed.
+    private var hotkeyChoices: [HotkeyKey] {
+        var choices: [HotkeyKey] = [.fn, .rightOption]
+        if case .custom = settings.hotkeyKey { choices.append(settings.hotkeyKey) }
+        return choices
+    }
+
+    /// Fn is the chosen talk key and macOS has taken it (#226): a live read at
+    /// presentation, never a stored verdict, so the line goes the moment the
+    /// setting changes and the picker cannot silently re-create the state
+    /// onboarding exists to get out of (`no-false-positives.md` §1–2).
+    private var fnIsTakenByMacOS: Bool {
+        settings.hotkeyKey == .fn && FnKeySetting.current().conflictsWithHotkey
+    }
+
+    private var fnTakenNote: String {
+        "macOS is using Fn for \(FnKeySetting.current().label) \u{2014} \(LoreTheme.wordmark) won't see your hold."
     }
 
     /// DSET-21: cleanup/translate need a key; warn while either default is on
@@ -826,20 +881,16 @@ struct SettingsView: View {
 
     // MARK: - MODIFIERS (DSET-04…07)
 
-    /// Short hotkey label for the section title ("WHILE HOLDING FN").
-    private var hotkeyShortLabel: String {
-        switch settings.hotkeyKey {
-        case .fn: "Fn"
-        case .rightOption: "R\u{2325}"
-        }
-    }
-
     private var modifiersSection: some View {
         // Rows reflect the CURRENT hardcoded keymap truthfully (D-031): key
         // chips are static — no remapping this stage. The enable toggles are
         // new and gate HotkeyManager + the dictation footer kbd bar.
+        //
+        // "Fn" here is literal and stays literal whatever the talk key is
+        // (#226): these four chords read the physical Fn flag off the event, so
+        // naming the chosen key would be a line the keyboard disagrees with.
         SettingsSectionCard(
-            label: "Modifiers \u{2014} while holding \(hotkeyShortLabel)",
+            label: "Modifiers \u{2014} while holding Fn",
             note: "Tap a key while talking to say where the words go. Remapping comes later."
         ) {
             modifierRow(

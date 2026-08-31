@@ -675,27 +675,24 @@ struct DictationView: View {
 
     // MARK: - Footer Kbd Bar (DIC-25)
 
-    private var hotkeyLabel: String {
-        switch settings.hotkeyKey {
-        case .fn: "Fn"
-        case .rightOption: "R\u{2325}"
-        }
-    }
-
     /// DIC-25 (dynamic since Stage D): the bar builds from the enabled
     /// modifiers — "{hotkey} hold to talk" first, "Esc discard" last, the
     /// hints in between appear only while their Settings toggle is on.
+    ///
+    /// The chords say "Fn" literally whatever the talk key is (#226): they read
+    /// the physical Fn flag off the event, so the chosen key's name here would
+    /// be a hint the keyboard disagrees with.
     private var hotkeyCheatSheet: some View {
         HStack(spacing: 16) {
-            kbdHint(hotkeyLabel, "hold to talk")
+            kbdHint(settings.hotkeyKey.shortName, "hold to talk")
             if settings.modifierLockEnabled {
                 kbdHint("Space", "lock")
             }
             if settings.modifierCleanupEnabled {
-                kbdHint("\(hotkeyLabel)+V", "cleanup")
+                kbdHint("Fn+V", "cleanup")
             }
             if settings.modifierTranslateEnabled {
-                kbdHint("\(hotkeyLabel)+T", "translate")
+                kbdHint("Fn+T", "translate")
             }
             kbdHint("Esc", "discard")
             Spacer()

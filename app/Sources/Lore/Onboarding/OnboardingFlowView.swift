@@ -26,6 +26,10 @@ struct OnboardingFlowView: View {
         .animation(.easeInOut(duration: 0.2), value: model.expandedGrant)
     }
 
+    /// The key the flow teaches from the Fn step onward (#226) — read here, in
+    /// the body, so a choice made on that step is on screen at the next one.
+    private var talkKey: HotkeyKey { model.hotkeyKey }
+
     // MARK: - Steps
 
     @ViewBuilder
@@ -84,18 +88,24 @@ struct OnboardingFlowView: View {
         }
     }
 
-    /// 3 · Fn key — a permission-shaped system setting. Rendered only while it
-    /// conflicts; the setting itself is the only exit, so there is no Continue.
+    /// 3 · Fn key — two ways out, not one (#226). Free up Fn, or hold a
+    /// different key. Either choice moves the flow on; the step used to have no
+    /// exit but System Settings.
     private var fnKeyStep: some View {
         VStack(alignment: .leading, spacing: 0) {
             stepHeading(
-                "One system setting is in the way",
-                "macOS keeps the Fn key for its own features, so \(LoreTheme.wordmark) never sees your hold."
+                "Pick the key you'll hold to talk",
+                "macOS is using Fn for its own features, so \(LoreTheme.wordmark) never sees your hold."
             )
             Spacer()
             FnKeyCard(
                 action: model.fnAction,
                 onOpenSettings: { model.openPane(.keyboard) }
+            )
+            Spacer().frame(height: 10)
+            OtherKeyCard(
+                onPick: { model.chooseHotkey($0) },
+                onListening: { model.onHotkeyRecorderListening($0) }
             )
             Spacer()
         }
@@ -107,7 +117,7 @@ struct OnboardingFlowView: View {
         VStack(alignment: .leading, spacing: 0) {
             if model.tryIt == .tapDead {
                 stepHeading("Nothing arrived",
-                            "You held Fn, but no keystroke reached \(LoreTheme.wordmark).")
+                            "You held \(talkKey.shortName), but no keystroke reached \(LoreTheme.wordmark).")
                 Spacer()
                 TapRecoveryCard(onRelaunch: { model.relaunchForDeadTap() })
                 Spacer()
@@ -119,9 +129,9 @@ struct OnboardingFlowView: View {
                 Spacer()
             } else {
                 stepHeading(
-                    "Hold Fn and say anything",
+                    "Hold \(talkKey.shortName) and say anything",
                     model.tryIt == .recording
-                        ? "Keep holding. Release Fn when you are done."
+                        ? "Keep holding. Release \(talkKey.shortName) when you are done."
                         : "It types into the box below \u{2014} exactly the way it will type anywhere else."
                 )
                 // Something concrete to say, so the first hold is not a blank
@@ -192,7 +202,7 @@ struct OnboardingFlowView: View {
                     .frame(maxWidth: .infinity, alignment: .leading)
                 case .idle, .tapDead:
                     HStack(spacing: 10) {
-                        keycap("fn")
+                        keycap(talkKey.shortName)
                         Text("hold to talk")
                             .font(LoreTheme.Typography.secondary)
                             .foregroundStyle(LoreTheme.TextColor.muted)
@@ -224,7 +234,7 @@ struct OnboardingFlowView: View {
                 .font(.system(size: 24, weight: .semibold))
                 .foregroundStyle(.white)
             Spacer().frame(height: 8)
-            Text("\(LoreTheme.wordmark) waits in the menu bar. Hold Fn wherever you type.")
+            Text("\(LoreTheme.wordmark) waits in the menu bar. Hold \(talkKey.shortName) wherever you type.")
                 .font(.system(size: 13))
                 .foregroundStyle(LoreTheme.TextColor.muted)
             Spacer().frame(height: 18)
@@ -238,10 +248,15 @@ struct OnboardingFlowView: View {
 
     private var cheatSheet: some View {
         VStack(alignment: .leading, spacing: 9) {
-            cheatRow("fn", "hold to talk")
+            cheatRow(talkKey.shortName, "hold to talk")
             cheatRow("Space", "lock it on, hands free")
-            cheatRow("V", "clean up what you just said")
-            cheatRow("T", "translate what you just said")
+            // Fn literally, whatever the talk key is: these two read the
+            // event's own Fn flag, so "R⌥+V" would be a line the keyboard
+            // disagrees with. Present tense because they are pressed *during*
+            // the dictation — they arm the mode before the words are inserted,
+            // they do not repair words already pasted.
+            cheatRow("Fn+V", "clean up what you're saying")
+            cheatRow("Fn+T", "translate what you're saying")
             cheatRow("\u{2303}\u{2318}V", "paste that take again")
         }
         .padding(.vertical, 14)
@@ -354,18 +369,18 @@ struct OnboardingFlowView: View {
             }
 
         case .fnKey:
-            // No Continue: the setting itself is the only exit, so nothing here
-            // can be clicked past.
+            // No Continue: the step's two cards are its two exits, and each one
+            // moves the flow on by itself.
             HStack(spacing: 7) {
                 Circle()
-                    .fill(model.fnAction.conflictsWithHotkey
+                    .fill(model.fnStepNeeded
                           ? LoreTheme.TextColor.faint : LoreTheme.Accent.green)
                     .frame(width: 6, height: 6)
-                Text(model.fnAction.conflictsWithHotkey
-                     ? "Watching this setting. \(LoreTheme.wordmark) continues by itself."
-                     : "Detected \u{2014} continuing\u{2026}")
+                Text(model.fnStepNeeded
+                     ? "\(LoreTheme.wordmark) continues the moment you choose."
+                     : "Got it \u{2014} continuing\u{2026}")
                     .font(LoreTheme.Typography.meta)
-                    .foregroundStyle(model.fnAction.conflictsWithHotkey
+                    .foregroundStyle(model.fnStepNeeded
                                      ? LoreTheme.TextColor.muted : LoreTheme.Accent.green)
             }
 
@@ -402,6 +417,46 @@ struct OnboardingFlowView: View {
             .frame(minWidth: minWidth, alignment: .center)
             .background(LoreTheme.Surface.card3,
                         in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button))
+    }
+}
+
+// MARK: - Card chrome
+
+/// The chrome the flow's four cards share: one radius, one hairline, one inset.
+/// They differ only in the colour pair they pass and, for the permission cards,
+/// a tighter inset.
+private extension View {
+    func onboardingCardChrome(
+        fill: Color, stroke: Color, padding: CGFloat = 16
+    ) -> some View {
+        self
+            .padding(padding)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(fill, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card))
+            .overlay(
+                RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
+                    .strokeBorder(stroke, lineWidth: 1)
+            )
+    }
+}
+
+/// The 28pt icon tile every card in the flow opens with.
+private struct OnboardingCardBadge: View {
+    let systemName: String
+    var tint: Color = LoreTheme.TextColor.muted
+    var fill: Color = LoreTheme.Surface.card3
+    var weight: Font.Weight = .regular
+    var size: CGFloat = 13
+
+    var body: some View {
+        ZStack {
+            RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
+                .fill(fill)
+                .frame(width: 28, height: 28)
+            Image(systemName: systemName)
+                .font(.system(size: size, weight: weight))
+                .foregroundStyle(tint)
+        }
     }
 }
 
@@ -483,18 +538,10 @@ private struct PermissionCard: View {
                 }
             }
         }
-        .padding(14)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            granted ? LoreTheme.Accent.green.opacity(0.06) : LoreTheme.Surface.card2,
-            in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
-                .strokeBorder(
-                    granted ? LoreTheme.Accent.green.opacity(0.28) : LoreTheme.Surface.line,
-                    lineWidth: 1
-                )
+        .onboardingCardChrome(
+            fill: granted ? LoreTheme.Accent.green.opacity(0.06) : LoreTheme.Surface.card2,
+            stroke: granted ? LoreTheme.Accent.green.opacity(0.28) : LoreTheme.Surface.line,
+            padding: 14
         )
         // Unreached cards are collapsed stubs at half opacity: scope is visible,
         // complexity is not.
@@ -506,16 +553,12 @@ private struct PermissionCard: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
-                    .fill(granted ? LoreTheme.Accent.green.opacity(0.16)
-                                  : LoreTheme.Surface.card3)
-                    .frame(width: 28, height: 28)
-                Image(systemName: granted ? "checkmark" : grant.icon)
-                    .font(.system(size: 13, weight: granted ? .semibold : .regular))
-                    .foregroundStyle(granted ? LoreTheme.Accent.green
-                                             : LoreTheme.TextColor.muted)
-            }
+            OnboardingCardBadge(
+                systemName: granted ? "checkmark" : grant.icon,
+                tint: granted ? LoreTheme.Accent.green : LoreTheme.TextColor.muted,
+                fill: granted ? LoreTheme.Accent.green.opacity(0.16) : LoreTheme.Surface.card3,
+                weight: granted ? .semibold : .regular
+            )
             Text(grant.title)
                 .font(LoreTheme.Typography.control)
                 .foregroundStyle(revealed ? LoreTheme.TextColor.primary
@@ -580,17 +623,13 @@ private struct FnKeyCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
             HStack(spacing: 12) {
-                ZStack {
-                    RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
-                        .fill(resolved ? LoreTheme.Accent.green.opacity(0.16)
-                                       : LoreTheme.Surface.card3)
-                        .frame(width: 28, height: 28)
-                    Image(systemName: resolved ? "checkmark" : "slider.horizontal.3")
-                        .font(.system(size: 13, weight: resolved ? .semibold : .regular))
-                        .foregroundStyle(resolved ? LoreTheme.Accent.green
-                                                  : LoreTheme.TextColor.muted)
-                }
-                Text("Fn key behavior")
+                OnboardingCardBadge(
+                    systemName: resolved ? "checkmark" : "slider.horizontal.3",
+                    tint: resolved ? LoreTheme.Accent.green : LoreTheme.TextColor.muted,
+                    fill: resolved ? LoreTheme.Accent.green.opacity(0.16) : LoreTheme.Surface.card3,
+                    weight: resolved ? .semibold : .regular
+                )
+                Text("Use Fn")
                     .font(LoreTheme.Typography.control)
                     .foregroundStyle(LoreTheme.TextColor.primary)
                 Spacer(minLength: 0)
@@ -615,18 +654,9 @@ private struct FnKeyCard: View {
 
             pathChip
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(
-            resolved ? LoreTheme.Accent.green.opacity(0.06) : LoreTheme.Surface.card2,
-            in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
-        )
-        .overlay(
-            RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
-                .strokeBorder(
-                    resolved ? LoreTheme.Accent.green.opacity(0.28) : LoreTheme.Surface.line,
-                    lineWidth: 1
-                )
+        .onboardingCardChrome(
+            fill: resolved ? LoreTheme.Accent.green.opacity(0.06) : LoreTheme.Surface.card2,
+            stroke: resolved ? LoreTheme.Accent.green.opacity(0.28) : LoreTheme.Surface.line
         )
     }
 
@@ -670,6 +700,48 @@ private struct FnKeyCard: View {
     }
 }
 
+// MARK: - The other key (#226)
+
+/// The second half of the Fn step: the choice that does not send the user to
+/// System Settings. Right Option is one click because it is the answer for
+/// almost everyone; the recorder is there for the keyboard that has no right
+/// Option key, or the hand that would rather use something else.
+private struct OtherKeyCard: View {
+    let onPick: (HotkeyKey) -> Void
+    let onListening: (Bool) -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 12) {
+                OnboardingCardBadge(systemName: "keyboard")
+                Text("Use another key")
+                    .font(LoreTheme.Typography.control)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                Spacer(minLength: 0)
+            }
+
+            HStack(spacing: 12) {
+                Text(HotkeyKey.rightOption.displayName)
+                    .font(LoreTheme.Typography.secondary)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                Spacer(minLength: 12)
+                LorePrimaryButton(title: "Use this", size: .compact) {
+                    onPick(.rightOption)
+                }
+            }
+
+            HStack(alignment: .top, spacing: 12) {
+                Text("Any other key")
+                    .font(LoreTheme.Typography.secondary)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                Spacer(minLength: 12)
+                HotkeyRecorder(onPick: onPick, onListening: onListening)
+            }
+        }
+        .onboardingCardChrome(fill: LoreTheme.Surface.card2, stroke: LoreTheme.Surface.line)
+    }
+}
+
 // MARK: - Recovery card
 
 /// The only recovery affordance in the flow, and the only place a relaunch is
@@ -679,14 +751,12 @@ private struct TapRecoveryCard: View {
 
     var body: some View {
         HStack(alignment: .top, spacing: 12) {
-            ZStack {
-                RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
-                    .fill(LoreTheme.Accent.amber.opacity(0.16))
-                    .frame(width: 28, height: 28)
-                Image(systemName: "exclamationmark.triangle")
-                    .font(.system(size: 12))
-                    .foregroundStyle(LoreTheme.Accent.amber)
-            }
+            OnboardingCardBadge(
+                systemName: "exclamationmark.triangle",
+                tint: LoreTheme.Accent.amber,
+                fill: LoreTheme.Accent.amber.opacity(0.16),
+                size: 12
+            )
             VStack(alignment: .leading, spacing: 8) {
                 HStack(alignment: .top) {
                     Text("The key listener didn't wake up")
@@ -705,13 +775,9 @@ private struct TapRecoveryCard: View {
                     .fixedSize(horizontal: false, vertical: true)
             }
         }
-        .padding(16)
-        .frame(maxWidth: .infinity, alignment: .leading)
-        .background(LoreTheme.Accent.amber.opacity(0.06),
-                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.card))
-        .overlay(
-            RoundedRectangle(cornerRadius: LoreTheme.Radius.card)
-                .strokeBorder(LoreTheme.Accent.amber.opacity(0.45), lineWidth: 1)
+        .onboardingCardChrome(
+            fill: LoreTheme.Accent.amber.opacity(0.06),
+            stroke: LoreTheme.Accent.amber.opacity(0.45)
         )
     }
 }

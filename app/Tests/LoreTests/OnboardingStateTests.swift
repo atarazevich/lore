@@ -55,12 +55,98 @@ final class OnboardingStateTests: XCTestCase {
         }
     }
 
-    /// Only Do Nothing leaves the key for lore — the whole gating condition of
-    /// the Fn step.
+    /// Only Do Nothing leaves the key for lore — what `conflictsWithHotkey`
+    /// says about the *macOS setting*. Whether the step appears is a second
+    /// question, and `fnStepNeeded` is where it is answered (#226).
     func testOnlyDoNothingClearsTheConflict() {
         for action in FnKeyAction.allCases {
             XCTAssertEqual(action.conflictsWithHotkey, action != .doNothing)
         }
+    }
+
+    // MARK: - When the Fn step exists at all (#226)
+
+    /// The step stands on two facts, not one: Fn is the key the user holds, and
+    /// macOS has taken it. Choose another key and the macOS setting stops
+    /// mattering — which is the whole of the fix, since the step had no other
+    /// exit than System Settings.
+    func testTheFnStepStandsOnTheChosenKeyAsWellAsTheSetting() {
+        let model = OnboardingModel(dwell: Self.testDwell)
+        var chosen = HotkeyKey.fn
+        model.readHotkeyKey = { chosen }
+        model.writeHotkeyKey = { chosen = $0 }
+
+        model.apply(permissions: Self.allGranted, fn: .showEmojiPicker)
+        XCTAssertTrue(model.fnStepNeeded)
+
+        for key in [HotkeyKey.rightOption, .custom(keyCode: 96), .custom(keyCode: 54)] {
+            chosen = key
+            XCTAssertFalse(model.fnStepNeeded, key.displayName)
+        }
+
+        chosen = .fn
+        XCTAssertTrue(model.fnStepNeeded, "back on Fn, the setting matters again")
+        model.apply(permissions: Self.allGranted, fn: .doNothing)
+        XCTAssertFalse(model.fnStepNeeded, "Fn is free")
+    }
+
+    /// With a key already chosen, the Fn step is not on the way at all — a
+    /// machine set up once never sees it again over a setting it no longer uses.
+    func testAChosenKeySkipsTheFnStepEntirely() {
+        let model = OnboardingModel(dwell: Self.testDwell)
+        model.readHotkeyKey = { .rightOption }
+
+        model.advanceFromButton()
+        model.apply(permissions: Self.allGranted, fn: .showEmojiPicker)
+        model.advanceFromButton()
+
+        XCTAssertEqual(model.step, .tryIt)
+    }
+
+    /// The exit the step used not to have: choosing a key on it writes the
+    /// setting and hands off to Try it, the same dwell freeing up Fn uses. The
+    /// dead end was that neither of those could happen without System Settings.
+    func testChoosingAKeyOnTheStepWritesItAndHandsOff() async {
+        let model = OnboardingModel(dwell: Self.testDwell)
+        var chosen = HotkeyKey.fn
+        model.readHotkeyKey = { chosen }
+        model.writeHotkeyKey = { chosen = $0 }
+
+        model.advanceFromButton()
+        model.apply(permissions: Self.allGranted, fn: .showEmojiPicker)
+        model.advanceFromButton()
+        XCTAssertEqual(model.step, .fnKey)
+
+        model.chooseHotkey(.rightOption)
+        XCTAssertEqual(chosen, .rightOption, "the choice is the setting, written straight away")
+
+        let handedOff = await poll(
+            model, permissions: Self.allGranted, fn: .showEmojiPicker,
+            until: { model.step == .tryIt }
+        )
+        XCTAssertTrue(handedOff, "choosing a key never reached Try it")
+    }
+
+    /// And the flow does not drag the user back: Try it used to re-derive the
+    /// Fn step from the macOS setting alone, which with a chosen key would be a
+    /// trap that closes behind them.
+    func testTryItDoesNotWalkBackToAStepAboutAKeyNoLongerInUse() {
+        let model = OnboardingModel(dwell: Self.testDwell)
+        model.readHotkeyKey = { .custom(keyCode: 96) }
+
+        model.advanceFromButton()
+        model.apply(permissions: Self.allGranted, fn: .showEmojiPicker)
+        model.advanceFromButton()
+        XCTAssertEqual(model.step, .tryIt)
+
+        model.apply(permissions: Self.allGranted, fn: .startDictation)
+        XCTAssertEqual(model.step, .tryIt)
+    }
+
+    /// A model with no settings store behind it stands on the shipped answer,
+    /// so nothing in the flow has to test for an absent seam.
+    func testTheDefaultTalkKeyIsFn() {
+        XCTAssertEqual(OnboardingModel(dwell: Self.testDwell).hotkeyKey, .fn)
     }
 
     func testLabelsMatchTheSettingsWording() {

@@ -464,13 +464,17 @@ extension View {
 /// Generic picker popover: mono section header + item rows with hover fill
 /// and a trailing amber ✓ on the active item. Consumers: dictation cleanup
 /// method (224px) and translate language (180px).
-struct LorePickerPopover<Item: Identifiable, ItemLabel: View>: View {
+struct LorePickerPopover<Item: Identifiable, ItemLabel: View, Footer: View>: View {
     let header: String
     let items: [Item]
     let width: CGFloat
     let isActive: (Item) -> Bool
     let onSelect: (Item) -> Void
     @ViewBuilder let itemLabel: (Item) -> ItemLabel
+    /// An action under the list, past a divider — the hotkey picker's key
+    /// recorder (#226). The inits below default it to nothing, and nothing
+    /// draws no divider.
+    @ViewBuilder let footer: () -> Footer
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -496,6 +500,11 @@ struct LorePickerPopover<Item: Identifiable, ItemLabel: View>: View {
                 .buttonStyle(.plain)
                 .loreHoverFill(cornerRadius: LoreTheme.Radius.chip)
             }
+            if Footer.self != EmptyView.self {
+                LoreDivider()
+                footer()
+                    .padding(EdgeInsets(top: 9, leading: 9, bottom: 9, trailing: 9))
+            }
         }
         .frame(width: width)
         .lorePopoverChrome()
@@ -515,6 +524,24 @@ struct LorePickerItemLabel: View {
     }
 }
 
+extension LorePickerPopover where Footer == EmptyView {
+    /// The plain picker: a list and nothing under it.
+    init(
+        header: String,
+        items: [Item],
+        width: CGFloat,
+        isActive: @escaping (Item) -> Bool,
+        onSelect: @escaping (Item) -> Void,
+        @ViewBuilder itemLabel: @escaping (Item) -> ItemLabel
+    ) {
+        self.init(
+            header: header, items: items, width: width,
+            isActive: isActive, onSelect: onSelect,
+            itemLabel: itemLabel, footer: { EmptyView() }
+        )
+    }
+}
+
 extension LorePickerPopover where ItemLabel == LorePickerItemLabel {
     /// Convenience for plain-text pickers: pass a title per item instead of a
     /// label view.
@@ -524,17 +551,32 @@ extension LorePickerPopover where ItemLabel == LorePickerItemLabel {
         width: CGFloat,
         isActive: @escaping (Item) -> Bool,
         onSelect: @escaping (Item) -> Void,
+        title: @escaping (Item) -> String,
+        @ViewBuilder footer: @escaping () -> Footer
+    ) {
+        self.init(
+            header: header, items: items, width: width,
+            isActive: isActive, onSelect: onSelect,
+            itemLabel: { item in LorePickerItemLabel(title: title(item)) },
+            footer: footer
+        )
+    }
+}
+
+extension LorePickerPopover where ItemLabel == LorePickerItemLabel, Footer == EmptyView {
+    init(
+        header: String,
+        items: [Item],
+        width: CGFloat,
+        isActive: @escaping (Item) -> Bool,
+        onSelect: @escaping (Item) -> Void,
         title: @escaping (Item) -> String
     ) {
         self.init(
-            header: header,
-            items: items,
-            width: width,
-            isActive: isActive,
-            onSelect: onSelect
-        ) { item in
-            LorePickerItemLabel(title: title(item))
-        }
+            header: header, items: items, width: width,
+            isActive: isActive, onSelect: onSelect,
+            title: title, footer: { EmptyView() }
+        )
     }
 }
 

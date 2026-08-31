@@ -71,6 +71,26 @@ final class EphemeralDictation {
         )
     }
 
+    /// The gesture fixture: a coordinator on this storage that hears nothing,
+    /// its own settings, and a `HotkeyManager` installed on the pair. Three
+    /// suites had hand-rolled these five lines — `LockedFnHoldTests`,
+    /// `DictationPauseTests` and `RecordedHotkeyTests` — and the differences
+    /// between the copies were accidental.
+    ///
+    /// Both halves come back because `HotkeyManager.coordinator` is weak: a
+    /// caller holding only the manager would put every gesture through a nil.
+    func gestures(
+        _ label: String, talkKey: HotkeyKey = .fn, transcript: String = ""
+    ) -> (coordinator: DictationCoordinator, settings: AppSettings, hotkeys: HotkeyManager) {
+        let settings = isolatedSettings(label, defaults: defaults)
+        settings.hotkeyKey = talkKey
+        let coordinator = coordinator(backend: StubTranscriptionBackend(transcript: transcript))
+        coordinator.settings = settings
+        let hotkeys = HotkeyManager()
+        hotkeys.install(coordinator: coordinator, settings: settings)
+        return (coordinator, settings, hotkeys)
+    }
+
     func files(in directory: URL) -> [String] {
         ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? []).sorted()
     }
