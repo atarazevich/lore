@@ -189,6 +189,18 @@ final class DictationCoordinator {
 
     let history: DictationHistory
     var settings: AppSettings?
+    /// Fired the instant a live recording ends by any path — Stop recording
+    /// (`finishWithoutPasting`), a normal Fn-release/lock-click `stopRecording`,
+    /// or a discard — regardless of what the pipeline eventually does with it
+    /// (paste, a failure face, nothing). This is the one seam both `finish` and
+    /// `discardRecording` call through (#225): the Space lock is a fact about a
+    /// gesture that is over the moment any of these run, even though the
+    /// pipeline's own 300ms tail and save continue in the background.
+    /// `HotkeyManager` is the one subscriber, wired in `install`; its own
+    /// Fn-release and lock-click endings already clear the lock synchronously
+    /// before this ever fires, so their subscriber call is a no-op for them —
+    /// this exists for every path that does not already know about the lock.
+    var onRecordingEnding: (() -> Void)?
 
     /// How this dictation's words leave (#195, #211).
     ///
@@ -535,6 +547,7 @@ final class DictationCoordinator {
     /// during the 300 ms tail cannot change what this one does.
     private func finish(pasting: Bool) {
         guard state == .recording else { return }
+        onRecordingEnding?()
         endingInFlight = true
         enqueueTranscription { [weak self] epoch, previous in
             await self?.runDictationPipeline(epoch: epoch, previous: previous, pasting: pasting)
@@ -885,6 +898,7 @@ final class DictationCoordinator {
             return
         }
         guard state == .recording || state == .loadingModel || state == .processing else { return }
+        onRecordingEnding?()
         DiagStore.record(.dictationDiscarded(state: state))
         // A deliberate discard cancels this session's own pipeline (#104). An
         // older session's late pipeline (epoch mismatch) is left to finish.

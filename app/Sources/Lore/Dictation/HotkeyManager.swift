@@ -167,6 +167,16 @@ final class HotkeyManager {
         self.coordinator = coordinator
         self.settings = settings
 
+        // The lock is a fact only this manager's own paths used to clear —
+        // Fn-release, the lock glyph's click. Any other ending (Stop recording,
+        // a discard, a failure) had no way to tell it, and left the sidebar's
+        // dot pulsing after the recording was long gone (#225). This is the one
+        // subscription that covers every such path; see `clearStaleLock` and
+        // `DictationCoordinator.onRecordingEnding`'s own comment.
+        coordinator.onRecordingEnding = { [weak self] in
+            self?.clearStaleLock()
+        }
+
         globalFlagsMonitor = NSEvent.addGlobalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
             Task { @MainActor in
                 self?.handleFlagsChanged(event)
@@ -303,6 +313,7 @@ final class HotkeyManager {
         fnReleaseDebounce?.cancel()
         fnReleaseDebounce = nil
         lockedHoldStart = nil
+        coordinator?.onRecordingEnding = nil
         coordinator = nil
         settings = nil
         HotkeyManager.hkLog.info("Hotkey manager uninstalled")
@@ -581,9 +592,12 @@ final class HotkeyManager {
     }
 
     /// The bubble's lock glyph (#201). Locking is the Space path itself.
-    /// Unlocking is the only ending a locked recording has ever had — the Fn
-    /// release: stop and paste. Anything else would leave a recording running
-    /// hands-free under a glyph that says it is not.
+    /// Unlocking here and the Fn release are the two endings this manager
+    /// starts itself — stop and paste — so both clear the lock synchronously,
+    /// before `stopRecording` even reaches the coordinator. Every other ending
+    /// (Stop recording on the paused bubble, a discard) goes through
+    /// `clearStaleLock` instead, via `DictationCoordinator.onRecordingEnding`
+    /// (#225).
     func toggleLockByClick() {
         guard let coordinator else { return }
         if isLocked {
@@ -602,6 +616,28 @@ final class HotkeyManager {
               coordinator.state == .recording || coordinator.isPreBuffering else { return }
         lockRecording(coordinator)
         HotkeyManager.hkLog.debug("[HOTKEY] lock glyph → confirm + locked")
+    }
+
+    /// The shared seam for every ending that is not this manager's own (#225):
+    /// `DictationCoordinator.onRecordingEnding` calls this for Stop recording,
+    /// a discard, and a failure ending alike, since all of them run through
+    /// the coordinator's `finish`/`discardRecording` regardless of outcome.
+    ///
+    /// Guarded on `isLocked` so this is a genuine no-op for the two endings
+    /// above: both already clear the lock themselves, synchronously, before
+    /// `stopRecording` is even called — by the time the coordinator's hook
+    /// fires, there is nothing left here to clear.
+    private func clearStaleLock() {
+        guard isLocked else { return }
+        HotkeyManager.hkLog.debug(
+            "[HOTKEY] recording ended outside the lock's own path → lock cleared (#225)"
+        )
+        fnReleaseDebounce?.cancel()
+        fnReleaseDebounce = nil
+        fnHeldAtLock = false
+        isLocked = false
+        isLockedFlag = false
+        isRecordingFlag = false
     }
 
     /// Fn+R (read now) / Fn+Q (enqueue) — Read Aloud (#105). Reading and

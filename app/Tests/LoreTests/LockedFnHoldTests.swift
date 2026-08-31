@@ -187,4 +187,47 @@ final class LockedFnHoldTests: XCTestCase {
         XCTAssertEqual(HotkeyManager.holdToRecordThreshold, .milliseconds(150))
         XCTAssertGreaterThan(HotkeyManager.lockedHoldThreshold, HotkeyManager.holdToRecordThreshold)
     }
+
+    // MARK: - Every ending clears the lock (#225)
+
+    /// The bug report: the paused bubble's `Stop recording` calls
+    /// `finishWithoutPasting()` straight on the coordinator, with no route
+    /// through this manager's own Fn-release/click paths — so `isLocked` used
+    /// to stand true forever after, and the sidebar's dot with it. The fix
+    /// fires synchronously inside `finish`, before the async pipeline even
+    /// starts, so there is nothing to await here.
+    func testFinishWithoutPastingClearsTheLock() {
+        lockedRecording()
+
+        coordinator.finishWithoutPasting()
+
+        XCTAssertFalse(hotkeys.isLocked, "Stop recording must end the lock, not just the dictation")
+        XCTAssertFalse(hotkeys.isFnHoldingBubble)
+    }
+
+    /// The issue's other named path: a discard reachable while locked (today,
+    /// only via the Fn+R/Fn+Q read-aloud chord, which already cleared the lock
+    /// itself first — this exercises the coordinator's own entry point
+    /// directly, the shared seam every future caller gets for free).
+    func testDiscardWhileLockedClearsTheLock() {
+        lockedRecording()
+
+        coordinator.discardRecording()
+
+        XCTAssertFalse(hotkeys.isLocked, "a discard must end the lock along with the recording")
+        XCTAssertFalse(hotkeys.isFnHoldingBubble)
+    }
+
+    /// The normal endings stay exactly as they were: both already clear the
+    /// lock themselves before the coordinator's hook can fire, so the hook is
+    /// a no-op for them (`testATapStillStopsAndPastes` above covers the
+    /// Fn-release side) — restated here as the contrast the #225 fix must not
+    /// disturb.
+    func testTheLockGlyphsOwnUnlockStillClearsTheLockImmediately() {
+        lockedRecording()
+
+        hotkeys.toggleLockByClick()
+
+        XCTAssertFalse(hotkeys.isLocked, "the lock glyph's own ending is untouched by #225")
+    }
 }
