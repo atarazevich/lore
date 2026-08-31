@@ -65,6 +65,28 @@ final class HotkeyManager {
     /// go, unlocking, Esc, a dead tap and the recording ending all close the
     /// bubble without a line of their own.
     var isFnHoldingBubble: Bool { isLocked && fnDown && lockedHoldPassedThreshold }
+    /// True while a key recorder is open (#226). The press the user makes there
+    /// is them choosing a talk key, not holding one, so no gesture may start.
+    /// Only the start: a recording already running still ends on its release,
+    /// because a suspended release would leave the mic open under no key.
+    var isSuspended = false
+
+    /// The keycode the tap has to own end to end, because the chosen talk key is
+    /// not a modifier (#226). Nil for Fn and Right Option, which ride
+    /// `flagsChanged` — and nil is the common case, so the tap's extra branch
+    /// costs one dictionary-free comparison per key.
+    ///
+    /// Also nil while a recorder is open, and that is the whole of it being
+    /// *swallowed*: the tap consumes this key on every press, so a suspension
+    /// that only stopped the gesture would still eat the keystroke and the
+    /// recorder — listening on an NSEvent monitor downstream of the tap — would
+    /// wait forever for a key the user is pressing. Suspended, the key is
+    /// nobody's and passes straight through to the prompt.
+    var recordedTalkKeyCode: UInt16? {
+        guard !isSuspended else { return nil }
+        return settings?.hotkeyKey.tapKeyCode
+    }
+
     /// Locked = recording continues after Fn release; stopped by Fn or Esc
     private(set) var isLocked = false
     /// Set synchronously so the local monitor closure can check it without main actor hop
@@ -349,113 +371,146 @@ final class HotkeyManager {
     /// means (#205). The NSEvent monitors are its only other callers.
     func handleFlagsChanged(_ event: NSEvent) {
         let hotkeyKey = settings?.hotkeyKey ?? .fn
+        // A recorded talk key that is not a modifier never appears here: it
+        // arrives as a key-down and a key-up through the tap (#226), and asking
+        // `matchesPress` about it would answer no on every flag change.
+        guard hotkeyKey.isModifier else { return }
         let hotkeyPressed = hotkeyKey.matchesPress(event)
 
         let flags = event.modifierFlags.rawValue
         HotkeyManager.hkLog.info("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(self.fnDown) locked=\(self.isLocked) hold=\(self.isHoldMode)")
 
         if hotkeyPressed && !fnDown {
-            fnDown = true
-            fnReleaseDebounce?.cancel() // Cancel any pending debounced release
-
-            if coordinator == nil {
-                HotkeyManager.hkLog.error("[HK] coordinator is nil in handleFlagsChanged — events being dropped")
-            }
-
-            if isLocked {
-                // Don't stop yet — V/T chord may follow. Stop happens on Fn release.
-                // And the press is one of two gestures, told apart by the clock
-                // (#205): a tap stops and pastes, as a locked recording has always
-                // ended; held past the threshold it opens the bubble for as long
-                // as the key is down, which is exactly when Fn+T, Fn+K and Fn+S
-                // are pressed.
-                lockedHoldStart = Date()
-                HotkeyManager.hkLog.debug("[HOTKEY] hotkey pressed while locked → waiting for chord or release")
-                return
-            }
-
-            // Start pre-buffering immediately (audio capture before hold confirmed)
-            isPreBufferingFlag = true
-            coordinator?.startPreBuffer()
-
-            isHoldMode = false
-            fnTimer = Task { [weak self] in
-                try? await Task.sleep(for: Self.holdToRecordThreshold)
-                guard !Task.isCancelled, let self else { return }
-                self.isHoldMode = true
-                self.isRecordingFlag = true
-                self.isPreBufferingFlag = false
-                HotkeyManager.hkLog.debug("[HOTKEY] hold confirmed (150ms) → recording")
-                self.coordinator?.confirmRecording()
-            }
+            beginHotkeyPress()
         } else if !hotkeyPressed && fnDown {
-            fnDown = false
-            fnTimer?.cancel()
-            fnTimer = nil
-            // A press that lasted past the threshold was a hold: it opened the
-            // bubble, so letting go closes the bubble and does nothing else —
-            // swallowed by the latch every chord already uses (#205). Read
-            // before the timestamp is dropped, so what opened the bubble and
-            // what swallows the release are one fact and not two.
-            if isLocked && lockedHoldPassedThreshold { fnHeldAtLock = true }
-            lockedHoldStart = nil
-
-            if isLocked {
-                if fnHeldAtLock {
-                    // First release after lock-while-holding — just continue recording.
-                    // Still a genuine Fn release: clear any sticky mic error (no-op when none
-                    // is showing). The `.sticky` hide path leaves autoHideTask nil, so without
-                    // this an error reached through this branch would never clear.
-                    fnHeldAtLock = false
-                    HotkeyManager.hkLog.debug("[HOTKEY] hotkey released after lock → continues (initial release)")
-                    coordinator?.dismissMicErrorAfterRelease()
-                    return
-                }
-                // Subsequent release — stop recording (with debounce for Fn flag flicker)
-                fnReleaseDebounce?.cancel()
-                fnReleaseDebounce = Task { [weak self] in
-                    try? await Task.sleep(for: .milliseconds(30))
-                    guard !Task.isCancelled, let self, !self.fnDown else { return }
-                    self.isLocked = false
-                    self.isLockedFlag = false
-                    self.isRecordingFlag = false
-                    HotkeyManager.hkLog.debug("[HOTKEY] hotkey released while locked → stop + paste")
-                    // Genuine release (past the 30ms flag-flicker debounce): if a sticky
-                    // mic error is showing, begin its grace hide; otherwise stop normally.
-                    // stopRecording only spawns the coordinator-owned pipeline (#104):
-                    // the next Fn press cancels this debounce Task, and the in-flight
-                    // transcription must not die with it.
-                    self.coordinator?.dismissMicErrorAfterRelease()
-                    self.coordinator?.stopRecording()
-                }
-                return
-            }
-
-            if isHoldMode {
-                // Debounce hold-to-talk release too (same Fn flag flickering issue)
-                fnReleaseDebounce?.cancel()
-                fnReleaseDebounce = Task { [weak self] in
-                    try? await Task.sleep(for: .milliseconds(30))
-                    guard !Task.isCancelled, let self, !self.fnDown else { return }
-                    self.isHoldMode = false
-                    self.isRecordingFlag = false
-                    HotkeyManager.hkLog.debug("[HOTKEY] hold mode release → stop + paste")
-                    // Genuine release (past the 30ms flag-flicker debounce): if a sticky
-                    // mic error is showing, begin its grace hide; otherwise stop normally.
-                    // As above, stopRecording spawns the pipeline elsewhere (#104).
-                    self.coordinator?.dismissMicErrorAfterRelease()
-                    self.coordinator?.stopRecording()
-                }
-                return
-            }
-
-            // Tap within 150ms — cancel pre-buffer (no debounce needed for taps).
-            // A sticky mic error can surface on a tap too (synchronous .denied path), so
-            // start its grace hide here; startPreBuffer cancels it if Fn is pressed again.
-            isPreBufferingFlag = false
-            coordinator?.cancelPreBuffer()
-            coordinator?.dismissMicErrorAfterRelease()
+            endHotkeyPress()
         }
+    }
+
+    /// The recorded talk key's key-down / key-up, handed over by the CGEvent tap
+    /// (#226). It reaches the same two functions the modifier path does, so a
+    /// hold, a lock, a chord and a release mean exactly what they always meant —
+    /// only the event that carries them is different.
+    ///
+    /// Internal so tests drive it the way `handleFlagsChanged` is driven.
+    func handleRecordedKey(down: Bool) {
+        if down {
+            guard !fnDown else { return }  // auto-repeat: still one press
+            beginHotkeyPress()
+        } else if fnDown {
+            endHotkeyPress()
+        }
+    }
+
+    /// The talk key went down.
+    private func beginHotkeyPress() {
+        // A key recorder is open: this press is the user choosing a key, not a
+        // hold (#226). Nothing is armed, so the release has nothing to unwind.
+        guard !isSuspended else { return }
+
+        fnDown = true
+        fnReleaseDebounce?.cancel() // Cancel any pending debounced release
+
+        if coordinator == nil {
+            HotkeyManager.hkLog.error("[HK] coordinator is nil in beginHotkeyPress — events being dropped")
+        }
+
+        if isLocked {
+            // Don't stop yet — V/T chord may follow. Stop happens on Fn release.
+            // And the press is one of two gestures, told apart by the clock
+            // (#205): a tap stops and pastes, as a locked recording has always
+            // ended; held past the threshold it opens the bubble for as long
+            // as the key is down, which is exactly when Fn+T, Fn+K and Fn+S
+            // are pressed.
+            lockedHoldStart = Date()
+            HotkeyManager.hkLog.debug("[HOTKEY] hotkey pressed while locked → waiting for chord or release")
+            return
+        }
+
+        // Start pre-buffering immediately (audio capture before hold confirmed)
+        isPreBufferingFlag = true
+        coordinator?.startPreBuffer()
+
+        isHoldMode = false
+        fnTimer = Task { [weak self] in
+            try? await Task.sleep(for: Self.holdToRecordThreshold)
+            guard !Task.isCancelled, let self else { return }
+            self.isHoldMode = true
+            self.isRecordingFlag = true
+            self.isPreBufferingFlag = false
+            HotkeyManager.hkLog.debug("[HOTKEY] hold confirmed (150ms) → recording")
+            self.coordinator?.confirmRecording()
+        }
+    }
+
+    /// The talk key came up.
+    private func endHotkeyPress() {
+        fnDown = false
+        fnTimer?.cancel()
+        fnTimer = nil
+        // A press that lasted past the threshold was a hold: it opened the
+        // bubble, so letting go closes the bubble and does nothing else —
+        // swallowed by the latch every chord already uses (#205). Read
+        // before the timestamp is dropped, so what opened the bubble and
+        // what swallows the release are one fact and not two.
+        if isLocked && lockedHoldPassedThreshold { fnHeldAtLock = true }
+        lockedHoldStart = nil
+
+        if isLocked {
+            if fnHeldAtLock {
+                // First release after lock-while-holding — just continue recording.
+                // Still a genuine Fn release: clear any sticky mic error (no-op when none
+                // is showing). The `.sticky` hide path leaves autoHideTask nil, so without
+                // this an error reached through this branch would never clear.
+                fnHeldAtLock = false
+                HotkeyManager.hkLog.debug("[HOTKEY] hotkey released after lock → continues (initial release)")
+                coordinator?.dismissMicErrorAfterRelease()
+                return
+            }
+            // Subsequent release — stop recording (with debounce for Fn flag flicker)
+            fnReleaseDebounce?.cancel()
+            fnReleaseDebounce = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(30))
+                guard !Task.isCancelled, let self, !self.fnDown else { return }
+                self.isLocked = false
+                self.isLockedFlag = false
+                self.isRecordingFlag = false
+                HotkeyManager.hkLog.debug("[HOTKEY] hotkey released while locked → stop + paste")
+                // Genuine release (past the 30ms flag-flicker debounce): if a sticky
+                // mic error is showing, begin its grace hide; otherwise stop normally.
+                // stopRecording only spawns the coordinator-owned pipeline (#104):
+                // the next Fn press cancels this debounce Task, and the in-flight
+                // transcription must not die with it.
+                self.coordinator?.dismissMicErrorAfterRelease()
+                self.coordinator?.stopRecording()
+            }
+            return
+        }
+
+        if isHoldMode {
+            // Debounce hold-to-talk release too (same Fn flag flickering issue)
+            fnReleaseDebounce?.cancel()
+            fnReleaseDebounce = Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(30))
+                guard !Task.isCancelled, let self, !self.fnDown else { return }
+                self.isHoldMode = false
+                self.isRecordingFlag = false
+                HotkeyManager.hkLog.debug("[HOTKEY] hold mode release → stop + paste")
+                // Genuine release (past the 30ms flag-flicker debounce): if a sticky
+                // mic error is showing, begin its grace hide; otherwise stop normally.
+                // As above, stopRecording spawns the pipeline elsewhere (#104).
+                self.coordinator?.dismissMicErrorAfterRelease()
+                self.coordinator?.stopRecording()
+            }
+            return
+        }
+
+        // Tap within 150ms — cancel pre-buffer (no debounce needed for taps).
+        // A sticky mic error can surface on a tap too (synchronous .denied path), so
+        // start its grace hide here; startPreBuffer cancels it if Fn is pressed again.
+        isPreBufferingFlag = false
+        coordinator?.cancelPreBuffer()
+        coordinator?.dismissMicErrorAfterRelease()
     }
 
     /// Callers: the local key monitor and the global monitor's Ctrl+Cmd+V chord
@@ -686,7 +741,11 @@ final class HotkeyManager {
 
     /// Create the CGEvent tap and attach it to the main run loop.
     private func installEventTap() {
+        // Key-up is in the mask for exactly one key: a recorded talk key that is
+        // not a modifier (#226). Everything else here is a key-down, and the
+        // callback returns any other key-up untouched before it reads a thing.
         let eventMask = (1 << CGEventType.keyDown.rawValue)
+            | (1 << CGEventType.keyUp.rawValue)
         // SAFETY: self must outlive the event tap. Currently guaranteed because
         // HotkeyManager is owned by AppDelegate for the app's entire lifetime.
         // If ownership changes, this must become passRetained + release in teardown.
@@ -723,20 +782,45 @@ final class HotkeyManager {
 
                 let manager = Unmanaged<HotkeyManager>.fromOpaque(refcon).takeUnretainedValue()
 
-                // `eventsOfInterest` is key-down only and the tap-disabled
-                // control events returned above, so reaching here *is* "our tap
-                // received a real key-down" (the synthetic guard above) — the
-                // fact the health check exists to measure and never did (#97).
+                // A real key-down from the user's keyboard (the synthetic guard
+                // above) — the fact the health check exists to measure and never
+                // did (#97). A key-up is the same press seen twice and must not
+                // count as a second one.
                 //
                 // The tap's source is on CFRunLoopGetMain (see below), so this runs on
                 // the main thread: the same assumption `modifierOn` and the Space path
                 // already make, and why no `nonisolated(unsafe)` mirror is needed.
-                MainActor.assumeIsolated {
-                    manager.noteRealKeyDown()
+                if type == .keyDown {
+                    MainActor.assumeIsolated {
+                        manager.noteRealKeyDown()
+                    }
                 }
 
                 let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
                 let flags = event.flags
+
+                // A recorded talk key that is not a modifier (#226): the tap is
+                // its only owner, because it has to be swallowed — the key does
+                // nothing else, and it is held for the length of a sentence.
+                // Auto-repeat is that same press still down, not a second one.
+                if let talkKey = MainActor.assumeIsolated({ manager.recordedTalkKeyCode }),
+                   keyCode == Int64(talkKey) {
+                    if type == .keyDown, event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                        return nil
+                    }
+                    let down = (type == .keyDown)
+                    Task { @MainActor in
+                        manager.handleRecordedKey(down: down)
+                        HotkeyManager.hkLog.debug(
+                            "[HOTKEY] recorded key \(down ? "down" : "up", privacy: .public) (CGEvent)"
+                        )
+                    }
+                    return nil
+                }
+
+                // Past here everything reads a key-down. Every other key-up is
+                // in the mask only because the one above had to be.
+                guard type == .keyDown else { return Unmanaged.passRetained(event) }
 
                 // Fn+V/T while recording → set pre-paste mode
                 // Use the EVENT's own Fn flag (reliable) instead of tracked fnDown (flickers)

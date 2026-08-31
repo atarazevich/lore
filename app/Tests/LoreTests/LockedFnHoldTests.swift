@@ -13,24 +13,15 @@ import XCTest
 /// the thing that can be wrong.
 @MainActor
 final class LockedFnHoldTests: XCTestCase {
-    private var tempRoot: URL!
-    private var suiteName: String!
-    private var defaults: UserDefaults!
+    private var storage: EphemeralDictation!
     private var hotkeys: HotkeyManager!
     /// Held strongly for the length of the test: `HotkeyManager.coordinator` is
     /// weak, and a fixture that let it go would put every gesture through a nil.
     private var coordinator: DictationCoordinator!
 
-    private var entriesDir: URL { tempRoot.appendingPathComponent("entries") }
-    private var audioDir: URL { tempRoot.appendingPathComponent("audio") }
-
     override func setUpWithError() throws {
         try super.setUpWithError()
-        tempRoot = URL(fileURLWithPath: NSTemporaryDirectory())
-            .appendingPathComponent("LockedFnHoldTests-\(UUID().uuidString)", isDirectory: true)
-        suiteName = "com.lore.test.\(UUID().uuidString)"
-        defaults = UserDefaults(suiteName: suiteName)!
-        defaults.removePersistentDomain(forName: suiteName)
+        storage = EphemeralDictation("LockedFnHoldTests")
         // The gesture starts behind the microphone-permission gate, and an
         // undetermined status would put a system prompt on the user's screen —
         // the same fence `DictationDurabilityTests` stands behind.
@@ -44,8 +35,8 @@ final class LockedFnHoldTests: XCTestCase {
         hotkeys?.uninstall()
         hotkeys = nil
         coordinator = nil
-        defaults.removePersistentDomain(forName: suiteName)
-        try? FileManager.default.removeItem(at: tempRoot)
+        storage?.tearDown()
+        storage = nil
         super.tearDown()
     }
 
@@ -54,16 +45,9 @@ final class LockedFnHoldTests: XCTestCase {
     /// dictation runs the pipeline as far as its no-speech branch and no
     /// further.
     private func recording() {
-        let settings = isolatedSettings("LockedFnHoldTests", defaults: defaults)
-        let history = DictationHistory(
-            defaults: defaults, entriesDirectory: entriesDir, audioDirectory: audioDir
-        )
-        coordinator = DictationCoordinator(
-            history: history, backend: StubTranscriptionBackend(transcript: "")
-        )
-        coordinator.settings = settings
-        hotkeys = HotkeyManager()
-        hotkeys.install(coordinator: coordinator, settings: settings)
+        let fixture = storage.gestures("LockedFnHoldTests")
+        coordinator = fixture.coordinator
+        hotkeys = fixture.hotkeys
         coordinator.startPreBuffer()
         coordinator.confirmRecording()
     }
@@ -76,15 +60,7 @@ final class LockedFnHoldTests: XCTestCase {
         XCTAssertTrue(hotkeys.isLocked, "the fixture is a locked recording")
     }
 
-    private func hotkey(down: Bool) -> NSEvent {
-        NSEvent.keyEvent(
-            with: .flagsChanged, location: .zero,
-            modifierFlags: down ? [.function] : [],
-            timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: 0, context: nil, characters: "",
-            charactersIgnoringModifiers: "", isARepeat: false, keyCode: 63
-        )!
-    }
+    private func hotkey(down: Bool) -> NSEvent { fnKeyEvent(down: down) }
 
     /// Held past 300 ms: the bubble opens and stays open for as long as the key
     /// is down, the recording carries on, and letting go only closes it.

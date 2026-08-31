@@ -411,6 +411,10 @@ struct DictationIndicatorView: View {
     /// DSET-05: with Space-lock turned off there is no lock to offer, so the
     /// glyph is not drawn at all rather than standing there inert (#201).
     var lockEnabled = true
+    /// The chosen talk key's keycap, for the lock tooltip that names the way
+    /// out of a locked recording (#226). Polled like the switches above,
+    /// because the setting can change between recordings.
+    var talkKeyName = HotkeyKey.fn.shortName
     /// The failure face on screen, if any (#209).
     var lastError: DictationFace?
     var bluetoothRedirected = false
@@ -1741,10 +1745,12 @@ struct DictationIndicatorView: View {
     private static let timerHelp = "Unlimited dictation. Locally saved."
 
     /// Both ways out, not only the stop (#212): the owner locked a dictation
-    /// and had to guess whether Esc kept the words.
+    /// and had to guess whether Esc kept the words. The key is named from the
+    /// setting (#226) — it is the one the user actually holds, and every other
+    /// surface says the same one.
     private var lockHelp: String {
         isLocked
-            ? "Press Fn to paste, Esc to stop"
+            ? "Press \(talkKeyName) to paste, Esc to stop"
             : "Space locks recording, hands free"
     }
 
@@ -1964,6 +1970,8 @@ final class DictationIndicatorModel {
     /// The Fn+K master switch (#223).
     var operatorSendEnabled = true
     var lockEnabled = true
+    /// The chosen talk key's keycap, for the lock tooltip (#226).
+    var talkKeyName = HotkeyKey.fn.shortName
     var lastError: DictationFace?
     var bluetoothRedirected = false
     var noSignal = false
@@ -2011,6 +2019,7 @@ struct DictationIndicatorHost: View {
             recordingSeconds: model.recordingSeconds,
             operatorSendEnabled: model.operatorSendEnabled,
             lockEnabled: model.lockEnabled,
+            talkKeyName: model.talkKeyName,
             lastError: model.lastError,
             bluetoothRedirected: model.bluetoothRedirected,
             noSignal: model.noSignal,
@@ -2181,6 +2190,9 @@ final class DictationIndicatorManager {
                 self.model.operatorSendEnabled =
                     coordinator.settings?.operatorSendEnabled ?? false
                 self.model.lockEnabled = coordinator.settings?.modifierLockEnabled ?? true
+                // The lock tooltip names the key the user holds (#226); the
+                // setting can change between recordings, so it is polled.
+                self.model.talkKeyName = (coordinator.settings?.hotkeyKey ?? .fn).shortName
                 self.model.lastError = coordinator.lastError
                 self.model.bluetoothRedirected = coordinator.bluetoothMicRedirected
                 self.model.noSignal = coordinator.noSignal

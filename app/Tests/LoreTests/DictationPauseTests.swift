@@ -437,9 +437,9 @@ final class DictationPauseTests: XCTestCase {
     /// The same, with the hotkey manager installed on it so a real key can be
     /// put through the decision both event paths take.
     private func makeHotkeyRecording() {
-        let coordinator = makeCoordinator(backend: StubTranscriptionBackend(transcript: ""))
-        hotkeys = HotkeyManager()
-        hotkeys.install(coordinator: coordinator, settings: coordinator.settings!)
+        let fixture = storage.gestures("DictationPauseTests")
+        coordinator = fixture.coordinator
+        hotkeys = fixture.hotkeys
     }
 
     /// Locked by the bubble's own glyph, which is the Space path itself.
@@ -451,13 +451,5 @@ final class DictationPauseTests: XCTestCase {
         XCTAssertTrue(hotkeys.isLocked, "the fixture is a locked recording")
     }
 
-    private func hotkey(down: Bool) -> NSEvent {
-        NSEvent.keyEvent(
-            with: .flagsChanged, location: .zero,
-            modifierFlags: down ? [.function] : [],
-            timestamp: ProcessInfo.processInfo.systemUptime,
-            windowNumber: 0, context: nil, characters: "",
-            charactersIgnoringModifiers: "", isARepeat: false, keyCode: 63
-        )!
-    }
+    private func hotkey(down: Bool) -> NSEvent { fnKeyEvent(down: down) }
 }

@@ -285,7 +285,7 @@ final class SettingsStore {
         set {
             withMutation(keyPath: \.hotkeyKey) {
                 _hotkeyKey = newValue
-                defaults.set(newValue.rawValue, forKey: "hotkeyKey")
+                defaults.set(newValue.storageValue, forKey: "hotkeyKey")
             }
         }
     }
@@ -636,8 +636,10 @@ final class SettingsStore {
         self._modifierLockEnabled = defaults.object(forKey: "modifierLockEnabled") as? Bool ?? true
         self._modifierCleanupEnabled = defaults.object(forKey: "modifierCleanupEnabled") as? Bool ?? true
         self._modifierTranslateEnabled = defaults.object(forKey: "modifierTranslateEnabled") as? Bool ?? true
+        // A stored key this build cannot honour (#226) falls back to Fn rather
+        // than to a talk key nobody can press.
         self._hotkeyKey = HotkeyKey(
-            rawValue: defaults.string(forKey: "hotkeyKey") ?? ""
+            storage: defaults.string(forKey: "hotkeyKey") ?? ""
         ) ?? .fn
         if let savedPreset = defaults.string(forKey: "cleanupPreset"),
            let preset = CleanupPreset(rawValue: savedPreset) {

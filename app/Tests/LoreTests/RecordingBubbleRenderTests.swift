@@ -262,50 +262,6 @@ final class RecordingBubbleRenderTests: XCTestCase {
 
     // MARK: - Rendering
 
-    private struct Raster {
-        let width: Int
-        let height: Int
-        let pixels: [UInt8]
-
-        /// The whole render, canvas included — the bubble sits in its top-leading
-        /// corner and the rest is transparent margin.
-        var pointWidth: CGFloat { CGFloat(width) / RecordingBubbleRenderTests.scale }
-
-        /// The same downward — the canvas's whole height, tooltip room and all.
-        var pointHeight: CGFloat { CGFloat(height) / RecordingBubbleRenderTests.scale }
-
-        /// Where the bubble itself ends: the last column that has anything drawn
-        /// in it. The canvas past that is empty, so this is measured rather than
-        /// assumed — and it is what the comparison regions are cut from.
-        var paintedWidth: CGFloat { CGFloat(lastPainted(along: .horizontal) + 1) / scale }
-
-        /// The same downward: the resting row's own depth, under which an open
-        /// shape draws its list and a resting one draws nothing.
-        var paintedHeight: CGFloat { CGFloat(lastPainted(along: .vertical) + 1) / scale }
-
-        private enum Axis { case horizontal, vertical }
-
-        private var scale: CGFloat { RecordingBubbleRenderTests.scale }
-
-        private func lastPainted(along axis: Axis) -> Int {
-            let outer = axis == .horizontal ? width : height
-            let inner = axis == .horizontal ? height : width
-            for a in stride(from: outer - 1, through: 0, by: -1) {
-                for b in 0..<inner {
-                    let x = axis == .horizontal ? a : b
-                    let y = axis == .horizontal ? b : a
-                    if pixels[(y * width + x) * 4 + 3] > 0 { return a }
-                }
-            }
-            return -1
-        }
-
-
-        func pixel(x: Int, y: Int) -> (UInt8, UInt8, UInt8, UInt8) {
-            let i = (y * width + x) * 4
-            return (pixels[i], pixels[i + 1], pixels[i + 2], pixels[i + 3])
-        }
-    }
 
     // MARK: - The bubble's own tooltip (#207)
 
@@ -440,7 +396,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// Where the paperclip's own box ends, in a render whose row finishes with
     /// the clip and its count (#209, B2): back from the shape's trailing padding
     /// through the figures and the gap beside them.
-    private static func glyphRight(in raster: Raster, digits: Int) -> CGFloat {
+    private static func glyphRight(in raster: SwiftUIRaster, digits: Int) -> CGFloat {
         raster.paintedWidth - rowPadding
             - CGFloat(digits) * DictationIndicatorView.countDigitWidth
             - DictationIndicatorView.glyphGap
@@ -671,7 +627,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// The mark is `LoreTheme.Accent.green` and nothing near it. The brightest
     /// pixel in the slot is printed whatever the verdict — it is the number that
     /// makes a run of this readable.
-    private func assertGreen(_ raster: Raster, columns: Range<Int>) throws {
+    private func assertGreen(_ raster: SwiftUIRaster, columns: Range<Int>) throws {
         let rows = Int(raster.paintedHeight * Self.scale)
         var best: (r: Int, g: Int, b: Int) = (0, 0, 0)
         var found = false
@@ -721,7 +677,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// Where the paste's mark stands, across the render: the middle of every
     /// column carrying its green (`isMarkGreen`), which in these rows is the
     /// mark and nothing else.
-    private func greenCentre(of raster: Raster) throws -> CGFloat {
+    private func greenCentre(of raster: SwiftUIRaster) throws -> CGFloat {
         let rows = Int(raster.paintedHeight * Self.scale)
         var first = raster.width
         var last = -1
@@ -863,11 +819,11 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// The runs of ink across a rendered row, split wherever it leaves `gap`
     /// points or more of surface — the 10 pt the shape puts between its
     /// elements, never the point or two between the letters of one word.
-    private func inkRuns(_ raster: Raster, gap: CGFloat) -> [Range<Int>] {
+    private func inkRuns(_ raster: SwiftUIRaster, gap: CGFloat) -> [Range<Int>] {
         painted(raster, minimumGap: Int(gap * Self.scale))
     }
 
-    private func painted(_ raster: Raster, minimumGap: Int) -> [Range<Int>] {
+    private func painted(_ raster: SwiftUIRaster, minimumGap: Int) -> [Range<Int>] {
         let rows = Int(raster.paintedHeight * Self.scale)
         var runs: [Range<Int>] = []
         var start: Int?
@@ -893,7 +849,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// Where a run of ink stands: the bottom of its first glyph. Sub-split at
     /// any column of bare surface, so the run's own tail — the only place a
     /// descender can be in these strings — is never what is measured.
-    private func baseline(of run: Range<Int>, in raster: Raster) throws -> CGFloat {
+    private func baseline(of run: Range<Int>, in raster: SwiftUIRaster) throws -> CGFloat {
         let glyph = try XCTUnwrap(
             painted(raster, minimumGap: 1).first { run.contains($0.lowerBound) }
         )
@@ -945,23 +901,10 @@ final class RecordingBubbleRenderTests: XCTestCase {
         )
     }
 
-    private func raster(_ view: some View) throws -> Raster {
-        let renderer = ImageRenderer(content: view)
-        renderer.scale = Self.scale
+    private func raster(_ view: some View) throws -> SwiftUIRaster {
         // No backdrop offscreen, so the material draws nothing — which is what
         // makes this a comparison of where things are, not of how they look.
-        renderer.isOpaque = false
-        let image = try XCTUnwrap(renderer.cgImage, "the bubble did not render")
-        let width = image.width
-        let height = image.height
-        var pixels = [UInt8](repeating: 0, count: width * height * 4)
-        let context = try XCTUnwrap(CGContext(
-            data: &pixels, width: width, height: height, bitsPerComponent: 8,
-            bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ))
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return Raster(width: width, height: height, pixels: pixels)
+        try SwiftUIRaster.render(view, scale: Self.scale, opaque: false)
     }
 
     private struct Comparison {
@@ -975,7 +918,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// Every pixel of the two renders over `columns`, within the row band `of`
     /// leaves once its outline is inset — the corners round and unround as the
     /// list opens, which is the shape changing rather than anything moving.
-    private func compare(_ a: Raster, _ b: Raster, columns: Range<Int>, of band: Raster) -> Comparison {
+    private func compare(_ a: SwiftUIRaster, _ b: SwiftUIRaster, columns: Range<Int>, of band: SwiftUIRaster) -> Comparison {
         let inset = Int(Self.bubbleCorner * Self.scale)
         let firstRow = inset
         let rows = min(
@@ -1008,7 +951,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// The two renders agree over the region they must, and the numbers are
     /// printed whatever the verdict — they are the acceptance.
     private func assertIdentical(
-        _ a: Raster, _ b: Raster, upToPoint: CGFloat, what: String,
+        _ a: SwiftUIRaster, _ b: SwiftUIRaster, upToPoint: CGFloat, what: String,
         file: StaticString = #filePath, line: UInt = #line
     ) throws {
         let inset = Int(Self.bubbleCorner * Self.scale)
