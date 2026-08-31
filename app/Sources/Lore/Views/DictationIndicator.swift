@@ -73,8 +73,16 @@ enum BubbleRailLetter: String, CaseIterable, Sendable {
 /// Whatever is armed already stands in the bubble at rest, so opening may only
 /// append to the right of it: a letter that was on screen before the pointer
 /// arrived may not move. So the armed letters come first, in `V T K`, and
-/// whatever is not armed follows in `T K`. An unarmed `V` never appears — an
-/// unarmed cleanup letter has nothing to say.
+/// whatever is not armed follows, also in `V T K` — opening always offers the
+/// full rail, hinting the keys that are not yet pressed.
+///
+/// 2026-08-31: the open rail shipped as `T K` with no unarmed `V` — the armed
+/// and hint orderings were two byte-identical array literals kept in sync by
+/// hand, `armedOrder` and `restOrder`, and the hint one fell out of step: a
+/// holdover from the C era that #224 renamed but did not correct against
+/// `docs/design/prototypes/operator-switch.html`, which always drew `V T K`.
+/// One array now, read for both purposes below — the desync that caused the
+/// bug is no longer a shape the code can hold.
 ///
 /// A fixed order was the first answer and it broke the invariant for a lone
 /// armed `K`: opening would insert `T` ahead of it, and the `K` the user was
@@ -82,10 +90,9 @@ enum BubbleRailLetter: String, CaseIterable, Sendable {
 /// closed rail a prefix of the open one for every armed set, which is the
 /// property `RecordingBubbleRailTests` checks.
 enum BubbleRail {
-    /// `V T K` — the order armed letters are read in.
-    static let armedOrder: [BubbleRailLetter] = [.cleanup, .translate, .operatorSend]
-    /// `T K` — what opening appends, for whatever is not armed already.
-    static let restOrder: [BubbleRailLetter] = [.translate, .operatorSend]
+    /// `V T K` — the rail's one reading order: what stands first when armed,
+    /// and what opening appends for whatever is not armed yet.
+    static let readingOrder: [BubbleRailLetter] = [.cleanup, .translate, .operatorSend]
 
     /// - Parameter open: the bubble is widened. Closed, only the armed letters
     ///   are drawn at all.
@@ -96,11 +103,11 @@ enum BubbleRail {
     static func letters(
         armed: Set<BubbleRailLetter>, open: Bool, operatorSend: Bool
     ) -> [BubbleRailLetter] {
-        let standing = armedOrder.filter {
+        let standing = readingOrder.filter {
             armed.contains($0) && ($0 != .operatorSend || operatorSend)
         }
         guard open else { return standing }
-        return standing + restOrder.filter {
+        return standing + readingOrder.filter {
             !armed.contains($0) && ($0 != .operatorSend || operatorSend)
         }
     }
