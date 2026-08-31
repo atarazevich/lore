@@ -759,16 +759,16 @@ final class DictationCoordinator {
             scheduleAutoHide()
             return
         }
-        // The paste moment (#211). The words went at `deliver` above — before
-        // this write, with nothing between the two that waits — and the shape
-        // says so on its way out: the spinner's slot becomes a green checkmark,
-        // the mark detaches and falls toward the cursor, and the bubble fades
-        // with it. What V-A refused (#209) is refused still: nothing is claimed
-        // about the words *arriving* — `TextInserter` can confirm only that the
-        // Cmd+V was created — and nothing is parked for anyone to dismiss. This
-        // is the shape leaving, drawn.
+        // The paste moment (#211, #218). The words went at `deliver` above —
+        // before this write, with nothing between the two that waits — and the
+        // shape says so on its way out: the spinner's slot becomes a green
+        // checkmark, which bursts where it stands as the bubble closes with it.
+        // What V-A refused (#209) is refused still: nothing is claimed about the
+        // words *arriving* — `TextInserter` can confirm only that the Cmd+V was
+        // created — and nothing is parked for anyone to dismiss. This is the
+        // shape leaving, drawn.
         state = .done
-        scheduleAutoHide(after: PasteFall.hold)
+        scheduleAutoHide(after: PasteMark.hold)
     }
 
     /// Clipboard images become PNGs under lore's own Application Support — the
@@ -800,8 +800,8 @@ final class DictationCoordinator {
     /// restarts it.
     ///
     /// Two delays: a failure face's four seconds — long enough to read one
-    /// sentence and reach for its button — and `PasteFall.hold`, which is not
-    /// reading time at all but the length of the mark's own fall (#211).
+    /// sentence and reach for its button — and `PasteMark.hold`, which is not
+    /// reading time at all but the length of the mark's own burst (#218).
     /// Both end the same way, so they are one task and one slot; neither is the
     /// ~800 ms "Done" flash this used to default to (#209).
     private func scheduleAutoHide(after delay: Duration = DictationCoordinator.faceReadingTime) {
