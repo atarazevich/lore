@@ -94,6 +94,14 @@ private enum RowPopover: Equatable {
     case translate(UUID)
 }
 
+/// The two views of the Dictation destination (#215), reached by a
+/// header-level switch — same idiom as the meetings Live/Review switch
+/// (`MeetingsDestination.liveReviewSwitch`, ShellDestinations.swift).
+private enum DictationSubview {
+    case history
+    case activity
+}
+
 struct DictationView: View {
     @Bindable var settings: AppSettings
     /// False while the unified shell shows another destination. Gates the
@@ -115,10 +123,17 @@ struct DictationView: View {
     @FocusState private var isEditorFocused: Bool
     @State private var activePopover: RowPopover?
     @State private var projectionCache = HistoryProjectionCache()
+    @State private var subview: DictationSubview = .history
+    /// Activity pane's memoized aggregation (#215 review — F4): held here,
+    /// not on `DictationActivityView`, so it survives that view being torn
+    /// down and rebuilt on every History/Activity round trip.
+    @State private var activityCache = DictationActivityCache()
 
     var body: some View {
         VStack(spacing: 0) {
             statusStrip
+            LoreDivider()
+            historyActivitySwitch
             LoreDivider()
             historyTab
         }
@@ -235,12 +250,33 @@ struct DictationView: View {
         )
     }
 
-    // MARK: - History (the destination's only content — settings moved to
-    // the unified Settings destination in Stage D)
+    // MARK: - History/Activity switch (#215, header-level — same idiom as
+    // MeetingsDestination.liveReviewSwitch, ShellDestinations.swift)
+
+    private var historyActivitySwitch: some View {
+        LoreSegmentedSwitch(
+            isLeftSelected: subview == .history,
+            selectLeft: { subview = .history },
+            selectRight: { subview = .activity }
+        ) {
+            Text("History")
+        } rightLabel: {
+            Text("Activity")
+        }
+    }
+
+    // MARK: - History (settings moved to the unified Settings destination in
+    // Stage D) / Activity (#215)
 
     private var historyTab: some View {
         VStack(spacing: 0) {
-            historyList
+            if subview == .activity {
+                DictationActivityView(
+                    history: dictation.history, cache: activityCache, isActiveInShell: isActiveInShell
+                )
+            } else {
+                historyList
+            }
             LoreDivider()
             hotkeyCheatSheet
         }

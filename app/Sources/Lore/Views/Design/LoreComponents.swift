@@ -352,6 +352,57 @@ extension View {
     }
 }
 
+// MARK: - Two-option segmented switch (meetings Live/Review, dictation History/Activity)
+
+/// Chip-chrome two-option switch: `--hover` pill inset 3px, active segment
+/// gets a white .12 fill. Shared by `MeetingsDestination.liveReviewSwitch` and
+/// `DictationView`'s History/Activity switch (#215 review — the two were a
+/// near-verbatim 12-line clone of each other). Each label is a `@ViewBuilder`
+/// slot so a segment can carry more than a title (the Live segment's pulsing
+/// dot).
+struct LoreSegmentedSwitch<LeftLabel: View, RightLabel: View>: View {
+    let isLeftSelected: Bool
+    let selectLeft: () -> Void
+    let selectRight: () -> Void
+    @ViewBuilder let leftLabel: () -> LeftLabel
+    @ViewBuilder let rightLabel: () -> RightLabel
+
+    var body: some View {
+        HStack {
+            Spacer()
+            HStack(spacing: 3) {
+                segment(isOn: isLeftSelected, action: selectLeft, label: leftLabel)
+                segment(isOn: !isLeftSelected, action: selectRight, label: rightLabel)
+            }
+            .padding(3)
+            .background(
+                LoreTheme.Surface.hover,
+                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
+            )
+            Spacer()
+        }
+        .padding(.vertical, 7)
+    }
+
+    private func segment<Label: View>(
+        isOn: Bool, action: @escaping () -> Void, @ViewBuilder label: () -> Label
+    ) -> some View {
+        Button(action: action) {
+            HStack(spacing: 6) { label() }
+                .font(.system(size: 12.5, weight: .semibold))
+                .foregroundStyle(isOn ? Color.white : LoreTheme.TextColor.muted)
+                .padding(.vertical, 5)
+                .padding(.horizontal, 14)
+                .background(
+                    isOn ? Color.white.opacity(0.12) : Color.clear,
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
+                )
+                .contentShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
+        }
+        .buttonStyle(.plain)
+    }
+}
+
 // MARK: - Hairline divider (`.hairline`, `.srow` borders)
 
 /// 1px `--line` divider.

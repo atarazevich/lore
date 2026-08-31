@@ -55,56 +55,23 @@ struct MeetingsDestination: View {
 
     /// Compact segmented switch shown only during a session: "Live" (with the
     /// session dot — steady amber while paused, #153) vs "Meetings" (the review
-    /// layout).
+    /// layout). Shared chip chrome: `LoreSegmentedSwitch` (#215 review — F6).
     private func liveReviewSwitch(showLive: Bool) -> some View {
         let paused = coordinator.isPaused
-        return HStack {
-            Spacer()
-            HStack(spacing: 3) {
-                switchSegment(isOn: showLive) {
-                    shell.meetingsReviewWhileRecording = false
-                } label: {
-                    LorePulsingDot(
-                        color: paused ? LoreTheme.Accent.amber : LoreTheme.Accent.red,
-                        size: 7,
-                        pulses: !paused
-                    )
-                    Text("Live")
-                }
-                switchSegment(isOn: !showLive) {
-                    shell.meetingsReviewWhileRecording = true
-                } label: {
-                    Text("Meetings")
-                }
-            }
-            .padding(3)
-            .background(
-                LoreTheme.Surface.hover,
-                in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
+        return LoreSegmentedSwitch(
+            isLeftSelected: showLive,
+            selectLeft: { shell.meetingsReviewWhileRecording = false },
+            selectRight: { shell.meetingsReviewWhileRecording = true }
+        ) {
+            LorePulsingDot(
+                color: paused ? LoreTheme.Accent.amber : LoreTheme.Accent.red,
+                size: 7,
+                pulses: !paused
             )
-            Spacer()
+            Text("Live")
+        } rightLabel: {
+            Text("Meetings")
         }
-        .padding(.vertical, 7)
-    }
-
-    private func switchSegment(
-        isOn: Bool,
-        action: @escaping () -> Void,
-        @ViewBuilder label: () -> some View
-    ) -> some View {
-        Button(action: action) {
-            HStack(spacing: 6) { label() }
-                .font(.system(size: 12.5, weight: .semibold))
-                .foregroundStyle(isOn ? Color.white : LoreTheme.TextColor.muted)
-                .padding(.vertical, 5)
-                .padding(.horizontal, 14)
-                .background(
-                    isOn ? Color.white.opacity(0.12) : Color.clear,
-                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
-                )
-                .contentShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
-        }
-        .buttonStyle(.plain)
     }
 }
 
