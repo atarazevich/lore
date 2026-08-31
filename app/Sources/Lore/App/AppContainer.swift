@@ -95,6 +95,10 @@ final class AppContainer {
             // #150: one preset instead of the two retired flags — a UI test
             // starts in the configured world, never in the setup state.
             defaults.set(true, forKey: SetupState.completedKey)
+            // #221: the scenarios drive the Meetings destination, and a UI
+            // test's domain is empty — which is a fresh install, where the
+            // master switch is off. Pinned on with the rest of the preset.
+            defaults.set(true, forKey: "meetingsEnabled")
             defaults.set(false, forKey: "meetingAutoDetectEnabled")
             defaults.set(false, forKey: "hasShownAutoDetectExplanation")
             defaults.set(false, forKey: "hideFromScreenShare")

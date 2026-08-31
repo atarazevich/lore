@@ -84,7 +84,7 @@ enum NotesFolderMigration {
     /// Keys an earlier launch of this app leaves behind, none of them written
     /// by a framework. Their absence is how a *fresh* install is recognized
     /// without asking the filesystem — looking is the dialog.
-    private static let priorLaunchKeys = [
+    static let priorLaunchKeys = [
         "didMigrateFromOnTheSpot",
         "didMigrateFromOpenGranola",
         SetupState.tourCompletedKey,
@@ -161,7 +161,12 @@ enum NotesFolderMigration {
         ))
     }
 
-    private static func hasPriorInstall(defaults: UserDefaults) -> Bool {
+    /// "An earlier launch of this app happened on this Mac." Two readers: the
+    /// notes move above, and the Meetings switch's one-time default (#221) —
+    /// both want the same fact, so neither spells the key list itself. Both
+    /// must ask *before* `SettingsStore`'s bundle migrations, which write two
+    /// of the keys on every first launch.
+    static func hasPriorInstall(defaults: UserDefaults) -> Bool {
         priorLaunchKeys.contains { defaults.object(forKey: $0) != nil }
     }
 

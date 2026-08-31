@@ -23,18 +23,23 @@ struct MenuBarPopoverView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            statusLine
-                .padding(.horizontal, 16)
-                .padding(.top, 14)
-                .padding(.bottom, 10)
+            // The whole meeting block, or none of it (#221, board frame E): no
+            // status line, no Start/Stop, no Resume. The menu-bar icon itself
+            // does not change — only what the popover opens on.
+            if settings.meetingsEnabled {
+                statusLine
+                    .padding(.horizontal, 16)
+                    .padding(.top, 14)
+                    .padding(.bottom, 10)
 
-            LoreDivider()
+                LoreDivider()
 
-            primaryAction
-                .padding(.horizontal, 12)
-                .padding(.vertical, 10)
+                primaryAction
+                    .padding(.horizontal, 12)
+                    .padding(.vertical, 10)
 
-            LoreDivider()
+                LoreDivider()
+            }
 
             VStack(spacing: 2) {
                 // Only while a condition actually stands, so the popover carries

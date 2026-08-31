@@ -68,6 +68,23 @@ final class SettingsStore {
         }
     }
 
+    // MARK: - Meetings (#221)
+
+    /// The master switch. Off, Meetings is on no surface and no meeting
+    /// subsystem runs — the shell does not mount the destination, which is what
+    /// stops detection, the sweeps and the polling loop. Recordings and notes
+    /// already on disk are never touched by it in either position.
+    @ObservationIgnored nonisolated(unsafe) private var _meetingsEnabled: Bool
+    var meetingsEnabled: Bool {
+        get { access(keyPath: \.meetingsEnabled); return _meetingsEnabled }
+        set {
+            withMutation(keyPath: \.meetingsEnabled) {
+                _meetingsEnabled = newValue
+                defaults.set(newValue, forKey: "meetingsEnabled")
+            }
+        }
+    }
+
     // MARK: - Detection Settings
 
     @ObservationIgnored nonisolated(unsafe) private var _meetingAutoDetectEnabled: Bool
@@ -527,6 +544,12 @@ final class SettingsStore {
 
         let defaults = storage.defaults
 
+        // The Meetings master switch (#221), stamped before anything else for
+        // the same reason the notes move decides first: the bundle migrations
+        // below write two of the keys its "has this Mac run lore before?"
+        // evidence reads, so after them every install looks like an old one.
+        self._meetingsEnabled = Self.resolveMeetingsEnabled(defaults: defaults)
+
         // One-time migrations from previous bundle IDs. The notes move (#148)
         // *decides* FIRST, load-bearing: it reads a fresh install off the
         // *absence* of keys the two below write on every launch. The decision is
@@ -706,6 +729,22 @@ final class SettingsStore {
 // MARK: - Migration
 
 extension SettingsStore {
+    /// The Meetings master switch at launch (#221). An explicit stored choice —
+    /// either position — always wins. With the key absent the verdict is
+    /// decided once from prior-install evidence: a Mac that has run lore before
+    /// keeps Meetings where it was, a fresh install starts without it.
+    ///
+    /// The verdict is written, not re-derived each launch: the *first* launch
+    /// is what leaves the evidence keys behind, so without the stamp the second
+    /// launch of a fresh install would read itself as an old one and turn
+    /// Meetings on.
+    private static func resolveMeetingsEnabled(defaults: UserDefaults) -> Bool {
+        if let stored = defaults.object(forKey: "meetingsEnabled") as? Bool { return stored }
+        let enabled = NotesFolderMigration.hasPriorInstall(defaults: defaults)
+        defaults.set(enabled, forKey: "meetingsEnabled")
+        return enabled
+    }
+
     /// Migrate settings from the old "On The Spot" (com.onthespot.app) bundle.
     /// Copies UserDefaults entries to the current bundle, then marks migration as done.
     private static func migrateFromOldBundleIfNeeded(defaults: UserDefaults) {

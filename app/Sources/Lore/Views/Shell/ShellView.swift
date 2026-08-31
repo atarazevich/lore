@@ -10,6 +10,10 @@ struct ShellView: View {
     let updater: SPUUpdater
     @Environment(AppCoordinator.self) private var coordinator
     @Environment(ShellModel.self) private var shell
+    /// Only for the one thing the Meetings switch owns outside the view tree
+    /// (#221): meeting detection, which the container holds and the unmounted
+    /// destination can no longer turn off for itself.
+    @Environment(AppContainer.self) private var container
     @State private var showProblemReport = false
 
     var body: some View {
@@ -19,6 +23,9 @@ struct ShellView: View {
         @Bindable var shell = shell
         return HStack(spacing: 0) {
             ShellSidebar(
+                destinations: ShellModel.enabledDestinations(
+                    meetingsEnabled: settings.meetingsEnabled
+                ),
                 activeDestination: shell.destination,
                 isMeetingRecording: coordinator.isRecording,
                 isMeetingPaused: coordinator.isPaused,
@@ -36,6 +43,13 @@ struct ShellView: View {
         // The toolbar's "N recorded" subtitle needs the index at launch;
         // afterwards session end / batch completion keep it fresh.
         .task { await coordinator.loadHistory() }
+        // The master switch moved (#221). Unmounting the destination stops the
+        // meeting work that lives in its `.task`; detection is the one piece
+        // that outlives it, because the container owns the controller.
+        .onChange(of: settings.meetingsEnabled) { _, enabled in
+            shell.meetingsSwitchChanged(to: enabled)
+            if !enabled { container.disableDetection(coordinator: coordinator) }
+        }
         .sheet(isPresented: $shell.presentsHealthPanel) {
             if let monitor = coordinator.healthMonitor {
                 HealthPanelView(
@@ -89,7 +103,7 @@ struct ShellView: View {
             Spacer()
             if let startedAt = recordingStartedAt, showRecPill {
                 ShellRecPill(startedAt: startedAt, isPaused: paused) {
-                    shell.destination = .meetings
+                    shell.showMeetings()
                 }
             }
         }
@@ -123,6 +137,12 @@ struct ShellView: View {
 
     /// All destinations stay mounted; the inactive ones are hidden, not
     /// destroyed (SHELL-16). ContentView's `.task` polling loop depends on it.
+    ///
+    /// Meetings is the one exception (#221): with the master switch off it is
+    /// not mounted at all, and that absence is what actually stops the meeting
+    /// work — detection, the launch repair and enrichment sweeps, and the
+    /// polling loop all start from `ContentView`'s `.task`. Switching it back
+    /// on mounts the destination and runs that `.task` again.
     private var content: some View {
         ZStack {
             DictationDestination(
@@ -131,8 +151,10 @@ struct ShellView: View {
             )
             .shellKeepAlive(isActive: shell.destination == .dictation)
 
-            MeetingsDestination(settings: settings)
-                .shellKeepAlive(isActive: shell.destination == .meetings)
+            if settings.meetingsEnabled {
+                MeetingsDestination(settings: settings)
+                    .shellKeepAlive(isActive: shell.destination == .meetings)
+            }
 
             StatsDestination(isActive: shell.destination == .stats)
                 .shellKeepAlive(isActive: shell.destination == .stats)
@@ -164,6 +186,9 @@ extension View {
 // MARK: - Sidebar (SHELL-06…12)
 
 private struct ShellSidebar: View {
+    /// What the nav list shows, resolved by the caller — the sidebar itself has
+    /// no opinion about which destinations exist (#221).
+    let destinations: [ShellDestination]
     let activeDestination: ShellDestination
     let isMeetingRecording: Bool
     let isMeetingPaused: Bool
@@ -214,7 +239,7 @@ private struct ShellSidebar: View {
 
     private var navList: some View {
         VStack(spacing: 2) {
-            ForEach(ShellModel.enabledDestinations) { destination in
+            ForEach(destinations) { destination in
                 ShellNavItem(
                     title: destination.title,
                     icon: destination == .meetings && (isMeetingRecording || isMeetingPaused)

@@ -69,7 +69,13 @@ public struct LoreRootApp: App {
         // repeat init is idempotent: same shell, same coordinator.
         let shellModel = Self.sharedShell
         let coordinator = context.coordinator
+        let settings = context.settings
         shellModel.isRecordingActive = { coordinator.state != .idle }
+        // The Meetings master switch (#221), wired at the same moment and for
+        // the same reason: every door into Meetings — menu bar, deep link,
+        // notification tap, REC pill — asks the shell, so the shell has to be
+        // able to answer before the first of them can fire.
+        shellModel.isMeetingsEnabled = { settings.meetingsEnabled }
         self._shell = State(initialValue: shellModel)
     }
 
@@ -126,28 +132,34 @@ public struct LoreRootApp: App {
                     Divider()
                 }
 
-                Button("Toggle Meeting") {
-                    guard isRunning else { return }
-                    appDelegate.toggleMeeting()
-                }
-                .keyboardShortcut("l", modifiers: [.command, .shift])
+                // The three Meetings commands leave the menu with the feature
+                // (#221). Their shortcuts go with them; `toggleMeeting` and
+                // `importMeetingRecording` re-ask the switch anyway, because
+                // Cmd+Shift+L is also a global monitor that no menu governs.
+                if settings.meetingsEnabled {
+                    Button("Toggle Meeting") {
+                        guard isRunning else { return }
+                        appDelegate.toggleMeeting()
+                    }
+                    .keyboardShortcut("l", modifiers: [.command, .shift])
 
-                Button("Past Meetings") {
-                    guard isRunning else { return }
-                    showPastMeetings()
-                }
-                .keyboardShortcut("m", modifiers: [.command, .shift])
+                    Button("Past Meetings") {
+                        guard isRunning else { return }
+                        showPastMeetings()
+                    }
+                    .keyboardShortcut("m", modifiers: [.command, .shift])
 
-                Button("Import Meeting Recording...") {
-                    guard isRunning else { return }
-                    importMeetingRecording()
+                    Button("Import Meeting Recording...") {
+                        guard isRunning else { return }
+                        importMeetingRecording()
+                    }
+                    .keyboardShortcut("i", modifiers: [.command, .shift])
+                    // Paused counts (#153): while a session is live the healer's
+                    // queue is suspended and the import would only sit — keep the
+                    // item disabled. A busy engine no longer blocks (#166): the
+                    // healer serializes imports behind whatever is running.
+                    .disabled(coordinator.state.isLive)
                 }
-                .keyboardShortcut("i", modifiers: [.command, .shift])
-                // Paused counts (#153): while a session is live the healer's
-                // queue is suspended and the import would only sit — keep the
-                // item disabled. A busy engine no longer blocks (#166): the
-                // healer serializes imports behind whatever is running.
-                .disabled(coordinator.state.isLive)
 
                 Button("Dictation") {
                     guard isRunning else { return }
@@ -227,6 +239,10 @@ extension LoreRootApp {
     }
 
     private func importMeetingRecording() {
+        // The menu item is gone while Meetings is off (#221); this is the guard
+        // for the one thing a stale menu could still do — open a file panel and
+        // put a transcription job behind it.
+        guard settings.meetingsEnabled else { return }
         let panel = NSOpenPanel()
         panel.title = "Import Meeting Recording"
         panel.allowedContentTypes = [
@@ -640,10 +656,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// removed (#65 A) — scene URL routing is not deterministic. AppKit
     /// delivery is: works at launch and while running, window open or closed.
     func application(_ application: NSApplication, open urls: [URL]) {
+        // Every lore:// command drives a meeting (#221). With Meetings off there
+        // is nothing to route them to — and a queued one would fire whenever the
+        // switch came back, so it is dropped at the door rather than parked.
+        // A URL can arrive before `wireDelegate` hands the settings over; the
+        // launch context is the same object, just earlier.
+        let meetingsEnabled = (settings ?? LoreRootApp.sharedContext.settings).meetingsEnabled
         for url in urls {
             appLog.debug("deep link: \(url.absoluteString, privacy: .private)")
             guard let command = LoreDeepLink.parse(url) else {
                 appLog.error("unrecognized deep link URL, skipping")
+                continue
+            }
+            guard meetingsEnabled else {
+                appLog.debug("meetings are off, dropping deep link")
                 continue
             }
             if NSApp.activationPolicy() == .accessory {
@@ -923,6 +949,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // No consent branch: the app only runs once setup completed, and setup
         // completing *is* the acknowledgement (#150).
         guard let coordinator, let settings else { return }
+        // Cmd+Shift+L reaches here from a global monitor as well as the menu
+        // item, so the master switch (#221) is asked at the one place both
+        // paths pass through rather than at each of them.
+        guard settings.meetingsEnabled else { return }
 
         // The toggle's two positions are "a session exists" and "none does"
         // (#153): from a pause it stops and finalizes rather than starting a

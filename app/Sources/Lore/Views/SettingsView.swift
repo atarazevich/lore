@@ -890,81 +890,118 @@ struct SettingsView: View {
 
     private var meetingsSection: some View {
         SettingsSectionCard(label: "Meetings") {
-            // First-enable privacy gate preserved (SET-20): flip back off and
-            // show the explanation sheet until it has been accepted once.
-            toggleRow(
-                "Auto-detect meetings",
-                sub: "Offer to record when a call starts",
-                isOn: $settings.meetingAutoDetectEnabled
-            )
-            .onChange(of: settings.meetingAutoDetectEnabled) {
-                if settings.meetingAutoDetectEnabled && !settings.hasShownAutoDetectExplanation {
-                    settings.meetingAutoDetectEnabled = false
-                    showAutoDetectExplanation = true
-                }
-            }
-            if settings.meetingAutoDetectEnabled {
+            // The master switch (#221) sits on top; with it off the card is the
+            // toggle and one line, and every row below belongs to a feature
+            // that is not there.
+            masterSwitchRow
+            if settings.meetingsEnabled {
                 LoreDivider()
-                SettingsRow(
-                    name: "Silence timeout",
-                    sub: "Auto-detected sessions stop after this much silence"
-                ) {
-                    numberField(value: $settings.silenceTimeoutMinutes, unit: "min", width: 56)
-                }
+                meetingRows
+            } else {
                 LoreDivider()
-                customMeetingAppsRows
+                Text("Hidden from the sidebar and menu bar. "
+                     + "Your recordings and notes stay on this Mac.")
+                    .font(.system(size: 11))
+                    .foregroundStyle(LoreTheme.TextColor.muted)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(EdgeInsets(top: 13, leading: 16, bottom: 13, trailing: 16))
             }
-            if !settings.ignoredAppBundleIDs.isEmpty {
-                LoreDivider()
-                ignoredAppsRows
-            }
-            LoreDivider()
-            // Current semantics kept honest (SET-21/Q4): hides the panel only;
-            // transcription keeps running for notes.
-            toggleRow(
-                "Show live transcript",
-                sub: "Hide the panel only \u{2014} transcription keeps running for notes",
-                isOn: $settings.showLiveTranscript
-            )
-            LoreDivider()
-            SettingsRow(name: "Microphone", sub: "Input device for recordings") {
-                LoreMonoValueButton(title: currentMicName) {
-                    showMicPicker.toggle()
-                }
-                .accessibilityIdentifier("settings.microphonePicker")
-                .popover(isPresented: $showMicPicker, arrowEdge: .bottom) {
-                    LorePickerPopover(
-                        header: "Microphone",
-                        items: micOptions,
-                        width: 260,
-                        isActive: { $0.id == settings.inputDeviceID },
-                        onSelect: { option in
-                            showMicPicker = false
-                            settings.inputDeviceID = option.id
-                        },
-                        title: { $0.name }
-                    )
-                }
-            }
-            LoreDivider()
-            toggleRow(
-                "Save audio recording",
-                sub: "Keep a local .m4a alongside each transcript",
-                isOn: $settings.saveAudioRecording
-            )
-            LoreDivider()
-            toggleRow(
-                "Clean up transcript during recording",
-                sub: "Removes fillers and fixes punctuation as you record",
-                isOn: $settings.enableTranscriptRefinement
-            )
-            LoreDivider()
-            toggleRow(
-                "Enhance transcript after meeting",
-                sub: "Re-transcribes the recording with full context in the background",
-                isOn: $settings.enableBatchRefinement
-            )
         }
+    }
+
+    /// The toggle the whole feature hangs from. Disabled while a meeting is
+    /// live — turning Meetings off then would strand the session with no
+    /// surface left to stop or save it from. No tooltip and no hint beside it:
+    /// the row already says what the switch does, and the live meeting is on
+    /// screen anyway.
+    private var masterSwitchRow: some View {
+        let live = coordinator.state.isLive
+        return toggleRow(
+            "Meetings",
+            sub: "Record and transcribe meetings. This part of lore is still rough.",
+            isOn: $settings.meetingsEnabled
+        )
+        .disabled(live)
+        .opacity(live ? 0.45 : 1)
+    }
+
+    /// Everything the switch governs — shown only while it is on.
+    @ViewBuilder
+    private var meetingRows: some View {
+        // First-enable privacy gate preserved (SET-20): flip back off and
+        // show the explanation sheet until it has been accepted once.
+        toggleRow(
+            "Auto-detect meetings",
+            sub: "Offer to record when a call starts",
+            isOn: $settings.meetingAutoDetectEnabled
+        )
+        .onChange(of: settings.meetingAutoDetectEnabled) {
+            if settings.meetingAutoDetectEnabled && !settings.hasShownAutoDetectExplanation {
+                settings.meetingAutoDetectEnabled = false
+                showAutoDetectExplanation = true
+            }
+        }
+        if settings.meetingAutoDetectEnabled {
+            LoreDivider()
+            SettingsRow(
+                name: "Silence timeout",
+                sub: "Auto-detected sessions stop after this much silence"
+            ) {
+                numberField(value: $settings.silenceTimeoutMinutes, unit: "min", width: 56)
+            }
+            LoreDivider()
+            customMeetingAppsRows
+        }
+        if !settings.ignoredAppBundleIDs.isEmpty {
+            LoreDivider()
+            ignoredAppsRows
+        }
+        LoreDivider()
+        // Current semantics kept honest (SET-21/Q4): hides the panel only;
+        // transcription keeps running for notes.
+        toggleRow(
+            "Show live transcript",
+            sub: "Hide the panel only \u{2014} transcription keeps running for notes",
+            isOn: $settings.showLiveTranscript
+        )
+        LoreDivider()
+        SettingsRow(name: "Microphone", sub: "Input device for recordings") {
+            LoreMonoValueButton(title: currentMicName) {
+                showMicPicker.toggle()
+            }
+            .accessibilityIdentifier("settings.microphonePicker")
+            .popover(isPresented: $showMicPicker, arrowEdge: .bottom) {
+                LorePickerPopover(
+                    header: "Microphone",
+                    items: micOptions,
+                    width: 260,
+                    isActive: { $0.id == settings.inputDeviceID },
+                    onSelect: { option in
+                        showMicPicker = false
+                        settings.inputDeviceID = option.id
+                    },
+                    title: { $0.name }
+                )
+            }
+        }
+        LoreDivider()
+        toggleRow(
+            "Save audio recording",
+            sub: "Keep a local .m4a alongside each transcript",
+            isOn: $settings.saveAudioRecording
+        )
+        LoreDivider()
+        toggleRow(
+            "Clean up transcript during recording",
+            sub: "Removes fillers and fixes punctuation as you record",
+            isOn: $settings.enableTranscriptRefinement
+        )
+        LoreDivider()
+        toggleRow(
+            "Enhance transcript after meeting",
+            sub: "Re-transcribes the recording with full context in the background",
+            isOn: $settings.enableBatchRefinement
+        )
     }
 
     private struct MicOption: Identifiable {

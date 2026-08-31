@@ -140,8 +140,76 @@ final class ShellModelTests: XCTestCase {
     /// #220: Stats is its own sidebar entry (formerly the Activity half of
     /// DictationView's History/Activity switch) with the statistics glyph.
     func testStatsIsAnEnabledDestinationWithTheStatsGlyph() {
-        XCTAssertTrue(ShellModel.enabledDestinations.contains(.stats))
+        XCTAssertTrue(ShellModel.enabledDestinations(meetingsEnabled: true).contains(.stats))
         XCTAssertEqual(ShellDestination.stats.icon, "chart.bar.xaxis")
         XCTAssertEqual(ShellDestination.stats.title, "Stats")
+    }
+
+    // MARK: - The Meetings master switch (#221)
+
+    /// Off, Meetings is not in the sidebar at all — not greyed out, not last.
+    /// Everything else keeps its place and its order.
+    func testMeetingsLeavesTheSidebarWhenTheSwitchIsOff() {
+        XCTAssertEqual(ShellModel.enabledDestinations(meetingsEnabled: true),
+                       [.dictation, .meetings, .stats, .settings])
+        XCTAssertEqual(ShellModel.enabledDestinations(meetingsEnabled: false),
+                       [.dictation, .stats, .settings])
+    }
+
+    /// Switching it off while the user is standing on Meetings lands them on
+    /// Dictation, and takes the recording-scoped flags with it — no boundary
+    /// will ever arrive to clear them once the destination is gone.
+    func testDestinationFallsBackToDictationWhenMeetingsGoesAway() {
+        let shell = ShellModel()
+        shell.isRecordingActive = { true }
+        shell.showMeetingsReview()
+        shell.meetingsPinnedLive = true
+        XCTAssertEqual(shell.destination, .meetings)
+
+        shell.meetingsSwitchChanged(to: false)
+
+        XCTAssertEqual(shell.destination, .dictation)
+        XCTAssertFalse(shell.meetingsPinnedLive)
+        XCTAssertFalse(shell.meetingsReviewWhileRecording)
+    }
+
+    /// Standing anywhere else, the switch moves nothing.
+    func testSwitchingMeetingsOffLeavesAnotherDestinationAlone() {
+        let shell = ShellModel()
+        shell.destination = .stats
+        shell.meetingsSwitchChanged(to: false)
+        XCTAssertEqual(shell.destination, .stats)
+    }
+
+    /// Turning it back on navigates nowhere: the sidebar item returns and the
+    /// destination mounts, but the user stays where they are.
+    func testSwitchingMeetingsOnDoesNotNavigate() {
+        let shell = ShellModel()
+        shell.destination = .dictation
+        shell.meetingsSwitchChanged(to: true)
+        XCTAssertEqual(shell.destination, .dictation)
+    }
+
+    /// Every door into Meetings asks the one switch — the menu bar, a deep
+    /// link, a notification tap and the REC pill all arrive through these two.
+    func testMeetingsDoorsAreNoOpsWhileTheSwitchIsOff() {
+        let shell = ShellModel()
+        shell.isRecordingActive = { true }
+        shell.isMeetingsEnabled = { false }
+
+        shell.showMeetings()
+        XCTAssertEqual(shell.destination, .dictation)
+
+        shell.showMeetingsReview()
+        XCTAssertEqual(shell.destination, .dictation)
+        XCTAssertFalse(shell.meetingsReviewWhileRecording,
+                       "a refused navigation must not leave the flip behind")
+    }
+
+    /// Unwired, the shell behaves exactly as it did before the switch existed.
+    func testDefaultMeetingsProviderIsOn() {
+        let shell = ShellModel()
+        shell.showMeetings()
+        XCTAssertEqual(shell.destination, .meetings)
     }
 }

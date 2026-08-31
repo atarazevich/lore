@@ -72,6 +72,75 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(store.enableBatchRefinement)
     }
 
+    // MARK: - Meetings Master Switch (#221)
+
+    /// Nothing in the domain means nobody has ever run lore here: Meetings is
+    /// off, and the verdict is written down rather than left to be re-derived.
+    func testMeetingsOffOnAFreshInstall() {
+        let suite = makeSuite()
+        XCTAssertFalse(makeStore(defaults: suite).meetingsEnabled)
+        XCTAssertEqual(suite.object(forKey: "meetingsEnabled") as? Bool, false)
+    }
+
+    /// Any one of the keys an earlier launch leaves behind is enough: a Mac
+    /// that has used lore keeps Meetings exactly where it was.
+    func testMeetingsOnWhenTheMacHasRunLoreBefore() {
+        for key in NotesFolderMigration.priorLaunchKeys {
+            let suite = makeSuite()
+            suite.set(true, forKey: key)
+            XCTAssertTrue(makeStore(defaults: suite).meetingsEnabled,
+                          "\(key) is prior-install evidence")
+        }
+    }
+
+    /// The evidence is presence, not truth — #148 reads these keys the same
+    /// way, and a stored `false` is still a key an earlier launch wrote.
+    func testMeetingsOnWhenPriorEvidenceIsPresentButFalse() {
+        let suite = makeSuite()
+        suite.set(false, forKey: "didMigrateFromOnTheSpot")
+        XCTAssertTrue(makeStore(defaults: suite).meetingsEnabled)
+    }
+
+    /// An explicit choice wins in both directions, evidence or not.
+    func testStoredMeetingsChoiceAlwaysWins() {
+        let onSuite = makeSuite()
+        onSuite.set(true, forKey: "meetingsEnabled")
+        XCTAssertTrue(makeStore(defaults: onSuite).meetingsEnabled)
+
+        let offSuite = makeSuite()
+        offSuite.set(true, forKey: "didMigrateFromOpenGranola")
+        offSuite.set(false, forKey: "meetingsEnabled")
+        XCTAssertFalse(makeStore(defaults: offSuite).meetingsEnabled)
+    }
+
+    /// Why the verdict is stamped rather than re-derived: the first launch
+    /// itself writes the evidence keys, so a second launch reading them fresh
+    /// would turn Meetings on behind the user's back.
+    func testFreshInstallStaysOffOnceItsOwnFirstLaunchKeysExist() {
+        let suite = makeSuite()
+        XCTAssertFalse(makeStore(defaults: suite).meetingsEnabled)
+
+        // What launch one leaves behind (the bundle migrations always run).
+        suite.set(true, forKey: "didMigrateFromOnTheSpot")
+        suite.set(true, forKey: "didMigrateFromOpenGranola")
+
+        XCTAssertFalse(makeStore(defaults: suite).meetingsEnabled)
+    }
+
+    /// And the switch itself is not evidence — otherwise stamping it would
+    /// make every fresh install look like a prior one to #148's notes move.
+    func testTheSwitchIsNotPriorInstallEvidence() {
+        let suite = makeSuite()
+        _ = makeStore(defaults: suite)
+        XCTAssertFalse(NotesFolderMigration.hasPriorInstall(defaults: suite))
+    }
+
+    func testMeetingsEnabledRoundTrip() {
+        let suite = makeSuite()
+        makeStore(defaults: suite).meetingsEnabled = true
+        XCTAssertTrue(makeStore(defaults: suite).meetingsEnabled)
+    }
+
     // MARK: - Detection Settings Group
 
     func testDefaultMeetingAutoDetect() {

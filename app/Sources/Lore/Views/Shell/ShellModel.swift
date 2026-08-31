@@ -66,7 +66,14 @@ final class ShellModel {
     /// Destinations rendered in Stage 1; Tasks/Library join in Stage 2. Stats
     /// (#220) is the former Dictation Activity pane, promoted to its own
     /// entry.
-    static let enabledDestinations: [ShellDestination] = [.dictation, .meetings, .stats, .settings]
+    ///
+    /// Meetings is in the list only while its master switch is on (#221) — not
+    /// greyed out and not moved down: absent.
+    static func enabledDestinations(meetingsEnabled: Bool) -> [ShellDestination] {
+        meetingsEnabled
+            ? [.dictation, .meetings, .stats, .settings]
+            : [.dictation, .stats, .settings]
+    }
 
     var destination: ShellDestination = .dictation
 
@@ -98,6 +105,13 @@ final class ShellModel {
     /// (no cycle — the coordinator never holds the shell; both live for the
     /// app's lifetime).
     @ObservationIgnored var isRecordingActive: () -> Bool = { false }
+
+    /// Whether the Meetings surfaces exist at all (#221) — the master switch,
+    /// wired once at app setup like `isRecordingActive`. Held as a closure so
+    /// every door into Meetings asks the one switch here, rather than each
+    /// caller (menu bar, deep link, REC pill, notification) remembering to.
+    /// Defaults to on, so navigation before wiring behaves as it always did.
+    @ObservationIgnored var isMeetingsEnabled: () -> Bool = { true }
 
     /// The one live-vs-review decision for the Meetings destination
     /// (extracted from the view for unit tests). Reading `coordinator.state`
@@ -157,7 +171,10 @@ final class ShellModel {
     }
 
     /// Navigate to Meetings as-is: live while recording, review otherwise.
+    /// A no-op while the master switch is off (#221) — there is no destination
+    /// to land on.
     func showMeetings() {
+        guard isMeetingsEnabled() else { return }
         destination = .meetings
     }
 
@@ -167,8 +184,21 @@ final class ShellModel {
     /// While idle the review layout is already the default (`meetingsPinnedLive
     /// == false` shows it), so the recording-scoped flip flag stays untouched.
     func showMeetingsReview() {
+        guard isMeetingsEnabled() else { return }
         destination = .meetings
         meetingsPinnedLive = false
         meetingsReviewWhileRecording = isRecordingActive()
+    }
+
+    /// The master switch moved (#221). Meetings taken away while the user is
+    /// standing on it would leave them on a destination that no longer renders,
+    /// so the shell lands on Dictation; the recording-scoped Meetings flags go
+    /// with the destination rather than waiting for a boundary that, with no
+    /// Meetings, will never arrive. Turning it back on adds nothing here — the
+    /// sidebar item returns and the destination mounts on its own.
+    func meetingsSwitchChanged(to enabled: Bool) {
+        guard !enabled else { return }
+        if destination == .meetings { destination = .dictation }
+        resetMeetingsForRecordingBoundary()
     }
 }
