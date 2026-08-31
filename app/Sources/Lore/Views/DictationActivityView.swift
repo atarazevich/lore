@@ -24,6 +24,17 @@ struct DictationActivityView: View {
 
     @State private var hoveredDay: Date?
 
+    /// Whether the current hover session over the tokens line is still armed
+    /// to open the popover once its 150ms delay elapses (review — B1) — kept
+    /// separate from `tokensTooltip.isHovering`, which is the flag that
+    /// actually drives presentation.
+    @State private var tokensHoverArming = TokensHoverArming()
+    /// Drives the ⓘ glyph's own hover state (cursor + tint) — independent
+    /// of `tokensHoverArming` since the glyph reacts instantly, with no
+    /// delay, unlike the tooltip itself.
+    @State private var tokensGlyphHovering = false
+    @State private var tokensTooltip = TokensTooltipState()
+
     /// Today's day boundary, held in state rather than read fresh on every
     /// body evaluation (review — A4): a pane left open across midnight
     /// otherwise never re-evaluates `Date()` again on its own — nothing was
@@ -79,12 +90,21 @@ struct DictationActivityView: View {
             guard isActiveInShell else { return }
             cache.ensure(entries: history.entries, revision: history.revision)
         }
-        // Review — A9: keep-alive flips a destination's hit-testing before
-        // `onHover(false)` gets a chance to fire, so a pointer-driven
-        // `hoveredDay` from the last visit could otherwise survive a
-        // non-pointer switch back to Stats and show a stale day projection.
+        // Review — A9/B2: keep-alive flips a destination's hit-testing before
+        // `onHover(false)` gets a chance to fire, so pointer-driven state from
+        // the last visit could otherwise survive a non-pointer switch away.
+        // The tokens tooltip is its own `.popover` window (not just a view in
+        // this tree) — left pinned or hovering-open, it would keep floating
+        // over whatever destination the user switched to, and the glyph's
+        // `NSCursor.pointingHand` push would stay in effect with no view left
+        // to un-push it. Reset everything pointer-driven on deactivation.
         .onChange(of: isActiveInShell) { _, isActive in
-            if !isActive { hoveredDay = nil }
+            guard !isActive else { return }
+            hoveredDay = nil
+            tokensHoverArming = TokensHoverArming()
+            tokensGlyphHovering = false
+            tokensTooltip = TokensTooltipState()
+            NSCursor.arrow.set()
         }
         .onReceive(NotificationCenter.default.publisher(for: .NSCalendarDayChanged)) { _ in
             today = Calendar.current.startOfDay(for: Date())
@@ -118,15 +138,41 @@ struct DictationActivityView: View {
         let projected = hoveredDay.map { summary.byDay[$0] ?? DictationDayActivity(day: $0) }
         ScrollView {
             VStack(alignment: .leading, spacing: 0) {
-                periodRow(summary: summary)
-                hairline(LoreTheme.Surface.line3)
-                statQuadrant(summary: summary, projected: projected)
+                statStrip(summary: summary, projected: projected)
                 hairline(LoreTheme.Surface.line2)
                 heatmapSection(summary: summary)
             }
             .padding(.horizontal, 26)
-            .padding(.top, 16)
+            // Tightened from 16 (#222 — owner: the date row now sits close
+            // under the toolbar hairline). Left/right/bottom padding, and
+            // #220's fixed widths, are untouched.
+            .padding(.top, 8)
             .padding(.bottom, 22)
+        }
+    }
+
+    /// Groups the period (date) row with the stat quadrant so the vertical
+    /// column rule between the giant-numeral column and everything beside it
+    /// can run full height — from right under the toolbar hairline down
+    /// through the quadrant's own bottom hairline (#222: "the poster
+    /// structure the design came from") — instead of stopping at the
+    /// quadrant's own top edge. The date row's right-aligned label ends up
+    /// inside the wider right-hand column this line marks off, per the
+    /// owner's framing.
+    private func statStrip(summary: DictationActivitySummary, projected: DictationDayActivity?) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            periodRow(summary: summary)
+            hairline(LoreTheme.Surface.line3)
+            statQuadrant(summary: summary, projected: projected)
+        }
+        // The boundary this line sits on: the primary cell's numeral is
+        // pinned to `wordsColumnWidth` (#220) and is always the widest thing
+        // in that `.fixedSize` column, so the column's rendered width is
+        // exactly `wordsColumnWidth` plus `primaryCellTrailingPadding` — the
+        // same constant `statQuadrant`'s own layout already applies.
+        .overlay(alignment: .topLeading) {
+            hairline(LoreTheme.Surface.line2, vertical: true)
+                .offset(x: Self.wordsColumnWidth + Self.primaryCellTrailingPadding)
         }
     }
 
@@ -150,6 +196,12 @@ struct DictationActivityView: View {
     }
 
     // MARK: - Stat quadrant (`.quadrant`, prototype v4)
+
+    /// Trailing padding on the primary cell — also the offset `statStrip`'s
+    /// full-height column-rule overlay adds past `wordsColumnWidth` (review —
+    /// B4: the two sites shared a literal `24` tied together only by a
+    /// comment).
+    private static let primaryCellTrailingPadding: CGFloat = 24
 
     private func statQuadrant(summary: DictationActivitySummary, projected: DictationDayActivity?) -> some View {
         let words = projected?.words ?? summary.totalWords
@@ -190,26 +242,53 @@ struct DictationActivityView: View {
                     Text("tokens")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(LoreTheme.Accent.blue)
-                    Image(systemName: "info.circle")
-                        .font(.system(size: 10))
-                        .foregroundStyle(Color.white.opacity(0.45))
-                        .help("≈ o200k_base (GPT-5 tokenizer), estimated")
+                    tokensInfoGlyph
                 }
                 .padding(.top, 5)
+                .contentShape(Rectangle())
+                // #222: hovering anywhere on the line (number + "tokens" +
+                // ⓘ) — not only the glyph — opens the tooltip after a short
+                // delay, replacing the system `.help()` tooltip's
+                // multi-second wait.
+                .onHover { hovering in tokensHoverArming.setHovering(hovering) }
+                .task(id: tokensHoverArming) {
+                    guard tokensHoverArming.shouldShowAfterDelay else {
+                        tokensTooltip.isHovering = false
+                        return
+                    }
+                    try? await Task.sleep(for: .milliseconds(150))
+                    guard !Task.isCancelled else { return }
+                    tokensTooltip.isHovering = true
+                }
+                .popover(isPresented: tokensTooltipPresented, arrowEdge: .bottom) {
+                    tokensTooltipContent
+                }
             }
-            .padding(.trailing, 24)
+            .padding(.trailing, Self.primaryCellTrailingPadding)
             .padding(.vertical, 20)
             .fixedSize(horizontal: true, vertical: false)
             // Review — A5: two bare `Text`s plus a companion line otherwise
             // read as disconnected VoiceOver fragments; one combined element
-            // reads as "146,902, words, 40,412 tokens".
+            // reads as "146,902, words, 40,412 tokens". #222 appends the
+            // tooltip's own copy to this same combined label — the ⓘ glyph
+            // has no accessibility element of its own to reach, since this
+            // parent already ignores children — rather than adding a second,
+            // separately-focusable element the combined-label review (A5)
+            // was written to avoid.
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(
                 "\(DictationActivityFormat.groupedNumber(words)), words, "
-                    + "\(DictationActivityFormat.groupedNumber(tokens)) tokens"
+                    + "\(DictationActivityFormat.groupedNumber(tokens)) tokens. "
+                    + Self.tokensTooltipText
             )
 
-            hairline(LoreTheme.Surface.line2, vertical: true)
+            // The visible line at this boundary is now drawn full-height by
+            // `statStrip`'s overlay (#222); this clear hairline keeps every
+            // width/position after it identical to before that line moved,
+            // rather than re-deriving them from a narrower HStack — the
+            // file's own `hairline` helper (review — B6) so its 1pt width
+            // matches the visible rules by construction, not by coincidence.
+            hairline(.clear, vertical: true)
 
             // 2×2 secondary quadrant: time/dictations, active days/peak.
             // Every value gets a reserved width (#220) so the cell frames
@@ -250,6 +329,118 @@ struct DictationActivityView: View {
     private func peakDateSuffix(summary: DictationActivitySummary) -> String {
         guard let peak = summary.peak else { return "" }
         return " · " + Self.monthDayLabel(peak.day)
+    }
+
+    // MARK: - Tokens tooltip (#222)
+    // Replaces the ⓘ's system `.help()` (seconds of delay, no click) with a
+    // custom popover: a 150ms hover-anywhere-on-the-line delay, or an
+    // instant click-to-pin on the glyph itself. `.popover(isPresented:)` —
+    // the same native primitive `DictationView.rowPopoverButton` and
+    // `SettingsView.voiceRow` already use for their own menus — gets
+    // click-away and Esc dismissal for free from AppKit, so no key monitor
+    // is needed here (unlike `DictationView`'s search field, whose own
+    // local key monitor would otherwise have to special-case Esc for a row
+    // popover it might swallow first). The content view reuses
+    // `lorePopoverChrome()` (#215 review — the same chrome `LorePickerPopover`
+    // wears) for the dark system-tooltip look.
+
+    private static let tokensTooltipText = "≈ o200k_base (GPT-5 tokenizer), estimated"
+
+    /// Pure hover/pin state machine, extracted so `DictationActivityTests`
+    /// can exercise the transitions directly. Independent booleans rather
+    /// than one enum: a click while already hovering must not un-pin on the
+    /// next mouse move, and leaving after a pinned click must not hide the
+    /// popover. `internal` (not `private`) for the same testability reason
+    /// as `weekColumns`/`monthLabelPositions` above.
+    struct TokensTooltipState: Equatable {
+        var isHovering = false
+        var isPinned = false
+
+        var isPresented: Bool { isHovering || isPinned }
+
+        /// The `.popover` binding's setter only ever receives `false` —
+        /// AppKit itself drives dismissal, on click-away or Esc — at which
+        /// point both drivers reset so a stale pin can't silently reopen the
+        /// popover on the next hover.
+        mutating func setPresented(_ presented: Bool) {
+            guard !presented else { return }
+            isHovering = false
+            isPinned = false
+        }
+
+        mutating func togglePinned() {
+            isPinned.toggle()
+        }
+    }
+
+    /// Pure hover-delay arming state machine (review — B1), separate from
+    /// `TokensTooltipState`: governs whether the *current* hover session over
+    /// the tokens line is still allowed to open the popover once its 150ms
+    /// delay elapses. Without this, an un-pinning click while the mouse never
+    /// left the line couldn't stop that same session's already-running delay
+    /// task from firing later and reopening the popover — the `.task(id:)`
+    /// keyed on raw hover alone never changes id across the click, so the
+    /// stale task just keeps sleeping. `internal` (not `private`) so
+    /// `DictationActivityTests` drives the exact hover → delayed-show → pin →
+    /// unpin-while-still-hovering sequence without a real 150ms sleep.
+    struct TokensHoverArming: Equatable {
+        private(set) var isHovering = false
+        private(set) var isArmed = true
+
+        /// A real mouse enter/leave on the tokens line. Leaving always
+        /// re-arms — the next entry is a fresh session.
+        mutating func setHovering(_ hovering: Bool) {
+            isHovering = hovering
+            if !hovering { isArmed = true }
+        }
+
+        /// An un-pinning click while the pointer is still on the line:
+        /// disarms this session so its delay (pending or already fired) can
+        /// never (re)open the popover — only a genuine leave + re-enter does.
+        /// A no-op while not hovering, so toggling the pin from elsewhere
+        /// can't disarm a future session that hasn't started yet.
+        mutating func disarmForClosingClick() {
+            guard isHovering else { return }
+            isArmed = false
+        }
+
+        /// Whether this exact session should still show once its delay
+        /// elapses.
+        var shouldShowAfterDelay: Bool { isHovering && isArmed }
+    }
+
+    private var tokensTooltipPresented: Binding<Bool> {
+        Binding(
+            get: { tokensTooltip.isPresented },
+            set: { presented in tokensTooltip.setPresented(presented) }
+        )
+    }
+
+    private var tokensInfoGlyph: some View {
+        Image(systemName: "info.circle")
+            .font(.system(size: 10))
+            .foregroundStyle(Color.white.opacity(tokensGlyphHovering ? 0.7 : 0.45))
+            .onHover { hovering in
+                tokensGlyphHovering = hovering
+                if hovering { NSCursor.pointingHand.set() } else { NSCursor.arrow.set() }
+            }
+            .onTapGesture {
+                tokensTooltip.togglePinned()
+                // Review — B1: a closing click wins even if the mouse never
+                // left the line — see `TokensHoverArming` above.
+                if !tokensTooltip.isPinned {
+                    tokensTooltip.isHovering = false
+                    tokensHoverArming.disarmForClosingClick()
+                }
+            }
+    }
+
+    private var tokensTooltipContent: some View {
+        Text(Self.tokensTooltipText)
+            .font(.system(size: 11.5))
+            .foregroundStyle(LoreTheme.TextColor.primary)
+            .fixedSize(horizontal: false, vertical: true)
+            .lorePopoverChrome(inset: 8, horizontalInset: 10)
     }
 
     private func quadrantCell(value: String, label: String, valueWidth: CGFloat) -> some View {
