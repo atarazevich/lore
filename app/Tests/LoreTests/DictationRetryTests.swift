@@ -179,6 +179,30 @@ final class DictationRetryTests: XCTestCase {
         XCTAssertEqual(coordinator.state, .idle)
     }
 
+    /// Silence over an entry that carries something is not nothing (#229). The
+    /// retry re-composes from the entry's own items, so a row failed by the
+    /// gate before the fix heals when it is asked again.
+    func testARetryOverAnEntryThatCarriesItemsComposesThem() async {
+        // `pasteText` reads the Copying switches live (#198), so the expected
+        // string needs a store the owner's own Settings cannot decide.
+        _ = isolatedRichInputDefaults("DictationRetryTests")
+        defer { RichInputSettings.use(.standard) }
+        let coordinator = makeCoordinator(backend: ScriptedBackend([.success("")]))
+        var entry = addAudioEntry(to: coordinator, sampleCount: 20_000)
+        entry.status = .failed
+        entry.errorMessage = DictationFace.nothingCameThrough.sentence
+        entry.items = [DictationItem(kind: .text, offset: 1, text: "the stack trace")]
+        coordinator.history.update(entry)
+
+        await coordinator.retryTranscription(entryID: entry.id)
+
+        let updated = coordinator.history.entries.first { $0.id == entry.id }!
+        XCTAssertEqual(updated.status, .transcribed)
+        XCTAssertEqual(updated.rawText, "<copied>\nthe stack trace\n</copied>")
+        XCTAssertNil(updated.errorMessage)
+        XCTAssertNil(coordinator.lastError)
+    }
+
     // MARK: - Cleanup retries
 
     func testCleanupTransientFailureThenSuccessNoFallback() async {

@@ -45,15 +45,6 @@ final class PasteCheckmarkTests: XCTestCase {
         return coordinator
     }
 
-    /// The gesture starts behind the microphone-permission gate, and an
-    /// undetermined status would put a system prompt on the user's screen.
-    private func skipWithoutMicrophone() throws {
-        try XCTSkipUnless(
-            MicrophonePermission.status == .authorized,
-            "a dictation gesture starts behind the microphone-permission gate"
-        )
-    }
-
     // MARK: - The order (the whole of what may not regress)
 
     /// The paste is posted while the shape is still Transcribing. The checkmark

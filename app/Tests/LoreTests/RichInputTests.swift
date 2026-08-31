@@ -11,6 +11,10 @@ func spokenWords(_ ends: [Double], endingClauseAt clauses: Set<Int> = []) -> [Ri
 /// Rich input (#192), the parts that are pure: what the clipboard door accepts,
 /// where an item lands in the words, what the paste says, and how the words come
 /// back out for cleanup with the items untouched.
+///
+/// The last section is not pure: whether items count as content (#229) is a
+/// question only the dictation pipeline can answer, and it needs the same
+/// isolated Copying switches every case here already runs behind.
 @MainActor
 final class RichInputTests: XCTestCase {
 
@@ -106,6 +110,8 @@ final class RichInputTests: XCTestCase {
         RichInputSettings.use(.standard)
         board.releaseGlobally()
         board = nil
+        storage?.tearDown()
+        storage = nil
     }
 
     /// Seeds the change count the way a confirmed hold does, then stops the
@@ -510,5 +516,151 @@ final class RichInputTests: XCTestCase {
         let entry = DictationHistoryEntry(durationSeconds: 4)
         let json = String(data: try JSONEncoder().encode(entry), encoding: .utf8)!
         XCTAssertFalse(json.contains("items"))
+    }
+
+    // MARK: - Items are content (#229)
+
+    /// Storage nobody else can see, built only by the pipeline cases below.
+    private var storage: EphemeralDictation?
+    /// What the paste was handed, in order.
+    private var delivered: [RichInput.DeliveryStep] = []
+
+    /// The shared confirmed recording, hearing nothing and collecting from
+    /// `board`. The paste is answered by a seam that records what it was handed
+    /// instead of pressing Cmd+V into whatever the developer has in front of
+    /// them (#211) — the one thing these cases need that the fixture cannot
+    /// guess.
+    private func silentRecording(
+        cleanupClient: any CleanupProviding = CleanupClient()
+    ) throws -> DictationCoordinator {
+        try skipWithoutMicrophone()
+        let storage = EphemeralDictation("RichInputTests")
+        self.storage = storage
+        return storage.recording(
+            backend: StubTranscriptionBackend(transcript: ""),
+            cleanupClient: cleanupClient,
+            clipboard: ClipboardWatcher(pasteboard: board, interval: .milliseconds(10)),
+            deliver: { [weak self] steps in
+                self?.delivered.append(contentsOf: steps)
+                return Task { true }
+            }
+        )
+    }
+
+    /// The incident: a dictation with screenshots and no speech pasted nothing
+    /// and failed with "Nothing came through", while the items it had collected
+    /// sat in history undelivered. What was copied is content in its own right —
+    /// the words are what the dictation composes to, and they go out.
+    func testASilentDictationDeliversWhatRodeAlongWithIt() async throws {
+        let coordinator = try silentRecording()
+        speak(coordinator, samples: 20_000)
+        let collected = await copied("the stack trace", onto: board, into: coordinator)
+        XCTAssertTrue(collected, "nothing rode along")
+
+        coordinator.stopRecording()
+
+        let landed = await waitUntil { coordinator.history.entries.first?.status == .transcribed }
+        XCTAssertTrue(landed, "the silence failed the dictation its items were on")
+        let entry = try XCTUnwrap(coordinator.history.entries.first)
+        XCTAssertEqual(entry.rawText, "<copied>\nthe stack trace\n</copied>")
+        XCTAssertNil(entry.errorMessage)
+        XCTAssertNil(coordinator.lastError, "a face over a dictation that had something to paste")
+        XCTAssertEqual(delivered, [.text("<copied>\nthe stack trace\n</copied>")])
+    }
+
+    /// And silence with nothing riding along is still nothing: the one sentence,
+    /// and no paste.
+    func testASilentDictationWithNothingAttachedStillSaysSoAndPastesNothing() async throws {
+        let coordinator = try silentRecording()
+        speak(coordinator, samples: 20_000)
+
+        coordinator.stopRecording()
+
+        let landed = await waitUntil { coordinator.history.entries.first?.status == .failed }
+        XCTAssertTrue(landed, "the entry never settled")
+        let entry = try XCTUnwrap(coordinator.history.entries.first)
+        XCTAssertNil(entry.rawText)
+        XCTAssertEqual(entry.errorMessage, DictationFace.nothingCameThrough.sentence)
+        XCTAssertEqual(coordinator.lastError, .nothingCameThrough)
+        XCTAssertEqual(delivered, [], "a dictation with nothing in it pasted")
+    }
+
+    /// An item switched off is not content — the same reading `compose` takes.
+    /// It stays on the entry marked left out, because history is the record of
+    /// what was copied while this was spoken.
+    func testItemsAllSwitchedOffLeaveTheSilenceEmpty() async throws {
+        let coordinator = try silentRecording()
+        speak(coordinator, samples: 20_000)
+        let collected = await copied("the stack trace", onto: board, into: coordinator)
+        XCTAssertTrue(collected, "nothing rode along")
+        coordinator.toggleItem(id: try XCTUnwrap(coordinator.items.first).id)
+
+        coordinator.stopRecording()
+
+        let landed = await waitUntil { coordinator.history.entries.first?.status == .failed }
+        XCTAssertTrue(landed, "the entry never settled")
+        let entry = try XCTUnwrap(coordinator.history.entries.first)
+        XCTAssertEqual(entry.errorMessage, DictationFace.nothingCameThrough.sentence)
+        XCTAssertEqual(entry.items?.count, 1, "the record of what was copied was dropped")
+        XCTAssertEqual(entry.items?.first?.included, false)
+        XCTAssertEqual(delivered, [], "an item switched off was pasted anyway")
+    }
+
+    /// A hold too short to be speech is nothing — unless something rode along
+    /// with it. It used to be dropped before the entry was ever written, taking
+    /// the items with it (`testSlipUnderHalfASecondLeavesNothingBehind` is the
+    /// empty-handed half of the same rule).
+    func testASlipUnderHalfASecondCarryingAnItemBecomesADictation() async throws {
+        let coordinator = try silentRecording()
+        speak(coordinator, samples: 4_000) // 0.25 s
+        let collected = await copied("the stack trace", onto: board, into: coordinator)
+        XCTAssertTrue(collected, "nothing rode along")
+
+        coordinator.stopRecording()
+
+        let landed = await waitUntil { coordinator.history.entries.first?.status == .transcribed }
+        XCTAssertTrue(landed, "the slip took the item with it")
+        let entry = try XCTUnwrap(coordinator.history.entries.first)
+        XCTAssertEqual(entry.rawText, "<copied>\nthe stack trace\n</copied>")
+        XCTAssertEqual(delivered, [.text("<copied>\nthe stack trace\n</copied>")])
+    }
+
+    /// Cleanup has nothing to send when the dictation is only its items, and a
+    /// run with no call to make returns the same text — which the pipeline
+    /// would then stamp cleaned, badge, offer a toggle over, and report as an
+    /// upgrade that succeeded. It does not run at all.
+    func testCleanupNeverRunsOverADictationThatIsOnlyItsItems() async throws {
+        let client = LoudCleanupClient()
+        let coordinator = try silentRecording(cleanupClient: client)
+        coordinator.settings?.openaiApiKey = "sk-test"
+        coordinator.settings?.cleanupByDefault = true
+        speak(coordinator, samples: 20_000)
+        let collected = await copied("the stack trace", onto: board, into: coordinator)
+        XCTAssertTrue(collected, "nothing rode along")
+        let mark = DiagStream.mark()
+
+        coordinator.stopRecording()
+
+        // The paste is the pipeline's last step, so it stands behind the
+        // cleanup this case is watching for.
+        let pasted = await waitUntil { !self.delivered.isEmpty }
+        XCTAssertTrue(pasted, "the items never went out")
+        let landed = await waitUntil {
+            coordinator.history.entries.first?.status == .transcribed
+        }
+        XCTAssertTrue(landed, "an untouched text was stamped cleaned")
+        let entry = try XCTUnwrap(coordinator.history.entries.first)
+        XCTAssertEqual(entry.activeVersion, .raw)
+        XCTAssertNil(entry.cleanedText)
+        XCTAssertNil(entry.cleanupModeName)
+        XCTAssertNil(entry.translatedToLanguage)
+        XCTAssertEqual(client.seen, [], "the model was asked about a dictation with no words")
+        XCTAssertNil(coordinator.llmStage, "the bubble named a call nobody made")
+        XCTAssertFalse(
+            DiagStream.events(since: mark).contains {
+                if case .dictationUpgrade = $0 { true } else { false }
+            },
+            "an upgrade event for a call that never happened"
+        )
     }
 }

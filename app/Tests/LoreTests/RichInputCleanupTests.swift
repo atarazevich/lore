@@ -19,21 +19,6 @@ final class RichInputCleanupTests: XCTestCase {
         RichInputSettings.use(.standard)
     }
 
-    /// Uppercases what it is given and remembers it, so a test can see exactly
-    /// which spans reached the model.
-    private final class LoudCleanupClient: CleanupProviding, @unchecked Sendable {
-        private let lock = NSLock()
-        private var texts: [String] = []
-        var seen: [String] { lock.withLock { texts } }
-
-        func cleanup(rawText: String, prompt: String, apiKey: String) async throws -> String {
-            // `withLock`, not lock/unlock: the bare calls are unavailable from
-            // an async context.
-            lock.withLock { texts.append(rawText) }
-            return rawText.uppercased()
-        }
-    }
-
     private func makeCoordinator(_ client: LoudCleanupClient) -> DictationCoordinator {
         let name = "com.lore.test.\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: name)!

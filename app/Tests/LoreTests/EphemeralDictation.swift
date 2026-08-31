@@ -1,4 +1,6 @@
+import AppKit
 import Foundation
+import XCTest
 @testable import LoreKit
 
 /// Dictation storage nobody else can see: a temp directory holding the
@@ -22,11 +24,14 @@ final class EphemeralDictation {
     let defaults: UserDefaults
 
     private let suiteName: String
+    /// What the settings suite a recording gets is named after.
+    private let label: String
 
     var entriesDirectory: URL { root.appendingPathComponent("entries") }
     var audioDirectory: URL { root.appendingPathComponent("audio") }
 
     init(_ label: String) {
+        self.label = label
         root = URL(fileURLWithPath: NSTemporaryDirectory())
             .appendingPathComponent("\(label)-\(UUID().uuidString)", isDirectory: true)
         suiteName = "com.lore.test.\(UUID().uuidString)"
@@ -69,6 +74,29 @@ final class EphemeralDictation {
             history: history(), cleanupClient: cleanupClient,
             backend: backend, clipboard: clipboard, deliver: deliver
         )
+    }
+
+    /// A confirmed recording on this storage: a coordinator with settings of
+    /// its own — `startPreBuffer` refuses without them — taken through the
+    /// pre-buffer and the hold-confirm. Nothing has been spoken yet; `speak` is
+    /// the seam for that, and with no bus wired no microphone is ever opened.
+    ///
+    /// Callers cross `skipWithoutMicrophone()` first: without the grant the
+    /// pre-buffer aborts and the confirm is a no-op.
+    func recording(
+        backend: (any TranscriptionBackend)? = nil,
+        cleanupClient: any CleanupProviding = CleanupClient(),
+        clipboard: ClipboardWatcher = ClipboardWatcher(),
+        deliver: @escaping DictationDelivery = { _ in Task { true } }
+    ) -> DictationCoordinator {
+        let coordinator = coordinator(
+            backend: backend, cleanupClient: cleanupClient,
+            clipboard: clipboard, deliver: deliver
+        )
+        coordinator.settings = isolatedSettings(label, defaults: defaults)
+        coordinator.startPreBuffer()
+        coordinator.confirmRecording()
+        return coordinator
     }
 
     /// The gesture fixture: a coordinator on this storage that hears nothing,
@@ -120,6 +148,28 @@ final class EphemeralDictation {
 func speak(_ coordinator: DictationCoordinator, samples: Int) {
     guard samples > 0 else { return }
     coordinator.appendCapturedSamples([Float](repeating: 0.05, count: samples))
+}
+
+/// One copy during a recording, through the door the app uses: the watcher's
+/// own poll notices the pasteboard moved and the item lands on the coordinator.
+/// Answers whether it arrived, so each caller says what its absence would mean.
+@MainActor
+func copied(
+    _ text: String, onto board: NSPasteboard, into coordinator: DictationCoordinator
+) async -> Bool {
+    let before = coordinator.items.count
+    board.clearContents()
+    board.setString(text, forType: .string)
+    return await waitUntil { coordinator.items.count == before + 1 }
+}
+
+/// A dictation gesture starts behind the microphone-permission gate, and an
+/// undetermined status would put a system prompt on the user's screen.
+func skipWithoutMicrophone() throws {
+    try XCTSkipUnless(
+        MicrophonePermission.status == .authorized,
+        "a dictation gesture starts behind the microphone-permission gate"
+    )
 }
 
 /// Reading the shared diagnostic store as a delta: what a test's own actions put

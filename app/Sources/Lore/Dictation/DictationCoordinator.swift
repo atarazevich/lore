@@ -643,7 +643,13 @@ final class DictationCoordinator {
         // here on is epoch-gated.
         if isCurrentSession(epoch) { lastError = nil }
 
-        guard samples.count > Self.minimumSpeechSamples else {
+        // A hold too short to be speech is nothing — unless something rode
+        // along with it (#229). Screenshots and copies are content in their own
+        // right: the dictation carries on into the pipeline, transcribes to
+        // nothing, and composes to the items alone. Abandoning here dropped
+        // them before they were ever saved.
+        guard samples.count > Self.minimumSpeechSamples || collected.contains(where: \.included)
+        else {
             recording?.abandon()
             log.info("Too short, ignoring")
             if isCurrentSession(epoch) { state = .idle }
@@ -737,7 +743,13 @@ final class DictationCoordinator {
         // Mode name and translation meta are written only when the cleanup
         // actually succeeded — a swallowed API failure must not relabel the
         // pasted raw text (DIC-37/48).
-        if let action, hasApiKey {
+        // A dictation that is only its items has nothing to send (#229): the
+        // model would be asked for nothing, `cleanupSegments` would make no
+        // call at all, and the same text would come back stamped cleaned —
+        // a badge, a toggle and an `.ok` upgrade event over an untouched
+        // string. Asked here, so the stage never names the call either.
+        let hasWords = RichInput.hasSpokenWords(in: rawText, items: entry.items ?? [])
+        if let action, hasApiKey, hasWords {
             // `llmStage` names this call while it runs, so the bubble's working
             // sentence can say "Translating…"/"Cleaning up…" instead of always
             // reading "Transcribing" (owner, 2026-08-31) — set right before the
@@ -1188,10 +1200,12 @@ final class DictationCoordinator {
             // bubble too (`showsProgress` defaults true), so its cleanup call
             // gets named the same way — but only when `cleanupEntry`'s own
             // guards (no `prompt` is passed here, so it falls to
-            // `settings.cleanupByDefault`) mean the call actually happens;
-            // naming a call that is about to no-op would be a stage nobody's
-            // bubble ever runs.
-            let willCleanup = !(settings?.openaiApiKey.isEmpty ?? true) && (settings?.cleanupByDefault ?? false)
+            // `settings.cleanupByDefault`, and there must be words to send)
+            // mean the call actually happens; naming a call that is about to
+            // no-op would be a stage nobody's bubble ever runs.
+            let willCleanup = !(settings?.openaiApiKey.isEmpty ?? true)
+                && (settings?.cleanupByDefault ?? false)
+                && RichInput.hasSpokenWords(in: text, items: entry.items ?? [])
             if willCleanup, isCurrentSession(epoch) { llmStage = .cleanup }
             await cleanupEntry(&entry, rawText: text, endpoint: .cleanup, epoch: epoch)
             if isCurrentSession(epoch) { llmStage = nil }
@@ -1264,6 +1278,16 @@ final class DictationCoordinator {
         _ entry: inout DictationHistoryEntry, samples: [Float], epoch: Int,
         showsProgress: Bool = true
     ) async {
+        // Only a slip carrying items gets this far under the speech minimum
+        // (#229), and there is nothing in a fraction of a second to ask a model
+        // about. Nobody asks: FluidAudio is never handed a buffer shorter than
+        // it was measured against, and a dictation that needs no transcription
+        // cannot fail on a model download. It settles on its items alone.
+        guard samples.count > Self.minimumSpeechSamples else {
+            settle(&entry, spoken: "", words: [])
+            return
+        }
+
         // Ensure the shared cache has downloaded model files (fast no-op if already cached)
         if let cache = backendCache {
             do {
@@ -1384,20 +1408,29 @@ final class DictationCoordinator {
             characters: text.count,
             ms: Int(Date().timeIntervalSince(transcribeStart) * 1000)
         ))
-        if text.isEmpty {
+        settle(&entry, spoken: text, words: words)
+    }
+
+    /// The entry's verdict: the spoken words with every kept item at the end of
+    /// the clause it happened in (#192), and what that composition says about
+    /// whether anything came through.
+    ///
+    /// `compose` returns the spoken words when none of its items place, so the
+    /// composed text is empty in exactly one case — nothing said and nothing
+    /// riding along (#229). Asking compose keeps the condition from re-deriving
+    /// compose's own filter.
+    private func settle(
+        _ entry: inout DictationHistoryEntry, spoken: String, words: [RichInput.Word]
+    ) {
+        let composed = RichInput.compose(spoken: spoken, items: entry.items ?? [], words: words)
+        if composed.isEmpty {
             entry.status = .failed
             // One sentence for the bubble and the row alike (#209, F2).
             entry.errorMessage = DictationFace.nothingCameThrough.sentence
         } else {
             entry.status = .transcribed
-            // The spoken words with every kept item at the end of the clause
-            // it happened in (#192). Identical to `text` when the dictation
-            // carried nothing, and re-derived on a retry from the entry's own
-            // items.
-            entry.rawText = RichInput.compose(
-                spoken: text, items: entry.items ?? [], words: words
-            )
-            log.debug("raw transcription: \(text, privacy: .private)")
+            entry.rawText = composed
+            log.debug("raw transcription: \(spoken, privacy: .private)")
         }
     }
 
@@ -1463,6 +1496,10 @@ final class DictationCoordinator {
         epoch: Int? = nil
     ) async -> Bool {
         guard let settings, !settings.openaiApiKey.isEmpty else { return false }
+        // Nothing of the user's own to work on — an item-only dictation (#229).
+        // Every caller crosses this, so no path can stamp `.cleaned` on a text
+        // the model never saw.
+        guard RichInput.hasSpokenWords(in: rawText, items: entry.items ?? []) else { return false }
 
         let effectivePrompt: String
         if let prompt, !prompt.isEmpty {

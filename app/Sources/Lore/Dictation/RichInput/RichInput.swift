@@ -293,6 +293,17 @@ enum RichInput {
         }
     }
 
+    /// Whether `text` has any words of the user's own for a model to work on,
+    /// once the items it carries are cut out of it. False for a dictation that
+    /// is only its items (#229): cleanup and translation must not run at all
+    /// there, because a run with no call to make returns the same text and
+    /// would stamp it cleaned.
+    static func hasSpokenWords(in text: String, items: [DictationItem]) -> Bool {
+        split(text, items: items).segments.contains {
+            !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        }
+    }
+
     /// Cut `text` at the items it carries. The items are found by their own
     /// pasted text, searched forward from the previous cut, so nothing needs to
     /// remember character offsets that a later edit would invalidate. An item
