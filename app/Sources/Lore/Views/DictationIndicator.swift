@@ -96,10 +96,13 @@ enum BubbleRail {
     static func letters(
         armed: Set<BubbleRailLetter>, open: Bool, operatorSend: Bool
     ) -> [BubbleRailLetter] {
-        let offered = { (letter: BubbleRailLetter) in operatorSend || letter != .operatorSend }
-        let standing = armedOrder.filter { armed.contains($0) && offered($0) }
+        let standing = armedOrder.filter {
+            armed.contains($0) && ($0 != .operatorSend || operatorSend)
+        }
         guard open else { return standing }
-        return standing + restOrder.filter { !armed.contains($0) && offered($0) }
+        return standing + restOrder.filter {
+            !armed.contains($0) && ($0 != .operatorSend || operatorSend)
+        }
     }
 }
 

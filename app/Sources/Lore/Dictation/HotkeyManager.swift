@@ -218,7 +218,7 @@ final class HotkeyManager {
             if event.modifierFlags.contains(.function) && self.isRecordingFlag {
                 if (event.keyCode == 9 && self.modifierOn({ $0.modifierCleanupEnabled }))
                     || (event.keyCode == 17 && self.modifierOn({ $0.modifierTranslateEnabled }))
-                    || (event.keyCode == 40 && self.modifierOn({ $0.operatorSendEnabled })) // V, T, or K (#122/#223)
+                    || (event.keyCode == 40 && self.operatorSendOn()) // V, T, or K (#122/#223)
                     || (event.keyCode == 1 && RichInputSettings.screenshotsEnabled) { // S (#192)
                     Task { @MainActor in
                         self.handleKeyDown(event)
@@ -322,6 +322,15 @@ final class HotkeyManager {
             guard let settings else { return true }
             return read(settings)
         }
+    }
+
+    /// The Fn+K master switch (#223), read strictly: with no settings wired the
+    /// answer is *off*, where `modifierOn` answers on for its siblings. They
+    /// default to enabled and gate a key the user already knows; this one is off
+    /// on every fresh install, so "cannot tell" may not mean yes here. It is the
+    /// same reading `DictationCoordinator.toggleOperatorAddressed` takes.
+    nonisolated private func operatorSendOn() -> Bool {
+        MainActor.assumeIsolated { settings?.operatorSendEnabled == true }
     }
 
     /// Internal, not private, so `LockedFnHoldTests` can put a real
@@ -464,7 +473,15 @@ final class HotkeyManager {
                 if isLocked { fnHeldAtLock = true }
                 HotkeyManager.hkLog.debug("[HOTKEY] Fn+T → pending translate")
                 return
-            } else if event.keyCode == 40, modifierOn({ $0.operatorSendEnabled }) { // K (#122/#223)
+            } else if event.keyCode == 40, operatorSendOn() { // K (#122/#223)
+                // Not a duplicate of the entry gates, for the same reason V and
+                // T carry their own: the local monitor's last branch passes
+                // every other key through to here, so this is reachable ungated
+                // whenever lore itself is focused. `toggleOperatorAddressed`
+                // would refuse anyway, but the two lines below are not its —
+                // an unswitched K counting as a chord would swallow the Fn
+                // release that ends a locked recording. Strict, like the entry
+                // sites: no settings means off.
                 coordinator.toggleOperatorAddressed()
                 if isLocked { fnHeldAtLock = true }
                 HotkeyManager.hkLog.debug("[HOTKEY] Fn+K → operator addressed")
@@ -716,7 +733,7 @@ final class HotkeyManager {
                             HotkeyManager.hkLog.debug("[HOTKEY] Fn+S (CGEvent) → screenshot to clipboard")
                         }
                         return nil
-                    } else if keyCode == 40, manager.modifierOn({ $0.operatorSendEnabled }) { // K (#122/#223)
+                    } else if keyCode == 40, manager.operatorSendOn() { // K (#122/#223)
                         Task { @MainActor in
                             manager.coordinator?.toggleOperatorAddressed()
                             if manager.isLocked { manager.fnHeldAtLock = true }

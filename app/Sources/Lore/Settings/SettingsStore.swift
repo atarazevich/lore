@@ -555,9 +555,7 @@ final class SettingsStore {
         // before?" evidence reads, so after them every install looks like an
         // old one.
         self._meetingsEnabled = Self.resolveMasterSwitch("meetingsEnabled", defaults: defaults)
-        self._operatorSendEnabled = Self.resolveMasterSwitch(
-            "operatorSendEnabled", defaults: defaults
-        )
+        self._operatorSendEnabled = Self.resolveOperatorSendEnabled(defaults: defaults)
 
         // One-time migrations from previous bundle IDs. The notes move (#148)
         // *decides* FIRST, load-bearing: it reads a fresh install off the
@@ -752,6 +750,26 @@ extension SettingsStore {
         let enabled = NotesFolderMigration.hasPriorInstall(defaults: defaults)
         defaults.set(enabled, forKey: key)
         return enabled
+    }
+
+    /// The Fn+K switch at launch (#223): the rule above, with one migration
+    /// ahead of it. Until this release the chord was gated by the MODIFIERS
+    /// "Extra keys" toggle, so a stored `false` there is a user who already said
+    /// no to Fn+K — that choice carries over, ahead of the prior-install
+    /// evidence that would otherwise turn the new switch on, and is stamped
+    /// under the new key so the retired one is read exactly once (the #150 flag
+    /// migration reads its three the same way). A stored `true`, or no key at
+    /// all, says nothing about Fn+K in particular — it was the default and it
+    /// also meant Fn+S — so those fall through to the evidence rule. An explicit
+    /// choice already stored under the new key outranks all of it.
+    private static func resolveOperatorSendEnabled(defaults: UserDefaults) -> Bool {
+        let key = "operatorSendEnabled"
+        if defaults.object(forKey: key) == nil,
+           defaults.object(forKey: "modifierUpgradeKeysEnabled") as? Bool == false {
+            defaults.set(false, forKey: key)
+            return false
+        }
+        return resolveMasterSwitch(key, defaults: defaults)
     }
 
     /// Migrate settings from the old "On The Spot" (com.onthespot.app) bundle.

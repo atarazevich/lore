@@ -90,25 +90,35 @@ final class RecordingBubbleRailTests: XCTestCase {
     /// switch positions, since the shorter rail has to hold it too.
     func testOpeningOnlyEverAppendsToTheRight() {
         let armable: [BubbleRailLetter] = [.cleanup, .translate, .operatorSend]
-        for (mask, operatorSend) in (0..<(1 << armable.count)).flatMap({ mask in
-            [(mask, true), (mask, false)]
-        }) {
-            let armed = Set(armable.indices.filter { mask & (1 << $0) != 0 }.map { armable[$0] })
-            let standing = BubbleRail.letters(armed: armed, open: false, operatorSend: operatorSend)
-            let opened = BubbleRail.letters(armed: armed, open: true, operatorSend: operatorSend)
-            let named = armed.map(\.rawValue).sorted().joined()
-            XCTAssertEqual(
-                Array(opened.prefix(standing.count)), standing,
-                "opening moved a letter that was already on screen, armed [\(named)]"
-            )
-            XCTAssertEqual(Set(opened).count, opened.count, "a letter is drawn twice, armed [\(named)]")
-            var offered = armed.union([.translate])
-            if operatorSend { offered.insert(.operatorSend) } else { offered.remove(.operatorSend) }
-            XCTAssertEqual(
-                Set(opened), offered,
-                "the open rail is whatever is armed, plus T and K while the switch is on, "
-                + "armed [\(named)]"
-            )
+        for mask in 0..<(1 << armable.count) {
+            for operatorSend in [true, false] {
+                let armed = Set(armable.indices.filter { mask & (1 << $0) != 0 }.map { armable[$0] })
+                let standing = BubbleRail.letters(
+                    armed: armed, open: false, operatorSend: operatorSend
+                )
+                let opened = BubbleRail.letters(
+                    armed: armed, open: true, operatorSend: operatorSend
+                )
+                let named = armed.map(\.rawValue).sorted().joined()
+                XCTAssertEqual(
+                    Array(opened.prefix(standing.count)), standing,
+                    "opening moved a letter that was already on screen, armed [\(named)]"
+                )
+                XCTAssertEqual(
+                    Set(opened).count, opened.count, "a letter is drawn twice, armed [\(named)]"
+                )
+                var offered = armed.union([.translate])
+                if operatorSend {
+                    offered.insert(.operatorSend)
+                } else {
+                    offered.remove(.operatorSend)
+                }
+                XCTAssertEqual(
+                    Set(opened), offered,
+                    "the open rail is whatever is armed, plus T and K while the switch is on, "
+                    + "armed [\(named)]"
+                )
+            }
         }
     }
 }

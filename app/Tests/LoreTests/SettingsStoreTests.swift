@@ -197,6 +197,49 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertFalse(NotesFolderMigration.hasPriorInstall(defaults: suite))
     }
 
+    /// The upgrade path. Until #223 the chord was gated by the MODIFIERS "Extra
+    /// keys" toggle, so a stored `false` there is a user who already said no to
+    /// Fn+K: that choice carries over ahead of the prior-install evidence that
+    /// would otherwise turn the new switch on, and is stamped under the new key.
+    func testAStoredExtraKeysOffCarriesOverIntoTheOperatorSwitch() {
+        let suite = makeSuite()
+        suite.set(true, forKey: "didMigrateFromOnTheSpot") // evidence alone would say on
+        suite.set(false, forKey: "modifierUpgradeKeysEnabled")
+
+        XCTAssertFalse(makeStore(defaults: suite).operatorSendEnabled)
+        XCTAssertEqual(suite.object(forKey: "operatorSendEnabled") as? Bool, false,
+                       "the verdict is stamped, so the retired key is read once")
+    }
+
+    /// The retired toggle on — its default, and it also meant Fn+S — says
+    /// nothing about Fn+K in particular, and neither does its absence. Both fall
+    /// to the evidence rule, in both directions.
+    func testExtraKeysOnOrAbsentLeavesTheEvidenceRuleAlone() {
+        for retired in [true, nil] as [Bool?] {
+            let named = retired.map(String.init(describing:)) ?? "absent"
+
+            let priorInstall = makeSuite()
+            priorInstall.set(true, forKey: "didMigrateFromOnTheSpot")
+            if let retired { priorInstall.set(retired, forKey: "modifierUpgradeKeysEnabled") }
+            XCTAssertTrue(makeStore(defaults: priorInstall).operatorSendEnabled,
+                          "prior install, retired key \(named)")
+
+            let fresh = makeSuite()
+            if let retired { fresh.set(retired, forKey: "modifierUpgradeKeysEnabled") }
+            XCTAssertFalse(makeStore(defaults: fresh).operatorSendEnabled,
+                           "fresh install, retired key \(named)")
+        }
+    }
+
+    /// And an explicit choice under the new key outranks the migration.
+    func testAStoredOperatorChoiceOutranksTheRetiredToggle() {
+        let suite = makeSuite()
+        suite.set(false, forKey: "modifierUpgradeKeysEnabled")
+        suite.set(true, forKey: "operatorSendEnabled")
+
+        XCTAssertTrue(makeStore(defaults: suite).operatorSendEnabled)
+    }
+
     func testOperatorSendEnabledRoundTrip() {
         let suite = makeSuite()
         makeStore(defaults: suite).operatorSendEnabled = true
