@@ -1,5 +1,19 @@
 # Changelog
 
+## v3.3.0 — 2026-08-31
+
+The after-release polish: the bubble tells the truth in more places, onboarding stops dead-ending, and switching meetings off leaves nothing behind.
+
+**Onboarding unblocks (#226)**
+- Onboarding no longer dead-ends when macOS owns the Fn key: the hotkey step offers Fn, Right Option, or a key you record yourself (right-hand modifiers, and F-keys when the F-row is standard), and every surface names the key you chose
+
+**The bubble tells the truth (#224 follow-ups, #225)**
+- The open rail hints V too — the letters you see are the keys that work
+- While a dictation is processed, the bubble names the real stage: Translating… or Cleaning up… once transcription is done
+- Ending a dictation by any path ends the Space lock — the sidebar dot can no longer pulse with no recording
+
+**Meetings off means gone (#227)**
+- Switching meetings off leaves nothing to flash: the detection prompt refuses to appear while off, the app keeps one prompt window for its whole life instead of one per toggle, and every show or sweep leaves a trace in the diagnostic ring
 ## v3.2.0 — 2026-08-31
 
 lore becomes the primary input surface for AI agents: what you say, copy, and screenshot while dictating reaches the agent's prompt — and meetings step back behind a switch until their own polish cycle.
