@@ -1085,8 +1085,14 @@ final class DictationCoordinator {
 
     /// Toggle the operator-addressed flag during recording (Fn+K, #122).
     /// Same toggle idiom as `setPendingMode`: pressed twice → off.
+    ///
+    /// The one chokepoint the master switch (#223) sits on: the key paths and
+    /// the bubble's own click both arrive here, so with the switch off no
+    /// dictation can be armed by any route. A coordinator with no settings
+    /// cannot read the switch, and a switch that is off on every fresh install
+    /// must read as off when it cannot be read at all.
     func toggleOperatorAddressed() {
-        guard state == .recording else { return }
+        guard state == .recording, settings?.operatorSendEnabled == true else { return }
         pendingOperatorAddressed.toggle()
         log.debug("operator addressed: \(self.pendingOperatorAddressed, privacy: .public)")
     }

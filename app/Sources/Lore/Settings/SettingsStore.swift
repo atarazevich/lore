@@ -85,6 +85,23 @@ final class SettingsStore {
         }
     }
 
+    // MARK: - Send to the operator (#223)
+
+    /// The master switch behind Fn+K. Off, the `K` letter is on no surface —
+    /// not armed, not as a hint — the key marks nothing and the bubble offers
+    /// nothing to click. Dictations already marked keep their flag: it lives in
+    /// each entry's own file, which this switch never reads in either position.
+    @ObservationIgnored nonisolated(unsafe) private var _operatorSendEnabled: Bool
+    var operatorSendEnabled: Bool {
+        get { access(keyPath: \.operatorSendEnabled); return _operatorSendEnabled }
+        set {
+            withMutation(keyPath: \.operatorSendEnabled) {
+                _operatorSendEnabled = newValue
+                defaults.set(newValue, forKey: "operatorSendEnabled")
+            }
+        }
+    }
+
     // MARK: - Detection Settings
 
     @ObservationIgnored nonisolated(unsafe) private var _meetingAutoDetectEnabled: Bool
@@ -258,18 +275,6 @@ final class SettingsStore {
             withMutation(keyPath: \.modifierTranslateEnabled) {
                 _modifierTranslateEnabled = newValue
                 defaults.set(newValue, forKey: "modifierTranslateEnabled")
-            }
-        }
-    }
-
-    @ObservationIgnored nonisolated(unsafe) private var _modifierUpgradeKeysEnabled: Bool
-    /// C/T = post-paste upgrade keys while the upgrade panel shows.
-    var modifierUpgradeKeysEnabled: Bool {
-        get { access(keyPath: \.modifierUpgradeKeysEnabled); return _modifierUpgradeKeysEnabled }
-        set {
-            withMutation(keyPath: \.modifierUpgradeKeysEnabled) {
-                _modifierUpgradeKeysEnabled = newValue
-                defaults.set(newValue, forKey: "modifierUpgradeKeysEnabled")
             }
         }
     }
@@ -544,11 +549,15 @@ final class SettingsStore {
 
         let defaults = storage.defaults
 
-        // The Meetings master switch (#221), stamped before anything else for
-        // the same reason the notes move decides first: the bundle migrations
-        // below write two of the keys its "has this Mac run lore before?"
-        // evidence reads, so after them every install looks like an old one.
-        self._meetingsEnabled = Self.resolveMeetingsEnabled(defaults: defaults)
+        // The two master switches (#221, #223), stamped before anything else
+        // for the same reason the notes move decides first: the bundle
+        // migrations below write two of the keys their "has this Mac run lore
+        // before?" evidence reads, so after them every install looks like an
+        // old one.
+        self._meetingsEnabled = Self.resolveMasterSwitch("meetingsEnabled", defaults: defaults)
+        self._operatorSendEnabled = Self.resolveMasterSwitch(
+            "operatorSendEnabled", defaults: defaults
+        )
 
         // One-time migrations from previous bundle IDs. The notes move (#148)
         // *decides* FIRST, load-bearing: it reads a fresh install off the
@@ -629,7 +638,6 @@ final class SettingsStore {
         self._modifierLockEnabled = defaults.object(forKey: "modifierLockEnabled") as? Bool ?? true
         self._modifierCleanupEnabled = defaults.object(forKey: "modifierCleanupEnabled") as? Bool ?? true
         self._modifierTranslateEnabled = defaults.object(forKey: "modifierTranslateEnabled") as? Bool ?? true
-        self._modifierUpgradeKeysEnabled = defaults.object(forKey: "modifierUpgradeKeysEnabled") as? Bool ?? true
         self._hotkeyKey = HotkeyKey(
             rawValue: defaults.string(forKey: "hotkeyKey") ?? ""
         ) ?? .fn
@@ -729,19 +737,20 @@ final class SettingsStore {
 // MARK: - Migration
 
 extension SettingsStore {
-    /// The Meetings master switch at launch (#221). An explicit stored choice —
-    /// either position — always wins. With the key absent the verdict is
-    /// decided once from prior-install evidence: a Mac that has run lore before
-    /// keeps Meetings where it was, a fresh install starts without it.
+    /// A master switch's position at launch — Meetings (#221) and Fn+K (#223)
+    /// are decided by the same rule. An explicit stored choice — either
+    /// position — always wins. With the key absent the verdict comes from
+    /// prior-install evidence: a Mac that has run lore before keeps the feature
+    /// where it was, a fresh install starts without it.
     ///
     /// The verdict is written, not re-derived each launch: the *first* launch
     /// is what leaves the evidence keys behind, so without the stamp the second
-    /// launch of a fresh install would read itself as an old one and turn
-    /// Meetings on.
-    private static func resolveMeetingsEnabled(defaults: UserDefaults) -> Bool {
-        if let stored = defaults.object(forKey: "meetingsEnabled") as? Bool { return stored }
+    /// launch of a fresh install would read itself as an old one and turn the
+    /// feature on.
+    private static func resolveMasterSwitch(_ key: String, defaults: UserDefaults) -> Bool {
+        if let stored = defaults.object(forKey: key) as? Bool { return stored }
         let enabled = NotesFolderMigration.hasPriorInstall(defaults: defaults)
-        defaults.set(enabled, forKey: "meetingsEnabled")
+        defaults.set(enabled, forKey: key)
         return enabled
     }
 

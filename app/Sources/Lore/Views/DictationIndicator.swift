@@ -86,10 +86,17 @@ enum BubbleRail {
 
     /// - Parameter open: the bubble is widened. Closed, only the armed letters
     ///   are drawn at all.
-    static func letters(armed: Set<BubbleRailLetter>, open: Bool) -> [BubbleRailLetter] {
-        let standing = armedOrder.filter(armed.contains)
+    /// - Parameter operatorSend: the Fn+K master switch (#223). Off, `K` is not
+    ///   a letter the rail has — the filter is here rather than at either
+    ///   caller because this is the one place that decides which letters exist,
+    ///   and armed and hint have to disappear together.
+    static func letters(
+        armed: Set<BubbleRailLetter>, open: Bool, operatorSend: Bool
+    ) -> [BubbleRailLetter] {
+        let offered = { (letter: BubbleRailLetter) in operatorSend || letter != .operatorSend }
+        let standing = armedOrder.filter { armed.contains($0) && offered($0) }
         guard open else { return standing }
-        return standing + restOrder.filter { !armed.contains($0) }
+        return standing + restOrder.filter { !armed.contains($0) && offered($0) }
     }
 }
 
@@ -376,10 +383,10 @@ struct DictationIndicatorView: View {
     /// while the dictation carries it.
     var operatorAddressed = false
     var recordingSeconds: Int = 0
-    /// DSET-06: the rail's hint letters — the ones nothing has armed — stay off
-    /// the bubble when the upgrade-keys modifier toggle is off. What *is* armed
-    /// still stands there, opened or not.
-    var showUpgradeKeycaps = true
+    /// The Fn+K master switch (#223). Off, the K letter is on no surface —
+    /// neither armed nor as a hint. The poll is the authority; the default here
+    /// is what an unpolled model draws with, which the app never renders.
+    var operatorSendEnabled = true
     /// DSET-05: with Space-lock turned off there is no lock to offer, so the
     /// glyph is not drawn at all rather than standing there inert (#201).
     var lockEnabled = true
@@ -1109,7 +1116,10 @@ struct DictationIndicatorView: View {
     }
 
     /// What this dictation already carries — the letters the resting bubble
-    /// stands with, and what `BubbleRail` orders the open rail around.
+    /// stands with, and what `BubbleRail` orders the open rail around. A plain
+    /// report of the dictation: whether a letter is *offered* at all is
+    /// `BubbleRail.letters`' decision, so an entry flagged before the operator
+    /// switch was turned off still reads as armed here and still draws nothing.
     private var armedLetters: Set<BubbleRailLetter> {
         var armed: Set<BubbleRailLetter> = []
         if pendingMode == .cleanup { armed.insert(.cleanup) }
@@ -1118,13 +1128,10 @@ struct DictationIndicatorView: View {
         return armed
     }
 
-    /// The rail, at rest and open (#204). DSET-06 turns the *hints* off, not the
-    /// facts: with the keycaps disabled the bubble still shows what is armed,
-    /// opened or not, because a letter that stands at rest may never disappear
-    /// when the shape opens.
+    /// The rail, at rest and open (#204).
     private func railKeys(open: Bool) -> [RailKey] {
         BubbleRail
-            .letters(armed: armedLetters, open: open && showUpgradeKeycaps)
+            .letters(armed: armedLetters, open: open, operatorSend: operatorSendEnabled)
             .map { key(for: $0) }
     }
 
@@ -1934,7 +1941,8 @@ final class DictationIndicatorModel {
     var pendingMode: UpgradeAction?
     var operatorAddressed = false
     var recordingSeconds: Int = 0
-    var showUpgradeKeycaps = true
+    /// The Fn+K master switch (#223).
+    var operatorSendEnabled = true
     var lockEnabled = true
     var lastError: DictationFace?
     var bluetoothRedirected = false
@@ -1981,7 +1989,7 @@ struct DictationIndicatorHost: View {
             pendingMode: model.pendingMode,
             operatorAddressed: model.operatorAddressed,
             recordingSeconds: model.recordingSeconds,
-            showUpgradeKeycaps: model.showUpgradeKeycaps,
+            operatorSendEnabled: model.operatorSendEnabled,
             lockEnabled: model.lockEnabled,
             lastError: model.lastError,
             bluetoothRedirected: model.bluetoothRedirected,
@@ -2148,8 +2156,10 @@ final class DictationIndicatorManager {
                 if newSeconds != self.model.recordingSeconds {
                     self.model.recordingSeconds = newSeconds
                 }
-                self.model.showUpgradeKeycaps =
-                    coordinator.settings?.modifierUpgradeKeysEnabled ?? true
+                // The letter follows the switch live (#223): flipped mid-recording
+                // the K leaves the rail at the next poll, armed or not.
+                self.model.operatorSendEnabled =
+                    coordinator.settings?.operatorSendEnabled ?? false
                 self.model.lockEnabled = coordinator.settings?.modifierLockEnabled ?? true
                 self.model.lastError = coordinator.lastError
                 self.model.bluetoothRedirected = coordinator.bluetoothMicRedirected

@@ -218,8 +218,8 @@ final class HotkeyManager {
             if event.modifierFlags.contains(.function) && self.isRecordingFlag {
                 if (event.keyCode == 9 && self.modifierOn({ $0.modifierCleanupEnabled }))
                     || (event.keyCode == 17 && self.modifierOn({ $0.modifierTranslateEnabled }))
-                    || (event.keyCode == 40 && self.modifierOn({ $0.modifierUpgradeKeysEnabled })) // V, T, or K (#122)
-                    || (event.keyCode == 1 && self.modifierOn({ $0.modifierUpgradeKeysEnabled })) { // S (#192)
+                    || (event.keyCode == 40 && self.modifierOn({ $0.operatorSendEnabled })) // V, T, or K (#122/#223)
+                    || (event.keyCode == 1 && RichInputSettings.screenshotsEnabled) { // S (#192)
                     Task { @MainActor in
                         self.handleKeyDown(event)
                     }
@@ -463,13 +463,12 @@ final class HotkeyManager {
                 if isLocked { fnHeldAtLock = true }
                 HotkeyManager.hkLog.debug("[HOTKEY] Fn+T → pending translate")
                 return
-            } else if event.keyCode == 40, modifierOn({ $0.modifierUpgradeKeysEnabled }) { // K (#122)
+            } else if event.keyCode == 40, modifierOn({ $0.operatorSendEnabled }) { // K (#122/#223)
                 coordinator.toggleOperatorAddressed()
                 if isLocked { fnHeldAtLock = true }
                 HotkeyManager.hkLog.debug("[HOTKEY] Fn+K → operator addressed")
                 return
-            } else if event.keyCode == 1, RichInputSettings.screenshotsEnabled,
-                      modifierOn({ $0.modifierUpgradeKeysEnabled }) { // S (#192/#198)
+            } else if event.keyCode == 1, RichInputSettings.screenshotsEnabled { // S (#192/#198)
                 // Still consumed while paused, and deliberately does nothing:
                 // the clipboard door is shut (#206), so a screenshot taken here
                 // would land on the user's clipboard and join no prompt.
@@ -703,8 +702,7 @@ final class HotkeyManager {
                             HotkeyManager.hkLog.debug("[HOTKEY] Fn+T (CGEvent) → pending translate")
                         }
                         return nil
-                    } else if keyCode == 1, RichInputSettings.screenshotsEnabled,
-                              manager.modifierOn({ $0.modifierUpgradeKeysEnabled }) { // S (#192/#198)
+                    } else if keyCode == 1, RichInputSettings.screenshotsEnabled { // S (#192/#198)
                         Task { @MainActor in
                             // The system's own crosshair, pressed for the user —
                             // the image lands on the clipboard and the door
@@ -717,7 +715,7 @@ final class HotkeyManager {
                             HotkeyManager.hkLog.debug("[HOTKEY] Fn+S (CGEvent) → screenshot to clipboard")
                         }
                         return nil
-                    } else if keyCode == 40, manager.modifierOn({ $0.modifierUpgradeKeysEnabled }) { // K (#122)
+                    } else if keyCode == 40, manager.modifierOn({ $0.operatorSendEnabled }) { // K (#122/#223)
                         Task { @MainActor in
                             manager.coordinator?.toggleOperatorAddressed()
                             if manager.isLocked { manager.fnHeldAtLock = true }

@@ -141,6 +141,68 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(makeStore(defaults: suite).meetingsEnabled)
     }
 
+    // MARK: - Send to the operator (#223)
+
+    /// The same rule as Meetings, on the same evidence: nothing in the domain
+    /// is a fresh install, and Fn+K starts off with the verdict written down.
+    func testOperatorSendOffOnAFreshInstall() {
+        let suite = makeSuite()
+        XCTAssertFalse(makeStore(defaults: suite).operatorSendEnabled)
+        XCTAssertEqual(suite.object(forKey: "operatorSendEnabled") as? Bool, false)
+    }
+
+    /// A Mac that has run lore before keeps Fn+K exactly where it was —
+    /// any one of the evidence keys is enough.
+    func testOperatorSendOnWhenTheMacHasRunLoreBefore() {
+        for key in NotesFolderMigration.priorLaunchKeys {
+            let suite = makeSuite()
+            suite.set(true, forKey: key)
+            XCTAssertTrue(makeStore(defaults: suite).operatorSendEnabled,
+                          "\(key) is prior-install evidence")
+        }
+    }
+
+    /// An explicit choice wins in both directions, evidence or not.
+    func testStoredOperatorSendChoiceAlwaysWins() {
+        let onSuite = makeSuite()
+        onSuite.set(true, forKey: "operatorSendEnabled")
+        XCTAssertTrue(makeStore(defaults: onSuite).operatorSendEnabled)
+
+        let offSuite = makeSuite()
+        offSuite.set(true, forKey: "didMigrateFromOpenGranola")
+        offSuite.set(false, forKey: "operatorSendEnabled")
+        XCTAssertFalse(makeStore(defaults: offSuite).operatorSendEnabled)
+    }
+
+    /// Why the verdict is stamped rather than re-derived: the first launch
+    /// writes the evidence keys itself, so a second launch reading them fresh
+    /// would turn Fn+K on behind the user's back.
+    func testFreshInstallKeepsTheOperatorSwitchOffOnItsSecondLaunch() {
+        let suite = makeSuite()
+        XCTAssertFalse(makeStore(defaults: suite).operatorSendEnabled)
+
+        suite.set(true, forKey: "didMigrateFromOnTheSpot")
+        suite.set(true, forKey: "didMigrateFromOpenGranola")
+
+        XCTAssertFalse(makeStore(defaults: suite).operatorSendEnabled)
+    }
+
+    /// Neither switch is evidence — not for #148's notes move, and not for each
+    /// other: stamping one must not make the next one read a prior install.
+    func testNeitherMasterSwitchIsPriorInstallEvidence() {
+        let suite = makeSuite()
+        let store = makeStore(defaults: suite)
+        XCTAssertFalse(store.meetingsEnabled)
+        XCTAssertFalse(store.operatorSendEnabled)
+        XCTAssertFalse(NotesFolderMigration.hasPriorInstall(defaults: suite))
+    }
+
+    func testOperatorSendEnabledRoundTrip() {
+        let suite = makeSuite()
+        makeStore(defaults: suite).operatorSendEnabled = true
+        XCTAssertTrue(makeStore(defaults: suite).operatorSendEnabled)
+    }
+
     // MARK: - Detection Settings Group
 
     func testDefaultMeetingAutoDetect() {
@@ -301,7 +363,6 @@ final class SettingsStoreTests: XCTestCase {
         XCTAssertTrue(store.modifierLockEnabled)
         XCTAssertTrue(store.modifierCleanupEnabled)
         XCTAssertTrue(store.modifierTranslateEnabled)
-        XCTAssertTrue(store.modifierUpgradeKeysEnabled)
     }
 
     /// #52: absent key must map to 500 — the pre-setting hardcoded policy —
@@ -332,13 +393,12 @@ final class SettingsStoreTests: XCTestCase {
 
         let store1 = makeStore(defaults: defaults)
         store1.modifierLockEnabled = false
-        store1.modifierUpgradeKeysEnabled = false
+        store1.modifierTranslateEnabled = false
 
         let store2 = makeStore(defaults: defaults)
         XCTAssertFalse(store2.modifierLockEnabled)
         XCTAssertTrue(store2.modifierCleanupEnabled)
-        XCTAssertTrue(store2.modifierTranslateEnabled)
-        XCTAssertFalse(store2.modifierUpgradeKeysEnabled)
+        XCTAssertFalse(store2.modifierTranslateEnabled)
     }
 
     // MARK: - Notes folder (#148)

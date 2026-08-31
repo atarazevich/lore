@@ -863,13 +863,29 @@ struct SettingsView: View {
                 isOn: $settings.modifierTranslateEnabled
             )
             LoreDivider()
-            modifierRow(
-                key: "K/S",
-                name: "Extra keys",
-                sub: "K sends to the operator, S takes a screenshot into the prompt",
-                isOn: $settings.modifierUpgradeKeysEnabled
-            )
+            operatorRow
         }
+    }
+
+    /// The Fn+K master switch (#223), in the shape the Meetings switch (#221)
+    /// established: one row that names the feature, whose second line says what
+    /// the key does while on and what is gone while off. The two never stand
+    /// together — a row promising the key marks a dictation, above a line
+    /// saying the key does nothing, would contradict itself on screen.
+    ///
+    /// No disabled state while a dictation records, unlike the Meetings row:
+    /// arming is per recording, so flipping the switch mid-dictation strands
+    /// nothing — the letter leaves the bubble and the next press does nothing.
+    private var operatorRow: some View {
+        modifierRow(
+            key: "K",
+            name: "Send to the operator",
+            sub: settings.operatorSendEnabled
+                ? "K while recording marks the dictation for your operator."
+                : "K is gone from the bubble and the key does nothing. "
+                    + "Dictations already marked keep their mark.",
+            isOn: $settings.operatorSendEnabled
+        )
     }
 
     /// Modifier row: 64px static key chip (the shared `.keybtn` spec, not

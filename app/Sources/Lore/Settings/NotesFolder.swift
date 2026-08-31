@@ -161,11 +161,11 @@ enum NotesFolderMigration {
         ))
     }
 
-    /// "An earlier launch of this app happened on this Mac." Two readers: the
-    /// notes move above, and the Meetings switch's one-time default (#221) —
-    /// both want the same fact, so neither spells the key list itself. Both
-    /// must ask *before* `SettingsStore`'s bundle migrations, which write two
-    /// of the keys on every first launch.
+    /// "An earlier launch of this app happened on this Mac." Three readers: the
+    /// notes move above, and the one-time default of each master switch —
+    /// Meetings (#221) and Fn+K (#223). All want the same fact, so none spells
+    /// the key list itself, and all must ask *before* `SettingsStore`'s bundle
+    /// migrations, which write two of the keys on every first launch.
     static func hasPriorInstall(defaults: UserDefaults) -> Bool {
         priorLaunchKeys.contains { defaults.object(forKey: $0) != nil }
     }
