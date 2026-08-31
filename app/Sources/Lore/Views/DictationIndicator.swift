@@ -1652,9 +1652,9 @@ struct DictationIndicatorView: View {
                     // — it must read as "not recording red").
                     .fill(noSignal ? Color.white.opacity(0.3) : LoreTheme.Accent.red)
                     .frame(width: 8, height: 8)
-                    .bubbleTip(.dot, "Recording", hovered: $hoveredTip, pointer: pointer)
+                    .bubbleTip(.dot, Self.recordingHelp, hovered: $hoveredTip, pointer: pointer)
                     .accessibilityElement(children: .ignore)
-                    .accessibilityLabel("Recording")
+                    .accessibilityLabel(Self.recordingHelp)
             }
         }
         .frame(width: Self.faceIconSide, height: Self.faceIconSide)
@@ -1713,10 +1713,23 @@ struct DictationIndicatorView: View {
             .accessibilityAddTraits(.isButton)
     }
 
-    /// The board's copy table, byte for byte — the em dash included.
+    /// The board's copy table, byte for byte — the em dash included. The dot
+    /// names the way out (#230), the mirror of the paused face's own sentence:
+    /// the two are read in the same slot, one after the other.
+    static let recordingHelp = "Recording \u{2014} Esc to pause"
     static let pausedHelp = "Paused \u{2014} Esc to resume"
     static let stopLabel = "Stop recording"
     static let stopHelp = "Saved to history, nothing pasted"
+
+    /// The two ways out of a locked recording, in the one place both surfaces
+    /// read them from (#228). The bubble's tooltip asks the user to press the
+    /// key; the app window's status row says the recording is locked. Only the
+    /// frame differs — the key, the verbs and their order are this string's,
+    /// and they used to be two literals naming the same key two ways ("Fn" in
+    /// the bubble against "Fn (Globe)" in the window).
+    static func lockedWaysOut(talkKey: String) -> String {
+        "\(talkKey) to paste, Esc to pause"
+    }
 
     /// The lock, both ways round (#201). It stands in the bubble from the
     /// first second — an open shackle is what tells someone holding Fn that
@@ -1747,10 +1760,11 @@ struct DictationIndicatorView: View {
     /// Both ways out, not only the stop (#212): the owner locked a dictation
     /// and had to guess whether Esc kept the words. The key is named from the
     /// setting (#226) — it is the one the user actually holds, and every other
-    /// surface says the same one.
+    /// surface says the same one. Esc has paused, never stopped, since #206;
+    /// the wrong verb outlived the change until #228.
     private var lockHelp: String {
         isLocked
-            ? "Press \(talkKeyName) to paste, Esc to stop"
+            ? "Press \(Self.lockedWaysOut(talkKey: talkKeyName))"
             : "Space locks recording, hands free"
     }
 

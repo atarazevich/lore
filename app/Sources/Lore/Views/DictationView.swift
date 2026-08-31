@@ -163,7 +163,9 @@ struct DictationView: View {
                     Image(systemName: "lock.fill")
                         .font(.system(size: 11))
                         .foregroundStyle(LoreTheme.Accent.red)
-                    Text("Locked \u{2014} \(settings.hotkeyKey.displayName) to paste, Esc to discard")
+                    Text("Locked \u{2014} " + DictationIndicatorView.lockedWaysOut(
+                        talkKey: settings.hotkeyKey.shortName
+                    ))
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(LoreTheme.Accent.red)
                 } else {
@@ -676,7 +678,7 @@ struct DictationView: View {
     // MARK: - Footer Kbd Bar (DIC-25)
 
     /// DIC-25 (dynamic since Stage D): the bar builds from the enabled
-    /// modifiers — "{hotkey} hold to talk" first, "Esc discard" last, the
+    /// modifiers — "{hotkey} hold to talk" first, "Esc pause" last, the
     /// hints in between appear only while their Settings toggle is on.
     ///
     /// The chords say "Fn" literally whatever the talk key is (#226): they read
@@ -694,7 +696,7 @@ struct DictationView: View {
             if settings.modifierTranslateEnabled {
                 kbdHint("Fn+T", "translate")
             }
-            kbdHint("Esc", "discard")
+            kbdHint("Esc", "pause")
             Spacer()
         }
         .font(LoreTheme.Typography.mono(11))

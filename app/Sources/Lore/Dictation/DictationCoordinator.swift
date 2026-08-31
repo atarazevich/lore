@@ -559,9 +559,9 @@ final class DictationCoordinator {
     /// awaited before entering the shared ASR backend so it is never used by
     /// two transcriptions concurrently (#104). Shared-UI writes are
     /// epoch-guarded: a pipeline that outlives its session (a newer recording
-    /// confirmed, or Esc discarded it) still lands its text in history — and
-    /// pastes it, unless deliberately cancelled — but no longer owns the
-    /// state/indicator/currentEntryID.
+    /// confirmed, or a discard took it — Esc pauses, #206) still lands its text
+    /// in history — and pastes it, unless deliberately cancelled — but no
+    /// longer owns the state/indicator/currentEntryID.
     private func runDictationPipeline(
         epoch: Int, previous: Task<Void, Never>?, pasting: Bool
     ) async {

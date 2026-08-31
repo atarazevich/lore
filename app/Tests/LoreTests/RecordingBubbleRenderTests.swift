@@ -227,9 +227,23 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// already resumes, and what was missing was the way out that keeps the words
     /// without inserting them (#219).
     func testThePausedFaceCarriesTheBoardsWords() {
+        // The dot's own line is the mirror of the paused one (#230): the same
+        // slot, the same shape of sentence, the other half of the key.
+        XCTAssertEqual(DictationIndicatorView.recordingHelp, "Recording \u{2014} Esc to pause")
         XCTAssertEqual(DictationIndicatorView.pausedHelp, "Paused \u{2014} Esc to resume")
         XCTAssertEqual(DictationIndicatorView.stopLabel, "Stop recording")
         XCTAssertEqual(DictationIndicatorView.stopHelp, "Saved to history, nothing pasted")
+        // The locked sentence has one source (#228): the bubble presses the
+        // key, the window says the recording is locked, and neither writes the
+        // key name or the verbs itself.
+        XCTAssertEqual(
+            DictationIndicatorView.lockedWaysOut(talkKey: HotkeyKey.fn.shortName),
+            "Fn to paste, Esc to pause"
+        )
+        XCTAssertEqual(
+            "Press " + DictationIndicatorView.lockedWaysOut(talkKey: HotkeyKey.fn.shortName),
+            "Press Fn to paste, Esc to pause"
+        )
     }
 
     /// Pausing changes the glyph in the slot and appends a hairline and the

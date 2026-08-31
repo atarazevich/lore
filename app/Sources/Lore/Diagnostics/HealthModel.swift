@@ -124,7 +124,7 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
     /// `.tap` was "Fn key" until #97, which is the lie at the root of the whole
     /// complaint: Fn hold-to-talk runs entirely on the NSEvent monitors, and the
     /// tap carries only the keys Lore intercepts while another app is focused
-    /// (Space to lock, Esc to discard, Fn+V/T — `HotkeyManager.installEventTap`).
+    /// (Space to lock, Esc to pause, Fn+V/T — `HotkeyManager.installEventTap`).
     /// The probe could never answer for the Fn key, yet spoke in its name — so it
     /// told a user whose Fn key demonstrably worked that it did not. Every fix
     /// before this one plumbed around the name instead of correcting it.

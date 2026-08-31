@@ -87,7 +87,8 @@ final class HotkeyManager {
         return settings?.hotkeyKey.tapKeyCode
     }
 
-    /// Locked = recording continues after Fn release; stopped by Fn or Esc
+    /// Locked = recording continues after the talk key's release; the key ends
+    /// it, and Esc pauses it (#206).
     private(set) var isLocked = false
     /// Set synchronously so the local monitor closure can check it without main actor hop
     nonisolated(unsafe) private var isRecordingFlag = false
