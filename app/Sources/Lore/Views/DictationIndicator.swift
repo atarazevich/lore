@@ -101,8 +101,8 @@ enum BubbleRail {
 /// and a blind clear there would swallow the line that just replaced it.
 private enum BubbleTipOwner: Hashable {
     case dot, lock, waveform, timer, clip, count, gear
-    /// The `Continue` button, which stands only while paused (#206).
-    case resume
+    /// The `Stop recording` button, which stands only while paused (#219).
+    case stop
     case letter(BubbleRailLetter)
     case row(UUID)
 }
@@ -403,7 +403,8 @@ struct DictationIndicatorView: View {
     var held = false
     /// Esc has suspended the capture (#206). The board's F7a: a pause glyph
     /// where the dot was, the waveform flat, the timer frozen, the clip and its
-    /// count as they were, and `Continue` past a hairline. The lock is untouched
+    /// count as they were, and `Stop recording` past a hairline. The lock is
+    /// untouched
     /// — pausing is not an ending.
     var paused = false
     /// The paste's checkmark is leaving (#218) — false until the words are away
@@ -477,8 +478,9 @@ struct DictationIndicatorView: View {
     var onArmOperator: (() -> Void)?
     /// The gear opens Settings → Copying (#201).
     var onOpenSettings: (() -> Void)?
-    /// `Continue` — the second Esc, taken by pointer (#206).
-    var onResume: (() -> Void)?
+    /// `Stop recording` — the dictation ends here, into history, with nothing
+    /// inserted (#219).
+    var onStop: (() -> Void)?
     /// A failure face's one action (#209) — which one it is, never what it does.
     var onFaceAction: ((DictationFaceAction) -> Void)?
     /// The shape is being dragged (#213): where the user puts the bubble is
@@ -743,7 +745,7 @@ struct DictationIndicatorView: View {
             shape(open: true, measuring: true, paused: false, listWidth: bubbleSize.width)
             // The paused row is laid out beside it, always, whether or not this
             // recording is paused (#206): Esc puts a pause glyph where the 8 pt
-            // dot was and `Continue` past a hairline, and a canvas measured
+            // dot was and `Stop recording` past a hairline, and a canvas measured
             // without them would resize the window the moment the key was
             // pressed. Its list is the same list at the same width, so the row
             // alone is what the union needs.
@@ -1013,7 +1015,7 @@ struct DictationIndicatorView: View {
             // of what was already there, as everything else in this row does.
             if paused, working == nil {
                 groupDivider.transition(Self.faceDissolve)
-                continuePill.transition(Self.faceDissolve)
+                stopPill.transition(Self.faceDissolve)
             }
             if !keys.isEmpty {
                 groupDivider
@@ -1658,8 +1660,8 @@ struct DictationIndicatorView: View {
     /// the menu-bar bead all use this token. The box around it is the row's own
     /// slot (`iconSlot`), which every state of the row now shares.
     ///
-    /// Not a control: the ways back are Esc, `Continue` and Fn, and a fourth
-    /// door on the glyph would be a fourth name for two actions.
+    /// Not a control: the ways on are Esc (resume) and Fn (finish and paste),
+    /// and a third door on the glyph would be a third name for them.
     private var pauseGlyph: some View {
         Image(systemName: "pause.fill")
             .font(.system(size: 11))
@@ -1669,21 +1671,24 @@ struct DictationIndicatorView: View {
             .accessibilityLabel(Self.pausedHelp)
     }
 
-    /// The one button a paused dictation offers (#206). `Finish` is not beside
-    /// it: a Fn tap already finishes, so a second button would have named the
-    /// same thing twice — and there is no `Delete`, because a dictation nobody
-    /// wants is removed from history, not from here.
-    private var continuePill: some View {
-        pill("Continue", .keycap(bright: true), action: onResume)
-            .bubbleTip(.resume, Self.resumeHelp, hovered: $hoveredTip, pointer: pointer)
+    /// The one button a paused dictation offers (#219). It is not `Continue`:
+    /// Esc already resumes, and the glyph beside it says so. `Finish` is not
+    /// here either — a Fn tap already finishes and pastes — and there is no
+    /// `Delete`, because a dictation nobody wants is removed from history, not
+    /// from here. What was missing was the third thing the user actually wanted:
+    /// keep the words, insert nothing.
+    private var stopPill: some View {
+        pill(Self.stopLabel, .keycap(bright: true), action: onStop)
+            .bubbleTip(.stop, Self.stopHelp, hovered: $hoveredTip, pointer: pointer)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Self.resumeHelp)
+            .accessibilityLabel(Self.stopHelp)
             .accessibilityAddTraits(.isButton)
     }
 
     /// The board's copy table, byte for byte — the em dash included.
-    static let pausedHelp = "Paused \u{2014} Esc"
-    static let resumeHelp = "Keep recording"
+    static let pausedHelp = "Paused \u{2014} Esc to resume"
+    static let stopLabel = "Stop recording"
+    static let stopHelp = "Saved to history, nothing pasted"
 
     /// The lock, both ways round (#201). It stands in the bubble from the
     /// first second — an open shackle is what tells someone holding Fn that
@@ -1951,8 +1956,8 @@ final class DictationIndicatorModel {
     var onArmTranslate: (() -> Void)?
     var onArmOperator: (() -> Void)?
     var onOpenSettings: (() -> Void)?
-    /// `Continue` (#206).
-    var onResume: (() -> Void)?
+    /// `Stop recording` (#219).
+    var onStop: (() -> Void)?
     var onFaceAction: ((DictationFaceAction) -> Void)?
     /// Where the user drags the bubble (#213).
     var onDrag: ((BubbleDrag) -> Void)?
@@ -1995,7 +2000,7 @@ struct DictationIndicatorHost: View {
             onArmTranslate: model.onArmTranslate,
             onArmOperator: model.onArmOperator,
             onOpenSettings: model.onOpenSettings,
-            onResume: model.onResume,
+            onStop: model.onStop,
             onFaceAction: model.onFaceAction,
             onDrag: model.onDrag,
             onCanvasChange: model.onCanvasChange
@@ -2067,10 +2072,11 @@ final class DictationIndicatorManager {
         // The gear names the section it belongs to and the shell fronts the
         // window (#198) — the one door, installed by the scene.
         model.onOpenSettings = { SettingsSection.open(.copying) }
-        // `Continue` is the second Esc, taken by pointer (#206).
-        model.onResume = { [weak coordinator] in
+        // `Stop recording` finishes the dictation into history and pastes
+        // nothing (#219). Esc, which resumes, is the keyboard's alone.
+        model.onStop = { [weak coordinator] in
             Task { @MainActor in
-                coordinator?.resumeRecording()
+                coordinator?.finishWithoutPasting()
             }
         }
         // A face's one action, resolved where the side effects live (#209).

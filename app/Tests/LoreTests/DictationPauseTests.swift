@@ -260,6 +260,88 @@ final class DictationPauseTests: XCTestCase {
         pasteboard.releaseGlobally()
     }
 
+    // MARK: - Stop recording (#219)
+
+    /// `Stop recording` is a finish minus the paste: the entry lands in history
+    /// with its audio, its words and what rode along, nothing is inserted, and
+    /// no paste event goes into the stream. The shape leaves as soon as the
+    /// entry is saved — the button the user just pressed said so — while the
+    /// pipeline goes on transcribing behind it.
+    func testStopRecordingKeepsTheWholeEntryAndPastesNothing() async throws {
+        // The door's own switches, on a suite nobody else can see.
+        _ = isolatedRichInputDefaults("DictationPauseTests")
+        defer { RichInputSettings.use(.standard) }
+        let pasteboard = NSPasteboard(name: .init("com.lore.test.stop.\(UUID().uuidString)"))
+        var posted = 0
+        let coordinator = makeRecording(
+            backend: StubTranscriptionBackend(),
+            clipboard: ClipboardWatcher(pasteboard: pasteboard, interval: .milliseconds(10)),
+            deliver: { _ in
+                posted += 1
+                return Task { true }
+            }
+        )
+        speak(coordinator, samples: 20_000)
+        pasteboard.clearContents()
+        pasteboard.setString("a stack trace", forType: .string)
+        let collected = await waitUntil { coordinator.items.count == 1 }
+        XCTAssertTrue(collected, "nothing was collected to ride along")
+        coordinator.pauseRecording()
+        let mark = DiagStream.mark()
+
+        coordinator.finishWithoutPasting()
+
+        let left = await waitUntil { coordinator.state == .idle }
+        XCTAssertTrue(left, "the shape did not leave")
+        let transcribed = await waitUntil {
+            coordinator.history.entries.first?.status == .transcribed
+        }
+        XCTAssertTrue(transcribed, "the words never reached history")
+
+        let entry = try XCTUnwrap(coordinator.history.entries.first)
+        let text = try XCTUnwrap(entry.rawText)
+        XCTAssertTrue(text.contains("mock transcription"), "the spoken words: \(text)")
+        XCTAssertTrue(text.contains("a stack trace"), "what was copied: \(text)")
+        XCTAssertNotNil(entry.audioFilename, "the entry lost its audio")
+        XCTAssertEqual(storage.audioFiles.count, 1)
+        XCTAssertEqual(entry.items?.count, 1, "what rode along was dropped")
+        XCTAssertEqual(posted, 0, "Stop recording pasted")
+        XCTAssertNil(coordinator.lastError, "a face over a dictation that went to plan")
+        XCTAssertEqual(coordinator.state, .idle, "the shape came back after the transcription")
+
+        let seen = DiagStream.events(since: mark)
+        XCTAssertTrue(
+            seen.contains { if case .dictationRecorded = $0 { true } else { false } },
+            "the finish never ran the pipeline"
+        )
+        XCTAssertFalse(
+            seen.contains { if case .dictationPasted = $0 { true } else { false } },
+            "a paste event from a dictation that pasted nothing"
+        )
+        XCTAssertFalse(
+            seen.contains { if case .dictationItemsPasted = $0 { true } else { false } },
+            "an items-pasted event from a dictation that pasted nothing"
+        )
+        pasteboard.releaseGlobally()
+    }
+
+    /// And a transcription that comes back with nothing after a `Stop recording`
+    /// is history's own retry, not a face for a bubble that has gone.
+    func testATranscriptionThatFailsAfterStopRecordingRaisesNoFace() async throws {
+        let coordinator = makeRecording(backend: StubTranscriptionBackend(transcript: ""))
+        speak(coordinator, samples: 20_000)
+
+        coordinator.finishWithoutPasting()
+
+        let left = await waitUntil { coordinator.state == .idle }
+        XCTAssertTrue(left, "the shape did not leave")
+        let saved = await waitUntil { coordinator.history.entries.count == 1 }
+        XCTAssertTrue(saved, "the entry never landed")
+        try? await Task.sleep(for: .milliseconds(200))
+        XCTAssertEqual(coordinator.state, .idle, "the shape came back to report a failure")
+        XCTAssertNil(coordinator.lastError, "a face nobody can see")
+    }
+
     // MARK: - Through the key that takes it
 
     /// The board's locked row: Esc pauses, the lock is untouched, Esc again
@@ -277,9 +359,10 @@ final class DictationPauseTests: XCTestCase {
         XCTAssertTrue(hotkeys.isLocked)
     }
 
-    /// And `Continue`, taken by pointer, is that same second Esc: the bubble's
-    /// button calls exactly what the key does.
-    func testTheContinueButtonIsTheSecondEsc() {
+    /// A second Esc continues, and continuing is not an ending — the lock stands
+    /// through both. (The bubble's own `Continue` button is retired: #219 gives
+    /// the paused row `Stop recording` instead, and resuming is the key's alone.)
+    func testASecondEscContinuesAndIsNotAnEnding() {
         makeLockedRecording()
         hotkeys.handleEscape()
         XCTAssertTrue(coordinator.isPaused)
@@ -326,10 +409,11 @@ final class DictationPauseTests: XCTestCase {
 
     @discardableResult
     private func makeCoordinator(
-        backend: (any TranscriptionBackend)? = nil, clipboard: ClipboardWatcher? = nil
+        backend: (any TranscriptionBackend)? = nil, clipboard: ClipboardWatcher? = nil,
+        deliver: @escaping DictationDelivery = { _ in Task { true } }
     ) -> DictationCoordinator {
         let coordinator = storage.coordinator(
-            backend: backend, clipboard: clipboard ?? ClipboardWatcher()
+            backend: backend, clipboard: clipboard ?? ClipboardWatcher(), deliver: deliver
         )
         coordinator.settings = isolatedSettings("DictationPauseTests", defaults: storage.defaults)
         self.coordinator = coordinator
@@ -339,9 +423,12 @@ final class DictationPauseTests: XCTestCase {
     /// A confirmed recording, writing to storage nothing else can see.
     @discardableResult
     private func makeRecording(
-        backend: (any TranscriptionBackend)? = nil, clipboard: ClipboardWatcher? = nil
+        backend: (any TranscriptionBackend)? = nil, clipboard: ClipboardWatcher? = nil,
+        deliver: @escaping DictationDelivery = { _ in Task { true } }
     ) -> DictationCoordinator {
-        let coordinator = makeCoordinator(backend: backend, clipboard: clipboard)
+        let coordinator = makeCoordinator(
+            backend: backend, clipboard: clipboard, deliver: deliver
+        )
         coordinator.startPreBuffer()
         coordinator.confirmRecording()
         return coordinator

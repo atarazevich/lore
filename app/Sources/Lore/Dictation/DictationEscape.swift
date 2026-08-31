@@ -19,7 +19,8 @@ enum DictationEscape: Equatable, Sendable {
     case passThrough
     /// Suspend capture in place — one session, one entry, one audio file.
     case pause
-    /// Carry on into the same recording. The `Continue` button is this too.
+    /// Carry on into the same recording. Esc's alone since #219 retired
+    /// `Continue`: the bubble's one button ends the dictation instead.
     case resume
 
     /// Escape's own key code, in the one place the event paths read it.

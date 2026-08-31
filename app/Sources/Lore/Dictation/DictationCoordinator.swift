@@ -455,7 +455,7 @@ final class DictationCoordinator {
         log.debug("recording paused (Esc)")
     }
 
-    /// `Continue`: the same recording, carrying on. Capture comes back up on the
+    /// The second Esc: the same recording, carrying on. Capture comes back up on the
     /// device the pinned selection resolves to, the clipboard door reopens, and
     /// the offsets pick up from the audio already held rather than from a wall
     /// clock that ran through the pause.
@@ -503,10 +503,33 @@ final class DictationCoordinator {
     /// pipeline ran inline there, that press killed the in-flight
     /// transcription and lost the dictation. Now the debounce only debounces.
     func stopRecording() {
+        finish(pasting: true)
+    }
+
+    /// `Stop recording` on the paused bubble (#219): the same ending, with the
+    /// words kept and nothing inserted — "when you press stop recording, then
+    /// this recording just stays, and doesn't insert anything, it just kind of
+    /// disappears."
+    ///
+    /// Everything else is a finish like any other: the same pipeline, the same
+    /// entry, its audio, its words and its items in history. What it does not do
+    /// is deliver — no paste, no paste events, no mark — and the shape leaves as
+    /// soon as the entry is saved rather than standing through the
+    /// transcription, because the button the user just pressed said so. A
+    /// transcription that fails after that is history's own retry, not a face
+    /// for a bubble that has gone.
+    func finishWithoutPasting() {
+        finish(pasting: false)
+    }
+
+    /// Which of the two, in the one place the decision is taken: the pipeline is
+    /// handed it at the moment it is enqueued, so a newer dictation starting
+    /// during the 300 ms tail cannot change what this one does.
+    private func finish(pasting: Bool) {
         guard state == .recording else { return }
         endingInFlight = true
         enqueueTranscription { [weak self] epoch, previous in
-            await self?.runDictationPipeline(epoch: epoch, previous: previous)
+            await self?.runDictationPipeline(epoch: epoch, previous: previous, pasting: pasting)
         }
     }
 
@@ -518,7 +541,9 @@ final class DictationCoordinator {
     /// confirmed, or Esc discarded it) still lands its text in history — and
     /// pastes it, unless deliberately cancelled — but no longer owns the
     /// state/indicator/currentEntryID.
-    private func runDictationPipeline(epoch: Int, previous: Task<Void, Never>?) async {
+    private func runDictationPipeline(
+        epoch: Int, previous: Task<Void, Never>?, pasting: Bool
+    ) async {
         // Audio tail: keep recording 300ms to capture trailing speech. The
         // sleep is a separate cancellable Task so a new Fn press can cut the
         // tail short (#104) — `startPreBuffer` finalizes the capture on this
@@ -639,7 +664,10 @@ final class DictationCoordinator {
         if isCurrentSession(epoch) {
             pending = pendingCleanupMode
             pendingCleanupMode = nil
-            state = .processing
+            // The entry is in history with its audio, so a `Stop recording` has
+            // everything it promised and the shape leaves here (#219). The rest
+            // of the pipeline runs on without it.
+            state = pasting ? .processing : .idle
         } else {
             pending = nil
         }
@@ -647,13 +675,15 @@ final class DictationCoordinator {
         // STEP 2: Transcribe — strictly after the previous pipeline finishes:
         // the shared backend must never be entered by two transcriptions (#104).
         await previous?.value
-        await transcribeEntry(&entry, samples: samples, epoch: epoch)
+        await transcribeEntry(&entry, samples: samples, epoch: epoch, showsProgress: pasting)
 
         guard entry.status == .transcribed, let rawText = entry.rawText else {
             // Transcription failed (or was cancelled by a discard) — record it;
-            // the indicator is touched only while this is the current session.
+            // the indicator is touched only while this is the current session,
+            // and a `Stop recording` has already taken the shape off the screen
+            // (#219): what failed here is history's own retry.
             history.update(entry)
-            guard isCurrentSession(epoch) else { return }
+            guard pasting, isCurrentSession(epoch) else { return }
             // The app knew this had happened and said "Done" anyway (#209, F2).
             // A model download that failed already put its own face up; anything
             // else here is a dictation that came back with nothing in it.
@@ -700,36 +730,41 @@ final class DictationCoordinator {
 
         // Paste immediately (always paste the best version) — even when a
         // newer recording session is already underway (#104): a completed
-        // dictation still lands where the cursor is.
+        // dictation still lands where the cursor is. Unless the user asked for
+        // the words to be kept and not inserted (#219), which is the whole of
+        // what `Stop recording` does differently: no delivery, and so no paste
+        // events and no mark either.
         var delivery: Task<Bool, Never>?
         if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
-            // Where the words are about to land decides the form the items take
-            // (#195): a terminal's agent opens a path, a web composer has to be
-            // handed the file. Read now — the user may have changed windows
-            // while this was being transcribed.
-            let target = PasteTarget.frontmost
-            let steps = RichInput.delivery(text: text, items: entry.items ?? [], target: target)
-            // Started here, answered below (#209, F5). A web composer is handed
-            // its steps 250–600 ms apart, and nothing in this function may wait
-            // for that: the shape leaves at STEP 4 and this outlives it.
-            delivery = deliver(steps)
-            // The pasted text is exactly what the user dictated and is already
-            // visible in the app's own history UI — only its length is recorded.
-            DiagStore.record(.dictationPasted(characters: text.count, cleaned: didCleanup))
-            if let items = entry.items, !items.isEmpty {
-                DiagStore.record(.dictationItemsPasted(
-                    items: items.count,
-                    included: items.filter(\.included).count,
-                    target: target
-                ))
-                // The folder that just grew is brought back under its ceiling
-                // (#196) — after the paste, off this actor, oldest first. What
-                // was named a moment ago is the newest thing in it.
-                if items.contains(where: { $0.kind == .image }) {
-                    let limit = RichInputSettings.keepMegabytes
-                    Task.detached(priority: .utility) {
-                        RichInputStore.pruneToCap(limitMegabytes: limit)
+            if pasting {
+                // Where the words are about to land decides the form the items take
+                // (#195): a terminal's agent opens a path, a web composer has to be
+                // handed the file. Read now — the user may have changed windows
+                // while this was being transcribed.
+                let target = PasteTarget.frontmost
+                let steps = RichInput.delivery(text: text, items: entry.items ?? [], target: target)
+                // Started here, answered below (#209, F5). A web composer is handed
+                // its steps 250–600 ms apart, and nothing in this function may wait
+                // for that: the shape leaves at STEP 4 and this outlives it.
+                delivery = deliver(steps)
+                // The pasted text is exactly what the user dictated and is already
+                // visible in the app's own history UI — only its length is recorded.
+                DiagStore.record(.dictationPasted(characters: text.count, cleaned: didCleanup))
+                if let items = entry.items, !items.isEmpty {
+                    DiagStore.record(.dictationItemsPasted(
+                        items: items.count,
+                        included: items.filter(\.included).count,
+                        target: target
+                    ))
+                    // The folder that just grew is brought back under its ceiling
+                    // (#196) — after the paste, off this actor, oldest first. What
+                    // was named a moment ago is the newest thing in it.
+                    if items.contains(where: { $0.kind == .image }) {
+                        let limit = RichInputSettings.keepMegabytes
+                        Task.detached(priority: .utility) {
+                            RichInputStore.pruneToCap(limitMegabytes: limit)
+                        }
                     }
                 }
             }
@@ -737,8 +772,10 @@ final class DictationCoordinator {
 
         history.update(entry)
 
-        // STEP 4: the indicator belongs to the newest session.
-        guard isCurrentSession(epoch) else { return }
+        // STEP 4: the indicator belongs to the newest session — and to a
+        // dictation that was going to be pasted, since a `Stop recording` took
+        // the shape off the screen when the entry was saved (#219).
+        guard pasting, isCurrentSession(epoch) else { return }
         // Whether the keystrokes could be created is the one thing this side
         // can observe — `CGEvent.post` returns no receipt — and the answer
         // arrives after the shape has already gone, which is the honest order:
@@ -916,7 +953,7 @@ final class DictationCoordinator {
         // accumulatedSamples, not AudioBus's process-global hasCapturedFrames —
         // which never resets after the first capture, so it would let the watchdog fire
         // only on the first capture after launch. The leg's own count rather than
-        // "empty" so a leg brought back up by `Continue` is watched too (#206): after a
+        // "empty" so a leg brought back up by a resume is watched too (#206): after a
         // resume the dictation already holds audio, and an emptiness test could never
         // be true again. The pause itself is not watched at all — the task is cancelled
         // with the capture, so no microphone is accused of withholding frames nobody
@@ -1168,14 +1205,20 @@ final class DictationCoordinator {
         }
     }
 
+    /// - Parameter showsProgress: whether this transcription may speak for the
+    ///   bubble — the model-download face, the `Transcribing` face, and the
+    ///   failure that replaces them. False for a `Stop recording` (#219), which
+    ///   took the shape off the screen when the entry was saved: nothing
+    ///   downstream may raise it again.
     private func transcribeEntry(
-        _ entry: inout DictationHistoryEntry, samples: [Float], epoch: Int
+        _ entry: inout DictationHistoryEntry, samples: [Float], epoch: Int,
+        showsProgress: Bool = true
     ) async {
         // Ensure the shared cache has downloaded model files (fast no-op if already cached)
         if let cache = backendCache {
             do {
                 try await cache.prepare { [weak self] _ in
-                    guard let self, self.isCurrentSession(epoch) else { return }
+                    guard showsProgress, let self, self.isCurrentSession(epoch) else { return }
                     self.state = .loadingModel
                 }
             } catch is CancellationError {
@@ -1191,7 +1234,7 @@ final class DictationCoordinator {
                 log.error("model download failed: \(error.localizedDescription, privacy: .private)")
                 entry.status = .failed
                 entry.errorMessage = DictationFace.modelDownloadFailed.sentence
-                if isCurrentSession(epoch) { lastError = .modelDownloadFailed }
+                if showsProgress, isCurrentSession(epoch) { lastError = .modelDownloadFailed }
                 history.update(entry)
                 return
             }
@@ -1211,12 +1254,12 @@ final class DictationCoordinator {
             log.error("backend prepare failed: \(error.localizedDescription, privacy: .private)")
             entry.status = .failed
             entry.errorMessage = DictationFace.modelDownloadFailed.sentence
-            if isCurrentSession(epoch) { lastError = .modelDownloadFailed }
+            if showsProgress, isCurrentSession(epoch) { lastError = .modelDownloadFailed }
             history.update(entry)
             return
         }
 
-        if isCurrentSession(epoch) { state = .processing }
+        if showsProgress, isCurrentSession(epoch) { state = .processing }
 
         // Build chunks, merging short tails into the previous chunk. Each keeps
         // the sample it starts at: a chunk's timings are its own, so placing an

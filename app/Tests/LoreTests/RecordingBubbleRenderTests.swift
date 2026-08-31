@@ -221,11 +221,43 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertGreaterThan(changed.moved, 0, "the dot is still the dot while paused")
     }
 
-    /// The board's copy table is the contract, so the two strings the paused face
-    /// adds are pinned byte for byte — em dash included.
+    /// The board's copy table is the contract, so the three strings the paused
+    /// face carries are pinned byte for byte — em dash included. The glyph's line
+    /// now says what the key does, and the button is no longer `Continue`: Esc
+    /// already resumes, and what was missing was the way out that keeps the words
+    /// without inserting them (#219).
     func testThePausedFaceCarriesTheBoardsWords() {
-        XCTAssertEqual(DictationIndicatorView.pausedHelp, "Paused \u{2014} Esc")
-        XCTAssertEqual(DictationIndicatorView.resumeHelp, "Keep recording")
+        XCTAssertEqual(DictationIndicatorView.pausedHelp, "Paused \u{2014} Esc to resume")
+        XCTAssertEqual(DictationIndicatorView.stopLabel, "Stop recording")
+        XCTAssertEqual(DictationIndicatorView.stopHelp, "Saved to history, nothing pasted")
+    }
+
+    /// Pausing changes the glyph in the slot and appends a hairline and the
+    /// button — and not a pixel else moves (#219). The dot was 8 pt of its own
+    /// where the pause glyph is 15, so everything right of it used to step
+    /// sideways; the slot is one box now, and the row from the timer onward is
+    /// the same picture.
+    ///
+    /// From the timer, not from the slot: the two glyphs differ (that is the
+    /// point) and so do the bars beside them — a live waveform against the flat
+    /// dim ones — but neither may move what follows, and the timer is what
+    /// follows.
+    func testPausingMovesNothingRightOfTheSlot() throws {
+        let live = try raster(bubble())
+        let paused = try raster(bubble(paused: true))
+        let timer = inkRuns(live, gap: 5)[3]
+        let after = compare(
+            live, paused,
+            columns: timer.lowerBound..<Int((live.paintedWidth - Self.rowPadding) * Self.scale),
+            of: live
+        )
+        print("[#219] live vs paused, from the timer on: \(after.moved) px differ over "
+              + "\(after.columns)×\(after.rows), worst delta \(after.worstDelta); the shape "
+              + "\(String(format: "%.2f", live.paintedWidth)) → "
+              + "\(String(format: "%.2f", paused.paintedWidth)) pt")
+        XCTAssertEqual(after.moved, 0, "the paused row moved what was already on screen")
+        // And the button is what the extra width is.
+        XCTAssertGreaterThan(paused.paintedWidth, live.paintedWidth, "no button was appended")
     }
 
     // MARK: - Rendering
