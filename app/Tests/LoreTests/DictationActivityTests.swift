@@ -67,6 +67,14 @@ final class DictationActivityTests: XCTestCase {
         XCTAssertEqual(DictationActivityAggregator.sample(from: entry)?.text, "cleaned only")
     }
 
+    /// Review — A11d: an empty-string `rawText` (distinct from nil `rawText`)
+    /// previously won `rawText ?? cleanedText` outright and then failed the
+    /// `!text.isEmpty` guard, discarding a perfectly good `cleanedText`.
+    func testFallsBackToCleanedTextWhenRawTextIsEmptyString() {
+        let entry = makeEntry(day: "2026-08-01", rawText: "", cleanedText: "cleaned only")
+        XCTAssertEqual(DictationActivityAggregator.sample(from: entry)?.text, "cleaned only")
+    }
+
     func testExcludesAudioSavedAndFailedStatuses() {
         let audioSaved = makeEntry(day: "2026-08-01", rawText: "x", status: .audioSaved)
         let failed = makeEntry(day: "2026-08-01", rawText: "x", status: .failed)
@@ -242,6 +250,27 @@ final class DictationActivityTests: XCTestCase {
         XCTAssertEqual(DictationActivityFormat.groupedNumber(144_929), "144,929")
     }
 
+    // MARK: - Duration formatting boundaries (review — A12a: `duration` had
+    // zero tests before this pass).
+
+    func testDurationUnderAMinuteFloorsToZeroMinutes() {
+        XCTAssertEqual(DictationActivityFormat.duration(59.9), "0 m")
+    }
+
+    func testDurationJustUnderAnHour() {
+        XCTAssertEqual(DictationActivityFormat.duration(3599), "59 m")
+    }
+
+    func testDurationExactlyOneHourZeroPadsMinutes() {
+        XCTAssertEqual(DictationActivityFormat.duration(3600), "1 h 00 m")
+    }
+
+    func testDurationMultiHourZeroPadsSingleDigitMinutes() {
+        // 7261s = 121m01s -> 2h01m; the zero-pad matters for a multi-hour
+        // total too, not only exactly-on-the-hour totals.
+        XCTAssertEqual(DictationActivityFormat.duration(7261), "2 h 01 m")
+    }
+
     func testDayLabelFormatting() {
         // Aug 29, 2026 is a Saturday.
         XCTAssertEqual(DictationActivityView.dayLabel(localDate(2026, 8, 29)), "sat, aug 29")
@@ -302,5 +331,61 @@ final class DictationActivityTests: XCTestCase {
             DictationActivityView.quadrantDurationWidth,
             DictationActivityView.measuredWidth("24 h 02 m", size: 24, weight: .bold)
         )
+    }
+
+    // MARK: - Heatmap week grid (review — A12b: `weekColumns` and
+    // `monthLabelPositions` shipped both the A1 and A3 divergences from the
+    // prototype while private and untested; made internal for this pass).
+
+    /// A `startOfDay` local date, built the same way `summary.earliestDay`
+    /// and the pane's `today` are — via `Calendar.current`, never a pinned
+    /// UTC calendar, since `weekColumns` itself uses `Calendar.current`.
+    private func localDay(_ year: Int, _ month: Int, _ day: Int) -> Date {
+        Calendar.current.startOfDay(for: Calendar.current.date(from: DateComponents(year: year, month: month, day: day))!)
+    }
+
+    func testWeekColumnsStartsOnTheMondayOnOrBeforeTheEarliestDay() {
+        let earliest = localDay(2026, 8, 5) // a Wednesday
+        let today = localDay(2026, 8, 29)
+        let weeks = DictationActivityView.weekColumns(from: earliest, through: today)
+
+        XCTAssertEqual(weeks.first?.first, localDay(2026, 8, 3)) // the Monday on/before Aug 5
+        // The first column is a full week — days before the data even
+        // starts still get a (level-0) slot, matching the GitHub-heatmap
+        // idiom of a partial-looking first column.
+        XCTAssertEqual(weeks.first?.count, 7)
+    }
+
+    func testWeekColumnsTrimsDaysAfterToday() {
+        // Review — A1: the grid must never carry (or hover-target) a day
+        // after today.
+        let earliest = localDay(2026, 8, 24) // a Monday
+        let today = localDay(2026, 8, 29) // a Saturday
+        let weeks = DictationActivityView.weekColumns(from: earliest, through: today)
+
+        let lastWeek = try! XCTUnwrap(weeks.last)
+        XCTAssertEqual(lastWeek.last, today)
+        XCTAssertFalse(lastWeek.contains(localDay(2026, 8, 30)))
+        XCTAssertEqual(lastWeek.count, 6) // Mon 24 ... Sat 29 — no Sunday 30
+    }
+
+    /// Review — A3, real-corpus shape: the grid's first week starts on the
+    /// last Monday of April, so May's first candidate week lands only one
+    /// column after April's label — too close (< 26pt) — and per the
+    /// prototype (dictation-heatmap.html:353-358) that suppression is
+    /// PERMANENT for the rest of May, because `lastMonth` updates before the
+    /// gap check: every later May week already shares May's month number and
+    /// never re-enters the check. June is far enough from April's label to
+    /// get its own tick, and July/August follow normally.
+    func testMonthLabelPositionsSkipsAPermanentlySuppressedMonth() {
+        let earliest = localDay(2026, 4, 27) // the Monday on/before May 1
+        let today = localDay(2026, 8, 29)
+        let weeks = DictationActivityView.weekColumns(from: earliest, through: today)
+
+        let labels = DictationActivityView.monthLabelPositions(weeks: weeks)
+        let months = labels.map { DictationActivityView.monthLabel($0.id) }
+
+        XCTAssertEqual(months, ["Apr", "Jun", "Jul", "Aug"]) // May never appears
+        XCTAssertEqual(labels.first?.x, 0) // Apr is week 0
     }
 }

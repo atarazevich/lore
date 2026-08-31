@@ -4,11 +4,10 @@ import Observation
 /// Sendable snapshot of one dictation's fields needed for Activity aggregation
 /// (#215) — copied out of the main-actor `DictationHistoryEntry` before
 /// hopping to a detached task, per `SettingsView.measureAudioFolder`
-/// (SettingsView.swift:669-686).
+/// (SettingsView.swift).
 struct DictationActivitySample: Sendable {
     let timestamp: Date
     let text: String
-    let durationSeconds: Double
 }
 
 /// Sendable per-entry timestamp/duration snapshot for the "every history
@@ -87,17 +86,18 @@ enum DictationActivityAggregator {
     static let tokensPerCharacter = 0.2753
 
     /// Population + text choice (#215 data rules): entries with status
-    /// transcribed/cleaned whose `rawText ?? cleanedText` is non-empty.
-    /// Never `displayText` — totals must not shift when a row's active
+    /// transcribed/cleaned whose `rawText ?? cleanedText` is non-empty. An
+    /// empty-string `rawText` (review — A11d) is treated as absent rather than
+    /// as "the text", so it falls through to `cleanedText` instead of masking
+    /// it. Never `displayText` — totals must not shift when a row's active
     /// version toggles. Feeds words/tokens only — see
     /// `DictationActivityDictationSample` for the broader "every entry is a
     /// dictation" population (#220) that feeds dictations count and time.
     static func sample(from entry: DictationHistoryEntry) -> DictationActivitySample? {
         guard entry.status == .transcribed || entry.status == .cleaned else { return nil }
-        guard let text = entry.rawText ?? entry.cleanedText, !text.isEmpty else { return nil }
-        return DictationActivitySample(
-            timestamp: entry.timestamp, text: text, durationSeconds: entry.durationSeconds
-        )
+        let rawText = entry.rawText.flatMap { $0.isEmpty ? nil : $0 }
+        guard let text = rawText ?? entry.cleanedText, !text.isEmpty else { return nil }
+        return DictationActivitySample(timestamp: entry.timestamp, text: text)
     }
 
     /// Every entry, any status — a failed dictation has no words but was
@@ -139,15 +139,25 @@ enum DictationActivityAggregator {
     ) -> DictationActivitySummary? {
         guard !dictationSamples.isEmpty else { return nil }
 
+        // Review — A8: this runs inside `Task.detached`, off the main actor,
+        // over the whole corpus (~1500 transcripts) — a superseded run (a new
+        // dictation lands mid-aggregation) used to finish the full split
+        // anyway before its result was discarded by the caller's own
+        // cancellation guard. Checking every ~100 samples bails out early
+        // without adding a cancellation check per entry.
+        let cancellationCheckStride = 100
+
         var byDay: [Date: DictationDayActivity] = [:]
-        for sample in dictationSamples {
+        for (index, sample) in dictationSamples.enumerated() {
+            if index.isMultiple(of: cancellationCheckStride), Task.isCancelled { return nil }
             let day = calendar.startOfDay(for: sample.timestamp)
             var stats = byDay[day] ?? DictationDayActivity(day: day)
             stats.seconds += sample.durationSeconds
             stats.dictations += 1
             byDay[day] = stats
         }
-        for sample in textSamples {
+        for (index, sample) in textSamples.enumerated() {
+            if index.isMultiple(of: cancellationCheckStride), Task.isCancelled { return nil }
             let day = calendar.startOfDay(for: sample.timestamp)
             var stats = byDay[day] ?? DictationDayActivity(day: day)
             stats.words += words(in: sample.text)
@@ -222,17 +232,26 @@ final class DictationActivityCache {
     private struct Key: Equatable {
         let revision: Int
         let today: Date
+        /// Review — A10: a day's `byDay` bucketing happens at aggregation
+        /// time, in the local calendar; a system time zone change desyncs
+        /// those buckets from render-time lookups (which also use
+        /// `Calendar.current`) until something else bumps `revision` or
+        /// `today`. Folding the identifier in here — not a pinned `Calendar`
+        /// in the formatters, which must keep tracking the live system
+        /// zone — makes a zone change alone a cache miss.
+        let timeZoneIdentifier: String
     }
     private var key: Key?
     private var computeTask: Task<Void, Never>?
 
-    /// Recomputes only when `(revision, today)` differs from the last call —
-    /// an unchanged key is a no-op, not a re-aggregation. The word/token
-    /// split still runs in a detached task off the main actor, the same
-    /// shape as `SettingsView.measureAudioFolder` (SettingsView.swift:669-686).
+    /// Recomputes only when `(revision, today, timeZoneIdentifier)` differs
+    /// from the last call — an unchanged key is a no-op, not a
+    /// re-aggregation. The word/token split still runs in a detached task
+    /// off the main actor, the same shape as
+    /// `SettingsView.measureAudioFolder` (SettingsView.swift).
     func ensure(entries: [DictationHistoryEntry], revision: Int) {
         let today = Calendar.current.startOfDay(for: Date())
-        let newKey = Key(revision: revision, today: today)
+        let newKey = Key(revision: revision, today: today, timeZoneIdentifier: TimeZone.current.identifier)
         guard key != newKey else { return }
         key = newKey
         computeTask?.cancel()
