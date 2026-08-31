@@ -388,4 +388,108 @@ final class DictationActivityTests: XCTestCase {
         XCTAssertEqual(months, ["Apr", "Jun", "Jul", "Aug"]) // May never appears
         XCTAssertEqual(labels.first?.x, 0) // Apr is week 0
     }
+
+    // MARK: - Tokens tooltip state (#222): pure hover/pin transitions,
+    // extracted so they're testable without driving SwiftUI hover events.
+
+    func testTooltipNotPresentedInitially() {
+        XCTAssertFalse(DictationActivityView.TokensTooltipState().isPresented)
+    }
+
+    func testTooltipPresentedWhileHoveringAlone() {
+        var state = DictationActivityView.TokensTooltipState()
+        state.isHovering = true
+        XCTAssertTrue(state.isPresented)
+    }
+
+    func testTooltipPresentedWhilePinnedAlone() {
+        var state = DictationActivityView.TokensTooltipState()
+        state.isPinned = true
+        XCTAssertTrue(state.isPresented)
+    }
+
+    /// A click while already hovering pins the tooltip; the hover ending on
+    /// the next mouse move must not un-pin it.
+    func testClickWhileHoveringPinsAndSurvivesHoverEnding() {
+        var state = DictationActivityView.TokensTooltipState()
+        state.isHovering = true
+        state.togglePinned()
+        state.isHovering = false
+        XCTAssertTrue(state.isPresented)
+    }
+
+    /// AppKit's dismissal (click-away, Esc) always calls the binding's
+    /// setter with `false` — that must clear both drivers, so a stale pin
+    /// can't silently reopen the popover on the next hover.
+    func testSetPresentedFalseClearsBothHoverAndPin() {
+        var state = DictationActivityView.TokensTooltipState()
+        state.isHovering = true
+        state.isPinned = true
+        state.setPresented(false)
+        XCTAssertFalse(state.isHovering)
+        XCTAssertFalse(state.isPinned)
+        XCTAssertFalse(state.isPresented)
+    }
+
+    /// The binding is one-directional: `.popover(isPresented:)` never calls
+    /// the setter with `true` (only SwiftUI-internal dismissal calls it, and
+    /// always with `false`), so `setPresented(true)` is defensively a no-op
+    /// rather than a way to reopen a closed tooltip out of band.
+    func testSetPresentedTrueIsANoOp() {
+        var state = DictationActivityView.TokensTooltipState()
+        state.setPresented(true)
+        XCTAssertFalse(state.isPresented)
+    }
+
+    // MARK: - Tokens hover-delay arming (review — B1): an un-pinning click
+    // while the mouse never left the tokens line must close the tooltip and
+    // keep it closed until a genuine leave + re-enter — not reopen 150ms
+    // later when the *original* hover session's delay task finally fires.
+    // Drives `TokensHoverArming` and `TokensTooltipState` directly, exactly
+    // as the view's `.onHover`/`.task(id:)`/tap-gesture glue would, without a
+    // real SwiftUI runtime or a real 150ms sleep.
+
+    func testUnpinWhileStillHoveringStaysClosedUntilPointerLeavesAndReenters() {
+        var arming = DictationActivityView.TokensHoverArming()
+        var tooltip = DictationActivityView.TokensTooltipState()
+
+        // Hover begins; the delay is allowed to fire and shows the tooltip.
+        arming.setHovering(true)
+        XCTAssertTrue(arming.shouldShowAfterDelay)
+        tooltip.isHovering = true
+
+        // A click while still hovering pins it.
+        tooltip.togglePinned()
+        XCTAssertTrue(tooltip.isPresented)
+
+        // A second click un-pins it — the mouse never left the line, so the
+        // original hover session (whose id never changed) is still "live".
+        tooltip.togglePinned()
+        XCTAssertFalse(tooltip.isPinned)
+        tooltip.isHovering = false
+        arming.disarmForClosingClick()
+
+        // The disarmed session must never show again, even though the
+        // pointer is still on the line — this is what a stale delay task
+        // would otherwise re-check 150ms after the closing click.
+        XCTAssertFalse(arming.shouldShowAfterDelay)
+        XCTAssertFalse(tooltip.isPresented)
+
+        // Leaving the line re-arms the next session...
+        arming.setHovering(false)
+        XCTAssertFalse(arming.shouldShowAfterDelay)
+
+        // ...and re-entering is a fresh session, allowed to show again.
+        arming.setHovering(true)
+        XCTAssertTrue(arming.shouldShowAfterDelay)
+    }
+
+    /// A closing click while NOT hovering (e.g. a future non-mouse pin
+    /// toggle) must not disarm a session that hasn't started yet.
+    func testDisarmForClosingClickIsANoOpWhileNotHovering() {
+        var arming = DictationActivityView.TokensHoverArming()
+        arming.disarmForClosingClick()
+        arming.setHovering(true)
+        XCTAssertTrue(arming.shouldShowAfterDelay)
+    }
 }
