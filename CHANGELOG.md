@@ -20,8 +20,9 @@ lore becomes the primary input surface for AI agents: what you say, copy, and sc
 - Releasing Fn migrates the bubble instead of conjuring a second one; the paste checkmark pops in place
 - Pause moves nothing, and the paused bubble's button is Stop recording — it saves to history and pastes nothing
 
-**Activity (#215, #220)**
+**Activity (#215, #220, #222)**
 - Stats is its own sidebar destination: a per-day heatmap of words, tokens, and time whose counts agree with history
+- The tokens estimate explains itself instantly: hover the line for the tooltip, click to pin it; the stat columns read full-height and the pane sits closer to the toolbar
 
 **Meetings step back (#221)**
 - One master switch in Settings; off on a fresh install, on for machines that already used lore
