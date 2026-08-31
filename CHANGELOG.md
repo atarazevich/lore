@@ -29,6 +29,10 @@ lore becomes the primary input surface for AI agents: what you say, copy, and sc
 - When off, meetings leave the sidebar and menu bar entirely — no detection, no prompts, no background work
 - Recordings and notes stay on this Mac; flip the switch and every past meeting returns
 
+**Only real controls (#223, #224)**
+- Send to the operator goes behind one switch — off on a fresh install; when off, K leaves the bubble and the key does nothing; dictations already marked keep their mark
+- The bubble rail shows the key you press: cleanup reads V, and S leaves — the paperclip is that control
+
 **Durability (#177, #182, #169, #168, #193 — first layer)**
 - A dictation killed mid-speech keeps its audio and offers a retry from the first buffer
 - A meeting killed mid-recording keeps its audio where the launch sweep already heals it
