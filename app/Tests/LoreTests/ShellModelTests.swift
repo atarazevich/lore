@@ -136,4 +136,12 @@ final class ShellModelTests: XCTestCase {
         shell.showMeetingsReview()
         XCTAssertFalse(shell.meetingsReviewWhileRecording)
     }
+
+    /// #220: Stats is its own sidebar entry (formerly the Activity half of
+    /// DictationView's History/Activity switch) with the statistics glyph.
+    func testStatsIsAnEnabledDestinationWithTheStatsGlyph() {
+        XCTAssertTrue(ShellModel.enabledDestinations.contains(.stats))
+        XCTAssertEqual(ShellDestination.stats.icon, "chart.bar.xaxis")
+        XCTAssertEqual(ShellDestination.stats.title, "Stats")
+    }
 }

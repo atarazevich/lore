@@ -75,6 +75,27 @@ struct MeetingsDestination: View {
     }
 }
 
+/// Stats destination (#220): the Dictation Activity pane, promoted out of
+/// `DictationView`'s History/Activity switch into its own sidebar entry. Owns
+/// the aggregation cache — the same `@State`-held-one-level-up shape
+/// `DictationView` used. This destination stays mounted for the shell's whole
+/// lifetime, like every other one (SHELL-16: `ShellView.content` keeps all
+/// destinations in the tree and only toggles `shellKeepAlive`'s
+/// opacity/hit-testing); the cache still lives here, one level above
+/// `DictationActivityView`, because it is what gates re-aggregation on
+/// `isActiveInShell` — not because the view underneath it is ever torn down.
+struct StatsDestination: View {
+    @Environment(DictationCoordinator.self) private var dictation
+    let isActive: Bool
+    @State private var activityCache = DictationActivityCache()
+
+    var body: some View {
+        DictationActivityView(
+            history: dictation.history, cache: activityCache, isActiveInShell: isActive
+        )
+    }
+}
+
 /// Settings destination — the unified Lore settings screen (Stage D). The old
 /// Cmd+, Settings scene is gone; this is the only Settings surface (SET-06).
 struct SettingsDestination: View {

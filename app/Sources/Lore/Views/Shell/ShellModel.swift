@@ -8,6 +8,7 @@ import Observation
 enum ShellDestination: String, CaseIterable, Identifiable {
     case dictation
     case meetings
+    case stats
     case tasks
     case library
     case settings
@@ -17,11 +18,14 @@ enum ShellDestination: String, CaseIterable, Identifiable {
     /// Toolbar / nav title (SHELL-13).
     var title: String { rawValue.capitalized }
 
-    /// SF Symbol per handoff README §SF Symbols map (SHELL-09).
+    /// SF Symbol per handoff README §SF Symbols map (SHELL-09). `stats`
+    /// (#220) reads as statistics at sidebar size — the Dictation Activity
+    /// pane's own empty-state icon, promoted with it.
     var icon: String {
         switch self {
         case .dictation: return "waveform"
         case .meetings: return "video"
+        case .stats: return "chart.bar.xaxis"
         case .tasks: return "checkmark.circle"
         case .library: return "text.book.closed"
         case .settings: return "slider.horizontal.3"
@@ -59,8 +63,10 @@ enum SettingsSection: String, CaseIterable, Identifiable, Hashable {
 @Observable
 @MainActor
 final class ShellModel {
-    /// Destinations rendered in Stage 1; Tasks/Library join in Stage 2.
-    static let enabledDestinations: [ShellDestination] = [.dictation, .meetings, .settings]
+    /// Destinations rendered in Stage 1; Tasks/Library join in Stage 2. Stats
+    /// (#220) is the former Dictation Activity pane, promoted to its own
+    /// entry.
+    static let enabledDestinations: [ShellDestination] = [.dictation, .meetings, .stats, .settings]
 
     var destination: ShellDestination = .dictation
 

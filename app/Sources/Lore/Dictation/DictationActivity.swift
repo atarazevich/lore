@@ -11,6 +11,19 @@ struct DictationActivitySample: Sendable {
     let durationSeconds: Double
 }
 
+/// Sendable per-entry timestamp/duration snapshot for the "every history
+/// entry is a dictation" population (#220): dictations count and dictation
+/// time count ALL entries regardless of status or text, so the Stats pane's
+/// "dictations" total agrees with the history strip's "N entries" by
+/// construction. Kept separate from `DictationActivitySample` (which stays
+/// text-bearing-only, for words/tokens) rather than making `text` optional on
+/// one shared struct — the two populations answer different questions and the
+/// existing `sample(from:)` filtering contract stays exactly as documented.
+struct DictationActivityDictationSample: Sendable {
+    let timestamp: Date
+    let durationSeconds: Double
+}
+
 /// One calendar day's rolled-up activity.
 struct DictationDayActivity: Sendable {
     let day: Date
@@ -43,7 +56,13 @@ struct DictationActivitySummary: Sendable {
     let peak: DictationDayActivity?
     let levelThresholds: DictationActivityLevelThresholds
 
-    var activeDays: Int { byDay.count }
+    /// A day with only failed/audio-only entries (0 words) is in `byDay` — it
+    /// has a dictation count — but renders as an uncolored level-0 heatmap
+    /// cell (`level(forWordsOn:)` guards on `words > 0`). Counting `byDay`
+    /// itself here would put a bigger number on screen than the colored
+    /// cells the user can actually count, so "active day" means a day with
+    /// words, matching level ≥ 1 by construction (review — A1, follows #220).
+    var activeDays: Int { byDay.values.filter { $0.words > 0 }.count }
 
     /// 0...4 — matches `docs/design/prototypes/dictation-heatmap.html` v4's
     /// `levelFor`. 0 for a day with no dictation or with `words <= 0`.
@@ -70,13 +89,21 @@ enum DictationActivityAggregator {
     /// Population + text choice (#215 data rules): entries with status
     /// transcribed/cleaned whose `rawText ?? cleanedText` is non-empty.
     /// Never `displayText` — totals must not shift when a row's active
-    /// version toggles.
+    /// version toggles. Feeds words/tokens only — see
+    /// `DictationActivityDictationSample` for the broader "every entry is a
+    /// dictation" population (#220) that feeds dictations count and time.
     static func sample(from entry: DictationHistoryEntry) -> DictationActivitySample? {
         guard entry.status == .transcribed || entry.status == .cleaned else { return nil }
         guard let text = entry.rawText ?? entry.cleanedText, !text.isEmpty else { return nil }
         return DictationActivitySample(
             timestamp: entry.timestamp, text: text, durationSeconds: entry.durationSeconds
         )
+    }
+
+    /// Every entry, any status — a failed dictation has no words but was
+    /// still a dictation and still took time (#220).
+    static func dictationSample(from entry: DictationHistoryEntry) -> DictationActivityDictationSample {
+        DictationActivityDictationSample(timestamp: entry.timestamp, durationSeconds: entry.durationSeconds)
     }
 
     /// Whitespace-split count (matches `ContentView.talkSplit`, ContentView.swift:415).
@@ -92,22 +119,39 @@ enum DictationActivityAggregator {
     static func summarize(
         entries: [DictationHistoryEntry], calendar: Calendar = .current
     ) -> DictationActivitySummary? {
-        summarize(samples: entries.compactMap(sample(from:)), calendar: calendar)
+        summarize(
+            dictationSamples: entries.map(dictationSample(from:)),
+            textSamples: entries.compactMap(sample(from:)),
+            calendar: calendar
+        )
     }
 
+    /// `dictationSamples` (#220, ALL entries) drives dictations count and
+    /// dictation time; `textSamples` (subset, text-bearing only) adds
+    /// words/tokens on top of the same per-day buckets. Emptiness is judged
+    /// on `dictationSamples` — the history-entries population — so "no
+    /// dictation activity yet" means no entries at all, not merely none with
+    /// text (a failed dictation still shows up with 0 words).
     static func summarize(
-        samples: [DictationActivitySample], calendar: Calendar = .current
+        dictationSamples: [DictationActivityDictationSample],
+        textSamples: [DictationActivitySample],
+        calendar: Calendar = .current
     ) -> DictationActivitySummary? {
-        guard !samples.isEmpty else { return nil }
+        guard !dictationSamples.isEmpty else { return nil }
 
         var byDay: [Date: DictationDayActivity] = [:]
-        for sample in samples {
+        for sample in dictationSamples {
+            let day = calendar.startOfDay(for: sample.timestamp)
+            var stats = byDay[day] ?? DictationDayActivity(day: day)
+            stats.seconds += sample.durationSeconds
+            stats.dictations += 1
+            byDay[day] = stats
+        }
+        for sample in textSamples {
             let day = calendar.startOfDay(for: sample.timestamp)
             var stats = byDay[day] ?? DictationDayActivity(day: day)
             stats.words += words(in: sample.text)
             stats.tokens += tokens(in: sample.text)
-            stats.seconds += sample.durationSeconds
-            stats.dictations += 1
             byDay[day] = stats
         }
 
@@ -157,16 +201,19 @@ enum DictationActivityAggregator {
     }
 }
 
-/// Memoized aggregation cache for the Activity pane (#215 review — F4): held
-/// in `DictationView`'s persistent `@State`, the `HistoryProjectionCache`
-/// pattern (DictationView.swift). `DictationActivityView` itself is only
-/// mounted while the History/Activity switch is on Activity, so a `@State`
-/// living on that view cannot survive a round trip back to History and
-/// forces the ~1500-transcript aggregation to redo itself on every revisit;
-/// this box, held one level up, survives that round trip. `@Observable` so
-/// `DictationActivityView` picks up `summary` when the detached task
-/// finishes, the same way it already reads `DictationHistory` — a plain
-/// stored property, no `@Bindable`/`@ObservedObject` wrapper needed.
+/// Memoized aggregation cache for the Activity pane (#215 review — F4; owner
+/// updated #220). Held in `StatsDestination`'s persistent `@State`
+/// (ShellDestinations.swift), the `HistoryProjectionCache` pattern
+/// (DictationView.swift). The Stats destination — like every shell
+/// destination — stays permanently mounted behind `shellKeepAlive` (SHELL-16:
+/// hidden via opacity/hit-testing, never torn down), so this box only exists
+/// to gate *aggregation*, not survival: `DictationActivityView.body` reads
+/// `isActiveInShell` and skips `ensure(...)` while another destination is
+/// showing, so switching away from Stats does not keep re-running the
+/// ~1500-transcript aggregation on every background revision bump.
+/// `@Observable` so `DictationActivityView` picks up `summary` when the
+/// detached task finishes, the same way it already reads `DictationHistory` —
+/// a plain stored property, no `@Bindable`/`@ObservedObject` wrapper needed.
 @MainActor
 @Observable
 final class DictationActivityCache {
@@ -189,10 +236,13 @@ final class DictationActivityCache {
         guard key != newKey else { return }
         key = newKey
         computeTask?.cancel()
-        let samples = entries.compactMap(DictationActivityAggregator.sample(from:))
+        let dictationSamples = entries.map(DictationActivityAggregator.dictationSample(from:))
+        let textSamples = entries.compactMap(DictationActivityAggregator.sample(from:))
         computeTask = Task { [weak self] in
             let result = await Task.detached(priority: .utility) {
-                DictationActivityAggregator.summarize(samples: samples)
+                DictationActivityAggregator.summarize(
+                    dictationSamples: dictationSamples, textSamples: textSamples
+                )
             }.value
             guard !Task.isCancelled else { return }
             self?.summary = result

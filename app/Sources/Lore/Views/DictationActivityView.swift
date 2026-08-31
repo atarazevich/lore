@@ -1,24 +1,24 @@
+import AppKit
 import SwiftUI
 
 /// Dictation Activity pane (#215): a whole-history roll-up — a giant words
 /// total, a 2×2 quadrant of secondary stats, and a per-day heatmap with
-/// hover projection. Reached via the History/Activity switch in
-/// `DictationView`. Design authority:
-/// `docs/design/prototypes/dictation-heatmap.html` v4 (the approved canvas,
-/// "D" layout, in the lore app skin) — matched pixel-for-pixel per
-/// `.claude/rules/ui-design-first.md`.
+/// hover projection. Reached via the standalone Stats sidebar destination
+/// (#220, moved out of DictationView's History/Activity switch). Design
+/// authority: `docs/design/prototypes/dictation-heatmap.html` v4 (the
+/// approved canvas, "D" layout, in the lore app skin) — matched
+/// pixel-for-pixel per `.claude/rules/ui-design-first.md`.
 struct DictationActivityView: View {
     let history: DictationHistory
-    /// Memoization box held in `DictationView`'s persistent `@State` (#215
-    /// review — F4): survives this view being torn down and rebuilt on every
-    /// History/Activity round trip, so an unchanged `(revision, today)` key
-    /// does not re-aggregate.
+    /// Memoization box held in `StatsDestination`'s persistent `@State` (#215
+    /// review — F4, owner updated #220): an unchanged `(revision, today,
+    /// isActive)` key does not re-aggregate.
     let cache: DictationActivityCache
-    /// Gates aggregation the same way `DictationView` gates its search key
-    /// monitor (DictationView.swift:128-139): while the shell shows another
-    /// destination, or Activity has never been opened (this view is then
-    /// simply not in the tree, since `DictationView` only builds it when the
-    /// switch is on Activity), no aggregation runs.
+    /// Gates aggregation: this destination stays mounted for the shell's
+    /// whole lifetime (SHELL-16), so `isActiveInShell` — not this view's
+    /// presence in the tree — is what stops the ~1500-transcript aggregation
+    /// from re-running on a background revision bump while another
+    /// destination is showing.
     var isActiveInShell: Bool
 
     @State private var hoveredDay: Date?
@@ -60,7 +60,7 @@ struct DictationActivityView: View {
             Image(systemName: "chart.bar.xaxis")
                 .font(.system(size: 28))
                 .foregroundStyle(LoreTheme.TextColor.faint)
-            Text("No dictation activity yet")
+            Text("No dictation stats yet")
                 .font(LoreTheme.Typography.body)
                 .foregroundStyle(LoreTheme.TextColor.muted)
             Spacer()
@@ -125,11 +125,15 @@ struct DictationActivityView: View {
         // row on its own natural width; only the primary cell is unconstrained
         // (sized to content), the secondary quadrant fills the remainder.
         return HStack(alignment: .top, spacing: 0) {
-            // Primary cell: giant words + tokens companion line.
+            // Primary cell: giant words + tokens companion line. The number's
+            // width is reserved for "1,000,000" (#220) rather than sized to
+            // its own content — hovering a quiet day used to shrink this
+            // number to one glyph and reflow the whole strip.
             VStack(alignment: .leading, spacing: 0) {
-                Text(Self.groupedNumber(words))
+                Text(DictationActivityFormat.groupedNumber(words))
                     .font(LoreTheme.Typography.mono(58, weight: .bold))
                     .tracking(-1)
+                    .frame(width: Self.wordsColumnWidth, alignment: .leading)
                     .foregroundStyle(Color.white.opacity(0.92))
                 Text("words")
                     .font(.system(size: 10))
@@ -137,7 +141,7 @@ struct DictationActivityView: View {
                     .foregroundStyle(Color.white.opacity(0.45))
                     .padding(.top, 10)
                 HStack(spacing: 6) {
-                    Text(Self.groupedNumber(tokens))
+                    Text(DictationActivityFormat.groupedNumber(tokens))
                         .font(LoreTheme.Typography.mono(13, weight: .semibold))
                         .foregroundStyle(LoreTheme.Accent.blue)
                     Text("tokens")
@@ -157,22 +161,33 @@ struct DictationActivityView: View {
             hairline(LoreTheme.Surface.line2, vertical: true)
 
             // 2×2 secondary quadrant: time/dictations, active days/peak.
+            // Every value gets a reserved width (#220) so the cell frames
+            // never renegotiate on hover — "24 h 02 m" ↔ "37 m" swaps text
+            // only.
             VStack(spacing: 0) {
                 HStack(spacing: 0) {
-                    quadrantCell(value: DictationActivityFormat.duration(seconds), label: "dictation time")
+                    quadrantCell(
+                        value: DictationActivityFormat.duration(seconds), label: "dictation time",
+                        valueWidth: Self.quadrantDurationWidth
+                    )
                     hairline(LoreTheme.Surface.line2, vertical: true)
-                    quadrantCell(value: Self.groupedNumber(dictations), label: "dictations")
+                    quadrantCell(
+                        value: DictationActivityFormat.groupedNumber(dictations), label: "dictations",
+                        valueWidth: Self.quadrantNumberWidth
+                    )
                 }
                 hairline(LoreTheme.Surface.line2)
                 HStack(spacing: 0) {
                     quadrantCell(
-                        value: Self.groupedNumber(summary.activeDays), label: "active days"
+                        value: DictationActivityFormat.groupedNumber(summary.activeDays), label: "active days",
+                        valueWidth: Self.quadrantNumberWidth
                     )
                     .opacity(dimmed ? 0.4 : 1)
                     hairline(LoreTheme.Surface.line2, vertical: true)
                     quadrantCell(
-                        value: Self.groupedNumber(summary.peak?.words ?? 0),
-                        label: "peak" + peakDateSuffix(summary: summary)
+                        value: DictationActivityFormat.groupedNumber(summary.peak?.words ?? 0),
+                        label: "peak" + peakDateSuffix(summary: summary),
+                        valueWidth: Self.quadrantNumberWidth
                     )
                     .opacity(dimmed ? 0.4 : 1)
                 }
@@ -186,12 +201,12 @@ struct DictationActivityView: View {
         return " · " + Self.monthDayLabel(peak.day)
     }
 
-    private func quadrantCell(value: String, label: String) -> some View {
+    private func quadrantCell(value: String, label: String, valueWidth: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(value)
                 .font(LoreTheme.Typography.mono(24, weight: .bold))
                 .foregroundStyle(Color.white.opacity(0.9))
-                .fixedSize()
+                .frame(width: valueWidth, alignment: .leading)
             Text(label)
                 .font(.system(size: 9))
                 .tracking(1.26)
@@ -339,7 +354,7 @@ struct DictationActivityView: View {
                     .fill(Self.levelColor(level))
                     .frame(width: Self.cellSize, height: Self.cellSize)
             }
-            Text("\(Self.groupedNumber(summary.peak?.words ?? 0)) words")
+            Text("\(DictationActivityFormat.groupedNumber(summary.peak?.words ?? 0)) words")
         }
         .font(.system(size: 10))
         .tracking(0.8)
@@ -364,41 +379,75 @@ struct DictationActivityView: View {
     }
 
     // MARK: - Formatting
-    // `.formatted(...)` pinned to `en_US` (#215 review — F8, replaces four
-    // `DateFormatter` statics + a `NumberFormatter` wrapper): the design's
-    // English copy ("aug 29", "144,929") must not drift with the system
-    // locale. `internal` (not `private`) so `DictationActivityTests` can
-    // assert the exact rendered strings.
-
-    static let locale = Locale(identifier: "en_US")
-
-    static func groupedNumber(_ value: Int) -> String {
-        value.formatted(.number.locale(locale))
-    }
+    // Display formatters live on `DictationActivityFormat` (below) —
+    // `groupedNumber`/`locale` moved there in the review pass so
+    // `DictationView.statusStrip`'s history-count strip and this pane both
+    // call the one shared enum instead of reaching into this view (review —
+    // A6). Date-shaped formatters stay here since only this pane uses them.
 
     /// Hovered-day label, e.g. "sat, aug 29" (`.period-row` while projecting).
     static func dayLabel(_ date: Date) -> String {
-        date.formatted(Date.FormatStyle(locale: locale).weekday(.abbreviated).month(.abbreviated).day())
-            .lowercased()
+        date.formatted(
+            Date.FormatStyle(locale: DictationActivityFormat.locale)
+                .weekday(.abbreviated).month(.abbreviated).day()
+        ).lowercased()
     }
 
     /// "since aug 29, 2026" period label.
     static func monthDayYearLabel(_ date: Date) -> String {
-        date.formatted(Date.FormatStyle(locale: locale).month(.abbreviated).day().year())
+        date.formatted(Date.FormatStyle(locale: DictationActivityFormat.locale).month(.abbreviated).day().year())
             .lowercased()
     }
 
     /// "peak · aug 29" suffix.
     static func monthDayLabel(_ date: Date) -> String {
-        date.formatted(Date.FormatStyle(locale: locale).month(.abbreviated).day())
+        date.formatted(Date.FormatStyle(locale: DictationActivityFormat.locale).month(.abbreviated).day())
             .lowercased()
     }
 
     /// Heatmap month tick — stays title-case, matching the prototype's axis
     /// labels ("May", "Jun"), unlike the lowercase house style used elsewhere.
     static func monthLabel(_ date: Date) -> String {
-        date.formatted(Date.FormatStyle(locale: locale).month(.abbreviated))
+        date.formatted(Date.FormatStyle(locale: DictationActivityFormat.locale).month(.abbreviated))
     }
+
+    // MARK: - Reserved column widths (#220)
+    // A day's hover projection swaps every one of these strings for a
+    // shorter/longer one ("146,902" -> "0", "24 h 02 m" -> "37 m"); without a
+    // reserved width the giant numeral's `.fixedSize` content width dragged
+    // the whole strip's layout along with it. Widths are measured in each
+    // value's own font via AppKit (`NSString.size(withAttributes:)`) rather
+    // than a hand-picked point value, so a font-size change here keeps the
+    // reservation honest automatically. `LoreTheme.Typography.mono` is
+    // `.system(design: .monospaced)`, whose AppKit equivalent is
+    // `NSFont.monospacedSystemFont`. `internal` (not `private`, review —
+    // A5) so `DictationActivityTests` measures with this exact function
+    // instead of keeping a token-identical copy of it that could drift.
+
+    static func measuredWidth(_ text: String, size: CGFloat, weight: NSFont.Weight, tracking: CGFloat = 0) -> CGFloat {
+        let font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
+        var attributes: [NSAttributedString.Key: Any] = [.font: font]
+        if tracking != 0 { attributes[.kern] = tracking }
+        return (text as NSString).size(withAttributes: attributes).width
+    }
+
+    /// Giant primary words numeral (58pt bold, `.tracking(-1)`): reserved for
+    /// "1,000,000", the owner's own words for the width — the whole strip's
+    /// width used to track this number's content. Measured with the same -1
+    /// tracking the numeral renders with (review — A4) — the untracked
+    /// measurement under-reserved the column, since `.tracking(-1)` makes the
+    /// real numeral narrower than a plain AppKit measurement of the digits.
+    static let wordsColumnWidth: CGFloat = measuredWidth("1,000,000", size: 58, weight: .bold, tracking: -1)
+
+    /// Quadrant cell values that are plain counts (dictations, active days,
+    /// peak words) share the same "1,000,000" reservation at the quadrant's
+    /// 24pt bold font. No tracking modifier on these Text views, so none here.
+    static let quadrantNumberWidth: CGFloat = measuredWidth("1,000,000", size: 24, weight: .bold)
+
+    /// "dictation time" is a compound "H h MM m" / "M m" string, not a plain
+    /// count — "999 h 59 m" (~41 days of continuous dictation) is far past any
+    /// real total and reserves the widest realistic shape at the same font.
+    static let quadrantDurationWidth: CGFloat = measuredWidth("999 h 59 m", size: 24, weight: .bold)
 
     /// Monday-through-Sunday week columns spanning the Monday on/before
     /// `earliestDay` through `today` inclusive — the heatmap's span, derived
@@ -428,9 +477,23 @@ struct DictationActivityView: View {
     }
 }
 
-/// Floor-based duration formatting shared by the Activity pane's giant/side
-/// stats: "N m" under an hour, else "H h MM m" (minutes zero-padded).
+/// Formatting shared between the Activity pane and `DictationView`'s history
+/// strip (review — A6: `groupedNumber`/`locale` moved here from
+/// `DictationActivityView` so both call sites reach the same enum instead of
+/// one reaching into the other's view type).
 enum DictationActivityFormat {
+    /// `.formatted(...)` pinned to `en_US` (#215 review — F8, replaces four
+    /// `DateFormatter` statics + a `NumberFormatter` wrapper): the design's
+    /// English copy ("144,929") must not drift with the system locale.
+    static let locale = Locale(identifier: "en_US")
+
+    static func groupedNumber(_ value: Int) -> String {
+        value.formatted(.number.locale(locale))
+    }
+
+    /// Floor-based duration formatting shared by the Activity pane's
+    /// giant/side stats: "N m" under an hour, else "H h MM m" (minutes
+    /// zero-padded).
     static func duration(_ totalSeconds: Double) -> String {
         let totalMinutes = Int(totalSeconds / 60) // truncates toward zero == floor for non-negative input
         let hours = totalMinutes / 60

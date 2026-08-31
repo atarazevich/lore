@@ -134,6 +134,9 @@ struct ShellView: View {
             MeetingsDestination(settings: settings)
                 .shellKeepAlive(isActive: shell.destination == .meetings)
 
+            StatsDestination(isActive: shell.destination == .stats)
+                .shellKeepAlive(isActive: shell.destination == .stats)
+
             SettingsDestination(
                 settings: settings,
                 updater: updater,

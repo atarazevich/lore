@@ -94,14 +94,6 @@ private enum RowPopover: Equatable {
     case translate(UUID)
 }
 
-/// The two views of the Dictation destination (#215), reached by a
-/// header-level switch — same idiom as the meetings Live/Review switch
-/// (`MeetingsDestination.liveReviewSwitch`, ShellDestinations.swift).
-private enum DictationSubview {
-    case history
-    case activity
-}
-
 struct DictationView: View {
     @Bindable var settings: AppSettings
     /// False while the unified shell shows another destination. Gates the
@@ -123,17 +115,10 @@ struct DictationView: View {
     @FocusState private var isEditorFocused: Bool
     @State private var activePopover: RowPopover?
     @State private var projectionCache = HistoryProjectionCache()
-    @State private var subview: DictationSubview = .history
-    /// Activity pane's memoized aggregation (#215 review — F4): held here,
-    /// not on `DictationActivityView`, so it survives that view being torn
-    /// down and rebuilt on every History/Activity round trip.
-    @State private var activityCache = DictationActivityCache()
 
     var body: some View {
         VStack(spacing: 0) {
             statusStrip
-            LoreDivider()
-            historyActivitySwitch
             LoreDivider()
             historyTab
         }
@@ -229,10 +214,14 @@ struct DictationView: View {
 
             if !dictation.history.entries.isEmpty {
                 // Honest counter (#51): total when idle (the cap is gone),
-                // "N of M" matches while searching.
+                // "N of M" matches while searching. Comma-grouped (#220) —
+                // pinned to the same `en_US` grouping the Stats pane uses
+                // (`DictationActivityFormat.groupedNumber`, review — A6), so
+                // this strip and that pane never disagree on how a count reads.
                 Text(searchText.isEmpty
-                    ? "\(dictation.history.entries.count) entries"
-                    : "\(historyProjection.filtered.count) of \(dictation.history.entries.count)")
+                    ? "\(DictationActivityFormat.groupedNumber(dictation.history.entries.count)) entries"
+                    : "\(DictationActivityFormat.groupedNumber(historyProjection.filtered.count)) of "
+                        + "\(DictationActivityFormat.groupedNumber(dictation.history.entries.count))")
                     .font(LoreTheme.Typography.mono(11.5))
                     .foregroundStyle(LoreTheme.TextColor.muted)
             }
@@ -250,33 +239,12 @@ struct DictationView: View {
         )
     }
 
-    // MARK: - History/Activity switch (#215, header-level — same idiom as
-    // MeetingsDestination.liveReviewSwitch, ShellDestinations.swift)
-
-    private var historyActivitySwitch: some View {
-        LoreSegmentedSwitch(
-            isLeftSelected: subview == .history,
-            selectLeft: { subview = .history },
-            selectRight: { subview = .activity }
-        ) {
-            Text("History")
-        } rightLabel: {
-            Text("Activity")
-        }
-    }
-
     // MARK: - History (settings moved to the unified Settings destination in
-    // Stage D) / Activity (#215)
+    // Stage D; Activity moved to the standalone Stats destination, #220)
 
     private var historyTab: some View {
         VStack(spacing: 0) {
-            if subview == .activity {
-                DictationActivityView(
-                    history: dictation.history, cache: activityCache, isActiveInShell: isActiveInShell
-                )
-            } else {
-                historyList
-            }
+            historyList
             LoreDivider()
             hotkeyCheatSheet
         }

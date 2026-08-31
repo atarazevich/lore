@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 import XCTest
 @testable import LoreKit
@@ -119,11 +120,49 @@ final class DictationActivityTests: XCTestCase {
         XCTAssertNil(DictationActivityAggregator.summarize(entries: [], calendar: utc))
     }
 
-    /// Zero entries survive the population filter (all audio-only/failed) —
-    /// must render the same quiet empty state as truly empty history.
-    func testHistoryWithNoQualifyingEntriesReturnsNilSummary() {
-        let entries = [makeEntry(day: "2026-08-01", rawText: "x", status: .failed)]
-        XCTAssertNil(DictationActivityAggregator.summarize(entries: entries, calendar: utc))
+    /// #220: a non-text-bearing entry (failed, or audio-only) is still a
+    /// dictation and still took time — it is NOT dropped from the summary the
+    /// way it is dropped from the words/tokens population. Only a truly empty
+    /// history (no entries at all) returns nil.
+    func testNonTextEntryStillCountsAsADictation() {
+        let entries = [makeEntry(day: "2026-08-01", rawText: "x", status: .failed, durationSeconds: 7)]
+        let summary = DictationActivityAggregator.summarize(entries: entries, calendar: utc)
+
+        XCTAssertNotNil(summary)
+        XCTAssertEqual(summary?.totalDictations, 1)
+        XCTAssertEqual(summary?.totalWords, 0)
+        XCTAssertEqual(summary?.totalSeconds, 7)
+    }
+
+    /// The Stats pane's "dictations" total must equal the history strip's
+    /// "N entries" by construction — same source array, same count — even
+    /// with a mix of statuses (some text-bearing, some not). This is the
+    /// #220 assertion that closes the 1,489-vs-1,573 discrepancy.
+    func testTotalDictationsEqualsHistoryEntryCount() {
+        let entries = [
+            makeEntry(day: "2026-08-01", rawText: "one two", status: .transcribed),
+            makeEntry(day: "2026-08-01", rawText: nil, status: .failed),
+            makeEntry(day: "2026-08-02", rawText: "x", status: .audioSaved),
+            makeEntry(day: "2026-08-03", cleanedText: "three", status: .cleaned),
+        ]
+        let summary = DictationActivityAggregator.summarize(entries: entries, calendar: utc)
+
+        XCTAssertEqual(summary?.totalDictations, entries.count)
+    }
+
+    /// Time counts ALL entries' durations, including ones with no text; words
+    /// keep counting only the text-bearing entries — the two populations stay
+    /// distinct even as dictations/time broaden (#220).
+    func testTimeIncludesAllEntriesWordsStayTextOnly() {
+        let entries = [
+            makeEntry(day: "2026-08-01", rawText: "one two", status: .transcribed, durationSeconds: 5),
+            makeEntry(day: "2026-08-01", rawText: "x", status: .audioSaved, durationSeconds: 9),
+        ]
+        let summary = DictationActivityAggregator.summarize(entries: entries, calendar: utc)
+
+        XCTAssertEqual(summary?.totalSeconds, 14)
+        XCTAssertEqual(summary?.totalWords, 2) // only the transcribed entry's text
+        XCTAssertEqual(summary?.totalDictations, 2)
     }
 
     func testSingleDayHistory() {
@@ -138,6 +177,23 @@ final class DictationActivityTests: XCTestCase {
         // One non-zero day collapses all three quantiles to its own value, so
         // it always lands in level 1 (value <= q25) — never crashes, never 0.
         XCTAssertEqual(summary?.level(forWordsOn: utc.startOfDay(for: dateFor("2026-08-01"))), 1)
+    }
+
+    /// Review — A1: a day with only a failed entry is in `byDay` (it has a
+    /// dictation and took time) but is an uncolored level-0 heatmap cell
+    /// (0 words) — it must not inflate "active days" past the number of
+    /// colored cells on screen.
+    func testActiveDaysCountsOnlyDaysWithWords() {
+        let entries = [
+            makeEntry(day: "2026-08-01", rawText: "one two three"),
+            makeEntry(day: "2026-08-02", rawText: nil, status: .failed, durationSeconds: 4),
+        ]
+        let summary = DictationActivityAggregator.summarize(entries: entries, calendar: utc)!
+
+        XCTAssertEqual(summary.byDay.count, 2)
+        XCTAssertEqual(summary.activeDays, 1)
+        let coloredCells = summary.byDay.keys.filter { summary.level(forWordsOn: $0) >= 1 }.count
+        XCTAssertEqual(summary.activeDays, coloredCells)
     }
 
     // MARK: - Quantile levels
@@ -183,7 +239,7 @@ final class DictationActivityTests: XCTestCase {
     // survives a different system locale).
 
     func testGroupedNumberFormatting() {
-        XCTAssertEqual(DictationActivityView.groupedNumber(144_929), "144,929")
+        XCTAssertEqual(DictationActivityFormat.groupedNumber(144_929), "144,929")
     }
 
     func testDayLabelFormatting() {
@@ -203,5 +259,48 @@ final class DictationActivityTests: XCTestCase {
     /// labels — the one place this pane doesn't lowercase.
     func testMonthLabelStaysTitleCase() {
         XCTAssertEqual(DictationActivityView.monthLabel(localDate(2026, 8, 29)), "Aug")
+    }
+
+    // MARK: - Reserved column widths (#220): "measure the string, not a magic
+    // number" — each width must equal a fresh AppKit measurement of
+    // "1,000,000" (or the widest duration shape) in the exact font the pane
+    // renders with, not a hand-picked point value that could silently drift
+    // from the font. Calls `DictationActivityView.measuredWidth` directly
+    // (review — A5) instead of keeping a token-identical private copy of it
+    // here, which could drift from the production formula unnoticed.
+
+    /// One assertion per reserved width, looped rather than three
+    /// near-identical test methods (review — A5): each row is the exact
+    /// `(constant, template, size, weight, tracking)` the production value
+    /// was built from.
+    func testReservedWidthsAreMeasuredExactly() {
+        let cases: [(name: String, actual: CGFloat, text: String, size: CGFloat, weight: NSFont.Weight, tracking: CGFloat)] = [
+            ("wordsColumnWidth", DictationActivityView.wordsColumnWidth, "1,000,000", 58, .bold, -1),
+            ("quadrantNumberWidth", DictationActivityView.quadrantNumberWidth, "1,000,000", 24, .bold, 0),
+            ("quadrantDurationWidth", DictationActivityView.quadrantDurationWidth, "999 h 59 m", 24, .bold, 0),
+        ]
+        for testCase in cases {
+            XCTAssertEqual(
+                testCase.actual,
+                DictationActivityView.measuredWidth(
+                    testCase.text, size: testCase.size, weight: testCase.weight, tracking: testCase.tracking
+                ),
+                accuracy: 0.01,
+                testCase.name
+            )
+        }
+    }
+
+    /// The reservation must actually be wide enough for real content —
+    /// otherwise "measured" just moves the magic number one level down.
+    func testReservedWidthsFitRealisticValues() {
+        XCTAssertGreaterThanOrEqual(
+            DictationActivityView.wordsColumnWidth,
+            DictationActivityView.measuredWidth("146,902", size: 58, weight: .bold)
+        )
+        XCTAssertGreaterThanOrEqual(
+            DictationActivityView.quadrantDurationWidth,
+            DictationActivityView.measuredWidth("24 h 02 m", size: 24, weight: .bold)
+        )
     }
 }
