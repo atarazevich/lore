@@ -680,20 +680,45 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertEqual(label, timer, accuracy: 1, "the label and the timer sit on two lines")
     }
 
-    /// The same for the recording row, where the label and the timer are the two
-    /// faces of one slot: a live dictation shows `1:13`, one with a dead mic
-    /// shows the sentence in its place. Both stand on the row's own baseline.
-    func testTheRecordingRowsLabelAndTimerShareABaseline() throws {
+    // MARK: - The arrival says nothing (#216)
+
+    /// A dictation that has not heard anything yet says so with the dot and the
+    /// bars, never with a sentence. The row swapped the timer for "No signal
+    /// from microphone" on every start and slid it back the moment a sound
+    /// arrived; now the timer never leaves its place, the row is the same width
+    /// either way, and everything from the timer onward is the same picture.
+    func testAQuietMicrophoneMovesNothingAndSaysNothing() throws {
         let running = try raster(bubble())
-        let dead = try raster(bubble(noSignal: true))
-        // The slot is the third run in either render: the dot, the lock and the
-        // waveform come before it, and the paperclip after.
-        let timer = try baseline(of: inkRuns(running, gap: 5)[3], in: running)
-        let label = try baseline(of: inkRuns(dead, gap: 5)[3], in: dead)
-        print("[#209] the recording row: the timer's baseline "
-              + "\(String(format: "%.2f", timer)) pt, the no-signal label's "
-              + "\(String(format: "%.2f", label)) pt")
-        XCTAssertEqual(label, timer, accuracy: 1, "the row's two labels sit on two lines")
+        let quiet = try raster(bubble(noSignal: true))
+        XCTAssertEqual(
+            quiet.paintedWidth, running.paintedWidth, accuracy: 0.5,
+            "the quiet row is a different width — a sentence took the timer's place"
+        )
+        // The timer is the fourth run of ink: the dot, the lock and the bars
+        // come before it, the paperclip after.
+        let timer = inkRuns(running, gap: 5)[3]
+        let after = compare(
+            running, quiet,
+            columns: timer.lowerBound..<Int(running.paintedWidth * Self.scale), of: running
+        )
+        print("[#216] quiet vs speaking, from the timer on: \(after.moved) px differ over "
+              + "\(after.columns)×\(after.rows), worst delta \(after.worstDelta)")
+        XCTAssertEqual(after.moved, 0, "the timer, or something after it, moved")
+
+        // And what is left of the message: the dot, dimmed in its own slot.
+        let slot = Int(Self.bubbleCorner * Self.scale)..<Int(24 * Self.scale)
+        let dot = compare(running, quiet, columns: slot, of: running)
+        print("[#216] the dot's slot: \(dot.moved) px differ, worst delta \(dot.worstDelta)")
+        XCTAssertGreaterThan(dot.moved, 0, "the dot reads the same quiet or not")
+    }
+
+    /// The list rows say what a click does, not which state they are in — the
+    /// dimming and the strike-through already draw that. The spoken name keeps
+    /// the state, because a screen reader has neither to read it off.
+    func testTheListRowsCarryTheBoardsWords() {
+        XCTAssertEqual(DictationIndicatorView.rowToggleHelp, "Click to toggle")
+        XCTAssertEqual(DictationIndicatorView.rowState(included: true), "In the prompt")
+        XCTAssertEqual(DictationIndicatorView.rowState(included: false), "Left out")
     }
 
     /// And the row is still the board's own row: switching it to a baseline

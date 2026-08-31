@@ -1422,10 +1422,24 @@ struct DictationIndicatorView: View {
             hideTip()
             onToggleItem?(item.id)
         }
-        .bubbleTip(.row(item.id), item.included ? "In the prompt" : "Left out", hovered: $hoveredTip, pointer: pointer)
+        // The line names the action, not the state (#216): the row is already
+        // dimmed to .42 and struck through, so a tooltip repeating that says
+        // nothing the eye has not read — what it does not say is that the row
+        // can be clicked at all.
+        .bubbleTip(.row(item.id), Self.rowToggleHelp, hovered: $hoveredTip, pointer: pointer)
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(item.included ? "In the prompt" : "Left out")
+        // The spoken name keeps the state: a screen reader has neither the
+        // dimming nor the strike-through to read it off.
+        .accessibilityLabel(Self.rowState(included: item.included))
         .accessibilityAddTraits(.isToggle)
+    }
+
+    /// The board's copy table, byte for byte: one line for both states of a row.
+    static let rowToggleHelp = "Click to toggle"
+
+    /// And what the same row is called out loud.
+    static func rowState(included: Bool) -> String {
+        included ? "In the prompt" : "Left out"
     }
 
     @ViewBuilder
@@ -1485,20 +1499,20 @@ struct DictationIndicatorView: View {
                 .bubbleTip(.waveform, "Your voice level", hovered: $hoveredTip, pointer: pointer)
                 .accessibilityElement(children: .ignore)
                 .accessibilityLabel("Your voice level")
-            if noSignal, !paused {
-                Text("No signal from microphone")
-                    .font(.system(size: 13, weight: .medium))
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-            } else {
-                timerText(recordingSeconds, color: LoreTheme.TextColor.muted)
-                    // Two sentences, because the second one is the answer.
-                    // The same two facts in a third of the words (#212).
-                    .bubbleTip(
-                        .timer, Self.timerHelp, hovered: $hoveredTip, pointer: pointer
-                    )
-                    .accessibilityElement(children: .ignore)
-                    .accessibilityLabel(Self.timerHelp)
-            }
+            // The timer never leaves its place (#216). Quiet is drawn, not
+            // written: the dot above is dimmed and the bars beside it lie flat,
+            // and that is the whole of the message — a sentence sliding in and
+            // out of the row at the start of every dictation said no more than
+            // they do. A microphone that is truly dead is a different thing and
+            // keeps its own loud face (`lastError`, #209 F1).
+            timerText(recordingSeconds, color: LoreTheme.TextColor.muted)
+                // Two sentences, because the second one is the answer.
+                // The same two facts in a third of the words (#212).
+                .bubbleTip(
+                    .timer, Self.timerHelp, hovered: $hoveredTip, pointer: pointer
+                )
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(Self.timerHelp)
             if bluetoothRedirected {
                 bluetoothGlyph
             }
@@ -1597,6 +1611,12 @@ struct DictationIndicatorView: View {
     /// Shared Lore waveform while live; the no-signal state keeps its distinct
     /// flat dimmed bars. Fixed 18pt frame preserves the pre-Stage-H panel
     /// height (`.fixedSize()` sizing is load-bearing — see the manager).
+    ///
+    /// One width for all three (#216). The flat bars are 26 pt of their own and
+    /// the live ones 27, so the timer, the paperclip and everything after them
+    /// used to step a point sideways the moment the first sound arrived — a
+    /// twitch that outlived the sentence this issue retired, and the same point
+    /// Esc would have moved.
     private func waveform(measuring: Bool, paused: Bool) -> some View {
         Group {
             // Paused has no level to show, so it borrows the flat bars the dead
@@ -1620,7 +1640,7 @@ struct DictationIndicatorView: View {
                 LoreLiveWaveform(level: audioLevel)
             }
         }
-        .frame(height: 18)
+        .frame(width: LoreLiveWaveform.width, height: 18)
     }
 
     // MARK: - The faces after release (#209)
