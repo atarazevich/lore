@@ -1,5 +1,39 @@
 # Changelog
 
+## v3.2.0 — 2026-08-31
+
+lore becomes the primary input surface for AI agents: what you say, copy, and screenshot while dictating reaches the agent's prompt — and meetings step back behind a switch until their own polish cycle.
+
+**Rich input for CLI agents (#192, #194, #195, #196, #198, #199, #202, #208)**
+- What you copy or screenshot while dictating joins the prompt where you said it
+- Screenshots reach web composers and Claude desktop as real files; collected screenshots stay under a size cap
+- Cmd+Shift+4 during a dictation goes to the prompt; paperclip off means lore takes no screenshot and nothing rides along
+- Copying gets its own Settings section
+
+**The recording bubble (#201, #202, #203, #204, #205, #206, #207, #208, #209, #210, #212, #213)**
+- One shape that explains itself: widens on hover from a fixed canvas, armed letters C T K S, a paperclip that carries its count, draggable, tooltips that actually appear
+- Esc pauses a dictation instead of destroying it; holding Fn in a locked recording opens the bubble; a short press submits
+- Every face of a dictation — processing, done, upgrade, errors, paused — lives in the same bubble idiom
+
+**After-use polish (#211, #216, #217, #218, #219)**
+- A quiet microphone is a dimmed dot, not a banner; rows say Click to toggle
+- Releasing Fn migrates the bubble instead of conjuring a second one; the paste checkmark pops in place
+- Pause moves nothing, and the paused bubble's button is Stop recording — it saves to history and pastes nothing
+
+**Activity (#215, #220)**
+- Stats is its own sidebar destination: a per-day heatmap of words, tokens, and time whose counts agree with history
+
+**Meetings step back (#221)**
+- One master switch in Settings; off on a fresh install, on for machines that already used lore
+- When off, meetings leave the sidebar and menu bar entirely — no detection, no prompts, no background work
+- Recordings and notes stay on this Mac; flip the switch and every past meeting returns
+
+**Durability (#177, #182, #169, #168, #193 — first layer)**
+- A dictation killed mid-speech keeps its audio and offers a retry from the first buffer
+- A meeting killed mid-recording keeps its audio where the launch sweep already heals it
+- One prepared speech model, one owner — no second copy loads during warm-up
+- One API-error shape across the app
+- A second app launch via Finder/Dock/open activates the running copy instead of racing its Fn tap (direct binary exec still escapes — #193 stays open)
 ## v3.1.0 — 2026-08-11
 
 Meetings now repair themselves. The transcript-state vocabulary is gone; a meeting shows its text, quietly prepares it, or says one honest sentence — and the app does its own chores.
