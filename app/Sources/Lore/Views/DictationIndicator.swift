@@ -392,6 +392,14 @@ struct DictationIndicatorView: View {
     let audioLevel: Float
     var isLocked = false
     var pendingMode: UpgradeAction?
+    /// Which LLM call is running once transcription itself is done, so the
+    /// working sentence can say so instead of reading "Transcribing" for the
+    /// whole pipeline (owner, 2026-08-31: "this transcription is done
+    /// quickly, and then translating happens"). Nil while the ASR call is
+    /// still running — `pendingMode` above cannot stand in for this: it is
+    /// cleared the moment the pipeline captures it, before transcription even
+    /// starts (`DictationCoordinator.stopRecording`).
+    var llmStage: UpgradeAction?
     /// Fn+K armed or entry flagged (#122): the K letter stands lit in the rail
     /// while the dictation carries it.
     var operatorAddressed = false
@@ -987,7 +995,7 @@ struct DictationIndicatorView: View {
             // from nowhere").
             liveRow(
                 open: open, measuring: measuring, paused: paused,
-                working: Self.workingLabel(for: state)
+                working: Self.workingLabel(for: state, llmStage: llmStage)
             )
         }
     }
@@ -995,11 +1003,22 @@ struct DictationIndicatorView: View {
     /// What the row says while the pipeline works (#209 T1, F3) — the sentence
     /// that stands where the lock and the waveform do while a dictation records.
     /// Nil is the recording itself.
-    static func workingLabel(for state: DictationState) -> String? {
+    ///
+    /// `llmStage` names the LLM call once the ASR call is done: the owner's
+    /// report (2026-08-31) was that "Transcribing" kept standing through the
+    /// translate/cleanup call that follows it, which finishes quickly but was
+    /// unnamed. `.processing` still reads "Transcribing" while `llmStage` is
+    /// nil — the ASR call itself, or a raw dictation with no LLM step at all.
+    static func workingLabel(for state: DictationState, llmStage: UpgradeAction?) -> String? {
         switch state {
         case .recording, .idle: nil
         case .loadingModel: "Downloading model\u{2026}"
-        case .processing, .done: "Transcribing"
+        case .processing, .done:
+            switch llmStage {
+            case .cleanup: "Cleaning up\u{2026}"
+            case .translate: "Translating\u{2026}"
+            case nil: "Transcribing"
+            }
         }
     }
 
@@ -1937,6 +1956,9 @@ final class DictationIndicatorModel {
     var audioLevel: Float = 0
     var isLocked = false
     var pendingMode: UpgradeAction?
+    /// The LLM stage once transcription is done (2026-08-31) — nil during the
+    /// ASR call and during a raw dictation with no LLM step.
+    var llmStage: UpgradeAction?
     var operatorAddressed = false
     var recordingSeconds: Int = 0
     /// The Fn+K master switch (#223).
@@ -1984,6 +2006,7 @@ struct DictationIndicatorHost: View {
             audioLevel: model.audioLevel,
             isLocked: model.isLocked,
             pendingMode: model.pendingMode,
+            llmStage: model.llmStage,
             operatorAddressed: model.operatorAddressed,
             recordingSeconds: model.recordingSeconds,
             operatorSendEnabled: model.operatorSendEnabled,
@@ -2148,6 +2171,7 @@ final class DictationIndicatorManager {
                 self.model.audioLevel = coordinator.audioLevel
                 self.model.isLocked = hotkeyManager?.isLocked ?? false
                 self.model.pendingMode = coordinator.pendingCleanupMode
+                self.model.llmStage = coordinator.llmStage
                 self.model.operatorAddressed = coordinator.operatorAddressedDisplayed
                 if newSeconds != self.model.recordingSeconds {
                     self.model.recordingSeconds = newSeconds

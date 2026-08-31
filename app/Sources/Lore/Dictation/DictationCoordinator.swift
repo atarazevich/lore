@@ -24,6 +24,13 @@ final class DictationCoordinator {
     private(set) var lastError: DictationFace?
     /// Pre-paste cleanup mode set during recording via Fn+V/Fn+T.
     private(set) var pendingCleanupMode: UpgradeAction?
+    /// Which LLM call is running once transcription itself is done (2026-08-31,
+    /// owner's report: "Transcribing" kept standing through the translate call
+    /// that follows it). Nil during the ASR call, and for a raw dictation with
+    /// no cleanup/translate step at all. Distinct from `pendingCleanupMode`,
+    /// which is cleared the moment the pipeline captures it — before
+    /// transcription starts — so it cannot name the LLM step that comes after.
+    private(set) var llmStage: UpgradeAction?
     /// Fn+K "send to operator" (#122): armed during recording, lands on the
     /// entry as `operatorAddressed` so the dispatcher's dictation door
     /// picks it up. The indicator shows a K badge while armed.
@@ -381,6 +388,7 @@ final class DictationCoordinator {
         endingInFlight = false
         pendingCleanupMode = nil
         pendingOperatorAddressed = false
+        llmStage = nil
         lastError = nil
         captureConfirmed = true
         state = .recording
@@ -705,21 +713,32 @@ final class DictationCoordinator {
         let cleanupEnabled = settings?.cleanupByDefault ?? false
         let translateEnabled = settings?.translationByDefault ?? false
         let hasApiKey = !(settings?.openaiApiKey.isEmpty ?? true)
-        let didCleanup: Bool
 
+        // Pre-paste mode (Fn+V/Fn+T) overrides defaults; translate-by-default
+        // implies cleanup. Resolved once — the mode itself is one decision,
+        // not three copies of the same `hasApiKey` gate that can (and did)
+        // drift apart from `llmStage`'s own three copies below.
+        let action: UpgradeAction? = pending
+            ?? (translateEnabled ? .translate : (cleanupEnabled ? .cleanup : nil))
+        let didCleanup: Bool
         // Mode name and translation meta are written only when the cleanup
         // actually succeeded — a swallowed API failure must not relabel the
-        // pasted raw text (DIC-37/48). Pre-paste mode (Fn+V/Fn+T) overrides
-        // defaults; translate-by-default implies cleanup.
-        if let pending, hasApiKey {
-            didCleanup = await runCleanupAction(pending, on: &entry, rawText: rawText, epoch: epoch)
-        } else if translateEnabled && hasApiKey {
-            didCleanup = await runCleanupAction(.translate, on: &entry, rawText: rawText, epoch: epoch)
-        } else if cleanupEnabled && hasApiKey {
-            didCleanup = await runCleanupAction(.cleanup, on: &entry, rawText: rawText, epoch: epoch)
+        // pasted raw text (DIC-37/48).
+        if let action, hasApiKey {
+            // `llmStage` names this call while it runs, so the bubble's working
+            // sentence can say "Translating…"/"Cleaning up…" instead of always
+            // reading "Transcribing" (owner, 2026-08-31) — set right before the
+            // await, gated the same way `lastError` already is: a stale
+            // pipeline's own stage must not paint a newer session's bubble.
+            // Only while `pasting`: a `finishWithoutPasting` ending has already
+            // taken the bubble off screen (#219), and a stage for a face nobody
+            // sees is a reader trap.
+            if pasting, isCurrentSession(epoch) { llmStage = action }
+            didCleanup = await runCleanupAction(action, on: &entry, rawText: rawText, epoch: epoch)
         } else {
             didCleanup = false
         }
+        if isCurrentSession(epoch) { llmStage = nil }
 
         // Re-check after the cleanup awaits: a discard that landed during
         // cleanup must not paste either — the text stays in history only.
@@ -884,6 +903,7 @@ final class DictationCoordinator {
         items.removeAll()
         pendingCleanupMode = nil
         pendingOperatorAddressed = false
+        llmStage = nil
         state = .idle
     }
 
@@ -1150,7 +1170,17 @@ final class DictationCoordinator {
         await transcribeEntry(&entry, samples: samples, epoch: epoch)
 
         if entry.status == .transcribed, let text = entry.rawText {
+            // Same stage the live pipeline sets (2026-08-31): a retry shows the
+            // bubble too (`showsProgress` defaults true), so its cleanup call
+            // gets named the same way — but only when `cleanupEntry`'s own
+            // guards (no `prompt` is passed here, so it falls to
+            // `settings.cleanupByDefault`) mean the call actually happens;
+            // naming a call that is about to no-op would be a stage nobody's
+            // bubble ever runs.
+            let willCleanup = !(settings?.openaiApiKey.isEmpty ?? true) && (settings?.cleanupByDefault ?? false)
+            if willCleanup, isCurrentSession(epoch) { llmStage = .cleanup }
             await cleanupEntry(&entry, rawText: text, endpoint: .cleanup, epoch: epoch)
+            if isCurrentSession(epoch) { llmStage = nil }
         }
 
         history.update(entry)
