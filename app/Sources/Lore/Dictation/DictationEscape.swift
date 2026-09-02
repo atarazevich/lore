@@ -1,46 +1,38 @@
 import AppKit
 
-/// What the Escape key means to a dictation (#206).
+/// What the Escape key means to a dictation (#206, #233).
 ///
-/// Esc used to be the discard: it deleted the audio and the entry at the
-/// keypress, with nothing left to recover. But Esc is pressed for other reasons
-/// — to cancel a screenshot crosshair, to close a menu — and a real dictation
-/// went that way (`events.json`, 2026-08-30 12:49:46Z: a
-/// `dictationDiscarded{state: recording}` five seconds after a screenshot
-/// chord, with two screenshots already collected). It now pauses capture in
-/// place, and a second Esc continues. No key deletes a recording.
+/// Esc was the discard once: it deleted the audio and the entry at the
+/// keypress, with nothing left to recover. #206 made it pause capture in place,
+/// and a second Esc continue. That is retired (2026-09-02, #233): a pause the
+/// eye can miss costs whole minutes of speech — 76 s and 49 s spoken into a
+/// stopped microphone on 2026-09-01, and a held Esc flipping pause and resume
+/// at the key-repeat rate — while the key itself was being pressed to *stop*.
+/// So Esc cancels: the dictation ends without pasting, the entry lands in
+/// history with its audio, its words and its items, and the bubble says so on
+/// its way out. "You hit escape when you want to stop and you don't want to use
+/// the recording — that's like 90% of the time." The pause moved to the talk
+/// key (`HotkeyManager.SpaceAction`).
 ///
-/// The decision is one value rather than three branches spread across the two
-/// event paths that take it, so the local monitor and the CGEvent tap cannot
-/// disagree about whose key it is — and so every row of the board's logic table
-/// is checkable without a crosshair on the screen.
-enum DictationEscape: Equatable, Sendable {
-    /// Not lore's. Passed through untouched, and never consumed.
-    case passThrough
-    /// Suspend capture in place — one session, one entry, one audio file.
-    case pause
-    /// Carry on into the same recording. Esc's alone since #219 retired
-    /// `Continue`: the bubble's one button ends the dictation instead.
-    case resume
-
+/// No key deletes a recording, with the two edges that promise has always had.
+/// A dictation under the half-second minimum with nothing collected is
+/// abandoned as it always was (#182/#229's slip rule) and shows no face —
+/// there is no entry there for `— in history` to point at, and saying so would
+/// be a lie. And Fn+R / Fn+Q still reach `discardRecording` (`HotkeyManager`),
+/// because reading aloud and recording are one gesture on one key: a
+/// pre-existing exception, untouched here.
+///
+/// This type is the crosshair reading and Escape's keycode, and nothing else.
+/// Whose the key is, is one Bool at the caller (`HotkeyManager.escapeIsOurs`),
+/// read by both event paths so the local monitor and the CGEvent tap cannot
+/// disagree about it.
+enum DictationEscape {
     /// Escape's own key code, in the one place the event paths read it.
     static let keyCode: UInt16 = 53
 
     /// The process macOS runs for the screenshot crosshair and its capture
     /// toolbar; it exists only while one of them is on screen.
     static let screenshotUIBundleID = "com.apple.screencaptureui"
-
-    /// Whose the key is, given a dictation that is live — which the caller has
-    /// already established, since it is what decides whether to take the one
-    /// live reading at all. Pure, so both facts and both answers fit in one
-    /// table a test can walk end to end.
-    static func decide(paused: Bool, screenshotUIIsUp: Bool) -> DictationEscape {
-        // The crosshair's Esc belongs to the crosshair. Consuming it would leave
-        // the user unable to cancel a screenshot they are taking *into* this
-        // dictation, and pausing on it would answer a key never addressed here.
-        guard !screenshotUIIsUp else { return .passThrough }
-        return paused ? .resume : .pause
-    }
 
     /// The live reading: is the screenshot UI *on screen*, not merely alive.
     ///
@@ -49,7 +41,7 @@ enum DictationEscape: Equatable, Sendable {
     /// 18 h 46 m with no crosshair anywhere, and it keeps one prewarmed
     /// full-screen window on screen the whole time (alpha 1, level 24 — exactly
     /// `CGWindowLevelForKey(.mainMenuWindow)`). Either test would therefore be
-    /// permanently true and Esc would never pause anything again.
+    /// permanently true and Esc would never reach a dictation again.
     ///
     /// What is true only while the crosshair or the capture toolbar is really up
     /// is that it draws *over* the menu bar — Cmd+Shift+4 can capture the menu
@@ -62,9 +54,10 @@ enum DictationEscape: Equatable, Sendable {
     /// every running application and every on-screen window, and an Esc outside
     /// a dictation never gets this far.
     ///
-    /// Should both readings miss a live crosshair, the cost is that Esc pauses
-    /// the dictation and the crosshair keeps the key — the behaviour before this
-    /// issue, minus the destruction, which is the part that mattered.
+    /// Should both readings miss a live crosshair, the cost is that the
+    /// dictation is cancelled into history and the crosshair keeps the key: one
+    /// re-record, and nothing lost — which is why #233 could leave this reading
+    /// exactly as #206 drew it.
     ///
     /// Unverified, and only a live window can settle it: the floating thumbnail
     /// left on screen for a few seconds after a capture is this process's window

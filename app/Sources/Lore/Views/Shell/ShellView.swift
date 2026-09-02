@@ -30,6 +30,7 @@ struct ShellView: View {
                 isMeetingRecording: coordinator.isRecording,
                 isMeetingPaused: coordinator.isPaused,
                 isDictationLocked: coordinator.dictationIndicator.model.isLocked,
+                isDictationPaused: coordinator.dictationIndicator.model.paused,
                 healthMonitor: coordinator.healthMonitor,
                 onSelect: { shell.destination = $0 },
                 onOpenHealth: { shell.presentsHealthPanel = true }
@@ -193,6 +194,7 @@ private struct ShellSidebar: View {
     let isMeetingRecording: Bool
     let isMeetingPaused: Bool
     let isDictationLocked: Bool
+    let isDictationPaused: Bool
     let healthMonitor: HealthMonitor?
     let onSelect: (ShellDestination) -> Void
     let onOpenHealth: () -> Void
@@ -246,9 +248,9 @@ private struct ShellSidebar: View {
                         ? "video.fill" : destination.icon,
                     isActive: destination == activeDestination,
                     isLive: isLive(destination),
-                    liveTint: destination == .meetings && isMeetingPaused
+                    liveTint: isPaused(destination)
                         ? LoreTheme.Accent.amber : LoreTheme.Accent.red,
-                    livePulses: !(destination == .meetings && isMeetingPaused),
+                    livePulses: !isPaused(destination),
                     badgeCount: nil, // SHELL-11 slot; Tasks uses it in Stage 2
                     action: { onSelect(destination) }
                 )
@@ -265,6 +267,17 @@ private struct ShellSidebar: View {
         switch destination {
         case .meetings: return isMeetingRecording || isMeetingPaused
         case .dictation: return isDictationLocked
+        default: return false
+        }
+    }
+
+    /// And a paused dictation reads the same way a paused meeting does (#233):
+    /// steady amber, no pulse. The dot pulsed red through a pause until here,
+    /// which said the microphone was live when it was not.
+    private func isPaused(_ destination: ShellDestination) -> Bool {
+        switch destination {
+        case .meetings: return isMeetingPaused
+        case .dictation: return isDictationPaused
         default: return false
         }
     }

@@ -678,17 +678,21 @@ struct DictationView: View {
     // MARK: - Footer Kbd Bar (DIC-25)
 
     /// DIC-25 (dynamic since Stage D): the bar builds from the enabled
-    /// modifiers — "{hotkey} hold to talk" first, "Esc pause" last, the
+    /// modifiers — "{hotkey} hold to talk" first, "Esc cancel" last, the
     /// hints in between appear only while their Settings toggle is on.
     ///
-    /// The chords say "Fn" literally whatever the talk key is (#226): they read
-    /// the physical Fn flag off the event, so the chosen key's name here would
-    /// be a hint the keyboard disagrees with.
+    /// Fn+V and Fn+T say "Fn" literally whatever the talk key is (#226): they
+    /// read the physical Fn flag off the event, so the chosen key's name there
+    /// would be a hint the keyboard disagrees with. The pause chord is the
+    /// other way round (#233) — it is the talk key that has to be held, so it
+    /// is the talk key that is named, and it stands next to the lock because
+    /// the two Space gestures are one pair, in the order they happen.
     private var hotkeyCheatSheet: some View {
         HStack(spacing: 16) {
             kbdHint(settings.hotkeyKey.shortName, "hold to talk")
             if settings.modifierLockEnabled {
                 kbdHint("Space", "lock")
+                kbdHint("\(settings.hotkeyKey.shortName)+Space", "pause")
             }
             if settings.modifierCleanupEnabled {
                 kbdHint("Fn+V", "cleanup")
@@ -696,7 +700,7 @@ struct DictationView: View {
             if settings.modifierTranslateEnabled {
                 kbdHint("Fn+T", "translate")
             }
-            kbdHint("Esc", "pause")
+            kbdHint("Esc", "cancel")
             Spacer()
         }
         .font(LoreTheme.Typography.mono(11))

@@ -41,19 +41,32 @@ final class DictationCoordinator {
     private(set) var bluetoothMicRedirected = false
     /// True when the audio bus reports zero signal (dead mic input).
     private(set) var noSignal = false
-    /// Esc has suspended capture in place (#206). Deliberately a flag beside
-    /// `state` rather than a sixth `DictationState`: a paused dictation *is* a
-    /// recording — one session, one entry, one audio file — and everything that
-    /// asks `state == .recording` (the quit guard, the Fn+V/T/K/S chords, the
+    /// The talk key and Space have suspended capture in place (#206; the chord
+    /// is #233's — Esc cancels now). Deliberately a flag beside `state` rather
+    /// than a sixth `DictationState`: a paused dictation *is* a recording — one
+    /// session, one entry, one audio file — and everything that asks
+    /// `state == .recording` (the quit guard, the Fn+V/T/K/S chords, the
     /// bubble's own canvas) means to include it. What changes is only what the
     /// capture is doing, and that is what this says.
     private(set) var isPaused = false
+    /// This dictation was cancelled (#233): it ends without pasting, and the
+    /// shape shows the leaving face until the entry has been in history for its
+    /// beat. A flag beside `state` for the same reason `isPaused` is one — the
+    /// pipeline that saves the entry runs on either way, and what changed is
+    /// what the shape says and what it does *not* do at the end of it.
+    ///
+    /// Also the latch that makes a cancel happen once: a held Esc auto-repeats
+    /// at ~30 a second, and the release of a talk key held through one would
+    /// otherwise paste the words the cancel just declined.
+    private(set) var cancelled = false
     /// `stopRecording` has enqueued this session's pipeline and the pipeline has
     /// not yet taken the capture (#206). `state` stays `.recording` across that
-    /// gap — the 300 ms audio tail — so both Esc gestures have to refuse inside
-    /// it: a resume would open a microphone the pipeline is about to close, and
-    /// a pause would cut the tail short, fire a `dictationPaused` with no pair,
-    /// and flash the paused face on its way to Transcribing.
+    /// gap — the 300 ms audio tail — so both pause gestures have to refuse
+    /// inside it: a resume would open a microphone the pipeline is about to
+    /// close, and a pause would cut the tail short, fire a `dictationPaused`
+    /// with no pair, and flash the paused face on its way to Transcribing. A
+    /// second ending refuses there too (#233): the first one already owns this
+    /// dictation's audio.
     ///
     /// Its own fact rather than `latestTranscription?.epoch == sessionEpoch`,
     /// which is the same thing only until a history retry is started during a
@@ -110,6 +123,12 @@ final class DictationCoordinator {
     /// How long a failure face stays up before the shape leaves — long enough
     /// to read one sentence and reach for its button.
     private static let faceReadingTime: Duration = .seconds(4)
+
+    /// How long the leaving face stands after a cancel (#233) — four words, and
+    /// the board's own ~1.2 s. Counted from the entry landing in history rather
+    /// than from the keypress, which is what makes `— in history` true for every
+    /// instant it is on screen; the face itself is up from the keypress.
+    private static let cancelledFaceTime: Duration = .milliseconds(1200)
 
     private static let minimumSpeechSamples = 8000
     private static let maxChunkSamples = 480_000
@@ -189,8 +208,8 @@ final class DictationCoordinator {
 
     let history: DictationHistory
     var settings: AppSettings?
-    /// Fired the instant a live recording ends by any path — Stop recording
-    /// (`finishWithoutPasting`), a normal Fn-release/lock-click `stopRecording`,
+    /// Fired the instant a live recording ends by any path — a cancel
+    /// (`cancelRecording`), a normal Fn-release/lock-click `stopRecording`,
     /// or a discard — regardless of what the pipeline eventually does with it
     /// (paste, a failure face, nothing). This is the one seam both `finish` and
     /// `discardRecording` call through (#225): the Space lock is a fact about a
@@ -398,6 +417,9 @@ final class DictationCoordinator {
         // Esc away for the rest of the session, and because "the new recording
         // owns the shared state" is exactly what this block is.
         endingInFlight = false
+        // Nor is an earlier cancel this dictation's (#233): the leaving face
+        // belongs to the dictation that was cancelled, and this is a new one.
+        cancelled = false
         pendingCleanupMode = nil
         pendingOperatorAddressed = false
         llmStage = nil
@@ -429,8 +451,8 @@ final class DictationCoordinator {
     }
 
     /// How long this dictation's audio is. Sample-accurate by construction — it
-    /// counts what was captured — so it stops of its own accord when Esc pauses
-    /// the capture and picks up exactly where it stopped.
+    /// counts what was captured — so it stops of its own accord when the chord
+    /// pauses the capture and picks up exactly where it stopped.
     private var capturedSeconds: Double {
         Double(accumulatedSamples.count) / Self.sampleRate
     }
@@ -453,9 +475,9 @@ final class DictationCoordinator {
         )
     }
 
-    // MARK: - Pause (#206)
+    // MARK: - Pause (#206, on the talk key's Space since #233)
 
-    /// Esc: suspend capture in place. One session, one entry, one audio file —
+    /// The talk key and Space: suspend capture in place. One session, one entry, one audio file —
     /// the recording's file stays open behind every buffer already queued, and a
     /// resume appends to it, so the audio is contiguous samples with no gap
     /// spliced into the middle of it (#182 writes a raw stream; a pause is
@@ -472,10 +494,10 @@ final class DictationCoordinator {
         isPaused = true
         tearDownCapture()
         DiagStore.record(.dictationPaused)
-        log.debug("recording paused (Esc)")
+        log.debug("recording paused")
     }
 
-    /// The second Esc: the same recording, carrying on. Capture comes back up on the
+    /// The same chord again: the same recording, carrying on. Capture comes back up on the
     /// device the pinned selection resolves to, the clipboard door reopens, and
     /// the offsets pick up from the audio already held rather than from a wall
     /// clock that ran through the pause.
@@ -526,27 +548,40 @@ final class DictationCoordinator {
         finish(pasting: true)
     }
 
-    /// `Stop recording` on the paused bubble (#219): the same ending, with the
-    /// words kept and nothing inserted — "when you press stop recording, then
-    /// this recording just stays, and doesn't insert anything, it just kind of
-    /// disappears."
+    /// Cancel: the same ending, with the words kept and nothing inserted (#219
+    /// as `Stop recording`, and Esc's own outcome since #233) — "when you press
+    /// stop recording, then this recording just stays, and doesn't insert
+    /// anything, it just kind of disappears."
     ///
     /// Everything else is a finish like any other: the same pipeline, the same
     /// entry, its audio, its words and its items in history. What it does not do
-    /// is deliver — no paste, no paste events, no mark — and the shape leaves as
-    /// soon as the entry is saved rather than standing through the
-    /// transcription, because the button the user just pressed said so. A
-    /// transcription that fails after that is history's own retry, not a face
-    /// for a bubble that has gone.
-    func finishWithoutPasting() {
+    /// is deliver — no paste, no paste events, no mark — and the shape says
+    /// `Cancelled — in history` for a beat and goes, rather than standing
+    /// through the transcription. A transcription that fails after that is
+    /// history's own retry, not a face for a bubble that has gone.
+    ///
+    /// Not `discardRecording`, which throws the audio away: nothing here
+    /// deletes a recording. Called by Esc, by the bubble's `Cancel` button, and
+    /// by nothing else — one action, one name, one path.
+    func cancelRecording() {
         finish(pasting: false)
     }
 
     /// Which of the two, in the one place the decision is taken: the pipeline is
     /// handed it at the moment it is enqueued, so a newer dictation starting
     /// during the 300 ms tail cannot change what this one does.
+    ///
+    /// One ending per dictation. `endingInFlight` covers the 300 ms tail and
+    /// `cancelled` the rest of the leaving face (#233), so a held Esc, a second
+    /// Esc and the talk-key release that follows one all find this dictation
+    /// already ended instead of enqueueing a second pipeline over an audio
+    /// buffer the first one has taken.
     private func finish(pasting: Bool) {
-        guard state == .recording else { return }
+        guard state == .recording, !endingInFlight, !cancelled else { return }
+        // A finish that pastes nothing is a cancel, and the shape says so from
+        // this instant — before the tail, before the entry is written — because
+        // the key has to feel decisive.
+        cancelled = !pasting
         onRecordingEnding?()
         endingInFlight = true
         enqueueTranscription { [weak self] epoch, previous in
@@ -559,7 +594,7 @@ final class DictationCoordinator {
     /// awaited before entering the shared ASR backend so it is never used by
     /// two transcriptions concurrently (#104). Shared-UI writes are
     /// epoch-guarded: a pipeline that outlives its session (a newer recording
-    /// confirmed, or a discard took it — Esc pauses, #206) still lands its text
+    /// confirmed, or a discard took it — no Esc does, #206/#233) still lands its text
     /// in history — and pastes it, unless deliberately cancelled — but no
     /// longer owns the state/indicator/currentEntryID.
     private func runDictationPipeline(
@@ -648,6 +683,11 @@ final class DictationCoordinator {
         // right: the dictation carries on into the pipeline, transcribes to
         // nothing, and composes to the items alone. Abandoning here dropped
         // them before they were ever saved.
+        //
+        // A cancel under this line takes the same path deliberately (#233):
+        // there is no recording to keep, so there is no entry for the leaving
+        // face's `— in history` to point at, and the shape goes to `.idle`
+        // with nothing said rather than claiming something was saved.
         guard samples.count > Self.minimumSpeechSamples || collected.contains(where: \.included)
         else {
             recording?.abandon()
@@ -691,10 +731,12 @@ final class DictationCoordinator {
         if isCurrentSession(epoch) {
             pending = pendingCleanupMode
             pendingCleanupMode = nil
-            // The entry is in history with its audio, so a `Stop recording` has
-            // everything it promised and the shape leaves here (#219). The rest
-            // of the pipeline runs on without it.
-            state = pasting ? .processing : .idle
+            // The entry is in history with its audio, so a cancel has everything
+            // it promised (#219) and the shape says so here: the leaving face
+            // stands its beat from the moment `— in history` became true, and
+            // the rest of the pipeline runs on without it (#233).
+            state = pasting ? .processing : .done
+            if !pasting { scheduleAutoHide(after: Self.cancelledFaceTime) }
         } else {
             pending = nil
         }
@@ -707,8 +749,8 @@ final class DictationCoordinator {
         guard entry.status == .transcribed, let rawText = entry.rawText else {
             // Transcription failed (or was cancelled by a discard) — record it;
             // the indicator is touched only while this is the current session,
-            // and a `Stop recording` has already taken the shape off the screen
-            // (#219): what failed here is history's own retry.
+            // and a cancel has already taken the shape off the screen
+            // (#219, #233): what failed here is history's own retry.
             history.update(entry)
             guard pasting, isCurrentSession(epoch) else { return }
             // The app knew this had happened and said "Done" anyway (#209, F2).
@@ -755,9 +797,9 @@ final class DictationCoordinator {
             // reading "Transcribing" (owner, 2026-08-31) — set right before the
             // await, gated the same way `lastError` already is: a stale
             // pipeline's own stage must not paint a newer session's bubble.
-            // Only while `pasting`: a `finishWithoutPasting` ending has already
-            // taken the bubble off screen (#219), and a stage for a face nobody
-            // sees is a reader trap.
+            // Only while `pasting`: a cancel has already taken the bubble off
+            // screen (#219, #233), and a stage for a face nobody sees is a
+            // reader trap.
             if pasting, isCurrentSession(epoch) { llmStage = action }
             didCleanup = await runCleanupAction(action, on: &entry, rawText: rawText, epoch: epoch)
         } else {
@@ -776,7 +818,7 @@ final class DictationCoordinator {
         // newer recording session is already underway (#104): a completed
         // dictation still lands where the cursor is. Unless the user asked for
         // the words to be kept and not inserted (#219), which is the whole of
-        // what `Stop recording` does differently: no delivery, and so no paste
+        // what a cancel does differently: no delivery, and so no paste
         // events and no mark either.
         var delivery: Task<Bool, Never>?
         if let text = entry.cleanedText ?? entry.rawText {
@@ -817,8 +859,8 @@ final class DictationCoordinator {
         history.update(entry)
 
         // STEP 4: the indicator belongs to the newest session — and to a
-        // dictation that was going to be pasted, since a `Stop recording` took
-        // the shape off the screen when the entry was saved (#219).
+        // dictation that was going to be pasted, since a cancel put the
+        // leaving face up when the entry was saved (#219, #233).
         guard pasting, isCurrentSession(epoch) else { return }
         // Whether the keystrokes could be created is the one thing this side
         // can observe — `CGEvent.post` returns no receipt — and the answer
@@ -930,6 +972,9 @@ final class DictationCoordinator {
         pendingCleanupMode = nil
         pendingOperatorAddressed = false
         llmStage = nil
+        // A discarded dictation has no leaving face to show: there is no entry
+        // for one to point at (#233).
+        cancelled = false
         state = .idle
     }
 
@@ -1271,9 +1316,9 @@ final class DictationCoordinator {
 
     /// - Parameter showsProgress: whether this transcription may speak for the
     ///   bubble — the model-download face, the `Transcribing` face, and the
-    ///   failure that replaces them. False for a `Stop recording` (#219), which
-    ///   took the shape off the screen when the entry was saved: nothing
-    ///   downstream may raise it again.
+    ///   failure that replaces them. False for a cancel (#219, #233), whose
+    ///   own leaving face is what the shape shows from the entry's landing to
+    ///   the hide: nothing downstream may raise another.
     private func transcribeEntry(
         _ entry: inout DictationHistoryEntry, samples: [Float], epoch: Int,
         showsProgress: Bool = true

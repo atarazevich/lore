@@ -121,8 +121,10 @@ enum BubbleRail {
 /// and a blind clear there would swallow the line that just replaced it.
 private enum BubbleTipOwner: Hashable {
     case dot, lock, waveform, timer, clip, count, gear
-    /// The `Stop recording` button, which stands only while paused (#219).
-    case stop
+    /// The `Cancel` button, which stands only while paused (#219, #233).
+    case cancel
+    /// The rail's Space cap, whose one label is what Space does now (#233).
+    case space
     case letter(BubbleRailLetter)
     case row(UUID)
 }
@@ -376,6 +378,7 @@ private struct BubbleFaceKey: Equatable {
     let state: DictationState
     let error: DictationFace?
     let paused: Bool
+    let cancelled: Bool
 }
 
 /// The pointer's place inside the shape, deliberately off the view's state:
@@ -430,12 +433,16 @@ struct DictationIndicatorView: View {
     /// the moment Fn+T and Fn+K are pressed, so the rail is on screen when
     /// those chords apply.
     var held = false
-    /// Esc has suspended the capture (#206). The board's F7a: a pause glyph
-    /// where the dot was, the waveform flat, the timer frozen, the clip and its
-    /// count as they were, and `Stop recording` past a hairline. The lock is
-    /// untouched
-    /// — pausing is not an ending.
+    /// The talk key and Space have suspended the capture (#206, #233). The
+    /// board's F7a: a pause glyph where the dot was, the waveform flat, the
+    /// timer frozen, the clip and its count as they were, and `Cancel` past a
+    /// hairline. The lock is untouched — pausing is not an ending.
     var paused = false
+    /// The dictation was cancelled (#233). The board's F8: the dot out, the
+    /// sentence in the timer's place, and nothing else — no waveform, no timer,
+    /// no rail, no list. It stands from the keypress until the entry has been in
+    /// history for its beat, and then the shape hides.
+    var cancelled = false
     /// The paste's checkmark is leaving (#218) — false until the words are away
     /// and the mark has stood its beat in the slot, then true for the burst:
     /// the mark grows as it fades where it stands, and the bubble's own close
@@ -498,6 +505,10 @@ struct DictationIndicatorView: View {
     var onToggleItem: ((UUID) -> Void)?
     /// The lock glyph is the Space key's other face (#201).
     var onToggleLock: (() -> Void)?
+    /// The rail's Space cap, taken by pointer (#233). It hands over the action
+    /// the cap is already showing rather than a second reading of the state, so
+    /// the click cannot do something else than the cap says.
+    var onSpaceCap: ((HotkeyManager.SpaceAction) -> Void)?
     /// The paperclip turns collecting off and on (#201).
     var onToggleCollecting: (() -> Void)?
     /// `V`, `T` and `K` arm and disarm exactly as Fn+V, Fn+T and Fn+K do
@@ -507,9 +518,9 @@ struct DictationIndicatorView: View {
     var onArmOperator: (() -> Void)?
     /// The gear opens Settings → Copying (#201).
     var onOpenSettings: (() -> Void)?
-    /// `Stop recording` — the dictation ends here, into history, with nothing
-    /// inserted (#219).
-    var onStop: (() -> Void)?
+    /// `Cancel` — the dictation ends here, into history, with nothing inserted
+    /// (#219, #233). The pointer form of Esc, and the same coordinator call.
+    var onCancel: (() -> Void)?
     /// A failure face's one action (#209) — which one it is, never what it does.
     var onFaceAction: ((DictationFaceAction) -> Void)?
     /// The shape is being dragged (#213): where the user puts the bubble is
@@ -706,7 +717,12 @@ struct DictationIndicatorView: View {
     private func shape(
         open: Bool, measuring: Bool, paused: Bool, listWidth: CGFloat
     ) -> some View {
-        VStack(spacing: 0) {
+        // Leading, not centred (#233): the list is given the shape's own width,
+        // and the two are measured a pass apart — a row that is a couple of
+        // points narrower than the list under it was being centred in the
+        // difference, which moved every element in it. The board's shape grows
+        // right and down; nothing in it is centred.
+        VStack(alignment: .leading, spacing: 0) {
             paddedRow(open: open, measuring: measuring, paused: paused)
             if showsItemList(open: open) {
                 LoreTheme.Surface.line.frame(height: 1)
@@ -773,11 +789,11 @@ struct DictationIndicatorView: View {
         ZStack(alignment: .topLeading) {
             shape(open: true, measuring: true, paused: false, listWidth: bubbleSize.width)
             // The paused row is laid out beside it, always, whether or not this
-            // recording is paused (#206): Esc puts a pause glyph where the 8 pt
-            // dot was and `Stop recording` past a hairline, and a canvas measured
-            // without them would resize the window the moment the key was
-            // pressed. Its list is the same list at the same width, so the row
-            // alone is what the union needs.
+            // recording is paused (#206): a pause puts a pause glyph where the
+            // 8 pt dot was, `Cancel` past a hairline and `Resume` on the rail's
+            // Space cap (#233), and a canvas measured without them would resize
+            // the window the moment the chord was pressed. Its list is the same
+            // list at the same width, so the row alone is what the union needs.
             paddedRow(open: true, measuring: true, paused: true)
             paddedRow(open: false, measuring: true, paused: false)
                 // Once per recording (#204): the window is centred on the resting
@@ -797,8 +813,10 @@ struct DictationIndicatorView: View {
     // MARK: - Hover, and the motion it drives
 
     /// A recording is what the rail and the list belong to; an error row is
-    /// not something to widen.
-    private var canExpand: Bool { state == .recording && lastError == nil }
+    /// not something to widen, and neither is a dictation on its way out (#233)
+    /// — the leaving face keeps the canvas the recording measured, and offers
+    /// nothing to open.
+    private var canExpand: Bool { state == .recording && lastError == nil && !cancelled }
 
     /// There is something collected, and a recording to show it for. With
     /// collecting off nothing is in the prompt, so there is no list either —
@@ -972,7 +990,9 @@ struct DictationIndicatorView: View {
         face(open: open, measuring: measuring, paused: paused)
             .animation(
                 faceChange,
-                value: BubbleFaceKey(state: state, error: lastError, paused: paused)
+                value: BubbleFaceKey(
+                    state: state, error: lastError, paused: paused, cancelled: cancelled
+                )
             )
     }
 
@@ -981,12 +1001,20 @@ struct DictationIndicatorView: View {
         if state == .idle {
             EmptyView()
         } else if let error = lastError, state == .recording || state == .done {
+            // A failure outranks the leaving face: a dictation that captured
+            // nothing has no entry for `— in history` to point at, and the
+            // microphone is what the person needs to hear about (#233).
             // Mic stall surfaced by the first-frame watchdog while recording
             // (#209, F1), or whatever the dictation came back with. A face that
             // reports a failure is a different face and dissolves in as one.
             // `.processing` ignores a failure exactly as it always did, and a
             // model download says only what it is doing.
             failureFace(error).transition(Self.faceDissolve)
+        } else if cancelled {
+            // The leaving face (#233, F8) — from the keypress to the hide,
+            // through the tail and the save alike, because the key has to feel
+            // decisive and the entry it names is already being written.
+            cancelledFace.transition(Self.faceDissolve)
         } else {
             // One row, migrating (#217). The recording's own row and the
             // transcribing face are the same HStack with different things in
@@ -1044,7 +1072,7 @@ struct DictationIndicatorView: View {
     private func liveRow(
         open: Bool, measuring: Bool, paused: Bool, working: String?
     ) -> some View {
-        let keys = working == nil ? railKeys(open: open) : []
+        let keys = working == nil ? railKeys(open: open, paused: paused) : []
         return HStack(spacing: 10) {
             statusGroup(measuring: measuring, paused: paused, working: working)
             if showsClip(working: working) {
@@ -1055,7 +1083,7 @@ struct DictationIndicatorView: View {
             // of what was already there, as everything else in this row does.
             if paused, working == nil {
                 groupDivider.transition(Self.faceDissolve)
-                stopPill.transition(Self.faceDissolve)
+                cancelPill.transition(Self.faceDissolve)
             }
             if !keys.isEmpty {
                 groupDivider
@@ -1069,10 +1097,14 @@ struct DictationIndicatorView: View {
                         // is nothing to click, or speak, before it can be
                         // read.
                         // The letter is the key on the keyboard, so the letters
-                        // teach the shortcut by standing there.
-                        pill(key.letter.rawValue, .keycap(bright: key.bright), action: key.action)
-                            .bubbleTip(.letter(key.letter), key.help,
-                                       hovered: $hoveredTip, pointer: pointer)
+                        // teach the shortcut by standing there; the Space cap
+                        // says what its key does, because Space cannot name
+                        // itself (#233). One render chain either way.
+                        pill(
+                            key.label, .keycap(bright: key.bright, minWidth: key.minWidth),
+                            action: key.action
+                        )
+                            .bubbleTip(key.tip, key.help, hovered: $hoveredTip, pointer: pointer)
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel(key.help)
                             .accessibilityAddTraits(key.action == nil ? .isStaticText : .isToggle)
@@ -1099,41 +1131,48 @@ struct DictationIndicatorView: View {
         .frame(minHeight: Self.faceRowHeight)
     }
 
-    /// One letter in the bubble (#201). `armed` is what the letter reports
-    /// about this dictation — cleanup or translate on paste, the operator —
-    /// and it is also why the letter stands in the resting bubble.
+    /// One cap on the bubble's rail (#201, and Space's since #233). `armed` is
+    /// what a letter reports about this dictation — cleanup or translate on
+    /// paste, the operator — and it is also why the letter stands in the
+    /// resting bubble.
     private struct RailKey: Identifiable {
-        let letter: BubbleRailLetter
+        /// What the cap reads: a letter is its own key, the Space cap is what
+        /// Space does.
+        let label: String
         let bright: Bool
         let help: String
         let action: (() -> Void)?
         let armed: Bool
-        var id: BubbleRailLetter { letter }
+        /// Which element the pointer is on, and the cap's identity in the row.
+        let tip: BubbleTipOwner
+        /// The board's `.kb` floor, widened to `.kb.spc` for the Space cap.
+        var minWidth: CGFloat = 18
+        var id: BubbleTipOwner { tip }
     }
 
     private var cleanupKey: RailKey {
         let armed = pendingMode == .cleanup
         return RailKey(
-            letter: .cleanup, bright: armed,
+            label: BubbleRailLetter.cleanup.rawValue, bright: armed,
             help: armed ? "Cleaning up on paste" : "Clean up on paste (Fn+V)",
-            action: onArmCleanup, armed: armed
+            action: onArmCleanup, armed: armed, tip: .letter(.cleanup)
         )
     }
 
     private var translateKey: RailKey {
         let armed = pendingMode == .translate
         return RailKey(
-            letter: .translate, bright: armed,
+            label: BubbleRailLetter.translate.rawValue, bright: armed,
             help: armed ? "Translating on paste" : "Translate on paste (Fn+T)",
-            action: onArmTranslate, armed: armed
+            action: onArmTranslate, armed: armed, tip: .letter(.translate)
         )
     }
 
     private var operatorKey: RailKey {
         RailKey(
-            letter: .operatorSend, bright: operatorAddressed,
+            label: BubbleRailLetter.operatorSend.rawValue, bright: operatorAddressed,
             help: operatorAddressed ? "Going to the operator" : "Send to the operator (Fn+K)",
-            action: onArmOperator, armed: operatorAddressed
+            action: onArmOperator, armed: operatorAddressed, tip: .letter(.operatorSend)
         )
     }
 
@@ -1150,11 +1189,15 @@ struct DictationIndicatorView: View {
         return armed
     }
 
-    /// The rail, at rest and open (#204).
-    private func railKeys(open: Bool) -> [RailKey] {
-        BubbleRail
+    /// The rail, at rest and open (#204), with the Space cap last — after the
+    /// letters and before the gear's own hairline, so nothing already lit ever
+    /// shifts (#233).
+    private func railKeys(open: Bool, paused: Bool) -> [RailKey] {
+        var keys = BubbleRail
             .letters(armed: armedLetters, open: open, operatorSend: operatorSendEnabled)
             .map { key(for: $0) }
+        if open, let cap = spaceKey(paused: paused) { keys.append(cap) }
+        return keys
     }
 
     private func key(for letter: BubbleRailLetter) -> RailKey {
@@ -1164,6 +1207,35 @@ struct DictationIndicatorView: View {
         case .operatorSend: operatorKey
         }
     }
+
+    /// The rail's Space cap: what the key does at this moment, read from the
+    /// same table the key itself reads (#233) — so the cap cannot name one
+    /// thing while Space does another. `talkKeyHeld` is true because the cap is
+    /// the chord's pointer form, and a click holds no key.
+    ///
+    /// Not an arming key, so it never stands at rest — `armed: false` is what
+    /// makes it arrive with the rail. With Space-lock switched off there is no
+    /// lock, no pause and nothing for the cap to say.
+    ///
+    /// `paused` is the row's, not the view's, because the measuring probes lay
+    /// the paused row out on every recording (#206): `Resume` is the widest of
+    /// the three, and the canvas has to have been measured with it or pausing
+    /// would resize the window.
+    private func spaceKey(paused: Bool) -> RailKey? {
+        guard lockEnabled else { return nil }
+        let action = HotkeyManager.SpaceAction.decide(
+            locked: isLocked, paused: paused, talkKeyHeld: true
+        )
+        guard let cap = action.cap(talkKey: talkKeyName) else { return nil }
+        return RailKey(
+            label: cap.label, bright: false, help: cap.help,
+            action: { onSpaceCap?(action) }, armed: false,
+            tip: .space, minWidth: Self.spaceCapWidth
+        )
+    }
+
+    /// The spacebar's own proportion on the rail — the board's `.kb.spc`.
+    static let spaceCapWidth: CGFloat = 46
 
     private var groupDivider: some View {
         LoreTheme.Surface.line.frame(width: 1, height: 14)
@@ -1412,11 +1484,11 @@ struct DictationIndicatorView: View {
         /// The rail's keycap, and P1's inline action wearing it (`.kb`/`.kb.on`).
         /// No hover lift on either: the fill is what says armed or not, and a
         /// brightening dim key would read as the armed one.
-        static func keycap(bright: Bool) -> BubblePill {
+        static func keycap(bright: Bool, minWidth: CGFloat = 18) -> BubblePill {
             BubblePill(
                 font: LoreTheme.Typography.mono(11, weight: .semibold),
                 insets: EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4),
-                minWidth: 18, minHeight: 17,
+                minWidth: minWidth, minHeight: 17,
                 plate: bright ? 0.12 : 0.04,
                 ink: bright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted
             )
@@ -1437,6 +1509,11 @@ struct DictationIndicatorView: View {
         Text(label)
             .font(style.font)
             .foregroundStyle(style.ink)
+            // A plate's label is one line at its own width. `minWidth` is a
+            // floor, as the board's `min-width` is — without this the frame
+            // proposes exactly that floor and the label wraps inside it, which
+            // is what `Resume` did on the 46 pt Space cap (#233).
+            .fixedSize()
             .padding(style.insets)
             .frame(minWidth: style.minWidth, minHeight: style.minHeight)
             .background(
@@ -1682,53 +1759,63 @@ struct DictationIndicatorView: View {
         .onHover { hovering in showBluetoothInfo = hovering }
     }
 
-    /// What stands where the record dot does while Esc has paused the capture
+    /// What stands where the record dot does while the capture is paused
     /// (#206, F7a). Amber, because that is already what paused means everywhere
     /// else in the app — the meeting banner, the REC pill, the sidebar dot and
     /// the menu-bar bead all use this token. The box around it is the row's own
     /// slot (`iconSlot`), which every state of the row now shares.
     ///
-    /// Not a control: the ways on are Esc (resume) and Fn (finish and paste),
-    /// and a third door on the glyph would be a third name for them.
+    /// Not a control: the ways on are the talk key with Space (resume) and the
+    /// talk key alone (finish and paste), and a third door on the glyph would be
+    /// a third name for them.
     private var pauseGlyph: some View {
-        Image(systemName: "pause.fill")
+        let help = Self.pausedHelp(talkKey: talkKeyName)
+        return Image(systemName: "pause.fill")
             .font(.system(size: 11))
             .foregroundStyle(LoreTheme.Accent.amber)
-            .bubbleTip(.dot, Self.pausedHelp, hovered: $hoveredTip, pointer: pointer)
+            .bubbleTip(.dot, help, hovered: $hoveredTip, pointer: pointer)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Self.pausedHelp)
+            .accessibilityLabel(help)
     }
 
-    /// The one button a paused dictation offers (#219). It is not `Continue`:
-    /// Esc already resumes, and the glyph beside it says so. `Finish` is not
-    /// here either — a Fn tap already finishes and pastes — and there is no
-    /// `Delete`, because a dictation nobody wants is removed from history, not
-    /// from here. What was missing was the third thing the user actually wanted:
-    /// keep the words, insert nothing.
-    private var stopPill: some View {
-        pill(Self.stopLabel, .keycap(bright: true), action: onStop)
-            .bubbleTip(.stop, Self.stopHelp, hovered: $hoveredTip, pointer: pointer)
+    /// The one button a paused dictation offers (#219, renamed #233). It is the
+    /// pointer form of Esc, so it carries Esc's name and Esc's outcome — one
+    /// action, one name. `Finish` is not here — a talk-key tap already finishes
+    /// and pastes — and there is no `Delete`, because a dictation nobody wants
+    /// is removed from history, not from here.
+    private var cancelPill: some View {
+        pill(Self.cancelLabel, .keycap(bright: true), action: onCancel)
+            .bubbleTip(.cancel, Self.cancelHelp, hovered: $hoveredTip, pointer: pointer)
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel(Self.stopHelp)
+            .accessibilityLabel(Self.cancelHelp)
             .accessibilityAddTraits(.isButton)
     }
 
     /// The board's copy table, byte for byte — the em dash included. The dot
     /// names the way out (#230), the mirror of the paused face's own sentence:
-    /// the two are read in the same slot, one after the other.
-    static let recordingHelp = "Recording \u{2014} Esc to pause"
-    static let pausedHelp = "Paused \u{2014} Esc to resume"
-    static let stopLabel = "Stop recording"
-    static let stopHelp = "Saved to history, nothing pasted"
+    /// the two are read in the same slot, one after the other. Both name what
+    /// the key does now (#233): Esc cancels, and the way back from a pause is
+    /// the chord that made it.
+    static let recordingHelp = "Recording \u{2014} Esc to cancel"
+    static func pausedHelp(talkKey: String) -> String {
+        "Paused \u{2014} \(talkKey)+Space to resume"
+    }
+    static let cancelLabel = "Cancel"
+    static let cancelHelp = "Saved to history, nothing pasted"
+    /// The leaving face (#233, F8): the whole of what the bubble says after a
+    /// cancel, in the timer's place, for `cancelledFaceTime` before it hides.
+    static let cancelledLine = "Cancelled \u{2014} in history"
 
     /// The two ways out of a locked recording, in the one place both surfaces
     /// read them from (#228). The bubble's tooltip asks the user to press the
     /// key; the app window's status row says the recording is locked. Only the
     /// frame differs — the key, the verbs and their order are this string's,
     /// and they used to be two literals naming the same key two ways ("Fn" in
-    /// the bubble against "Fn (Globe)" in the window).
+    /// the bubble against "Fn (Globe)" in the window). The pause is not in this
+    /// line (#233): it lives on the rail's Space cap, and two ways out is
+    /// already what one line can hold.
     static func lockedWaysOut(talkKey: String) -> String {
-        "\(talkKey) to paste, Esc to pause"
+        "\(talkKey) to paste, Esc to cancel"
     }
 
     /// The lock, both ways round (#201). It stands in the bubble from the
@@ -1760,8 +1847,8 @@ struct DictationIndicatorView: View {
     /// Both ways out, not only the stop (#212): the owner locked a dictation
     /// and had to guess whether Esc kept the words. The key is named from the
     /// setting (#226) — it is the one the user actually holds, and every other
-    /// surface says the same one. Esc has paused, never stopped, since #206;
-    /// the wrong verb outlived the change until #228.
+    /// surface says the same one. Esc cancels into history since #233, and the
+    /// pause it took before that is on the rail's Space cap.
     private var lockHelp: String {
         isLocked
             ? "Press \(Self.lockedWaysOut(talkKey: talkKeyName))"
@@ -1776,7 +1863,7 @@ struct DictationIndicatorView: View {
     /// the live ones 27, so the timer, the paperclip and everything after them
     /// used to step a point sideways the moment the first sound arrived — a
     /// twitch that outlived the sentence this issue retired, and the same point
-    /// Esc would have moved.
+    /// a pause would have moved.
     private func waveform(measuring: Bool, paused: Bool) -> some View {
         Group {
             // Paused has no level to show, so it borrows the flat bars the dead
@@ -1872,6 +1959,34 @@ struct DictationIndicatorView: View {
             .monospacedDigit()
             .fixedSize()
             .frame(minWidth: elapsedWidth(seconds, size: 13), alignment: .leading)
+    }
+
+    /// The leaving face after a cancel (#233, F8): the dot gone out, and the
+    /// one line the moment needs where the timer was.
+    ///
+    /// The dot dims rather than turning another colour — the recording is over,
+    /// and a dimmed dot already means "nothing is coming through here" (#216) —
+    /// and it keeps the row's own slot, so the shape's last frame is the shape
+    /// it has been all along. Nothing else is drawn: no waveform for a capture
+    /// that has stopped, no timer for a dictation that is over, no clip for
+    /// items that have gone with it, and no checkmark, because nothing was
+    /// pasted for one to confirm.
+    private var cancelledFace: some View {
+        HStack(alignment: .firstTextBaseline, spacing: 10) {
+            Circle()
+                .fill(LoreTheme.TextColor.muted)
+                .opacity(0.5)
+                .frame(width: 8, height: 8)
+                .frame(width: Self.faceIconSide, height: Self.faceIconSide)
+                .onTextBaseline()
+            Text(Self.cancelledLine)
+                .font(LoreTheme.Typography.body)
+                .foregroundStyle(LoreTheme.TextColor.primary)
+                .lineLimit(1)
+        }
+        .frame(minHeight: Self.faceRowHeight)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(Self.cancelledLine)
     }
 
     /// One failure face (#209): its icon, its one sentence, and at most one
@@ -1992,21 +2107,25 @@ final class DictationIndicatorModel {
     var items: [DictationItemChip] = []
     var collecting = true
     var held = false
-    /// Esc has suspended the capture (#206).
+    /// The talk key and Space have suspended the capture (#206, #233).
     var paused = false
+    /// The dictation was cancelled and the shape is leaving (#233).
+    var cancelled = false
     /// The paste's checkmark is bursting where it stands (#218).
     var popping = false
     /// Render-only — see `BubbleRenderPreview`.
     var renderPreview = BubbleRenderPreview()
     var onToggleItem: ((UUID) -> Void)?
     var onToggleLock: (() -> Void)?
+    /// The rail's Space cap, carrying the action it shows (#233).
+    var onSpaceCap: ((HotkeyManager.SpaceAction) -> Void)?
     var onToggleCollecting: (() -> Void)?
     var onArmCleanup: (() -> Void)?
     var onArmTranslate: (() -> Void)?
     var onArmOperator: (() -> Void)?
     var onOpenSettings: (() -> Void)?
-    /// `Stop recording` (#219).
-    var onStop: (() -> Void)?
+    /// `Cancel` (#219, #233).
+    var onCancel: (() -> Void)?
     var onFaceAction: ((DictationFaceAction) -> Void)?
     /// Where the user drags the bubble (#213).
     var onDrag: ((BubbleDrag) -> Void)?
@@ -2041,16 +2160,18 @@ struct DictationIndicatorHost: View {
             collecting: model.collecting,
             held: model.held,
             paused: model.paused,
+            cancelled: model.cancelled,
             popping: model.popping,
             renderPreview: model.renderPreview,
             onToggleItem: model.onToggleItem,
             onToggleLock: model.onToggleLock,
+            onSpaceCap: model.onSpaceCap,
             onToggleCollecting: model.onToggleCollecting,
             onArmCleanup: model.onArmCleanup,
             onArmTranslate: model.onArmTranslate,
             onArmOperator: model.onArmOperator,
             onOpenSettings: model.onOpenSettings,
-            onStop: model.onStop,
+            onCancel: model.onCancel,
             onFaceAction: model.onFaceAction,
             onDrag: model.onDrag,
             onCanvasChange: model.onCanvasChange
@@ -2094,6 +2215,21 @@ final class DictationIndicatorManager {
                 hotkeyManager?.toggleLockByClick()
             }
         }
+        // The rail's Space cap does what the key does, and the cap hands over
+        // which of the three that is (#233) — the state was read once, where
+        // the label was decided. Pause and resume go straight to the
+        // coordinator rather than through `handleSpace`: no key is held for a
+        // click, so there is no release to swallow.
+        model.onSpaceCap = { [weak coordinator, weak hotkeyManager] action in
+            Task { @MainActor in
+                switch action {
+                case .lock: hotkeyManager?.toggleLockByClick()
+                case .pause: coordinator?.pauseRecording()
+                case .resume: coordinator?.resumeRecording()
+                case .passThrough: break
+                }
+            }
+        }
         // `V`, `T` and `K` are the Fn+V / Fn+T / Fn+K chords, taken by pointer.
         model.onArmCleanup = { [weak coordinator] in
             Task { @MainActor in
@@ -2122,11 +2258,11 @@ final class DictationIndicatorManager {
         // The gear names the section it belongs to and the shell fronts the
         // window (#198) — the one door, installed by the scene.
         model.onOpenSettings = { SettingsSection.open(.copying) }
-        // `Stop recording` finishes the dictation into history and pastes
-        // nothing (#219). Esc, which resumes, is the keyboard's alone.
-        model.onStop = { [weak coordinator] in
+        // `Cancel` finishes the dictation into history and pastes nothing
+        // (#219) — the pointer form of Esc, and the same call it makes (#233).
+        model.onCancel = { [weak coordinator] in
             Task { @MainActor in
-                coordinator?.finishWithoutPasting()
+                coordinator?.cancelRecording()
             }
         }
         // A face's one action, resolved where the side effects live (#209).
@@ -2170,9 +2306,9 @@ final class DictationIndicatorManager {
 
                 // The dictation's own length, read off the audio it has
                 // captured (`elapsedCaptureSeconds`) rather than timed here: a
-                // clock kept in this poll would learn that Esc had paused the
-                // capture only when it next looked, and pay up to 50 ms of drift
-                // at each edge. It also stops by itself while paused, because
+                // clock kept in this poll would learn that the chord had
+                // paused the capture only when it next looked, and pay up to
+                // 50 ms of drift at each edge. It also stops by itself while paused, because
                 // no samples arrive.
                 //
                 // Once the capture is over the number is frozen where it
@@ -2216,10 +2352,14 @@ final class DictationIndicatorManager {
                 // opens, arriving through the poll that already reads the lock.
                 self.model.held = hotkeyManager?.isFnHoldingBubble ?? false
                 self.model.paused = coordinator.isPaused
+                self.model.cancelled = coordinator.cancelled
                 // The paste moment (#211): `.done` with nothing wrong is the one
-                // edge that says the words are away.
+                // edge that says the words are away — which a cancel is not
+                // (#233): it ends in `.done` too, and pasted nothing for a mark
+                // to confirm.
                 self.followPasteMoment(
                     delivered: newState == .done && coordinator.lastError == nil
+                        && !coordinator.cancelled
                 )
                 let chips = self.chips(for: coordinator.items)
                 if chips != self.model.items { self.model.items = chips }

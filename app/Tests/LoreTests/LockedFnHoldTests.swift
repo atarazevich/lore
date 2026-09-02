@@ -166,18 +166,18 @@ final class LockedFnHoldTests: XCTestCase {
 
     // MARK: - Every ending clears the lock (#225)
 
-    /// The bug report: the paused bubble's `Stop recording` calls
-    /// `finishWithoutPasting()` straight on the coordinator, with no route
-    /// through this manager's own Fn-release/click paths — so `isLocked` used
-    /// to stand true forever after, and the sidebar's dot with it. The fix
-    /// fires synchronously inside `finish`, before the async pipeline even
-    /// starts, so there is nothing to await here.
-    func testFinishWithoutPastingClearsTheLock() {
+    /// The bug report: the paused bubble's button calls `cancelRecording()`
+    /// straight on the coordinator, with no route through this manager's own
+    /// Fn-release/click paths — so `isLocked` used to stand true forever
+    /// after, and the sidebar's dot with it. The fix fires synchronously
+    /// inside `finish`, before the async pipeline even starts, so there is
+    /// nothing to await here.
+    func testCancellingClearsTheLock() {
         lockedRecording()
 
-        coordinator.finishWithoutPasting()
+        coordinator.cancelRecording()
 
-        XCTAssertFalse(hotkeys.isLocked, "Stop recording must end the lock, not just the dictation")
+        XCTAssertFalse(hotkeys.isLocked, "a cancel must end the lock, not just the dictation")
         XCTAssertFalse(hotkeys.isFnHoldingBubble)
     }
 

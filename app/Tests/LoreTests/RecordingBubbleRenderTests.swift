@@ -149,14 +149,14 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertGreaterThan(letters.moved, 0, "the rail drew nothing")
     }
 
-    // MARK: - Paused by Esc (#206)
+    // MARK: - Paused by the talk key and Space (#206, #233)
 
-    /// The window is the same window when Esc pauses. The paused row is wider —
-    /// a 15 pt pause glyph where the 8 pt dot was, and `Continue` past a hairline
-    /// — and the canvas already held all of it, because the probes lay the paused
-    /// row out beside the live one whether this recording is paused or not.
-    /// #204's invariant, on the face #206 adds.
-    func testEscDoesNotResizeTheWindow() throws {
+    /// The window is the same window when the chord pauses. The paused row is
+    /// wider — a 15 pt pause glyph where the 8 pt dot was, and `Cancel` past a
+    /// hairline — and the canvas already held all of it, because the probes lay
+    /// the paused row out beside the live one whether this recording is paused
+    /// or not. #204's invariant, on the face #206 adds.
+    func testPausingDoesNotResizeTheWindow() throws {
         let live = try raster(bubble())
         let paused = try raster(bubble(paused: true))
         print(
@@ -168,7 +168,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertEqual(paused.width, live.width, "the canvas widened for the paused row")
         XCTAssertEqual(paused.height, live.height, "the canvas grew taller for the paused row")
         XCTAssertGreaterThan(
-            paused.paintedWidth, live.paintedWidth, "the paused row drew no Continue"
+            paused.paintedWidth, live.paintedWidth, "the paused row drew no Cancel"
         )
     }
 
@@ -180,7 +180,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertEqual(paused.paintedHeight, Self.boardRowHeight, accuracy: 0.5)
     }
 
-    /// Opening a paused bubble appends the rail to the right of `Continue` and
+    /// Opening a paused bubble appends the rail to the right of `Cancel` and
     /// moves nothing that was already on the paused row — the same promise the
     /// live bubble makes, measured the same way.
     func testOpeningAPausedBubbleMovesNothingThatWasAlreadyOnScreen() throws {
@@ -221,29 +221,139 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertGreaterThan(changed.moved, 0, "the dot is still the dot while paused")
     }
 
-    /// The board's copy table is the contract, so the three strings the paused
-    /// face carries are pinned byte for byte — em dash included. The glyph's line
-    /// now says what the key does, and the button is no longer `Continue`: Esc
-    /// already resumes, and what was missing was the way out that keeps the words
-    /// without inserting them (#219).
+    /// The board's copy table is the contract, so every string the paused and
+    /// leaving faces carry is pinned byte for byte — em dash included. Esc
+    /// cancels now (#233), the way back from a pause is the chord that made it,
+    /// and the pill is the pointer form of Esc under Esc's own name.
     func testThePausedFaceCarriesTheBoardsWords() {
         // The dot's own line is the mirror of the paused one (#230): the same
         // slot, the same shape of sentence, the other half of the key.
-        XCTAssertEqual(DictationIndicatorView.recordingHelp, "Recording \u{2014} Esc to pause")
-        XCTAssertEqual(DictationIndicatorView.pausedHelp, "Paused \u{2014} Esc to resume")
-        XCTAssertEqual(DictationIndicatorView.stopLabel, "Stop recording")
-        XCTAssertEqual(DictationIndicatorView.stopHelp, "Saved to history, nothing pasted")
+        XCTAssertEqual(DictationIndicatorView.recordingHelp, "Recording \u{2014} Esc to cancel")
+        XCTAssertEqual(
+            DictationIndicatorView.pausedHelp(talkKey: HotkeyKey.fn.shortName),
+            "Paused \u{2014} Fn+Space to resume"
+        )
+        XCTAssertEqual(DictationIndicatorView.cancelLabel, "Cancel")
+        XCTAssertEqual(DictationIndicatorView.cancelHelp, "Saved to history, nothing pasted")
+        XCTAssertEqual(DictationIndicatorView.cancelledLine, "Cancelled \u{2014} in history")
+        // The rail's Space cap: one label at a time, whichever is true, and the
+        // chord spelled out in the line under it. Both come off the same table
+        // the key itself reads, so the cap cannot name what Space does not do.
+        let fn = HotkeyKey.fn.shortName
+        XCTAssertEqual(
+            HotkeyManager.SpaceAction.allCases.compactMap { $0.cap(talkKey: fn)?.label },
+            ["Lock", "Pause", "Resume"]
+        )
+        XCTAssertEqual(
+            HotkeyManager.SpaceAction.lock.cap(talkKey: fn)?.help,
+            "Space locks recording, hands free"
+        )
+        XCTAssertEqual(
+            HotkeyManager.SpaceAction.pause.cap(talkKey: fn)?.help, "Fn+Space pauses recording"
+        )
+        XCTAssertEqual(
+            HotkeyManager.SpaceAction.resume.cap(talkKey: fn)?.help, "Fn+Space resumes recording"
+        )
         // The locked sentence has one source (#228): the bubble presses the
         // key, the window says the recording is locked, and neither writes the
         // key name or the verbs itself.
         XCTAssertEqual(
-            DictationIndicatorView.lockedWaysOut(talkKey: HotkeyKey.fn.shortName),
-            "Fn to paste, Esc to pause"
+            DictationIndicatorView.lockedWaysOut(talkKey: fn), "Fn to paste, Esc to cancel"
         )
         XCTAssertEqual(
-            "Press " + DictationIndicatorView.lockedWaysOut(talkKey: HotkeyKey.fn.shortName),
-            "Press Fn to paste, Esc to pause"
+            "Press " + DictationIndicatorView.lockedWaysOut(talkKey: fn),
+            "Press Fn to paste, Esc to cancel"
         )
+    }
+
+    // MARK: - The leaving face (#233)
+
+    /// F8: the dot out and the one line the moment needs, and nothing else — no
+    /// waveform, no timer, no clip. Measured against the recording row it
+    /// replaces, which carries all three.
+    func testTheCancelledFaceIsTheDotAndTheLineAndNothingElse() throws {
+        let recording = try raster(bubble(items: [chip(0), chip(1)]))
+        let cancelled = try raster(bubble(items: [chip(0), chip(1)], cancelled: true))
+        let leaving = "\(String(format: "%.1f", cancelled.paintedWidth)) × "
+            + String(format: "%.1f", cancelled.paintedHeight)
+        let live = "\(String(format: "%.1f", recording.paintedWidth)) × "
+            + String(format: "%.1f", recording.paintedHeight)
+        print("[#233] the leaving face is \(leaving) pt, the recording row it replaces \(live) pt")
+        // The recording row is the dot, the lock, the bars, the timer and the
+        // clip with its count — five elements it lays out across the shape. The
+        // leaving face is the dot and one sentence, so the ink past the slot is
+        // one run of words and nothing that stands apart from it.
+        let runs = inkRuns(cancelled, gap: 5)
+        XCTAssertLessThan(
+            runs.count, inkRuns(recording, gap: 5).count,
+            "the leaving face is still carrying the recording row's elements"
+        )
+        // The board's own row, exactly as tall as everything else the shape says.
+        XCTAssertEqual(cancelled.paintedHeight, Self.boardRowHeight, accuracy: 0.5)
+        // And the window is the window the recording measured (#217): the face
+        // is narrower than the canvas the probes laid out, and `canvas` takes
+        // the wider of the two, so a cancel resizes nothing. Offscreen there is
+        // no recording before this render to have measured one, so the rule is
+        // read where it lives rather than off these pixels.
+        let measured = CGSize(width: recording.pointWidth, height: recording.pointHeight)
+        let held = DictationIndicatorView.canvas(
+            state: .done, measured: measured, restingWidth: recording.paintedWidth,
+            shape: CGSize(width: cancelled.paintedWidth, height: cancelled.paintedHeight)
+        )
+        XCTAssertEqual(held?.size, measured, "the leaving face resized the window")
+    }
+
+    /// The line stands where the timer did, and the dot keeps the row's own
+    /// slot: the shape's last frame is the shape it has been all along.
+    func testTheCancelledFaceKeepsTheRowsIconSlot() throws {
+        let recording = try raster(bubble())
+        let cancelled = try raster(bubble(cancelled: true))
+        let dot = try XCTUnwrap(inkRuns(recording, gap: 5).first, "the row drew no dot")
+        let gone = try XCTUnwrap(inkRuns(cancelled, gap: 5).first, "the leaving face drew no dot")
+        let centre = { (run: Range<Int>) -> CGFloat in
+            CGFloat(run.lowerBound + run.upperBound) / 2 / Self.scale
+        }
+        let live = String(format: "%.2f", centre(dot))
+        let leaving = String(format: "%.2f", centre(gone))
+        print("[#233] the slot's centre: \(live) pt while recording, \(leaving) pt on the way out")
+        XCTAssertEqual(centre(gone), centre(dot), accuracy: 1, "the dot moved as it went out")
+    }
+
+    // MARK: - The rail's Space cap (#233)
+
+    /// The cap is the last thing on the rail, so opening still appends to the
+    /// right of everything already lit — #204's invariant, on #233's control.
+    /// (`testOpeningTheBubbleMovesNothingThatWasAlreadyOnScreen` is the general
+    /// case; this is the cap's own ink.)
+    func testTheSpaceCapIsDrawnAtTheEndOfTheRail() throws {
+        let closed = try raster(bubble())
+        let open = try raster(bubble(held: true, railShown: true))
+        let caps = HotkeyManager.SpaceAction.allCases.compactMap { $0.cap(talkKey: "Fn")?.label }
+        let grew = String(format: "%.2f", open.paintedWidth - closed.paintedWidth)
+        print("[#233] the rail grew \(grew) pt with the cap on it; the cap's own box is "
+              + "\(DictationIndicatorView.spaceCapWidth) pt for \(caps)")
+        XCTAssertGreaterThan(
+            open.paintedWidth - closed.paintedWidth,
+            DictationIndicatorView.spaceCapWidth,
+            "the rail is not wide enough to be carrying the Space cap"
+        )
+    }
+
+    /// Which of the three the cap reads: the key's own table (`spaceAction`'s,
+    /// walked by `DictationPauseTests`), asked as the chord's pointer form — a
+    /// click holds no key, so the cap always has one of the three to show and
+    /// never the row where Space is the user's own.
+    func testTheSpaceCapReadsWhatSpaceDoes() {
+        let rows: [(locked: Bool, paused: Bool, action: HotkeyManager.SpaceAction)] = [
+            (false, false, .lock), (true, false, .pause), (true, true, .resume),
+        ]
+        for row in rows {
+            let action = HotkeyManager.SpaceAction.decide(
+                locked: row.locked, paused: row.paused, talkKeyHeld: true
+            )
+            XCTAssertEqual(action, row.action)
+            XCTAssertNotNil(action.cap(talkKey: HotkeyKey.fn.shortName), "the cap has no label")
+        }
     }
 
     /// Pausing changes the glyph in the slot and appends a hairline and the
@@ -883,6 +993,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         operatorAddressed: Bool = false,
         items: [DictationItemChip] = [],
         paused: Bool = false,
+        cancelled: Bool = false,
         held: Bool = false,
         railShown: Bool = false,
         clipBounce: Bool = false,
@@ -901,6 +1012,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         model.collecting = true
         model.held = held
         model.paused = paused
+        model.cancelled = cancelled
         model.renderPreview = BubbleRenderPreview(
             railVisible: railShown, tip: tip, clipBouncing: clipBounce
         )

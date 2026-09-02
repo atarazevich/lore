@@ -37,7 +37,7 @@ final class HotkeyKeyTests: XCTestCase {
     /// Esc and Space already have a job inside a dictation, and each refusal
     /// names which — not one shared reason for both.
     func testEscAndSpaceAreRefusedByName() {
-        XCTAssertEqual(record(53), .refused(.escPauses))
+        XCTAssertEqual(record(53), .refused(.escCancels))
         XCTAssertEqual(record(HotkeyKey.spaceKeyCode), .refused(.spaceLocks))
     }
 

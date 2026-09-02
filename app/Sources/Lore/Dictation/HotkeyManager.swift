@@ -88,7 +88,7 @@ final class HotkeyManager {
     }
 
     /// Locked = recording continues after the talk key's release; the key ends
-    /// it, and Esc pauses it (#206).
+    /// it, the key with Space pauses it, and Esc cancels it (#206, #233).
     private(set) var isLocked = false
     /// Set synchronously so the local monitor closure can check it without main actor hop
     nonisolated(unsafe) private var isRecordingFlag = false
@@ -191,8 +191,8 @@ final class HotkeyManager {
         self.settings = settings
 
         // The lock is a fact only this manager's own paths used to clear —
-        // Fn-release, the lock glyph's click. Any other ending (Stop recording,
-        // a discard, a failure) had no way to tell it, and left the sidebar's
+        // Fn-release, the lock glyph's click. Any other ending (a cancel, a
+        // discard, a failure) had no way to tell it, and left the sidebar's
         // dot pulsing after the recording was long gone (#225). This is the one
         // subscription that covers every such path; see `clearStaleLock` and
         // `DictationCoordinator.onRecordingEnding`'s own comment.
@@ -260,21 +260,26 @@ final class HotkeyManager {
                 }
             }
 
-            // Space while recording or pre-buffering → lock (consume the event)
-            if event.keyCode == 49,
-               self.modifierOn({ $0.modifierLockEnabled }),
-               (self.isRecordingFlag || self.isPreBufferingFlag),
-               !self.isLocked {
-                Task { @MainActor in
-                    self.handleKeyDown(event)
+            // Space inside a recording → lock it, or pause and resume a locked
+            // one with the talk key held (#233). Consumed only when it is
+            // lore's: a bare Space inside a locked recording is a space.
+            if event.keyCode == HotkeyKey.spaceKeyCode {
+                let action = self.spaceAction(talkKeyHeld: self.talkKeyHeld(event.modifierFlags))
+                if action != .passThrough {
+                    // Auto-repeat is the same press still down: swallowed with
+                    // the press it belongs to, acted on once (#233).
+                    let isRepeat = event.isARepeat
+                    Task { @MainActor in
+                        self.handleSpace(action, isRepeat: isRepeat)
+                    }
+                    return nil // swallow the Space
                 }
-                return nil // swallow the Space
             }
 
-            // Esc inside a recording → pause or continue, and consume (#206).
+            // Esc inside a recording → cancel, and consume (#206, #233).
             // Only when the key is lore's: while the system screenshot crosshair
             // is up it belongs to the crosshair, and falls through untouched.
-            if event.keyCode == DictationEscape.keyCode, self.escapeAction != .passThrough {
+            if event.keyCode == DictationEscape.keyCode, self.escapeIsOurs {
                 Task { @MainActor in
                     self.handleKeyDown(event)
                 }
@@ -520,7 +525,8 @@ final class HotkeyManager {
     /// here; known exception: during pre-buffer its narrower `isRecordingFlag`
     /// guard lets Fn+V/T fall through to its unconsuming fallthrough, so the
     /// keystroke lands in Lore's own field while the branch below still applies
-    /// the mode.
+    /// the mode. Space is not here at all: `spaceAction` is the whole decision,
+    /// taken at the monitor itself (#233).
     private func handleKeyDown(_ event: NSEvent) {
         guard let coordinator else {
             HotkeyManager.hkLog.error("[HK] coordinator is nil in handleKeyDown — events being dropped")
@@ -564,15 +570,7 @@ final class HotkeyManager {
             }
         }
 
-        // Space while recording or pre-buffering → confirm + lock
-        if event.keyCode == 49 && modifierOn({ $0.modifierLockEnabled })
-            && (coordinator.state == .recording || coordinator.isPreBuffering) && !isLocked {
-            lockRecording(coordinator)
-            HotkeyManager.hkLog.debug("[HOTKEY] Space → confirm + locked")
-            return
-        }
-
-        // Esc inside a recording → pause, or continue a paused one (#206).
+        // Esc inside a recording → cancel it into history (#233).
         if event.keyCode == DictationEscape.keyCode {
             handleEscape()
             return
@@ -584,42 +582,153 @@ final class HotkeyManager {
         }
     }
 
-    // MARK: - Escape (#206)
+    // MARK: - Escape (#206, cancels since #233)
 
-    /// What Esc means right now — the one decision both event paths take, so a
-    /// key cannot be consumed by the local monitor and ignored by the tap.
+    /// Is this Esc lore's? — the one reading both event paths take, so a key
+    /// cannot be consumed by the local monitor and ignored by the tap. Esc has
+    /// one outcome now (#233), so whose it is, is the whole decision.
     ///
     /// `state == .recording` is what makes it lore's: a pre-buffer is a gesture
-    /// that may still turn out to be a tap, and there is nothing there to pause.
-    /// It is also read first, and short-circuits: the crosshair reading walks
-    /// every running application and every on-screen window, this runs inside a
-    /// system-wide event tap on the main thread, and Esc is pressed all day long
-    /// outside a dictation.
-    private var escapeAction: DictationEscape {
-        guard let coordinator, coordinator.state == .recording else { return .passThrough }
-        return DictationEscape.decide(
-            paused: coordinator.isPaused,
-            screenshotUIIsUp: DictationEscape.screenshotUIIsUp
-        )
+    /// that may still turn out to be a tap, and there is nothing there to
+    /// cancel. It is also read first, and short-circuits: the crosshair reading
+    /// walks every running application and every on-screen window, this runs
+    /// inside a system-wide event tap on the main thread, and Esc is pressed all
+    /// day long outside a dictation. While the crosshair is up the key belongs
+    /// to the crosshair — consuming it would leave the user unable to cancel a
+    /// screenshot they are taking *into* this dictation.
+    private var escapeIsOurs: Bool {
+        guard let coordinator, coordinator.state == .recording else { return false }
+        return !DictationEscape.screenshotUIIsUp
     }
 
-    /// Esc taken. The lock is untouched either way: pausing is not an ending,
-    /// and a paused recording is still hands-free if that is how it was left.
+    /// Esc taken: the dictation ends into history and nothing is pasted (#233).
+    /// The same key in a held, a locked and a paused recording alike, and the
+    /// same outcome the bubble's `Cancel` button carries.
+    ///
+    /// Idempotent by the coordinator's own latch, which is what a held Esc
+    /// needs: auto-repeat is not filtered here, and this is reached ~30 times a
+    /// second while the key is down. The lock, if there was one, is cleared by
+    /// the ending itself (#225).
     ///
     /// Internal, not private, so `DictationPauseTests` drives the one function
     /// both event paths converge on — the same reason `handleFlagsChanged` is.
     func handleEscape() {
-        guard let coordinator else { return }
-        switch escapeAction {
-        case .passThrough:
+        guard let coordinator, escapeIsOurs else {
             HotkeyManager.hkLog.debug("[HOTKEY] Esc → not ours, passed through")
-        case .pause:
-            HotkeyManager.hkLog.debug("[HOTKEY] Esc → paused")
-            coordinator.pauseRecording()
-        case .resume:
-            HotkeyManager.hkLog.debug("[HOTKEY] Esc → continue")
-            coordinator.resumeRecording()
+            return
         }
+        HotkeyManager.hkLog.debug("[HOTKEY] Esc → cancelled into history")
+        coordinator.cancelRecording()
+    }
+
+    // MARK: - Space (#201, and the pause chord since #233)
+
+    /// What Space means to a live dictation right now — one decision, taken by
+    /// both event paths, so the key cannot be swallowed by one and ignored by
+    /// the other.
+    ///
+    /// The coordinator's own state is consulted rather than the sync mirrors: a
+    /// failed pre-buffer parks in `.done` and leaves `isPreBufferingFlag` stale,
+    /// which would phantom-lock onto a recording that never started.
+    ///
+    /// Internal so `DictationPauseTests` can walk the table without a keyboard.
+    func spaceAction(talkKeyHeld: Bool) -> SpaceAction {
+        guard let coordinator, modifierOn({ $0.modifierLockEnabled }),
+              coordinator.state == .recording || coordinator.isPreBuffering
+        else { return .passThrough }
+        return SpaceAction.decide(
+            locked: isLocked, paused: coordinator.isPaused, talkKeyHeld: talkKeyHeld
+        )
+    }
+
+    /// What Space does — the one table the key, the rail's Space cap and the
+    /// cap's click all read (#233), so what the cap says and what the key does
+    /// cannot drift apart.
+    enum SpaceAction: Equatable, Sendable, CaseIterable {
+        /// Not lore's — a bare Space inside a locked recording is a space.
+        case passThrough
+        case lock
+        case pause
+        case resume
+
+        /// The whole rule, pure: `locked` and `paused` are the dictation's,
+        /// `talkKeyHeld` the keyboard's — and for the cap, which is the chord
+        /// taken by pointer, it is true by definition.
+        static func decide(locked: Bool, paused: Bool, talkKeyHeld: Bool) -> SpaceAction {
+            // Space alone locks a held recording, exactly as it always has.
+            guard locked else { return .lock }
+            // Locked, the key is the user's own — they are typing — unless the
+            // talk key is down with it: the pause is the second press of the
+            // key the thumb is already on.
+            guard talkKeyHeld else { return .passThrough }
+            return paused ? .resume : .pause
+        }
+
+        /// What the rail's cap reads while Space means this, and the line under
+        /// it — the board's copy table. Nil when the key is the user's own and
+        /// there is no cap to draw.
+        ///
+        /// A letter names its own key; Space cannot, so the cap says what the
+        /// key does and its width — wider than any letter — says which key it
+        /// is. Verbs, because a keycap is pressed. The chord is spelled out in
+        /// the line because Space alone is the lock and the two must not be
+        /// guessed at, with the key the user actually holds (#226).
+        func cap(talkKey: String) -> (label: String, help: String)? {
+            switch self {
+            case .passThrough: nil
+            case .lock: ("Lock", "Space locks recording, hands free")
+            case .pause: ("Pause", "\(talkKey)+Space pauses recording")
+            case .resume: ("Resume", "\(talkKey)+Space resumes recording")
+            }
+        }
+    }
+
+    /// Space taken. Internal for the same reason `handleEscape` is.
+    ///
+    /// `isRepeat` is the key still being held down, and it is refused here so
+    /// both event paths refuse it identically: a held chord re-read
+    /// `coordinator.isPaused` on every repeat and flipped pause and resume at
+    /// the key-repeat rate (#233). One physical press, one action. The repeat
+    /// is still swallowed by the path that read it — the key is lore's for the
+    /// whole press, and letting the repeats through would type spaces into the
+    /// document under a held chord.
+    func handleSpace(_ action: SpaceAction, isRepeat: Bool) {
+        guard let coordinator, !isRepeat else { return }
+        switch action {
+        case .passThrough:
+            break
+        case .lock:
+            lockRecording(coordinator)
+            HotkeyManager.hkLog.debug("[HOTKEY] Space → confirm + locked")
+        case .pause:
+            coordinator.pauseRecording()
+            // The talk key's next release is the end of the chord and not the
+            // end of the dictation — the same latch Fn+V, Fn+T, Fn+K and Fn+S
+            // set at their own sites.
+            if isLocked { fnHeldAtLock = true }
+            HotkeyManager.hkLog.debug("[HOTKEY] talk key + Space → paused")
+        case .resume:
+            coordinator.resumeRecording()
+            if isLocked { fnHeldAtLock = true }
+            HotkeyManager.hkLog.debug("[HOTKEY] talk key + Space → resumed")
+        }
+    }
+
+    /// Is the talk key down for a chord arriving with these flags (#233)?
+    ///
+    /// Only Fn is read off the event's own flags, and only because there is one
+    /// Fn key on the keyboard: its flag *is* the key, and the flag is what every
+    /// other chord reads, since the tracked press flickers. Every other talk key
+    /// shares its mask with the twin on the other side of the keyboard —
+    /// `.option` is Left Option's too — so a mask cannot tell whose press this
+    /// is, and answering off one would swallow Left Option+Space, or Cmd+Space
+    /// with a recorded Right Command. Those read the tracked press, which
+    /// `matchesPress` sets by keycode exactly as `handleFlagsChanged` does, and
+    /// which is also the only fact about a recorded key that raises no flag at
+    /// all (#226).
+    func talkKeyHeld(_ flags: NSEvent.ModifierFlags) -> Bool {
+        if (settings?.hotkeyKey ?? .fn) == .fn, flags.contains(.function) { return true }
+        return fnDown
     }
 
 
@@ -651,7 +760,7 @@ final class HotkeyManager {
     /// Unlocking here and the Fn release are the two endings this manager
     /// starts itself — stop and paste — so both clear the lock synchronously,
     /// before `stopRecording` even reaches the coordinator. Every other ending
-    /// (Stop recording on the paused bubble, a discard) goes through
+    /// (a cancel, by Esc or by the paused bubble's pill, a discard) goes through
     /// `clearStaleLock` instead, via `DictationCoordinator.onRecordingEnding`
     /// (#225).
     func toggleLockByClick() {
@@ -675,7 +784,7 @@ final class HotkeyManager {
     }
 
     /// The shared seam for every ending that is not this manager's own (#225):
-    /// `DictationCoordinator.onRecordingEnding` calls this for Stop recording,
+    /// `DictationCoordinator.onRecordingEnding` calls this for a cancel,
     /// a discard, and a failure ending alike, since all of them run through
     /// the coordinator's `finish`/`discardRecording` regardless of outcome.
     ///
@@ -921,48 +1030,44 @@ final class HotkeyManager {
                     return nil
                 }
 
-                // Space while recording/pre-buffering and not locked → consume and lock
-                if keyCode == 49 && manager.modifierOn({ $0.modifierLockEnabled }) && !manager.isLockedFlag {
-                    // Consult the coordinator's live state, not just the sync flags: a failed
-                    // pre-buffer parks in `.done` but leaves isPreBufferingFlag stale, which
-                    // would phantom-lock onto a recording that never started. The tap is added
-                    // to the main run loop (CFRunLoopGetMain), so the callback runs on the main
-                    // thread and assumeIsolated is valid here. Mirrors the keyDown Space path,
-                    // which guards on `coordinator.state == .recording || coordinator.isPreBuffering`.
-                    let recordingLive = MainActor.assumeIsolated {
-                        manager.coordinator.map { $0.state == .recording || $0.isPreBuffering } ?? false
+                // Space inside a recording → consume, and lock it or — with the
+                // talk key held — pause and resume a locked one (#233). The
+                // decision is taken here rather than in the Task, so consuming
+                // and acting cannot disagree; the tap source is on
+                // CFRunLoopGetMain, so the callback runs on the main thread and
+                // assumeIsolated is valid. `CGEventFlags` and
+                // `NSEvent.ModifierFlags` are the same bits (both are the CG
+                // constants), which is what lets one predicate read either.
+                if keyCode == Int64(HotkeyKey.spaceKeyCode) {
+                    let action = MainActor.assumeIsolated {
+                        manager.spaceAction(talkKeyHeld: manager.talkKeyHeld(
+                            NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue))
+                        ))
                     }
-                    if recordingLive {
+                    guard action != .passThrough else {
+                        return Unmanaged.passRetained(event)
+                    }
+                    // Auto-repeat is the same press still down: swallowed with
+                    // the press it belongs to, acted on once — `handleSpace`
+                    // refuses it, so both event paths refuse it alike (#233).
+                    let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+                    // The sync mirrors, before the Task: the next event in this
+                    // same turn has to see the lock the user just took.
+                    if action == .lock, !isRepeat {
                         manager.isLockedFlag = true
                         manager.isPreBufferingFlag = false
                         manager.isRecordingFlag = true
-                        Task { @MainActor in
-                            if manager.coordinator?.isPreBuffering == true {
-                                manager.coordinator?.confirmRecording()
-                            }
-                            manager.fnHeldAtLock = manager.fnDown
-                            // As in `lockRecording`: a hold already under way
-                            // counts from the lock (#205).
-                            manager.lockedHoldStart = manager.fnDown ? Date() : nil
-                            manager.isLocked = true
-                            manager.fnTimer?.cancel()
-                            manager.fnTimer = nil
-                            manager.isHoldMode = false
-                            HotkeyManager.hkLog.debug("[HOTKEY] Space (CGEvent tap) → confirm + locked")
-                        }
-                        return nil
                     }
+                    Task { @MainActor in manager.handleSpace(action, isRepeat: isRepeat) }
+                    return nil
                 }
 
-                // Esc inside a recording → consume, and pause or continue
-                // (#206). The decision is taken here rather than in the Task, so
-                // consuming and acting cannot disagree; the tap source is on
-                // CFRunLoopGetMain, so assumeIsolated is valid (see the Space
-                // path above). While the screenshot crosshair is up the key is
-                // not lore's and falls through to it untouched.
+                // Esc inside a recording → consume, and cancel it into history
+                // (#206, #233). Read here for the same reason Space is, and
+                // while the screenshot crosshair is up the key is not lore's and
+                // falls through to it untouched.
                 if keyCode == DictationEscape.keyCode {
-                    let action = MainActor.assumeIsolated { manager.escapeAction }
-                    guard action != .passThrough else {
+                    guard MainActor.assumeIsolated({ manager.escapeIsOurs }) else {
                         return Unmanaged.passRetained(event)
                     }
                     Task { @MainActor in manager.handleEscape() }

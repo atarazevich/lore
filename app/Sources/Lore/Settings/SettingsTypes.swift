@@ -115,7 +115,7 @@ enum HotkeyKey: Hashable, Identifiable {
     /// reason is a value the caller can branch on and the tests can name,
     /// while the copy stays in one place.
     enum Refusal: String, CaseIterable {
-        case escPauses
+        case escCancels
         case spaceLocks
         case capsLockLatches
         case shortcutsUseIt
@@ -126,8 +126,8 @@ enum HotkeyKey: Hashable, Identifiable {
         /// the real reason and points at a key that works.
         var message: String {
             switch self {
-            case .escPauses:
-                "Esc pauses a recording \u{2014} try another key."
+            case .escCancels:
+                "Esc cancels a recording \u{2014} try another key."
             case .spaceLocks:
                 "Space locks a recording hands-free \u{2014} try another key."
             case .capsLockLatches:
@@ -152,7 +152,7 @@ enum HotkeyKey: Hashable, Identifiable {
         switch keyCode {
         case fnKeyCode: return .chosen(.fn)
         case rightOptionKeyCode: return .chosen(.rightOption)
-        case DictationEscape.keyCode: return .refused(.escPauses)
+        case DictationEscape.keyCode: return .refused(.escCancels)
         case spaceKeyCode: return .refused(.spaceLocks)
         case capsLockKeyCode: return .refused(.capsLockLatches)
         default: break
