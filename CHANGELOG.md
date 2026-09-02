@@ -1,5 +1,24 @@
 # Changelog
 
+## v3.4.0 — 2026-09-02
+
+Esc means cancel again — into history, never into the void — and the pause moves onto the key your thumb is already holding.
+
+**Esc cancels into history (#233)**
+- Esc ends a dictation without pasting, from a held, a locked, or a paused recording alike: the words, the audio, and whatever rode along land in history, nothing is inserted, and the bubble says "Cancelled — in history" for a moment before it hides
+- One press, one cancel: a held Esc is a single cancel, and the talk-key release after it pastes nothing
+- The pause moves onto the talk key: while locked, the talk key with Space pauses and the same chord resumes; a held chord no longer flips pause and resume at the key-repeat rate, and no stray spaces reach the document
+- The held-key rail gains a Space cap that reads what Space does right now — Lock, Pause, or Resume — and the sidebar dot shows a pause in steady amber instead of a pulsing red
+
+**The paused bubble is the recording bubble (#234)**
+- No Cancel pill: click the recording dot to pause, click the pause mark to resume, the way the lock glyph beside it already works; the paused row is the recording row with nothing appended
+
+**Every surface names what Esc does (#228, #230)**
+- The dot's tooltip, the lock glyph, the window's locked status row, and the footer cheat sheet all say what Esc actually does — no surface promises discard, stop, or pause where the key does something else
+
+**Attachments count as content (#229)**
+- A silent dictation with screenshots or copied items delivers them: the items compose into the prompt and paste instead of failing with "Nothing came through", and a release too short to transcribe keeps the items it collected
+
 ## v3.3.0 — 2026-08-31
 
 The after-release polish: the bubble tells the truth in more places, onboarding stops dead-ending, and switching meetings off leaves nothing behind.
