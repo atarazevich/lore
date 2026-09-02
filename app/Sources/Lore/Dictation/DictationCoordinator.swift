@@ -561,8 +561,9 @@ final class DictationCoordinator {
     /// history's own retry, not a face for a bubble that has gone.
     ///
     /// Not `discardRecording`, which throws the audio away: nothing here
-    /// deletes a recording. Called by Esc, by the bubble's `Cancel` button, and
-    /// by nothing else — one action, one name, one path.
+    /// deletes a recording. Called by Esc and by nothing else — the pointer
+    /// form the paused bubble carried is retired (#234), so one action has one
+    /// name and one path.
     func cancelRecording() {
         finish(pasting: false)
     }

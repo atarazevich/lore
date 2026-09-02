@@ -557,6 +557,56 @@ final class DictationPauseTests: XCTestCase {
         XCTAssertTrue(hotkeys.isLocked)
     }
 
+    // MARK: - The slot, clicked (#234)
+
+    /// The row's own glyph is the control it looks like: clicking the record dot
+    /// pauses and clicking the pause mark resumes, exactly as the chord does and
+    /// leaving the chord's own traces. Driven through the manager that installs
+    /// the door, so this is the wiring the pointer really reaches — the view
+    /// decides *which* action to hand over (`DictationIndicatorView.slotAction`,
+    /// walked in `RecordingBubbleRenderTests`), and this is what happens to it.
+    func testClickingTheSlotPausesAndResumes() async throws {
+        makeLockedRecording()
+        speak(coordinator, samples: 16_000)
+        let indicator = DictationIndicatorManager()
+        indicator.start(coordinator: coordinator, hotkeyManager: hotkeys)
+        defer { indicator.stop() }
+        let click = try XCTUnwrap(indicator.model.onSpaceCap, "the slot has no door to the app")
+
+        var mark = DiagStream.mark()
+        click(try XCTUnwrap(DictationIndicatorView.slotAction(locked: true, paused: false)))
+        let paused = await waitUntil { self.coordinator.isPaused }
+        XCTAssertTrue(paused, "the dot did not pause")
+        XCTAssertTrue(
+            DiagStream.events(since: mark).contains(.dictationPaused),
+            "the click left none of the chord's trace"
+        )
+        XCTAssertTrue(hotkeys.isLocked, "clicking the dot ended the recording")
+
+        mark = DiagStream.mark()
+        click(try XCTUnwrap(DictationIndicatorView.slotAction(locked: true, paused: true)))
+        let resumed = await waitUntil { !self.coordinator.isPaused }
+        XCTAssertTrue(resumed, "the glyph did not resume")
+        XCTAssertTrue(DiagStream.events(since: mark).contains(.dictationResumed))
+    }
+
+    /// And a held recording's dot is not a control at all: Space there is the
+    /// lock, and the lock is the glyph beside it — a dot that locked would be a
+    /// second name for that control, and would not be the pause the board
+    /// promises.
+    func testTheDotOfAHeldRecordingIsNotAControl() {
+        makeHotkeyRecording()
+        coordinator.startPreBuffer()
+        coordinator.confirmRecording()
+        XCTAssertFalse(hotkeys.isLocked)
+
+        XCTAssertNil(DictationIndicatorView.slotAction(locked: false, paused: false))
+        XCTAssertEqual(
+            hotkeys.spaceAction(talkKeyHeld: true), .lock,
+            "the key still locks a held recording — only the dot declines to"
+        )
+    }
+
     // MARK: - Fixtures
 
     @discardableResult

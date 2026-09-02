@@ -149,13 +149,13 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertGreaterThan(letters.moved, 0, "the rail drew nothing")
     }
 
-    // MARK: - Paused by the talk key and Space (#206, #233)
+    // MARK: - Paused by the talk key and Space (#206, #233, #234)
 
-    /// The window is the same window when the chord pauses. The paused row is
-    /// wider — a 15 pt pause glyph where the 8 pt dot was, and `Cancel` past a
-    /// hairline — and the canvas already held all of it, because the probes lay
-    /// the paused row out beside the live one whether this recording is paused
-    /// or not. #204's invariant, on the face #206 adds.
+    /// The window is the same window when the chord pauses. The row is the same
+    /// row too — the pause puts a glyph in the dot's own fixed slot and appends
+    /// nothing at all (#234 — the `Cancel` pill and its hairline are retired),
+    /// which `testPausingMovesNothingRightOfTheSlot` is what measures.
+    /// #204's invariant, on the face #206 adds.
     func testPausingDoesNotResizeTheWindow() throws {
         let live = try raster(bubble())
         let paused = try raster(bubble(paused: true))
@@ -167,9 +167,6 @@ final class RecordingBubbleRenderTests: XCTestCase {
         )
         XCTAssertEqual(paused.width, live.width, "the canvas widened for the paused row")
         XCTAssertEqual(paused.height, live.height, "the canvas grew taller for the paused row")
-        XCTAssertGreaterThan(
-            paused.paintedWidth, live.paintedWidth, "the paused row drew no Cancel"
-        )
     }
 
     /// And the paused row is still one board row tall: a keycap in the row does
@@ -180,7 +177,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertEqual(paused.paintedHeight, Self.boardRowHeight, accuracy: 0.5)
     }
 
-    /// Opening a paused bubble appends the rail to the right of `Cancel` and
+    /// Opening a paused bubble appends the rail to the right of the clip and
     /// moves nothing that was already on the paused row — the same promise the
     /// live bubble makes, measured the same way.
     func testOpeningAPausedBubbleMovesNothingThatWasAlreadyOnScreen() throws {
@@ -223,8 +220,11 @@ final class RecordingBubbleRenderTests: XCTestCase {
 
     /// The board's copy table is the contract, so every string the paused and
     /// leaving faces carry is pinned byte for byte — em dash included. Esc
-    /// cancels now (#233), the way back from a pause is the chord that made it,
-    /// and the pill is the pointer form of Esc under Esc's own name.
+    /// cancels now (#233), and the way back from a pause is the chord that made
+    /// it. #234 retired the pill: the two strings it carried, `Cancel` and
+    /// `Saved to history, nothing pasted`, are struck from the table and from
+    /// here, and the two lines below are unchanged by the click that replaced
+    /// it — a click does what the chord does, so it names no new way out.
     func testThePausedFaceCarriesTheBoardsWords() {
         // The dot's own line is the mirror of the paused one (#230): the same
         // slot, the same shape of sentence, the other half of the key.
@@ -233,8 +233,6 @@ final class RecordingBubbleRenderTests: XCTestCase {
             DictationIndicatorView.pausedHelp(talkKey: HotkeyKey.fn.shortName),
             "Paused \u{2014} Fn+Space to resume"
         )
-        XCTAssertEqual(DictationIndicatorView.cancelLabel, "Cancel")
-        XCTAssertEqual(DictationIndicatorView.cancelHelp, "Saved to history, nothing pasted")
         XCTAssertEqual(DictationIndicatorView.cancelledLine, "Cancelled \u{2014} in history")
         // The rail's Space cap: one label at a time, whichever is true, and the
         // chord spelled out in the line under it. Both come off the same table
@@ -356,11 +354,12 @@ final class RecordingBubbleRenderTests: XCTestCase {
         }
     }
 
-    /// Pausing changes the glyph in the slot and appends a hairline and the
-    /// button — and not a pixel else moves (#219). The dot was 8 pt of its own
-    /// where the pause glyph is 15, so everything right of it used to step
-    /// sideways; the slot is one box now, and the row from the timer onward is
-    /// the same picture.
+    /// Pausing changes the glyph in the slot and nothing else at all — no
+    /// pixel moves and nothing is appended (#219, and #234 which retired the
+    /// hairline and the pill). The dot was 8 pt of its own where the pause
+    /// glyph is 15, so everything right of it used to step sideways; the slot
+    /// is one box now, and the row from the timer to its last ink is the same
+    /// picture.
     ///
     /// From the timer, not from the slot: the two glyphs differ (that is the
     /// point) and so do the bars beside them — a live waveform against the flat
@@ -370,18 +369,76 @@ final class RecordingBubbleRenderTests: XCTestCase {
         let live = try raster(bubble())
         let paused = try raster(bubble(paused: true))
         let timer = inkRuns(live, gap: 5)[3]
+        // To the row's last ink, not to a padding short of it: with nothing
+        // appended the two rows end in the same place, so the clip and its
+        // count are inside the region that has to agree.
         let after = compare(
             live, paused,
-            columns: timer.lowerBound..<Int((live.paintedWidth - Self.rowPadding) * Self.scale),
-            of: live
+            columns: timer.lowerBound..<Int(live.paintedWidth * Self.scale), of: live
         )
         print("[#219] live vs paused, from the timer on: \(after.moved) px differ over "
               + "\(after.columns)×\(after.rows), worst delta \(after.worstDelta); the shape "
               + "\(String(format: "%.2f", live.paintedWidth)) → "
               + "\(String(format: "%.2f", paused.paintedWidth)) pt")
         XCTAssertEqual(after.moved, 0, "the paused row moved what was already on screen")
-        // And the button is what the extra width is.
-        XCTAssertGreaterThan(paused.paintedWidth, live.paintedWidth, "no button was appended")
+        // And the row ends where the recording row ends: the paused row is the
+        // recording row with one glyph changed (#234).
+        XCTAssertEqual(
+            paused.paintedWidth, live.paintedWidth, accuracy: 0.5,
+            "[#234] something was appended past the clip"
+        )
+    }
+
+    // MARK: - The slot as a control (#234)
+
+    /// Which action a click on the slot's glyph carries: the key's own table,
+    /// asked the same way the rail's Space cap asks it, and offered only where
+    /// the glyph standing there is what that answer names. A held recording's
+    /// Space is the lock — and the lock is the glyph beside this one — so the
+    /// dot there is not a control at all.
+    func testTheSlotClicksWhatTheChordDoes() {
+        let rows: [(locked: Bool, paused: Bool, action: HotkeyManager.SpaceAction?)] = [
+            (false, false, nil), (true, false, .pause), (true, true, .resume),
+        ]
+        for row in rows {
+            XCTAssertEqual(
+                DictationIndicatorView.slotAction(locked: row.locked, paused: row.paused),
+                row.action, "locked \(row.locked), paused \(row.paused)"
+            )
+        }
+    }
+
+    /// The target around that glyph is the paperclip's (#209) — at least
+    /// 24×24 pt — and it belongs to the control alone. A held recording's dot
+    /// does nothing, so nothing is installed on it: no click to take the press
+    /// that starts a drag (#213), and no shape past the ink it draws.
+    ///
+    /// Either way the row lays out the same 15 pt box a pause may not grow
+    /// (#219): the control's margin is handed straight back, so the dot sits in
+    /// the same place whether it is one or not. Measured as the centre of the
+    /// row's first run of ink, which is the dot. (Where that centre is, in the
+    /// row's own padding and slot, is `testTheMarkStandsWhereTheRecordingDotStood`.)
+    func testTheSlotsTargetIsTheControlsAlone() throws {
+        XCTAssertGreaterThanOrEqual(
+            DictationIndicatorView.slotHitSide, 24, "the board asks for 24×24 pt"
+        )
+        XCTAssertNil(
+            DictationIndicatorView.slotAction(locked: false, paused: false),
+            "a held recording's dot is a control, so this measures nothing"
+        )
+        let control = try dotCentre(of: raster(bubble()))
+        let inert = try dotCentre(of: raster(bubble(locked: false)))
+        print("[#234] the dot's centre is \(String(format: "%.2f", control)) pt with a "
+              + "\(DictationIndicatorView.slotHitSide) pt target around it, "
+              + "\(String(format: "%.2f", inert)) pt with none")
+        XCTAssertEqual(inert, control, accuracy: 0.5, "the target moved the row's own slot")
+    }
+
+    /// The centre of the row's first run of ink — the record dot, whichever ink
+    /// it is drawn in.
+    private func dotCentre(of raster: SwiftUIRaster) throws -> CGFloat {
+        let run = try XCTUnwrap(inkRuns(raster, gap: 5).first, "the row drew no dot")
+        return CGFloat(run.lowerBound + run.upperBound) / 2 / Self.scale
     }
 
     // MARK: - Rendering
@@ -782,8 +839,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         // The dot is the row's first run of ink; the mark is green, which the
         // ink test — a red-channel brightness — cannot see, so it is found by
         // its own colour instead.
-        let dotRun = try XCTUnwrap(inkRuns(recording, gap: 5).first, "the row drew no dot")
-        let dot = CGFloat(dotRun.lowerBound + dotRun.upperBound) / 2 / Self.scale
+        let dot = try dotCentre(of: recording)
         let mark = try greenCentre(of: delivered)
         print("[#217] the slot's centre: \(String(format: "%.2f", dot)) pt while recording, "
               + "\(String(format: "%.2f", mark)) pt once the words are away "
@@ -994,6 +1050,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         items: [DictationItemChip] = [],
         paused: Bool = false,
         cancelled: Bool = false,
+        locked: Bool = true,
         held: Bool = false,
         railShown: Bool = false,
         clipBounce: Bool = false,
@@ -1003,7 +1060,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         let model = DictationIndicatorModel()
         model.state = .recording
         model.audioLevel = 0
-        model.isLocked = true
+        model.isLocked = locked
         model.recordingSeconds = 73
         model.pendingMode = pendingMode
         model.operatorAddressed = operatorAddressed

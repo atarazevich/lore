@@ -603,7 +603,7 @@ final class HotkeyManager {
 
     /// Esc taken: the dictation ends into history and nothing is pasted (#233).
     /// The same key in a held, a locked and a paused recording alike, and the
-    /// same outcome the bubble's `Cancel` button carries.
+    /// only way to it since #234, which retired the paused bubble's `Cancel` pill.
     ///
     /// Idempotent by the coordinator's own latch, which is what a held Esc
     /// needs: auto-repeat is not filtered here, and this is reached ~30 times a
@@ -760,9 +760,8 @@ final class HotkeyManager {
     /// Unlocking here and the Fn release are the two endings this manager
     /// starts itself — stop and paste — so both clear the lock synchronously,
     /// before `stopRecording` even reaches the coordinator. Every other ending
-    /// (a cancel, by Esc or by the paused bubble's pill, a discard) goes through
-    /// `clearStaleLock` instead, via `DictationCoordinator.onRecordingEnding`
-    /// (#225).
+    /// (a cancel by Esc, a discard) goes through `clearStaleLock` instead, via
+    /// `DictationCoordinator.onRecordingEnding` (#225).
     func toggleLockByClick() {
         guard let coordinator else { return }
         if isLocked {
