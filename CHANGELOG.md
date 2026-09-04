@@ -1,5 +1,17 @@
 # Changelog
 
+## v3.5.0 — 2026-09-04
+
+The features speak for themselves: nothing is taught up front, and each one says one sentence from its own place at the moment you could use it.
+
+**Contextual hints on the dictation bubble (#235)**
+- Hold the talk key past ten seconds and the lock says "Space locks recording, hands free", with Space drawn as a keycap; lock for the first time and the closed lock says how it ends
+- Go quiet for twenty seconds while locked and the dot offers "Recording — click to pause"; pass two minutes without cleanup and the rail opens with "Fn+V cleans up on paste"
+- Talk into a muted or zeroed input for five seconds and the dimmed dot reports "No sound is reaching the microphone", withdrawn the instant sound arrives — a live report, never a guess
+- Each hint is the element's own tooltip said once: it leaves by itself after six seconds (hovering holds it), the instant you perform the action, or when you close it with ×, which means never again; otherwise it may return up to three times, on different days, and never twice in one recording
+- Someone who already locks, pauses or cleans up never sees the hint at all
+- The rail's Space keycap (Lock / Pause / Resume) is gone: the lock glyph and the dot are those controls, and the locked dot's tooltip now names the pause
+
 ## v3.4.0 — 2026-09-02
 
 Esc means cancel again — into history, never into the void — and the pause moves onto the key your thumb is already holding.
