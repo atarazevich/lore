@@ -225,32 +225,34 @@ final class RecordingBubbleRenderTests: XCTestCase {
     /// `Saved to history, nothing pasted`, are struck from the table and from
     /// here, and the two lines below are unchanged by the click that replaced
     /// it — a click does what the chord does, so it names no new way out.
+    ///
+    /// #235 gave the dot a second reading and retired the rail's Space cap. The
+    /// three cap labels (`Lock` / `Pause` / `Resume`) and their three lines are
+    /// struck from the table with it, and `SpaceAction` no longer has a
+    /// `cap(talkKey:)` for them to be read from — what is left of that row is
+    /// the locked dot's own line, below.
     func testThePausedFaceCarriesTheBoardsWords() {
+        let fn = HotkeyKey.fn.shortName
         // The dot's own line is the mirror of the paused one (#230): the same
-        // slot, the same shape of sentence, the other half of the key.
-        XCTAssertEqual(DictationIndicatorView.recordingHelp, "Recording \u{2014} Esc to cancel")
+        // slot, the same shape of sentence, the other half of the key. Held, it
+        // names the way out; locked, the dot is a control (#234) and it names
+        // what clicking it does (#235).
         XCTAssertEqual(
-            DictationIndicatorView.pausedHelp(talkKey: HotkeyKey.fn.shortName),
-            "Paused \u{2014} Fn+Space to resume"
+            DictationIndicatorView.recordingHelp(locked: false),
+            "Recording \u{2014} Esc to cancel"
+        )
+        XCTAssertEqual(
+            DictationIndicatorView.recordingHelp(locked: true), "Recording \u{2014} click to pause"
+        )
+        XCTAssertEqual(
+            DictationIndicatorView.pausedHelp(talkKey: fn), "Paused \u{2014} Fn+Space to resume"
         )
         XCTAssertEqual(DictationIndicatorView.cancelledLine, "Cancelled \u{2014} in history")
-        // The rail's Space cap: one label at a time, whichever is true, and the
-        // chord spelled out in the line under it. Both come off the same table
-        // the key itself reads, so the cap cannot name what Space does not do.
-        let fn = HotkeyKey.fn.shortName
+        // One action, one name (`ui-language.md` rule 1): the locked dot's line
+        // and the pause hint's sentence are the same string, from one source.
         XCTAssertEqual(
-            HotkeyManager.SpaceAction.allCases.compactMap { $0.cap(talkKey: fn)?.label },
-            ["Lock", "Pause", "Resume"]
-        )
-        XCTAssertEqual(
-            HotkeyManager.SpaceAction.lock.cap(talkKey: fn)?.help,
-            "Space locks recording, hands free"
-        )
-        XCTAssertEqual(
-            HotkeyManager.SpaceAction.pause.cap(talkKey: fn)?.help, "Fn+Space pauses recording"
-        )
-        XCTAssertEqual(
-            HotkeyManager.SpaceAction.resume.cap(talkKey: fn)?.help, "Fn+Space resumes recording"
+            DictationIndicatorView.recordingHelp(locked: true),
+            DictationHint.pause.sentence(talkKey: fn).plain
         )
         // The locked sentence has one source (#228): the bubble presses the
         // key, the window says the recording is locked, and neither writes the
@@ -317,40 +319,42 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertEqual(centre(gone), centre(dot), accuracy: 1, "the dot moved as it went out")
     }
 
-    // MARK: - The rail's Space cap (#233)
+    // MARK: - The rail's Space cap, retired (#235)
 
-    /// The cap is the last thing on the rail, so opening still appends to the
-    /// right of everything already lit — #204's invariant, on #233's control.
-    /// (`testOpeningTheBubbleMovesNothingThatWasAlreadyOnScreen` is the general
-    /// case; this is the cap's own ink.)
-    func testTheSpaceCapIsDrawnAtTheEndOfTheRail() throws {
+    /// The open rail is the letters and nothing after them. Until #235 it ended
+    /// in a 46 pt cap reading `Lock` / `Pause` / `Resume`; #234 had already made
+    /// the lock glyph and the dot those controls, so the cap was a second name
+    /// for one action. Measured as the width the rail is *not* carrying: opening
+    /// a bubble with nothing armed adds three keycaps and the gear, and used to
+    /// add the cap's own box on top of that.
+    ///
+    /// (`testOpeningTheBubbleMovesNothingThatWasAlreadyOnScreen` is still the
+    /// general case: the rail may only grow to the right of what was lit.)
+    func testTheRetiredSpaceCapIsNoLongerOnTheRail() throws {
         let closed = try raster(bubble())
         let open = try raster(bubble(held: true, railShown: true))
-        let caps = HotkeyManager.SpaceAction.allCases.compactMap { $0.cap(talkKey: "Fn")?.label }
-        let grew = String(format: "%.2f", open.paintedWidth - closed.paintedWidth)
-        print("[#233] the rail grew \(grew) pt with the cap on it; the cap's own box is "
-              + "\(DictationIndicatorView.spaceCapWidth) pt for \(caps)")
-        XCTAssertGreaterThan(
-            open.paintedWidth - closed.paintedWidth,
-            DictationIndicatorView.spaceCapWidth,
-            "the rail is not wide enough to be carrying the Space cap"
-        )
+        let grew = open.paintedWidth - closed.paintedWidth
+        // Three 18 pt letters, the gear's 17, their 6 pt gaps and the two
+        // dividers — under 130 pt all told. The cap alone was 46 pt wide plus
+        // its gap, so a rail still carrying it could not fit under this.
+        print("[#235] the rail grew \(String(format: "%.2f", grew)) pt without the Space cap")
+        XCTAssertLessThan(grew, 130, "the rail is still carrying the retired Space cap")
     }
 
-    /// Which of the three the cap reads: the key's own table (`spaceAction`'s,
-    /// walked by `DictationPauseTests`), asked as the chord's pointer form — a
-    /// click holds no key, so the cap always has one of the three to show and
-    /// never the row where Space is the user's own.
-    func testTheSpaceCapReadsWhatSpaceDoes() {
+    /// The table the cap read is untouched: the key, the lock glyph and the row's
+    /// own slot still ask it, and it still answers with one of the three. Only
+    /// the cap's own label and line went with the cap (#235).
+    func testSpaceStillLocksPausesAndResumes() {
         let rows: [(locked: Bool, paused: Bool, action: HotkeyManager.SpaceAction)] = [
             (false, false, .lock), (true, false, .pause), (true, true, .resume),
         ]
         for row in rows {
-            let action = HotkeyManager.SpaceAction.decide(
-                locked: row.locked, paused: row.paused, talkKeyHeld: true
+            XCTAssertEqual(
+                HotkeyManager.SpaceAction.decide(
+                    locked: row.locked, paused: row.paused, talkKeyHeld: true
+                ),
+                row.action
             )
-            XCTAssertEqual(action, row.action)
-            XCTAssertNotNil(action.cap(talkKey: HotkeyKey.fn.shortName), "the cap has no label")
         }
     }
 
@@ -387,6 +391,97 @@ final class RecordingBubbleRenderTests: XCTestCase {
             paused.paintedWidth, live.paintedWidth, accuracy: 0.5,
             "[#234] something was appended past the clip"
         )
+    }
+
+    // MARK: - The hint card (#235)
+
+    /// A hint appears under the shape without a pointer, in the room the canvas
+    /// already keeps — so the window does not resize and nothing in the resting
+    /// row moves. #204's invariant, on a card nobody asked for.
+    func testAHintMovesNothingInTheRestingRow() throws {
+        let rest = try raster(bubble())
+        let hinted = try raster(bubble(locked: false, hint: .lock))
+        XCTAssertEqual(hinted.width, rest.width, "the canvas widened for a hint")
+        XCTAssertEqual(hinted.height, rest.height, "the canvas grew taller for a hint")
+        print("[#235] the lock hint: the shape is still "
+              + "\(String(format: "%.2f", hinted.paintedWidth)) pt wide, and the card reaches "
+              + "\(String(format: "%.2f", hinted.paintedHeight)) pt of a "
+              + "\(hinted.pointHeight) pt canvas")
+        XCTAssertGreaterThan(
+            hinted.paintedHeight, rest.paintedHeight + BubbleTipCard.gap,
+            "no card was drawn under the shape"
+        )
+        XCTAssertLessThan(
+            hinted.paintedHeight, hinted.pointHeight,
+            "the card runs to the canvas's last row — it is being cut off"
+        )
+    }
+
+    /// The cleanup hint speaks from the `V` keycap, which only exists on the
+    /// open rail — so the rail opens for the card's life, exactly as the pointer
+    /// or a held key opens it.
+    func testTheCleanupHintOpensTheRail() throws {
+        let closed = try raster(bubble())
+        let hinted = try raster(bubble(railShown: true, hint: .cleanup))
+        let grew = hinted.paintedWidth - closed.paintedWidth
+        print("[#235] the cleanup hint opened the rail: the shape grew "
+              + "\(String(format: "%.2f", grew)) pt")
+        XCTAssertGreaterThan(grew, 0, "the rail did not open for the cleanup card")
+    }
+
+    /// A hint asked for the key it names, not for a list of what rode along: the
+    /// board's F4 draws the rail alone. The pointer and the held key open both;
+    /// a hint opens only the rail, so a dictation carrying two items shows the
+    /// same row it did at rest.
+    func testTheCleanupHintDoesNotOpenTheItemList() throws {
+        let rest = try raster(bubble(items: [chip(0), chip(1)]))
+        let hinted = try raster(
+            bubble(items: [chip(0), chip(1)], railShown: true, hint: .cleanup)
+        )
+        let opened = try raster(
+            bubble(items: [chip(0), chip(1)], held: true, railShown: true)
+        )
+        XCTAssertGreaterThan(
+            hinted.paintedWidth, rest.paintedWidth, "the cleanup hint did not open the rail"
+        )
+        // Not by total depth: the canvas always reserves room for the deepest
+        // shape *and* the card under it (#204), so both renders are as tall as
+        // each other. What separates them is the band between the row and that
+        // reserved room — the list draws there, and nothing else does.
+        let band = Int(rest.paintedHeight * Self.scale)..<Int(120 * Self.scale)
+        let withList = inkRows(opened, in: band)
+        let withHint = inkRows(hinted, in: band)
+        print("[#235] two items, the band under the row: \(withList) rows of list ink when the "
+              + "pointer opens it, \(withHint) when the cleanup hint opens the rail")
+        XCTAssertGreaterThan(withList, 0, "the pointer's own shape drew no list to compare against")
+        XCTAssertEqual(withHint, 0, "the cleanup hint unfolded the item list")
+    }
+
+    /// How many rows in `band` carry any ink at all.
+    private func inkRows(_ raster: SwiftUIRaster, in band: Range<Int>) -> Int {
+        band.clamped(to: 0..<raster.height).reduce(into: 0) { rows, y in
+            for x in 0..<raster.width where raster.pixel(x: x, y: y).3 > 0 {
+                rows += 1
+                return
+            }
+        }
+    }
+
+    /// The report's card is the same card, drawn in the same room — the board's
+    /// §07: a lesson and a report are one card, no colour, no badge, no second
+    /// style, and only the missing × says which it is.
+    func testTheReportsCardIsDrawnInTheSameRoom() throws {
+        let rest = try raster(bubble())
+        let report = try raster(bubble(locked: false, noSignal: true, hint: .silentMic))
+        print("[#235] the report's card reaches "
+              + "\(String(format: "%.2f", report.paintedHeight)) pt of a "
+              + "\(report.pointHeight) pt canvas")
+        XCTAssertEqual(report.height, rest.height, "the report's card resized the canvas")
+        XCTAssertGreaterThan(
+            report.paintedHeight, rest.paintedHeight + BubbleTipCard.gap,
+            "the report's card was not drawn"
+        )
+        XCTAssertLessThan(report.paintedHeight, report.pointHeight, "the card is being cut off")
     }
 
     // MARK: - The slot as a control (#234)
@@ -1055,7 +1150,8 @@ final class RecordingBubbleRenderTests: XCTestCase {
         railShown: Bool = false,
         clipBounce: Bool = false,
         noSignal: Bool = false,
-        tip: String? = nil
+        tip: String? = nil,
+        hint: DictationHint? = nil
     ) -> DictationIndicatorHost {
         let model = DictationIndicatorModel()
         model.state = .recording
@@ -1070,6 +1166,7 @@ final class RecordingBubbleRenderTests: XCTestCase {
         model.held = held
         model.paused = paused
         model.cancelled = cancelled
+        model.hint = hint
         model.renderPreview = BubbleRenderPreview(
             railVisible: railShown, tip: tip, clipBouncing: clipBounce
         )

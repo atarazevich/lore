@@ -260,6 +260,27 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case sweptGhost
     }
 
+    /// Why a hint left the card slot (#235) — the shape of `SummonWithdrawal`
+    /// above, for a surface that is not a summon.
+    ///
+    /// `displaced` is the slot being taken by something with more right to it:
+    /// the pointer's own tooltip, a failure face, or the paused face. A
+    /// displaced hint still counts as shown.
+    ///
+    /// `actionPerformed` is a *lesson* retiring because the user did the thing
+    /// it teaches. `conditionCleared` is the silent-microphone report's own
+    /// exit — sound arrived, so the card has nothing left to say. They are two
+    /// reasons because they answer two different questions of the stream: how
+    /// often a hint taught something, and how long a microphone was silent.
+    enum HintWithdrawal: String, Codable, Sendable, CaseIterable {
+        case timedOut
+        case closed
+        case actionPerformed
+        case conditionCleared
+        case recordingEnded
+        case displaced
+    }
+
     // MARK: - App
 
     case appLaunched(build: Int)
@@ -398,6 +419,17 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// legible in the stream as the reversible thing it is.
     case dictationPaused
     case dictationResumed
+    /// A recording went hands-free (#235) — by Space or by a click on the lock.
+    /// Without it a locked dictation is invisible in the stream:
+    /// `dictationRecorded` carries only samples and a duration, so "did the lock
+    /// hint change anything" could not be answered at all.
+    case dictationLocked
+
+    /// A hint spoke from its element, and left again (#235). The `hint` is a
+    /// closed enum and so is the reason, so no sentence enters the stream — only
+    /// which of the five it was.
+    case hintShown(hint: DictationHint)
+    case hintWithdrawn(hint: DictationHint, reason: HintWithdrawal)
 
     /// Rich input (#192). What was copied is never in the stream — only which
     /// of the four kinds it was, and, for an image, how many bytes came off the
@@ -515,7 +547,8 @@ extension DiagEvent {
 
         case .dictationRecorded, .dictationZeroFrames, .dictationPasted,
              .dictationUpgrade, .dictationDiscarded,
-             .dictationPaused, .dictationResumed, .dictationItemCollected,
+             .dictationPaused, .dictationResumed, .dictationLocked,
+             .hintShown, .hintWithdrawn, .dictationItemCollected,
              .dictationItemSwitched, .dictationItemsPasted, .dictationItemsPruned,
              .dictationScreenshotChord, .dictationScreenshotRedirected,
              .clipboardProbeRead:
@@ -593,6 +626,9 @@ extension DiagEvent {
         case .dictationDiscarded: return "dictationDiscarded"
         case .dictationPaused: return "dictationPaused"
         case .dictationResumed: return "dictationResumed"
+        case .dictationLocked: return "dictationLocked"
+        case .hintShown: return "hintShown"
+        case .hintWithdrawn: return "hintWithdrawn"
         case .dictationItemCollected: return "dictationItemCollected"
         case .dictationItemSwitched: return "dictationItemSwitched"
         case .dictationItemsPasted: return "dictationItemsPasted"

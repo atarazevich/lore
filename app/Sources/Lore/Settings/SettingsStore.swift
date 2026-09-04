@@ -327,6 +327,26 @@ final class SettingsStore {
         }
     }
 
+    // MARK: - Contextual hints (#235)
+
+    /// What the app remembers about the five hints the bubble can speak: the
+    /// days each was shown, whether the × closed it, whether its action has
+    /// been seen. One property and one key rather than fifteen — the five states
+    /// are read together on every poll and mean nothing apart — held as JSON, so
+    /// a field added later needs no migration.
+    @ObservationIgnored nonisolated(unsafe) private var _dictationHints: DictationHintRecord
+    var dictationHints: DictationHintRecord {
+        get { access(keyPath: \.dictationHints); return _dictationHints }
+        set {
+            withMutation(keyPath: \.dictationHints) {
+                _dictationHints = newValue
+                defaults.set(try? JSONEncoder().encode(newValue), forKey: Self.dictationHintsKey)
+            }
+        }
+    }
+
+    private static let dictationHintsKey = "dictationHints"
+
     @ObservationIgnored nonisolated(unsafe) private var _translationByDefault: Bool
     var translationByDefault: Bool {
         get { access(keyPath: \.translationByDefault); return _translationByDefault }
@@ -650,6 +670,11 @@ final class SettingsStore {
         self._customCleanupPrompt = defaults.string(forKey: "customCleanupPrompt") ?? ""
         self._cleanupByDefault = defaults.bool(forKey: "dictationCleanupEnabled")
         self._translationByDefault = defaults.bool(forKey: "dictationTranslationEnabled")
+        // An unreadable record is an empty one: a hint that speaks once more is
+        // a smaller fault than a launch that refuses to read its settings.
+        self._dictationHints = (defaults.data(forKey: Self.dictationHintsKey)
+            .flatMap { try? JSONDecoder().decode(DictationHintRecord.self, from: $0) })
+            ?? DictationHintRecord()
         self._openaiApiKey = storage.secretStore.load(key: "openaiApiKey") ?? ""
 
         // Copying Settings (#198) — every switch resolved against the same

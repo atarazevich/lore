@@ -520,6 +520,32 @@ final class DictationPauseTests: XCTestCase {
         XCTAssertTrue(coordinator.isPreBuffering, "the pre-buffer carried on")
     }
 
+    /// Every lock leaves a trace (#235), by either route — the key or the glyph.
+    /// Without it a hands-free dictation is invisible in the stream:
+    /// `dictationRecorded(samples:durationMs:)` says nothing about how the key
+    /// was held, so "did the lock hint change anything" had no answer at all.
+    func testEveryLockIsTraced() {
+        var mark = DiagStream.mark()
+        makeLockedRecording()
+        XCTAssertEqual(
+            DiagStream.events(since: mark).filter { $0 == .dictationLocked }.count, 1,
+            "the lock glyph's own route left no trace"
+        )
+
+        // And the key's route, which locks through the same door.
+        coordinator.discardRecording()
+        makeHotkeyRecording()
+        coordinator.startPreBuffer()
+        coordinator.confirmRecording()
+        mark = DiagStream.mark()
+        hotkeys.handleSpace(hotkeys.spaceAction(talkKeyHeld: false), isRepeat: false)
+        XCTAssertTrue(hotkeys.isLocked)
+        XCTAssertEqual(
+            DiagStream.events(since: mark).filter { $0 == .dictationLocked }.count, 1,
+            "Space locked the recording without a trace"
+        )
+    }
+
     /// The chord, both ways: the talk key with Space pauses a locked recording
     /// and the same chord brings it back, with the lock untouched throughout.
     func testTheSpaceChordPausesAndResumesALockedRecording() {
@@ -571,7 +597,7 @@ final class DictationPauseTests: XCTestCase {
         let indicator = DictationIndicatorManager()
         indicator.start(coordinator: coordinator, hotkeyManager: hotkeys)
         defer { indicator.stop() }
-        let click = try XCTUnwrap(indicator.model.onSpaceCap, "the slot has no door to the app")
+        let click = try XCTUnwrap(indicator.model.onSlotAction, "the slot has no door to the app")
 
         var mark = DiagStream.mark()
         click(try XCTUnwrap(DictationIndicatorView.slotAction(locked: true, paused: false)))

@@ -115,14 +115,17 @@ enum BubbleRail {
 
 // MARK: - The bubble's own tooltip (#207)
 
-/// Which element of the bubble the pointer is on. Identity rather than the
+/// Which element of the bubble a card belongs to: what the pointer is on
+/// (#207), and — since #235 — what a hint speaks from. Identity rather than the
 /// line it carries, so the element the pointer *left* can only take its own
 /// line down: SwiftUI may report the neighbour's arrival before the departure,
 /// and a blind clear there would swallow the line that just replaced it.
-private enum BubbleTipOwner: Hashable {
+///
+/// Not private, because `DictationHint.anchor` names elements from this same
+/// set — a second enum for three of them would be one more place for the dot to
+/// stop meaning the dot.
+enum BubbleTipOwner: Hashable, Sendable {
     case dot, lock, waveform, timer, clip, count, gear
-    /// The rail's Space cap, whose one label is what Space does now (#233).
-    case space
     case letter(BubbleRailLetter)
     case row(UUID)
 }
@@ -164,6 +167,29 @@ extension View {
             }
         }
     }
+
+    /// Where this element stands, for the hint that speaks from it (#235). A
+    /// report and nothing else — no size, no padding, no background — so an
+    /// anchor can never move anything in the shape, exactly as `bubbleTip`
+    /// above cannot.
+    ///
+    /// The measuring copies are laid out at the same origin as the drawn shape,
+    /// so their readings would be right by luck; they are skipped anyway,
+    /// because "the card points at the element the user can see" is a fact about
+    /// the drawn shape and should not depend on which probe reported last.
+    /// - Parameter anchor: nil for a rail key no hint speaks from, so the one
+    ///   call site that loops over the rail needs no branch of its own.
+    fileprivate func hintAnchor(
+        _ anchor: BubbleTipOwner?, measuring: Bool,
+        into anchors: Binding<[BubbleTipOwner: CGFloat]>
+    ) -> some View {
+        onGeometryChange(for: CGFloat.self) { proxy in
+            proxy.frame(in: .named(bubbleTipSpace)).midX
+        } action: { midX in
+            guard let anchor, !measuring else { return }
+            anchors.wrappedValue[anchor] = midX
+        }
+    }
 }
 
 /// The tooltip the bubble draws for itself (#207), to the board's F6: one line
@@ -192,6 +218,25 @@ struct BubbleTipCard: View {
     /// off the right edge of the window.
     let canvasWidth: CGFloat
 
+    /// The hint this card is, if it is one (#235). Nil is the hover tooltip the
+    /// card has always been: one line, no keycaps, no ×, and nothing the pointer
+    /// can touch. A hint is the same plate at the same size with two additions —
+    /// the keycap run inside the sentence, and the × at its trailing edge.
+    var hint: Hint?
+
+    /// What a hint gives the card beyond its words (#235).
+    struct Hint {
+        let sentence: [[DictationHintPiece]]
+        /// The pointer is on the card, which holds the six seconds.
+        let onHold: (Bool) -> Void
+        /// The × — nil for the report, which carries none.
+        let onClose: (() -> Void)?
+    }
+
+    /// The ×'s own name, in the board's copy table: it names the outcome, which
+    /// is forever. `Dismiss` or `Close` would hide exactly the part that matters.
+    static let closeName = "Don't show again"
+
     /// The board's card: 9 and 5 inside it, 11.5 text, and 222 as the widest it
     /// may be — a cap now, not the width (#212). Every card was 222 across
     /// whatever it held, so `Settings` was drawn on a card two thirds empty.
@@ -201,14 +246,28 @@ struct BubbleTipCard: View {
     private static let padX: CGFloat = 9
     private static let arrowSide: CGFloat = 8
 
-    /// Two lines of that face, the card's own padding, and a couple of points
-    /// of slack around its half-point border. Only the cap can put a line on a
-    /// second row, and `lineLimit(2)` is what makes this a ceiling and not an
-    /// estimate: it is the room the canvas keeps under the shape whatever the
-    /// line turns out to be, so no line appearing ever resizes the window.
+    /// The two lines between a hint's own rows (#235) — the board's 1.4 line
+    /// height on an 11.5 pt face, which a `VStack` of single-line rows does not
+    /// get for free the way a wrapped paragraph does.
+    private static let hintLineSpacing: CGFloat = 2
+
+    /// Two lines of the taller of the two cards, their own padding, and a couple
+    /// of points of slack around the half-point border. It is the room the
+    /// canvas keeps under the shape whatever the card turns out to be, so no
+    /// card appearing ever resizes the window.
+    ///
+    /// Two shapes, one ceiling. A hover tooltip is one `Text` the 222 pt cap can
+    /// put on a second row, and `lineLimit(2)` is what makes that a ceiling
+    /// rather than an estimate. A hint is the board's own two rows, each as tall
+    /// as the keycap that may stand in it (#235) — taller than a line of text,
+    /// and the reason this is a `max` and not one measurement.
     static let height: CGFloat = {
         let font = NSFont.systemFont(ofSize: fontSize)
-        return ceil(font.ascender - font.descender + font.leading) * 2 + 2 * padY + 3
+        let textLine = ceil(font.ascender - font.descender + font.leading)
+        let hintLine = max(
+            textLine, DictationIndicatorView.BubblePill.keycap(bright: true, .card).minHeight
+        )
+        return max(2 * textLine, 2 * hintLine + hintLineSpacing) + 2 * padY + 3
     }()
 
     /// The board hangs the card 51 under a 43-tall row.
@@ -243,11 +302,15 @@ struct BubbleTipCard: View {
         // The cap reaches the line as a *proposal*, and the card is the size the
         // line answers with. Nothing here measures text.
         CardWidthCap(maxWidth: Self.maxWidth - 2 * Self.padX) {
-            Text(text)
-                .font(.system(size: Self.fontSize))
-                .foregroundStyle(LoreTheme.TextColor.primary)
-                .lineLimit(2)
-                .fixedSize(horizontal: false, vertical: true)
+            if let hint {
+                hintBody(hint)
+            } else {
+                Text(text)
+                    .font(.system(size: Self.fontSize))
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                    .lineLimit(2)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
         }
             // No shadow: the bubble this hangs under carries none either
             // (`TopCenteredPanel` sets `hasShadow = false`, the shape draws
@@ -268,13 +331,92 @@ struct BubbleTipCard: View {
             // canvas, so the placement is done with the width SwiftUI settled on.
             .alignmentGuide(.leading) { -leading(cardWidth: $0.width) }
             .frame(width: canvasWidth, alignment: .leading)
-            // It explains what the pointer is on; it is never what the pointer
-            // is on. A card that answered the mouse would be a click the app
-            // underneath the canvas never receives.
-            .allowsHitTesting(false)
-            // The line is the element's own VoiceOver name already; read here
-            // it would be read twice.
-            .accessibilityHidden(true)
+            // A hover tooltip explains what the pointer is on; it is never what
+            // the pointer is on. A card that answered the mouse would be a click
+            // the app underneath the canvas never receives.
+            //
+            // A hint is the one card that has to answer it (#235): the pointer
+            // holds its six seconds and the × ends it for good, and neither is
+            // reachable through a view that takes no hits. What it costs is a
+            // click on the card's own plate, which the bubble above it already
+            // costs — and that plate is only ever on screen for six seconds.
+            .allowsHitTesting(hint != nil)
+            // A hover tooltip's line is the element's own VoiceOver name
+            // already; read here it would be read twice. A hint speaks without
+            // a pointer, so it has no element being read alongside it — it
+            // carries its own name, and its × carries another.
+            .accessibilityHidden(hint == nil)
+    }
+
+    /// The hint's sentence in the board's own lines, with the keys it names
+    /// standing in it as lit keycaps, and the × at the trailing edge (#235).
+    ///
+    /// The lines are drawn, never re-wrapped: the board fixed where each
+    /// sentence breaks, and laying them out is what keeps every hint inside the
+    /// two rows the canvas reserves under the shape — whatever the chosen talk
+    /// key's name turns out to be.
+    private func hintBody(_ hint: Hint) -> some View {
+        HStack(alignment: .center, spacing: 8) {
+            VStack(alignment: .leading, spacing: Self.hintLineSpacing) {
+                ForEach(Array(hint.sentence.enumerated()), id: \.offset) { _, line in
+                    HStack(spacing: 0) {
+                        ForEach(Array(line.enumerated()), id: \.offset) { _, piece in
+                            piecePart(piece)
+                        }
+                    }
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(hint.sentence.plain)
+            if let onClose = hint.onClose { closeMark(onClose) }
+        }
+        .onHover { hint.onHold($0) }
+    }
+
+    @ViewBuilder
+    private func piecePart(_ piece: DictationHintPiece) -> some View {
+        switch piece {
+        case .words(let words):
+            Text(words)
+                .font(.system(size: Self.fontSize))
+                .foregroundStyle(LoreTheme.TextColor.primary)
+                .fixedSize()
+        case .key(let name):
+            // The board's `.kc { margin: 0 1px }`: a lone keycap stands off the
+            // words on either side of it.
+            Self.keycap(name).padding(.horizontal, 1)
+        case .chord(let first, let second):
+            // One token (`.chord .kc { margin: 0 }`): the caps close on the +
+            // between them with none of that margin, so `Fn+V` reads as one
+            // press rather than two keys and a symbol.
+            HStack(spacing: 0) {
+                Self.keycap(first)
+                Text("+")
+                    .font(.system(size: Self.fontSize))
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                Self.keycap(second)
+            }
+        }
+    }
+
+    /// The rail's own lit keycap at the card's size (#235, the board's `.kc`).
+    private static func keycap(_ name: String) -> some View {
+        DictationIndicatorView.BubblePill.keycap(bright: true, .card).label(name)
+    }
+
+    /// The board's ×: bare strokes in a 14 pt box, not the filled circle the
+    /// failure faces use — this closes a card, it does not report anything.
+    private func closeMark(_ action: @escaping () -> Void) -> some View {
+        Image(systemName: "xmark")
+            .font(.system(size: 8, weight: .semibold))
+            .foregroundStyle(LoreTheme.TextColor.muted)
+            .frame(width: 14, height: 14)
+            .contentShape(Rectangle())
+            .onTapGesture(perform: action)
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(Self.closeName)
+            .accessibilityAddTraits(.isButton)
+            .help(Self.closeName)
     }
 
     /// The board's arrow: a square on the card's top edge, turned 45°, carrying
@@ -447,6 +589,9 @@ struct DictationIndicatorView: View {
     /// the mark grows as it fades where it stands, and the bubble's own close
     /// plays over the same fifth of a second, so mark and shape go together.
     var popping = false
+    /// The hint the arbiter chose for this moment (#235), or nil. The view draws
+    /// it; whether it may speak at all is decided in the indicator's poll.
+    var hint: DictationHint?
     @State private var showBluetoothInfo = false
     /// How many items have arrived during this dictation (#210). Not a count of
     /// the list — a number that changes once per arrival, which is what the
@@ -490,10 +635,24 @@ struct DictationIndicatorView: View {
     /// centred on, and it cannot be read off the visible shape once that shape
     /// has widened.
     @State private var restingRowWidth: CGFloat = 0
-    /// Open, by pointer or by key (#205). The 300 ms grace on the way out is the
-    /// pointer's alone: it exists for a pointer travelling down to a row, and a
-    /// key that has been let go is not travelling anywhere.
-    private var expanded: Bool { pointerExpanded || held }
+    /// Where each element a hint can speak from stands, in the shape's own space
+    /// (#235) — the card's arrow points at the element that owns the feature,
+    /// and only the element knows where it is. Measured off the drawn shape
+    /// alone; the probes are told to report nothing.
+    @State private var hintAnchors: [BubbleTipOwner: CGFloat] = [:]
+    /// The rail is out — by pointer, by key (#205), or for the one hint whose
+    /// element only exists on it (#235): the cleanup card speaks from the `V`
+    /// keycap, so the rail opens for that card's life and closes with it. The
+    /// 300 ms grace on the way out is the pointer's alone: it exists for a
+    /// pointer travelling down to a row, and neither a key that has been let go
+    /// nor a card that has left is travelling anywhere.
+    private var expanded: Bool { listExpanded || hint?.anchor == .letter(.cleanup) }
+
+    /// The list is out — the pointer and the key only. A hint asked for the key
+    /// it names, not for a list of what rode along: the board's F4 draws the
+    /// rail alone, and a list unfolding under a card about cleanup would be the
+    /// shape answering a question nobody asked.
+    private var listExpanded: Bool { pointerExpanded || held }
     /// The visible shape's own size. Its width is what the list stretches to
     /// exactly — the list must contribute nothing to the shape's width, so a
     /// long copied line ellipsises instead of pushing the bubble wider — and
@@ -504,11 +663,12 @@ struct DictationIndicatorView: View {
     var onToggleItem: ((UUID) -> Void)?
     /// The lock glyph is the Space key's other face (#201).
     var onToggleLock: (() -> Void)?
-    /// The rail's Space cap, taken by pointer (#233), and the row's own glyph
-    /// slot since #234. Both hand over the action they are already showing
-    /// rather than a second reading of the state, so a click cannot do
-    /// something else than the surface says.
-    var onSpaceCap: ((HotkeyManager.SpaceAction) -> Void)?
+    /// The row's own glyph slot, clicked (#234): the dot pauses and the pause
+    /// mark resumes. It hands over the action it is already showing rather than
+    /// a second reading of the state, so a click cannot do something else than
+    /// the surface says. (The rail's Space cap arrived here too until #235
+    /// retired it.)
+    var onSlotAction: ((HotkeyManager.SpaceAction) -> Void)?
     /// The paperclip turns collecting off and on (#201).
     var onToggleCollecting: (() -> Void)?
     /// `V`, `T` and `K` arm and disarm exactly as Fn+V, Fn+T and Fn+K do
@@ -527,6 +687,18 @@ struct DictationIndicatorView: View {
     /// canvas it may grow inside while recording, and `nil` for every other
     /// state, where the window simply fits what it holds.
     var onCanvasChange: (@MainActor (BubbleCanvas?) -> Void)?
+    /// The × on a hint's card: never again (#235).
+    var onHintClose: (() -> Void)?
+    /// The pointer is on a hint's card, which holds its six seconds (#235).
+    var onHintHold: ((Bool) -> Void)?
+    /// A hover tooltip is up (#235). The pointer's intent outranks a hint: it
+    /// keeps one from appearing, and takes the slot from one that has.
+    var onHoverTip: ((Bool) -> Void)?
+    /// The chosen card is really on screen (#235). The arbiter counts a showing
+    /// from this and not from its own choice: the cleanup card's element only
+    /// exists once the rail has widened, and a card nobody saw may not spend one
+    /// of its three days.
+    var onHintDrawn: ((Bool) -> Void)?
 
     var body: some View {
         content
@@ -536,6 +708,11 @@ struct DictationIndicatorView: View {
             .task(id: [pointerOnBubble, canExpand]) { await followPointer() }
             .task(id: [expanded, canExpand]) { await followExpansion() }
             .task(id: hoveredTip) { await followTip() }
+            // The pointer's own line is up, so no hint may be (#235). Reported
+            // rather than read: the 300 ms wait and the hand-off between
+            // neighbours are this view's, and the arbiter sees only the answer.
+            .onChange(of: shownTip != nil, initial: true) { _, up in onHoverTip?(up) }
+            .onChange(of: hintCard != nil, initial: true) { _, drawn in onHintDrawn?(drawn) }
             .animation(expanded ? widenAnimation : closeAnimation, value: expanded)
             .animation(railFade, value: railVisible)
             .onChange(of: canvas, initial: true) { _, measured in
@@ -577,6 +754,10 @@ struct DictationIndicatorView: View {
                 canvasSize = .zero
                 restingRowWidth = 0
                 bubbleSize = .zero
+                // And so do the hint anchors (#235): the next recording's
+                // elements report their own, and a card must never point at
+                // where the last one's `V` keycap stood.
+                hintAnchors.removeAll()
                 onCanvasChange?(nil)
             }
             .environment(\.colorScheme, .dark)
@@ -603,17 +784,12 @@ struct DictationIndicatorView: View {
             ZStack(alignment: .topLeading) {
                 Color.clear.frame(width: canvasWithTip.width, height: canvasWithTip.height)
                 bubble
-                if let tip = visibleTip {
-                    BubbleTipCard(
-                        text: tip.text, pointerX: tipPointerX, canvasWidth: canvasWithTip.width
-                    )
+                cardSlot
                     // Offset, so the card contributes its own size to the
                     // canvas and not its position: the room below the shape is
-                    // the clear rectangle's, kept there whether a line is
+                    // the clear rectangle's, kept there whether a card is
                     // showing or not.
                     .offset(y: canvasSize.height + BubbleTipCard.gap)
-                    .transition(.opacity)
-                }
             }
             .coordinateSpace(.named(bubbleTipSpace))
             // Measured, never drawn, and contributing nothing to the layout:
@@ -626,6 +802,33 @@ struct DictationIndicatorView: View {
         } else {
             bubble
         }
+    }
+
+    /// The one card slot under the shape, and the only thing the hint's own
+    /// curve is allowed to reach (#235).
+    ///
+    /// Scoped here rather than on the whole canvas on purpose: a cleanup hint
+    /// opens the rail, so the tick that puts the card up also widens the shape —
+    /// and an animation scope around both would have drawn that widen on the
+    /// card's 0.2 s ease instead of the bubble's own spring, which is the second
+    /// curve the board's motion table says not to invent.
+    ///
+    /// The pointer's own line has the slot whenever there is one: a hint speaks
+    /// to a hand on the keyboard, and a pointer that has arrived is asking about
+    /// something else.
+    @ViewBuilder
+    private var cardSlot: some View {
+        ZStack(alignment: .topLeading) {
+            if let tip = visibleTip {
+                BubbleTipCard(
+                    text: tip.text, pointerX: tipPointerX, canvasWidth: canvasWithTip.width
+                )
+                .transition(.opacity)
+            } else if let card = hintCard {
+                card.transition(hintTransition)
+            }
+        }
+        .animation(Self.hintMotion, value: hint)
     }
 
     /// What the window is, at every moment of a dictation (#204, #217). Nil
@@ -708,11 +911,42 @@ struct DictationIndicatorView: View {
         shownTip ?? renderPreview.tip.map { BubbleTip(owner: .timer, text: $0) }
     }
 
+    /// The hint's card, hung under the element that owns the feature (#235).
+    ///
+    /// Nil until that element has reported where it stands: an arrow pointing at
+    /// the wrong glyph says the wrong thing, and the anchor arrives on the
+    /// layout pass after the rail opens for the cleanup card.
+    private var hintCard: BubbleTipCard? {
+        guard let hint, canExpand, let anchor = hintAnchors[hint.anchor] else { return nil }
+        let sentence = hint.sentence(talkKey: talkKeyName)
+        return BubbleTipCard(
+            text: sentence.plain, pointerX: anchor, canvasWidth: canvasWithTip.width,
+            hint: BubbleTipCard.Hint(
+                sentence: sentence,
+                onHold: { onHintHold?($0) },
+                // The report carries no ×: it is not something to be done with,
+                // it is a fact that is either true or gone.
+                onClose: hint.isReport ? nil : { onHintClose?() }
+            )
+        )
+    }
+
+    /// The board's motion table (#235): the card fades up into the room the
+    /// canvas already reserves, and fades down out of it. Under Reduce Motion
+    /// the two points of travel are dropped and the fade stays — a card still
+    /// reads as arriving rather than as snapping into place.
+    private var hintTransition: AnyTransition {
+        reduceMotion ? .opacity : .opacity.combined(with: .offset(y: Self.hintTravel))
+    }
+
+    private static let hintTravel: CGFloat = 2
+    private static let hintMotion: Animation = .easeOut(duration: 0.2)
+
     /// One shape: the row, and — when something has been collected — the list
     /// at the bottom of the same surface (#201). Three floating surfaces for
     /// one panel read as three things; this is one.
     private func shape(
-        open: Bool, measuring: Bool, paused: Bool, listWidth: CGFloat
+        open: Bool, listOpen: Bool, measuring: Bool, paused: Bool, listWidth: CGFloat
     ) -> some View {
         // Leading, not centred (#233): the list is given the shape's own width,
         // and the two are measured a pass apart — a row that is a couple of
@@ -721,7 +955,7 @@ struct DictationIndicatorView: View {
         // right and down; nothing in it is centred.
         VStack(alignment: .leading, spacing: 0) {
             paddedRow(open: open, measuring: measuring, paused: paused)
-            if showsItemList(open: open) {
+            if showsItemList(open: listOpen) {
                 LoreTheme.Surface.line.frame(height: 1)
                 itemList(width: listWidth)
             }
@@ -745,7 +979,10 @@ struct DictationIndicatorView: View {
     /// The bubble the user sees, and the only part of the canvas that answers a
     /// pointer — the margin around it belongs to whatever window is underneath.
     private var bubble: some View {
-        shape(open: expanded, measuring: false, paused: paused, listWidth: bubbleSize.width)
+        shape(
+            open: expanded, listOpen: listExpanded, measuring: false, paused: paused,
+            listWidth: bubbleSize.width
+        )
             .fixedSize()
             // The paste's goodbye (#218): the shape closes over the same fifth
             // of a second the mark takes to burst, so the two leave as one
@@ -784,13 +1021,21 @@ struct DictationIndicatorView: View {
     /// can churn the window either: every size in a measuring copy is fixed.
     private var probes: some View {
         ZStack(alignment: .topLeading) {
-            shape(open: true, measuring: true, paused: false, listWidth: bubbleSize.width)
+            // The probe opens both, always: the canvas has to hold the widest
+            // rail and the deepest list whether or not this moment shows either,
+            // or the one that arrives would resize the window.
+            shape(
+                open: true, listOpen: true, measuring: true, paused: false,
+                listWidth: bubbleSize.width
+            )
             // The paused row is laid out beside it, always, whether or not this
             // recording is paused (#206): a pause puts a pause glyph where the
-            // 8 pt dot was and `Resume` on the rail's Space cap (#233), and a
-            // canvas measured without the wider of those caps would resize the
-            // window the moment the chord was pressed. Its list is the same
-            // list at the same width, so the row alone is what the union needs.
+            // 8 pt dot was, and a canvas measured without it would resize the
+            // window the moment the chord was pressed. (Until #235 the row also
+            // gained the widest reading of the rail's Space cap, `Resume`; the
+            // cap is gone and the glyph is the whole of the difference.) Its
+            // list is the same list at the same width, so the row alone is what
+            // the union needs.
             paddedRow(open: true, measuring: true, paused: true)
             paddedRow(open: false, measuring: true, paused: false)
                 // Once per recording (#204): the window is centred on the resting
@@ -813,7 +1058,16 @@ struct DictationIndicatorView: View {
     /// not something to widen, and neither is a dictation on its way out (#233)
     /// — the leaving face keeps the canvas the recording measured, and offers
     /// nothing to open.
-    private var canExpand: Bool { state == .recording && lastError == nil && !cancelled }
+    private var canExpand: Bool {
+        Self.canExpand(state: state, error: lastError, cancelled: cancelled)
+    }
+
+    /// The same predicate, where the indicator's poll can read it (#235): the
+    /// arbiter is told whether a card is possible by the function the shape
+    /// draws one by, so the two cannot disagree for a tick.
+    static func canExpand(state: DictationState, error: DictationFace?, cancelled: Bool) -> Bool {
+        state == .recording && error == nil && !cancelled
+    }
 
     /// There is something collected, and a recording to show it for. With
     /// collecting off nothing is in the prompt, so there is no list either —
@@ -1070,7 +1324,7 @@ struct DictationIndicatorView: View {
     private func liveRow(
         open: Bool, measuring: Bool, paused: Bool, working: String?
     ) -> some View {
-        let keys = working == nil ? railKeys(open: open, paused: paused) : []
+        let keys = working == nil ? railKeys(open: open) : []
         return HStack(spacing: 10) {
             statusGroup(measuring: measuring, paused: paused, working: working)
             if showsClip(working: working) {
@@ -1088,14 +1342,13 @@ struct DictationIndicatorView: View {
                         // is nothing to click, or speak, before it can be
                         // read.
                         // The letter is the key on the keyboard, so the letters
-                        // teach the shortcut by standing there; the Space cap
-                        // says what its key does, because Space cannot name
-                        // itself (#233). One render chain either way.
+                        // teach the shortcut by standing there.
                         pill(
-                            key.label, .keycap(bright: key.bright, minWidth: key.minWidth),
+                            key.label, .keycap(bright: key.bright),
                             action: key.action
                         )
                             .bubbleTip(key.tip, key.help, hovered: $hoveredTip, pointer: pointer)
+                            .hintAnchor(key.anchor, measuring: measuring, into: $hintAnchors)
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel(key.help)
                             .accessibilityAddTraits(key.action == nil ? .isStaticText : .isToggle)
@@ -1127,17 +1380,16 @@ struct DictationIndicatorView: View {
     /// paste, the operator — and it is also why the letter stands in the
     /// resting bubble.
     private struct RailKey: Identifiable {
-        /// What the cap reads: a letter is its own key, the Space cap is what
-        /// Space does.
+        /// What the key reads: its own letter on the keyboard.
         let label: String
         let bright: Bool
         let help: String
         let action: (() -> Void)?
         let armed: Bool
-        /// Which element the pointer is on, and the cap's identity in the row.
+        /// Which element the pointer is on, and the key's identity in the row.
         let tip: BubbleTipOwner
-        /// The board's `.kb` floor, widened to `.kb.spc` for the Space cap.
-        var minWidth: CGFloat = 18
+        /// Which hint speaks from this key, if one does (#235).
+        var anchor: BubbleTipOwner?
         var id: BubbleTipOwner { tip }
     }
 
@@ -1146,7 +1398,8 @@ struct DictationIndicatorView: View {
         return RailKey(
             label: BubbleRailLetter.cleanup.rawValue, bright: armed,
             help: armed ? "Cleaning up on paste" : "Clean up on paste (Fn+V)",
-            action: onArmCleanup, armed: armed, tip: .letter(.cleanup)
+            action: onArmCleanup, armed: armed, tip: .letter(.cleanup),
+            anchor: .letter(.cleanup)
         )
     }
 
@@ -1180,15 +1433,19 @@ struct DictationIndicatorView: View {
         return armed
     }
 
-    /// The rail, at rest and open (#204), with the Space cap last — after the
-    /// letters and before the gear's own hairline, so nothing already lit ever
-    /// shifts (#233).
-    private func railKeys(open: Bool, paused: Bool) -> [RailKey] {
-        var keys = BubbleRail
+    /// The rail, at rest and open (#204): the letters, and nothing after them.
+    ///
+    /// The Space cap that stood last retired with #235. It arrived with #233 on
+    /// the same day #234 made the glyphs the controls — the lock locks, the dot
+    /// pauses — so it had become a second control for an action the glyph beside
+    /// it already owned (`ui-language.md` rule 1, the reason the Cancel pill
+    /// went). Its one remaining job, writing the pause down somewhere on the
+    /// bubble, passes to the pause hint and to the locked dot's own tooltip. The
+    /// chord is untouched: `SpaceAction.decide` still locks, pauses and resumes.
+    private func railKeys(open: Bool) -> [RailKey] {
+        BubbleRail
             .letters(armed: armedLetters, open: open, operatorSend: operatorSendEnabled)
             .map { key(for: $0) }
-        if open, let cap = spaceKey(paused: paused) { keys.append(cap) }
-        return keys
     }
 
     private func key(for letter: BubbleRailLetter) -> RailKey {
@@ -1198,35 +1455,6 @@ struct DictationIndicatorView: View {
         case .operatorSend: operatorKey
         }
     }
-
-    /// The rail's Space cap: what the key does at this moment, read from the
-    /// same table the key itself reads (#233) — so the cap cannot name one
-    /// thing while Space does another. `talkKeyHeld` is true because the cap is
-    /// the chord's pointer form, and a click holds no key.
-    ///
-    /// Not an arming key, so it never stands at rest — `armed: false` is what
-    /// makes it arrive with the rail. With Space-lock switched off there is no
-    /// lock, no pause and nothing for the cap to say.
-    ///
-    /// `paused` is the row's, not the view's, because the measuring probes lay
-    /// the paused row out on every recording (#206): `Resume` is the widest of
-    /// the three, and the canvas has to have been measured with it or pausing
-    /// would resize the window.
-    private func spaceKey(paused: Bool) -> RailKey? {
-        guard lockEnabled else { return nil }
-        let action = HotkeyManager.SpaceAction.decide(
-            locked: isLocked, paused: paused, talkKeyHeld: true
-        )
-        guard let cap = action.cap(talkKey: talkKeyName) else { return nil }
-        return RailKey(
-            label: cap.label, bright: false, help: cap.help,
-            action: { onSpaceCap?(action) }, armed: false,
-            tip: .space, minWidth: Self.spaceCapWidth
-        )
-    }
-
-    /// The spacebar's own proportion on the rail — the board's `.kb.spc`.
-    static let spaceCapWidth: CGFloat = 46
 
     private var groupDivider: some View {
         LoreTheme.Surface.line.frame(width: 1, height: 14)
@@ -1472,14 +1700,25 @@ struct DictationIndicatorView: View {
         let plate: Double
         let ink: Color
 
-        /// The rail's keycap, and P1's inline action wearing it (`.kb`/`.kb.on`).
-        /// No hover lift on either: the fill is what says armed or not, and a
-        /// brightening dim key would read as the armed one.
-        static func keycap(bright: Bool, minWidth: CGFloat = 18) -> BubblePill {
+        /// Which line a keycap stands in: the rail's own 11 pt row (the board's
+        /// `.kb`), or the 10.5 pt of a hint card's sentence (`.kc`, #235). Two
+        /// sizes of one plate, so a keycap on a card cannot drift from a keycap
+        /// on the rail.
+        enum KeycapLine { case rail, card }
+
+        /// The rail's keycap, P1's inline action wearing it (`.kb`/`.kb.on`),
+        /// and the key a hint's sentence names. No hover lift on any of them:
+        /// the fill is what says armed or not, and a brightening dim key would
+        /// read as the armed one.
+        ///
+        /// One width per line now the Space cap is gone (#235): every plate on
+        /// the rail is a single letter on the board's own `.kb` floor.
+        static func keycap(bright: Bool, _ line: KeycapLine = .rail) -> BubblePill {
             BubblePill(
-                font: LoreTheme.Typography.mono(11, weight: .semibold),
+                font: LoreTheme.Typography.mono(line == .rail ? 11 : 10.5, weight: .semibold),
                 insets: EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4),
-                minWidth: minWidth, minHeight: 17,
+                minWidth: line == .rail ? 18 : 16,
+                minHeight: line == .rail ? 17 : 15,
                 plate: bright ? 0.12 : 0.04,
                 ink: bright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted
             )
@@ -1492,25 +1731,32 @@ struct DictationIndicatorView: View {
             minWidth: 0, minHeight: 0,
             plate: 0.07, ink: LoreTheme.TextColor.primary
         )
+
+        /// The label on this plate, and nothing else — no hit shape and no tap,
+        /// which is what makes it usable inside a card as well as on the rail.
+        func label(_ text: String) -> some View {
+            Text(text)
+                .font(font)
+                .foregroundStyle(ink)
+                // A plate's label is one line at its own width. `minWidth` is a
+                // floor, as the board's `min-width` is — without this the frame
+                // proposes exactly that floor and the label wraps inside it,
+                // which is what `Resume` did on the retired 46 pt Space cap
+                // (#233, #235).
+                .fixedSize()
+                .padding(insets)
+                .frame(minWidth: minWidth, minHeight: minHeight)
+                .background(
+                    RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
+                        .fill(Color.white.opacity(plate))
+                )
+        }
     }
 
     private func pill(
         _ label: String, _ style: BubblePill, action: (() -> Void)?
     ) -> some View {
-        Text(label)
-            .font(style.font)
-            .foregroundStyle(style.ink)
-            // A plate's label is one line at its own width. `minWidth` is a
-            // floor, as the board's `min-width` is — without this the frame
-            // proposes exactly that floor and the label wraps inside it, which
-            // is what `Resume` did on the 46 pt Space cap (#233).
-            .fixedSize()
-            .padding(style.insets)
-            .frame(minWidth: style.minWidth, minHeight: style.minHeight)
-            .background(
-                RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
-                    .fill(Color.white.opacity(style.plate))
-            )
+        style.label(label)
             .contentShape(Rectangle())
             .onTapGesture {
                 hideTip()
@@ -1651,7 +1897,7 @@ struct DictationIndicatorView: View {
     /// eye was reading migrate rather than being replaced.
     private func statusGroup(measuring: Bool, paused: Bool, working: String?) -> some View {
         HStack(alignment: .firstTextBaseline, spacing: 10) {
-            iconSlot(paused: paused, working: working != nil)
+            iconSlot(paused: paused, working: working != nil, measuring: measuring)
             if let working {
                 Text(working)
                     .font(LoreTheme.Typography.body)
@@ -1659,7 +1905,8 @@ struct DictationIndicatorView: View {
                     .transition(Self.faceDissolve)
             } else {
                 if lockEnabled {
-                    lockGlyph.onTextBaseline().transition(Self.faceDissolve)
+                    lockGlyph(measuring: measuring).onTextBaseline()
+                        .transition(Self.faceDissolve)
                 }
                 waveform(measuring: measuring, paused: paused)
                     .onTextBaseline()
@@ -1714,19 +1961,23 @@ struct DictationIndicatorView: View {
     /// it'll open." The spinner and the paste's mark are not: they report on a
     /// capture that is over.
     @ViewBuilder
-    private func iconSlot(paused: Bool, working: Bool) -> some View {
+    private func iconSlot(paused: Bool, working: Bool, measuring: Bool) -> some View {
         Group {
             if working {
                 workingIcon(delivered: state == .done)
                     .frame(width: Self.faceIconSide, height: Self.faceIconSide)
             } else if paused {
-                slot(pauseGlyph, help: Self.pausedHelp(talkKey: talkKeyName), paused: true)
+                slot(
+                    pauseGlyph, help: Self.pausedHelp(talkKey: talkKeyName),
+                    paused: true, measuring: measuring
+                )
             } else {
                 // No-signal keeps its distinct dimmed look (not a token color —
                 // it must read as "not recording red").
                 slot(
                     recordDot(noSignal ? Color.white.opacity(0.3) : LoreTheme.Accent.red),
-                    help: Self.recordingHelp, paused: false
+                    help: Self.recordingHelp(locked: isLocked),
+                    paused: false, measuring: measuring
                 )
             }
         }
@@ -1757,7 +2008,9 @@ struct DictationIndicatorView: View {
     /// lift, and no shape past the 15 pt the slot draws. A dot that answered the
     /// pointer over three times its own ink while doing nothing would swallow
     /// the press that starts a drag (#213).
-    private func slot(_ glyph: some View, help: String, paused: Bool) -> some View {
+    private func slot(
+        _ glyph: some View, help: String, paused: Bool, measuring: Bool
+    ) -> some View {
         let action = Self.slotAction(locked: isLocked, paused: paused)
         return Group {
             if let action {
@@ -1767,7 +2020,7 @@ struct DictationIndicatorView: View {
                     .contentShape(Rectangle())
                     .onTapGesture {
                         hideTip()
-                        onSpaceCap?(action)
+                        onSlotAction?(action)
                     }
                     .padding(-(Self.slotHitSide - Self.faceIconSide) / 2)
             } else {
@@ -1775,15 +2028,17 @@ struct DictationIndicatorView: View {
             }
         }
         .bubbleTip(.dot, help, hovered: $hoveredTip, pointer: pointer)
+        // The pause hint and the silent-microphone report both speak from here.
+        .hintAnchor(.dot, measuring: measuring, into: $hintAnchors)
         .accessibilityElement(children: .ignore)
         .accessibilityLabel(help)
         .accessibilityAddTraits(action == nil ? .isStaticText : .isButton)
     }
 
-    /// What a click on the slot does — read from the one table the key and the
-    /// rail's Space cap read (#233), so the glyph, the cap and the chord cannot
-    /// come to mean three things. `talkKeyHeld` is true for the same reason the
-    /// cap's is: a click holds no key, and this is the chord's pointer form.
+    /// What a click on the slot does — read from the one table the key itself
+    /// reads (#233), so the glyph and the chord cannot come to mean two things.
+    /// `talkKeyHeld` is true because a click holds no key, and this is the
+    /// chord's pointer form.
     ///
     /// Nil is not a control at all — no lift, no click, and a static name out
     /// loud. That is the row where the table's answer is not what this glyph
@@ -1851,10 +2106,16 @@ struct DictationIndicatorView: View {
     /// the key does now (#233): Esc cancels, and the way back from a pause is
     /// the chord that made it.
     ///
-    /// Unchanged by #234, which made the two glyphs clickable: a click does
-    /// what the chord does, and the line goes on naming the way out — as the
-    /// lock glyph's own two lines do.
-    static let recordingHelp = "Recording \u{2014} Esc to cancel"
+    /// Two readings since #235, because the dot is two different things. Locked,
+    /// it is a control (#234) and its line names what clicking it does — the
+    /// same words the pause hint speaks, since one action carries one name
+    /// (`ui-language.md` rule 1), and the line the rail's retired Space cap was
+    /// the only place that used to write down. Held, Space is the lock and the
+    /// lock is the glyph beside this one, so the dot is not a control at all and
+    /// the line names the way out instead of a click that does nothing.
+    static func recordingHelp(locked: Bool) -> String {
+        locked ? DictationHint.pauseLine : "Recording \u{2014} Esc to cancel"
+    }
     static func pausedHelp(talkKey: String) -> String {
         "Paused \u{2014} \(talkKey)+Space to resume"
     }
@@ -1868,8 +2129,8 @@ struct DictationIndicatorView: View {
     /// frame differs — the key, the verbs and their order are this string's,
     /// and they used to be two literals naming the same key two ways ("Fn" in
     /// the bubble against "Fn (Globe)" in the window). The pause is not in this
-    /// line (#233): it lives on the rail's Space cap, and two ways out is
-    /// already what one line can hold.
+    /// line (#233): it lives on the dot, which performs it (#235), and two ways
+    /// out is already what one line can hold.
     static func lockedWaysOut(talkKey: String) -> String {
         "\(talkKey) to paste, Esc to cancel"
     }
@@ -1878,7 +2139,7 @@ struct DictationIndicatorView: View {
     /// first second — an open shackle is what tells someone holding Fn that
     /// they can let go — and clicking it is the Space key: it locks, and while
     /// locked it ends the dictation the way Fn does.
-    private var lockGlyph: some View {
+    private func lockGlyph(measuring: Bool) -> some View {
         Image(systemName: isLocked ? "lock.fill" : "lock.open.fill")
             .font(.system(size: 11))
             .foregroundStyle(isLocked ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted)
@@ -1890,6 +2151,8 @@ struct DictationIndicatorView: View {
                 onToggleLock?()
             }
             .bubbleTip(.lock, lockHelp, hovered: $hoveredTip, pointer: pointer)
+            // The lock hint and "how it ends" both speak from here (#235).
+            .hintAnchor(.lock, measuring: measuring, into: $hintAnchors)
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(lockHelp)
             .accessibilityAddTraits(.isToggle)
@@ -1903,12 +2166,16 @@ struct DictationIndicatorView: View {
     /// Both ways out, not only the stop (#212): the owner locked a dictation
     /// and had to guess whether Esc kept the words. The key is named from the
     /// setting (#226) — it is the one the user actually holds, and every other
-    /// surface says the same one. Esc cancels into history since #233, and the
-    /// pause it took before that is on the rail's Space cap.
+    /// surface says the same one. Esc cancels into history since #233; the pause
+    /// is the dot's, which names it in its own line (#235).
+    ///
+    /// The open shackle's line is the lock hint's own sentence, read from it
+    /// rather than written twice: the copy table says the hint reuses this
+    /// string word for word, and one source is how that stays true.
     private var lockHelp: String {
         isLocked
             ? "Press \(Self.lockedWaysOut(talkKey: talkKeyName))"
-            : "Space locks recording, hands free"
+            : DictationHint.lock.sentence(talkKey: talkKeyName).plain
     }
 
     /// Shared Lore waveform while live; the no-signal state keeps its distinct
@@ -2167,13 +2434,14 @@ final class DictationIndicatorModel {
     var cancelled = false
     /// The paste's checkmark is bursting where it stands (#218).
     var popping = false
+    /// The hint the arbiter chose for this moment (#235).
+    var hint: DictationHint?
     /// Render-only — see `BubbleRenderPreview`.
     var renderPreview = BubbleRenderPreview()
     var onToggleItem: ((UUID) -> Void)?
     var onToggleLock: (() -> Void)?
-    /// The rail's Space cap and the row's glyph slot, each carrying the action
-    /// it shows (#233, #234).
-    var onSpaceCap: ((HotkeyManager.SpaceAction) -> Void)?
+    /// The row's glyph slot, carrying the action it shows (#234).
+    var onSlotAction: ((HotkeyManager.SpaceAction) -> Void)?
     var onToggleCollecting: (() -> Void)?
     var onArmCleanup: (() -> Void)?
     var onArmTranslate: (() -> Void)?
@@ -2185,6 +2453,12 @@ final class DictationIndicatorModel {
     /// The window the shape wants (#204): the canvas it grows inside while
     /// recording, `nil` for every other state.
     var onCanvasChange: (@MainActor (BubbleCanvas?) -> Void)?
+    /// A hint's ×, the pointer holding its card, the pointer's own tooltip
+    /// taking the slot from it, and whether the card is really on screen (#235).
+    var onHintClose: (() -> Void)?
+    var onHintHold: ((Bool) -> Void)?
+    var onHoverTip: ((Bool) -> Void)?
+    var onHintDrawn: ((Bool) -> Void)?
 }
 
 /// SwiftUI wrapper that reads the observable model. Not private, because it is
@@ -2215,10 +2489,11 @@ struct DictationIndicatorHost: View {
             paused: model.paused,
             cancelled: model.cancelled,
             popping: model.popping,
+            hint: model.hint,
             renderPreview: model.renderPreview,
             onToggleItem: model.onToggleItem,
             onToggleLock: model.onToggleLock,
-            onSpaceCap: model.onSpaceCap,
+            onSlotAction: model.onSlotAction,
             onToggleCollecting: model.onToggleCollecting,
             onArmCleanup: model.onArmCleanup,
             onArmTranslate: model.onArmTranslate,
@@ -2226,7 +2501,11 @@ struct DictationIndicatorHost: View {
             onOpenSettings: model.onOpenSettings,
             onFaceAction: model.onFaceAction,
             onDrag: model.onDrag,
-            onCanvasChange: model.onCanvasChange
+            onCanvasChange: model.onCanvasChange,
+            onHintClose: model.onHintClose,
+            onHintHold: model.onHintHold,
+            onHoverTip: model.onHoverTip,
+            onHintDrawn: model.onHintDrawn
         )
     }
 }
@@ -2250,6 +2529,16 @@ final class DictationIndicatorManager {
     private var thumbnails: [UUID: NSImage] = [:]
     /// The beat the mark stands in the slot before it bursts (#218).
     private var popTask: Task<Void, Never>?
+    /// The one place that decides whether a hint may speak (#235). Nil until a
+    /// coordinator with settings arrives, which is also the only state in which
+    /// nothing could be remembered anyway.
+    private var hints: DictationHintArbiter?
+    /// A hover tooltip is up — reported by the shape, which owns the pointer's
+    /// 300 ms and the hand-off between neighbours (#207).
+    private var hoverTipShowing = false
+    /// The chosen hint's card is really on screen — reported by the shape, which
+    /// is the only thing that knows where the element it points at stands.
+    private var hintDrawn = false
     func start(coordinator: DictationCoordinator, hotkeyManager: HotkeyManager) {
         guard let panel = TopCenteredPanel(
             content: DictationIndicatorHost(model: model), topInset: 8
@@ -2267,15 +2556,13 @@ final class DictationIndicatorManager {
                 hotkeyManager?.toggleLockByClick()
             }
         }
-        // The rail's Space cap does what the key does, and the cap hands over
-        // which of the three that is (#233) — the state was read once, where
-        // the label was decided. The row's own glyph slot arrives here too
-        // (#234): the dot pauses and the pause glyph resumes, which is the same
-        // table asked the same way, so there is one door and not a second.
-        // Pause and resume go straight to the coordinator rather than through
-        // `handleSpace`: no key is held for a click, so there is no release to
-        // swallow.
-        model.onSpaceCap = { [weak coordinator, weak hotkeyManager] action in
+        // The row's own glyph slot does what the key does, and hands over which
+        // of the three that is (#234) — the state was read once, where the
+        // glyph was decided. Pause and resume go straight to the coordinator
+        // rather than through `handleSpace`: no key is held for a click, so
+        // there is no release to swallow. (The rail's Space cap came through
+        // here too until #235 retired it; the door is the glyph's alone now.)
+        model.onSlotAction = { [weak coordinator, weak hotkeyManager] action in
             Task { @MainActor in
                 switch action {
                 case .lock: hotkeyManager?.toggleLockByClick()
@@ -2343,6 +2630,19 @@ final class DictationIndicatorManager {
         model.onCanvasChange = { [weak self] canvas in
             self?.panel?.setCanvas(canvas)
         }
+        // The hint's own three doors (#235). The × and the pointer's hold reach
+        // the arbiter directly rather than through the poll, so a card the user
+        // has just closed is off the screen on this frame and not the next one.
+        if let settings = coordinator.settings {
+            hints = DictationHintArbiter(settings: settings, history: coordinator.history)
+        }
+        model.onHintClose = { [weak self] in
+            self?.hints?.close()
+            self?.model.hint = self?.hints?.showing
+        }
+        model.onHintHold = { [weak self] holding in self?.hints?.hold(holding) }
+        model.onHoverTip = { [weak self] up in self?.hoverTipShowing = up }
+        model.onHintDrawn = { [weak self] drawn in self?.hintDrawn = drawn }
 
         // Poll coordinator state and push into model
         observationTask = Task { [weak self, weak coordinator, weak hotkeyManager] in
@@ -2411,6 +2711,26 @@ final class DictationIndicatorManager {
                 )
                 let chips = self.chips(for: coordinator.items)
                 if chips != self.model.items { self.model.items = chips }
+
+                // The arbiter rides this poll (#235): every fact it reads is
+                // already on the line above, so no hint needs a sensor, a timer
+                // or a window of its own.
+                let hint = self.hints?.tick(DictationHintSignals(
+                    capturing: newState == .recording && !coordinator.cancelled,
+                    canSpeak: DictationIndicatorView.canExpand(
+                        state: newState, error: coordinator.lastError,
+                        cancelled: coordinator.cancelled
+                    ),
+                    cardDrawn: self.hintDrawn,
+                    elapsedSeconds: newSeconds,
+                    locked: self.model.isLocked,
+                    paused: coordinator.isPaused,
+                    hoverTipShowing: self.hoverTipShowing,
+                    noSignal: coordinator.noSignal,
+                    level: coordinator.audioLevel,
+                    cleanupArmed: coordinator.pendingCleanupMode == .cleanup
+                ))
+                if hint != self.model.hint { self.model.hint = hint }
 
                 // Show/hide and resize
                 if newState == .idle {

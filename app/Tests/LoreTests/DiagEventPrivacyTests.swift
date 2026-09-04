@@ -62,7 +62,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         case apiCall
         case dictationRecorded, dictationZeroFrames, dictationPasted
         case dictationUpgrade, dictationDiscarded
-        case dictationPaused, dictationResumed
+        case dictationPaused, dictationResumed, dictationLocked
+        case hintShown, hintWithdrawn
         case dictationItemCollected, dictationItemSwitched, dictationItemsPasted
         case dictationItemsPruned
         case dictationScreenshotChord, dictationScreenshotRedirected, clipboardProbeRead
@@ -129,6 +130,9 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .dictationDiscarded: return .dictationDiscarded
         case .dictationPaused: return .dictationPaused
         case .dictationResumed: return .dictationResumed
+        case .dictationLocked: return .dictationLocked
+        case .hintShown: return .hintShown
+        case .hintWithdrawn: return .hintWithdrawn
         case .dictationItemCollected: return .dictationItemCollected
         case .dictationItemSwitched: return .dictationItemSwitched
         case .dictationItemsPasted: return .dictationItemsPasted
@@ -237,6 +241,10 @@ final class DiagEventPrivacyTests: XCTestCase {
         case .dictationDiscarded: return .dictationDiscarded(state: .processing)
         case .dictationPaused: return .dictationPaused
         case .dictationResumed: return .dictationResumed
+        case .dictationLocked: return .dictationLocked
+        case .hintShown: return .hintShown(hint: .silentMic)
+        case .hintWithdrawn:
+            return .hintWithdrawn(hint: .cleanup, reason: .actionPerformed)
         case .dictationItemCollected:
             return .dictationItemCollected(kind: .image, bytes: .max)
         case .dictationItemSwitched:
@@ -300,6 +308,8 @@ final class DiagEventPrivacyTests: XCTestCase {
         allowed.formUnion(DiagEvent.HealthTrigger.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.NotesMigration.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.SummonWithdrawal.allCases.map(\.rawValue))
+        allowed.formUnion(DiagEvent.HintWithdrawal.allCases.map(\.rawValue))
+        allowed.formUnion(DictationHint.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.OnboardingStep.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.RepairReason.allCases.map(\.rawValue))
         allowed.formUnion(DiagEvent.RepairOutcome.allCases.map(\.rawValue))

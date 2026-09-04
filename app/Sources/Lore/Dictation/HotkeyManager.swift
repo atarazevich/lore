@@ -641,9 +641,16 @@ final class HotkeyManager {
         )
     }
 
-    /// What Space does — the one table the key, the rail's Space cap and the
-    /// cap's click all read (#233), so what the cap says and what the key does
-    /// cannot drift apart.
+    /// What Space does — the one table the key, the lock glyph and the row's own
+    /// glyph slot all read (#233, #234), so what a surface offers and what the
+    /// key does cannot drift apart.
+    ///
+    /// The rail's Space cap read it too until #235 retired the cap: since #234
+    /// the lock glyph and the dot *are* those controls, so a keycap naming the
+    /// same action was a second name for one thing (`ui-language.md` rule 1).
+    /// The table itself is untouched — the chord still locks, pauses and
+    /// resumes — and only `cap(talkKey:)`, which drew the label and the line
+    /// under it, went with the cap.
     enum SpaceAction: Equatable, Sendable, CaseIterable {
         /// Not lore's — a bare Space inside a locked recording is a space.
         case passThrough
@@ -652,8 +659,8 @@ final class HotkeyManager {
         case resume
 
         /// The whole rule, pure: `locked` and `paused` are the dictation's,
-        /// `talkKeyHeld` the keyboard's — and for the cap, which is the chord
-        /// taken by pointer, it is true by definition.
+        /// `talkKeyHeld` the keyboard's — and for a glyph clicked by pointer,
+        /// which is the chord's pointer form, it is true by definition.
         static func decide(locked: Bool, paused: Bool, talkKeyHeld: Bool) -> SpaceAction {
             // Space alone locks a held recording, exactly as it always has.
             guard locked else { return .lock }
@@ -662,24 +669,6 @@ final class HotkeyManager {
             // key the thumb is already on.
             guard talkKeyHeld else { return .passThrough }
             return paused ? .resume : .pause
-        }
-
-        /// What the rail's cap reads while Space means this, and the line under
-        /// it — the board's copy table. Nil when the key is the user's own and
-        /// there is no cap to draw.
-        ///
-        /// A letter names its own key; Space cannot, so the cap says what the
-        /// key does and its width — wider than any letter — says which key it
-        /// is. Verbs, because a keycap is pressed. The chord is spelled out in
-        /// the line because Space alone is the lock and the two must not be
-        /// guessed at, with the key the user actually holds (#226).
-        func cap(talkKey: String) -> (label: String, help: String)? {
-            switch self {
-            case .passThrough: nil
-            case .lock: ("Lock", "Space locks recording, hands free")
-            case .pause: ("Pause", "\(talkKey)+Space pauses recording")
-            case .resume: ("Resume", "\(talkKey)+Space resumes recording")
-            }
         }
     }
 
@@ -754,6 +743,11 @@ final class HotkeyManager {
         isLocked = true
         isLockedFlag = true
         isRecordingFlag = true
+        // Every lock, from the one place both routes cross (#235). Without it a
+        // hands-free dictation is invisible in the stream —
+        // `dictationRecorded(samples:durationMs:)` says nothing about how the
+        // key was held — and "did the lock hint change anything" has no answer.
+        DiagStore.record(.dictationLocked)
     }
 
     /// The bubble's lock glyph (#201). Locking is the Space path itself.
