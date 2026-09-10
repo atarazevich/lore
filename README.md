@@ -4,7 +4,7 @@
 
 Hold `fn`, say it the way it comes out, release. The text shows up at your cursor: in Claude Code, Cursor, a browser, anywhere you can paste. Transcription runs on your Mac. No account, no subscription.
 
-![The lore bubble while dictating: timer, paperclip count, screenshots joining the dictation](assets/readme/bubble.gif)
+![The lore bubble while dictating: timer, paperclip count, screenshots joining the dictation](images/bubble.gif)
 
 ## Why
 
@@ -40,8 +40,8 @@ If macOS already uses `fn` for something else, onboarding offers Right Option or
 
 | | |
 |---|---|
-| ![Stats: words, time, dictations, per-day heatmap](assets/readme/stats.png) | ![Settings: hotkey, keep audio, cleanup and translation defaults, cleanup prompt, OpenAI key](assets/readme/settings.png) |
-| ![The bubble with a screenshot attached](assets/readme/bubble-attachment.png) | ![Menu bar: start a meeting recording, show lore, check for updates](assets/readme/menubar.png) |
+| ![Stats: words, time, dictations, per-day heatmap](images/stats.png) | ![Settings: hotkey, keep audio, cleanup and translation defaults, cleanup prompt, OpenAI key](images/settings.png) |
+| ![The bubble with a screenshot attached](images/bubble-attachment.png) | ![Menu bar: start a meeting recording, show lore, check for updates](images/menubar.png) |
 
 ## What it does not do
 
