@@ -1,46 +1,35 @@
-# Voice
+# lore
 
-Personal voice intelligence app — transcription, meeting notes, dictation, and life recording.
+lore is voice input for people who drive coding agents. Hold fn, speak, release: the text lands at your cursor. macOS, on-device transcription.
 
-## Three Modes
+## Install
 
-### 1. Meeting Notes
-Real-time transcription of online calls with two-stream separation (mic + system audio). Live suggestions, fact-checking, and post-meeting summaries. Replaces Granola.
+Download the DMG from <https://updates.dev.cognition.design/download/Lore.dmg> and drag lore to Applications.
 
-### 2. Dictation
-Fast voice-to-text with hotkeys. Text goes directly into active input field or clipboard. Replaces Aqua Voice / WhisprFlow.
+Or build it yourself:
 
-### 3. Life Recording
-Long-form offline recordings — personal diary, conversations, voice memos. Speaker diarization to separate voices. Inputs from multiple sources: OMI device, phone, Telegram, direct recording. Replaces VoiceBox.
-
-## Tech Stack
-
-- **App**: Lore — Swift/SwiftUI (originally forked from [OpenOats](https://github.com/yazinsai/OpenOats))
-- **Local transcription**: Parakeet TDT v3 via FluidAudio (Apple Neural Engine, ~90x realtime)
-- **Cleanup**: GPT-5.4-mini post-processing for punctuation and term correction
-- **Diarization**: FluidAudio (Pyannote-based offline + LS-EEND streaming) — not yet tested
-- **Backend**: Python (planned — API endpoints for OMI, Telegram, batch processing)
-- **API fallback**: OpenAI gpt-4o-transcribe for when local isn't available
-
-## Performance (Benchmarked)
-
-| Pipeline | Speed | Quality | Cost |
-|----------|-------|---------|------|
-| Parakeet v3 + GPT-5.3 cleanup | ~90x realtime transcription + 2-10s cleanup | Excellent (0.95+ semantic similarity to API) | ~$0.003/file |
-| gpt-4o-transcribe + GPT-5.3 cleanup | ~5x realtime | Slightly higher on long files | ~$0.04/file |
-| Parakeet v3 raw (no cleanup) | ~90x realtime | Good for short segments, degrades on long | Free |
-
-## Project Structure
-
+```bash
+cd app && ./build.sh
 ```
-voice/
-├── app/                    # Lore — Swift/SwiftUI app
-├── backend/                # Python backend (planned)
-├── scripts/                # Standalone utility scripts
-├── experiments/
-│   ├── benchmarks/         # Benchmark scripts and golden standards
-│   ├── fluid-test/         # FluidAudio/Parakeet test harness
-│   └── results/            # Experiment output data
-└── docs/
-    └── decisions.md        # Architecture and product decisions
-```
+
+Requires Xcode and an Apple Development certificate — see [docs/distribution.md](docs/distribution.md).
+
+## Privacy
+
+Transcription runs on your Mac. Text leaves it only when you ask: the English rewrite and the meeting cleanup go to OpenAI with your own key; Read aloud sends the selected text to Speechify with your key; a problem report goes to our server only when you press Send, exactly as previewed. The app checks for updates at launch and every six hours (Settings switch) and downloads its speech model once from Hugging Face. No account, no analytics, no cookies. Everything is stored in `~/Library/Application Support/Lore`. Long form: [docs/legal/privacy.html](docs/legal/privacy.html).
+
+## Recording other people
+
+Recording a conversation is on you: many places require everyone's consent first, and lore leaves that (and the law) in your hands.
+
+## Project layout
+
+| Folder | What's there |
+|--------|--------------|
+| `app/` | The macOS app — Swift/SwiftUI, build and release scripts |
+| `docs/` | Feature specs, design boards, decisions, distribution and legal |
+| `experiments/` | Benchmarks and transcription research harnesses |
+
+## License
+
+MIT — see [LICENSE](LICENSE). Third-party notices are in [THIRD-PARTY-LICENSES.txt](THIRD-PARTY-LICENSES.txt). The speech model is NVIDIA Parakeet TDT 0.6B v3, licensed [CC BY 4.0](https://creativecommons.org/licenses/by/4.0/).
