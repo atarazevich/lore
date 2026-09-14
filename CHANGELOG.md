@@ -1,5 +1,14 @@
 # Changelog
 
+## v3.6.0 — 2026-09-14
+
+A fix release: nothing new, one crash gone.
+
+**The recording bubble no longer quits the app (#255)**
+- lore could quit mid-dictation when macOS briefly had no system font to hand it — most likely just after a restart — because the bubble measured its timer with a font it assumed was always there
+- Every place that measures text for layout (the timer, the time column in the bubble's list, the error line, the bubble's height and the Stats pane) now asks for the font in a way that can come back empty, and falls back to the system font's own proportions when it does
+- Nothing looks different: the bubble renders pixel for pixel as it did in 3.5.0
+
 ## v3.5.0 — 2026-09-04
 
 The features speak for themselves: nothing is taught up front, and each one says one sentence from its own place at the moment you could use it.
