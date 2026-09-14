@@ -1002,6 +1002,18 @@ final class RecordingBubbleRenderTests: XCTestCase {
         XCTAssertEqual(label, timer, accuracy: 1, "the label and the timer sit on two lines")
     }
 
+    /// The row's baseline and the tooltip card's room are read off the system
+    /// font's metrics, and SF's proportions stand in when the lookup is empty
+    /// (#255) — so they have to be the same numbers.
+    func testTheFontMetricsFallbackIsTheSystemFontItself() {
+        for size: CGFloat in [11.5, 13] {
+            XCTAssertEqual(
+                SystemFont.metrics(size: size), SystemFont.Metrics.proportional(size: size),
+                "\(size) pt: SF's proportions are not what the lookup answers"
+            )
+        }
+    }
+
     // MARK: - The arrival says nothing (#216)
 
     /// A dictation that has not heard anything yet says so with the dot and the

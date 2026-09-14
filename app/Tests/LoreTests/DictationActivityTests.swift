@@ -320,6 +320,25 @@ final class DictationActivityTests: XCTestCase {
         }
     }
 
+    /// SF Mono's own advance stands in when the font lookup is empty (#255) —
+    /// so it has to be the measured number.
+    func testTheWidthWithoutAFontIsTheMeasuredWidth() throws {
+        let cases: [(text: String, size: CGFloat, weight: NSFont.Weight, tracking: CGFloat)] = [
+            ("1,000,000", 58, .bold, -1), ("1,000,000", 24, .bold, 0), ("999 h 59 m", 24, .bold, 0),
+            ("0", 11, .regular, 0), ("0:00:00", 13, .regular, 0),
+        ]
+        for testCase in cases {
+            let measured = try XCTUnwrap(SystemFont.width(
+                testCase.text, size: testCase.size, weight: testCase.weight,
+                monospaced: true, tracking: testCase.tracking
+            ))
+            XCTAssertEqual(
+                SystemFont.advanceWidth(testCase.text, size: testCase.size, tracking: testCase.tracking),
+                measured, accuracy: 0.01, testCase.text
+            )
+        }
+    }
+
     /// The reservation must actually be wide enough for real content —
     /// otherwise "measured" just moves the magic number one level down.
     func testReservedWidthsFitRealisticValues() {

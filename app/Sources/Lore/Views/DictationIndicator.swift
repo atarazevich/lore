@@ -47,11 +47,11 @@ private func elapsed(_ seconds: Int) -> String {
 /// `00:00` under an hour, `0:00:00` past it — measured in the same monospaced
 /// face the label draws with, where every digit is one width. Held as a
 /// minimum, nothing moves as the clock runs and no number is ever squeezed
-/// into two lines.
+/// into two lines. Measured through `SystemFont`, which survives a missing
+/// font (#255).
 private func elapsedWidth(_ seconds: Int, size: CGFloat) -> CGFloat {
     let template = seconds >= 3600 ? "0:00:00" : "00:00"
-    let font = NSFont.monospacedSystemFont(ofSize: size, weight: .regular)
-    return ceil((template as NSString).size(withAttributes: [.font: font]).width)
+    return ceil(SystemFont.monospacedWidth(template, size: size))
 }
 
 /// One letter in the recording bubble's rail (#201) — the key on the keyboard,
@@ -262,7 +262,7 @@ struct BubbleTipCard: View {
     /// as the keycap that may stand in it (#235) — taller than a line of text,
     /// and the reason this is a `max` and not one measurement.
     static let height: CGFloat = {
-        let font = NSFont.systemFont(ofSize: fontSize)
+        let font = SystemFont.metrics(size: fontSize)
         let textLine = ceil(font.ascender - font.descender + font.leading)
         let hintLine = max(
             textLine, DictationIndicatorView.BubblePill.keycap(bright: true, .card).minHeight
@@ -1681,10 +1681,7 @@ struct DictationIndicatorView: View {
     /// One tabular figure at that size. The count is 1…9 in practice, and this
     /// is the room each one takes: `RecordingBubbleRenderTests` measures the
     /// glyph's band back from the row's trailing edge through it.
-    static let countDigitWidth: CGFloat = {
-        let font = NSFont.monospacedSystemFont(ofSize: countSize, weight: .regular)
-        return ceil(("0" as NSString).size(withAttributes: [.font: font]).width)
-    }()
+    static let countDigitWidth: CGFloat = ceil(SystemFont.monospacedWidth("0", size: countSize))
 
     private var includedCount: Int { items.filter(\.included).count }
 
@@ -2373,11 +2370,11 @@ struct DictationIndicatorView: View {
     /// Whether a sentence needs the row's wrapping width — measured, never
     /// declared beside the sentence, so the two cannot disagree when one of them
     /// is edited. One `NSString` size in the row's own face, the same way
-    /// `elapsedWidth` sizes the timer's template.
+    /// `elapsedWidth` sizes the timer's template; with no font to measure in,
+    /// one line (#255).
     static func wraps(_ sentence: String) -> Bool {
-        let font = NSFont.systemFont(ofSize: 13)
-        return ceil((sentence as NSString).size(withAttributes: [.font: font]).width)
-            > faceWrapWidth
+        guard let width = SystemFont.width(sentence, size: 13) else { return false }
+        return ceil(width) > faceWrapWidth
     }
 }
 
@@ -2385,7 +2382,7 @@ struct DictationIndicatorView: View {
 /// are set on, at the 13 pt the bubble uses — `(ascender + descender) / 2`, the
 /// descender being negative. Measured off the font, never guessed.
 private let rowBaselineBelowCentre: CGFloat = {
-    let font = NSFont.systemFont(ofSize: 13)
+    let font = SystemFont.metrics(size: 13)
     return (font.ascender + font.descender) / 2
 }()
 

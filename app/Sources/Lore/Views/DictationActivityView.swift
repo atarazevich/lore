@@ -758,16 +758,14 @@ struct DictationActivityView: View {
     // value's own font via AppKit (`NSString.size(withAttributes:)`) rather
     // than a hand-picked point value, so a font-size change here keeps the
     // reservation honest automatically. `LoreTheme.Typography.mono` is
-    // `.system(design: .monospaced)`, whose AppKit equivalent is
-    // `NSFont.monospacedSystemFont`. `internal` (not `private`, review —
-    // A5) so `DictationActivityTests` measures with this exact function
-    // instead of keeping a token-identical copy of it that could drift.
+    // `.system(design: .monospaced)`, whose AppKit equivalent is the system
+    // font's monospaced design, looked up through `SystemFont` (#255).
+    // `internal` (not `private`, review — A5) so `DictationActivityTests`
+    // measures with this exact function instead of keeping a token-identical
+    // copy of it that could drift.
 
     static func measuredWidth(_ text: String, size: CGFloat, weight: NSFont.Weight, tracking: CGFloat = 0) -> CGFloat {
-        let font = NSFont.monospacedSystemFont(ofSize: size, weight: weight)
-        var attributes: [NSAttributedString.Key: Any] = [.font: font]
-        if tracking != 0 { attributes[.kern] = tracking }
-        return (text as NSString).size(withAttributes: attributes).width
+        SystemFont.monospacedWidth(text, size: size, weight: weight, tracking: tracking)
     }
 
     /// Giant primary words numeral (58pt bold, `.tracking(-1)`): reserved for
