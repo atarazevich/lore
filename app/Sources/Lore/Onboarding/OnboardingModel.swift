@@ -72,6 +72,13 @@ final class OnboardingModel {
 
     // MARK: - Collaborators
 
+    /// Starts the speech model's download and preparation without waiting for
+    /// it (#294). Called from the first screen, so by Try it — and the first
+    /// real dictation — the model is ready; Try it joins the load rather than
+    /// starting a second. The one job that runs before setup finishes: it needs
+    /// no permission and captures nothing (`docs/decisions.md`, #150 amended).
+    @ObservationIgnored var prepareModel: (() -> Void)?
+
     /// Arms the dictation subsystem for Try it — after Accessibility is granted,
     /// because a tap created before the grant stays dead.
     @ObservationIgnored var startDictationForTryIt: (() -> Void)?
@@ -140,10 +147,12 @@ final class OnboardingModel {
 
     // MARK: - Lifecycle
 
-    /// Start the poll. The first tick fires on the same background queue as
-    /// every later one — a synchronous baseline here would block the first frame.
+    /// Start the poll, and the model's preparation beside it. The first tick
+    /// fires on the same background queue as every later one — a synchronous
+    /// baseline here would block the first frame.
     func start() {
         guard pollTimer == nil else { return }
+        prepareModel?()
         let timer = DispatchSource.makeTimerSource(queue: pollQueue)
         timer.schedule(deadline: .now(), repeating: .milliseconds(400))
         timer.setEventHandler(handler: makePollTick())

@@ -75,19 +75,25 @@ public struct CLISayRequest: Codable, Sendable, Equatable {
 }
 
 /// Where a chat is shown, as the environment of a process in it says (#288):
-/// the herdr pane, tab and workspace, and the app. Each one read, none
-/// inferred.
+/// the herdr pane, tab and workspace, and the app, each one read from that
+/// environment. Which process that is, is `CLISay.place`'s decision — for a
+/// chat started in the agents view, a match on arguments and folder (#293).
 public struct ChatPlace: Equatable, Sendable {
     public var herdrPaneID: String?
     public var herdrTabID: String?
     public var herdrWorkspaceID: String?
     public var hostBundleID: String?
+    /// Whether the tab is the chat's own, so its id, its label and the topic
+    /// in it name the chat. Not in Claude Code's agents view (#293): that tab
+    /// shows every background chat and is named for none of them.
+    public let ownTab: Bool
 
-    public init(environment: [String: String]) {
+    public init(environment: [String: String], ownTab: Bool = true) {
         herdrPaneID = CLISay.present(environment["HERDR_PANE_ID"])
         herdrTabID = CLISay.present(environment["HERDR_TAB_ID"])
         herdrWorkspaceID = CLISay.present(environment["HERDR_WORKSPACE_ID"])
         hostBundleID = CLISay.present(environment["__CFBundleIdentifier"])
+        self.ownTab = ownTab
     }
 }
 
@@ -214,9 +220,11 @@ public enum CLISay {
     /// environment is inherited from whichever chat started it, so their
     /// `HERDR_*` variables name that chat's pane. A background session is shown
     /// by the window it was moved to the background from: the live chat whose
-    /// `parkedJobId` is its own job, whose environment says where. Without one
-    /// there is no place at all — no pane and no app — and the reply goes by
-    /// its stored name.
+    /// `parkedJobId` is its own job, whose environment says where. A chat no
+    /// live window holds — started in the agents view, or moved from a window
+    /// since closed — lives in the agents view (#293), and is shown by that
+    /// view's pane. Without either there is no place at all — no pane and no
+    /// app — and the reply goes by its stored name.
     ///
     /// - Parameters:
     ///   - session: the chat's own session file, the one `CLAUDE_PID` names.
@@ -227,11 +235,30 @@ public enum CLISay {
         sessions: () -> [ClaudeSessionFile],
         processes: some ProcessTable
     ) -> ChatPlace {
-        guard session?.kind == .background else { return ChatPlace(environment: environment) }
-        let window = session?.jobId.flatMap { job in
-            sessions().first { $0.parkedJobId == job && $0.isLive(started: processes.started) }
+        guard let session, session.kind == .background else { return ChatPlace(environment: environment) }
+        if let job = session.jobId,
+           let window = sessions().first(where: { $0.parkedJobId == job && $0.isLive(started: processes.started) }) {
+            return ChatPlace(environment: window.pid.flatMap(processes.environment(of:)) ?? [:])
         }
-        return ChatPlace(environment: window?.pid.flatMap(processes.environment(of:)) ?? [:])
+        let view = agentsView(startedIn: session.cwd, processes: processes).flatMap(processes.environment(of:))
+        return view.map { ChatPlace(environment: $0, ownTab: false) } ?? ChatPlace(environment: [:])
+    }
+
+    /// The `claude agents` process that shows a background chat (#293): the
+    /// only one this user runs, else the one working in the folder the chat
+    /// started in. Nil when that is not exactly one — a wrong tab is worse
+    /// than none. Started as `claude`, or as the versioned binary Claude Code
+    /// installs (`…/claude/versions/2.1.284`).
+    static func agentsView(startedIn folder: String?, processes: some ProcessTable) -> Int32? {
+        let views = processes.pids().filter { pid in
+            guard let arguments = processes.arguments(of: pid), arguments.count > 1, arguments[1] == "agents"
+            else { return false }
+            let path = arguments[0].split(separator: "/")
+            return path.last == "claude" || Array(path.dropLast().suffix(2)) == ["claude", "versions"]
+        }
+        guard views.count > 1 else { return views.first }
+        let there = views.filter { folder != nil && processes.workingFolder(of: $0) == folder }
+        return there.count == 1 ? there.first : nil
     }
 
     /// What `herdr api snapshot`'s answer says about this shell's own pane: the
@@ -275,13 +302,15 @@ public enum CLISay {
             // Only a name the owner typed himself: a derived one is the folder
             // with a suffix, which the folder says better (#267).
             name: chatName(sessionName: session?.handGivenName, cwd: cwd),
-            topic: present(herdr?.title),
+            // Not the agents view's (#293): its tab names the view, and the
+            // player names a row by its tab's live label. Go to needs the pane.
+            topic: place.ownTab ? present(herdr?.title) : nil,
             hostBundleID: place.hostBundleID,
             herdrPaneID: place.herdrPaneID,
-            herdrTabID: place.herdrTabID,
+            herdrTabID: place.ownTab ? place.herdrTabID : nil,
             herdrWorkspaceID: place.herdrWorkspaceID,
             herdrWorkspaceLabel: present(herdr?.workspaceLabel),
-            herdrTabLabel: present(herdr?.tabLabel),
+            herdrTabLabel: place.ownTab ? present(herdr?.tabLabel) : nil,
             sessionID: present(environment["CLAUDE_CODE_SESSION_ID"]) ?? present(session?.sessionId),
             cwd: present(cwd)
         )

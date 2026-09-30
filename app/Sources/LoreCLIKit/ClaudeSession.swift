@@ -30,6 +30,9 @@ public struct ClaudeSessionFile: Decodable, Equatable, Sendable {
     /// window then shows (#288). Claude Code clears it when the window's
     /// session changes.
     public var parkedJobId: String?
+    /// The folder the chat started in. What tells a background chat's agents
+    /// view from another one (#293).
+    public var cwd: String?
 
     /// What runs the chat (#288). Tolerant: a kind this version does not know
     /// still leaves the file readable.
@@ -58,7 +61,7 @@ public struct ClaudeSessionFile: Decodable, Equatable, Sendable {
     public init(
         pid: Int32? = nil, sessionId: String? = nil, name: String? = nil,
         nameSource: String? = nil, kind: Kind? = nil, startedAt: Int64? = nil,
-        jobId: String? = nil, parkedJobId: String? = nil
+        jobId: String? = nil, parkedJobId: String? = nil, cwd: String? = nil
     ) {
         self.pid = pid
         self.sessionId = sessionId
@@ -68,6 +71,7 @@ public struct ClaudeSessionFile: Decodable, Equatable, Sendable {
         self.startedAt = startedAt
         self.jobId = jobId
         self.parkedJobId = parkedJobId
+        self.cwd = cwd
     }
 
     /// Whether the chat that wrote this file still runs: a process holds its

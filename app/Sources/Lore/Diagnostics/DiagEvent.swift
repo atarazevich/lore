@@ -547,6 +547,10 @@ enum DiagEvent: Codable, Sendable, Equatable {
 
     case modelLoad(model: ModelKind, outcome: Outcome, seconds: Double, fromCache: Bool)
     case modelCacheCleared
+    /// Launch removed half-finished compiles of the speech model from lore's
+    /// own Neural Engine cache (#294): `*.tmp.<pid>_*.bundle` folders whose
+    /// process is gone. Recorded only when any went.
+    case modelCacheOrphansRemoved(folders: Int)
     case transcribed(chunks: Int, failedChunks: Int, samples: Int, characters: Int, ms: Int)
     /// A transcript repair job entered the healer's queue (#166) — the trace
     /// behind every Preparing face, since a self-healing engine that leaves
@@ -619,6 +623,16 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// `dictationRecorded` carries only samples and a duration, so "did the lock
     /// hint change anything" could not be answered at all.
     case dictationLocked
+    /// A take whose audio was saved but never transcribed — a restart caught
+    /// it (#294) — is being transcribed by itself after launch, into history
+    /// only. `attempt` counts across launches and never passes three, so a
+    /// take that takes the process down with it cannot loop.
+    case strandedDictationAttempt(attempt: Int)
+    /// …and how that attempt ended: `.ok` its words are in history, `.failed`
+    /// the row now says why, as any dictation's would, `.unknown` nothing
+    /// changed — the audio could not be read, or the attempt was stopped — and
+    /// a later launch may try again while attempts remain.
+    case strandedDictationSettled(outcome: Outcome)
 
     /// A hint spoke from its element, and left again (#235). The `hint` is a
     /// closed enum and so is the reason, so no sentence enters the stream — only
@@ -778,7 +792,7 @@ extension DiagEvent {
              .recordingExported, .recordingUnowned, .recordingBufferUnstamped, .resampleFailed:
             return .audio
 
-        case .modelLoad, .modelCacheCleared, .transcribed, .echoSuppressed,
+        case .modelLoad, .modelCacheCleared, .modelCacheOrphansRemoved, .transcribed, .echoSuppressed,
              .transcriptRepairQueued, .transcriptRepairSettled,
              .speakerMapSaved, .speakerMapFailed, .speakerMapGaveUp, .ownerVoiceprint, .transcriptSaveFailed,
              .speakerNamesUnreadable, .speakerNamingNotSaved,
@@ -792,6 +806,7 @@ extension DiagEvent {
         case .dictationRecorded, .dictationZeroFrames, .dictationPasted,
              .dictationUpgrade, .dictationDiscarded,
              .dictationPaused, .dictationResumed, .dictationLocked,
+             .strandedDictationAttempt, .strandedDictationSettled,
              .hintShown, .hintWithdrawn, .dictationItemCollected,
              .dictationItemSwitched, .dictationItemsPasted, .dictationItemsPruned,
              .dictationScreenshotChord, .dictationScreenshotRedirected,
@@ -870,6 +885,7 @@ extension DiagEvent {
         case .resampleFailed: return "resampleFailed"
         case .modelLoad: return "modelLoad"
         case .modelCacheCleared: return "modelCacheCleared"
+        case .modelCacheOrphansRemoved: return "modelCacheOrphansRemoved"
         case .transcribed: return "transcribed"
         case .echoSuppressed: return "echoSuppressed"
         case .transcriptRepairQueued: return "transcriptRepairQueued"
@@ -894,6 +910,8 @@ extension DiagEvent {
         case .dictationPaused: return "dictationPaused"
         case .dictationResumed: return "dictationResumed"
         case .dictationLocked: return "dictationLocked"
+        case .strandedDictationAttempt: return "strandedDictationAttempt"
+        case .strandedDictationSettled: return "strandedDictationSettled"
         case .hintShown: return "hintShown"
         case .hintWithdrawn: return "hintWithdrawn"
         case .dictationItemCollected: return "dictationItemCollected"

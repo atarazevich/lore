@@ -394,6 +394,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         else { return false }
 
         container.ensureServicesInitialized(settings: settings, coordinator: coordinator)
+        // A relaunch in the middle of a model compile leaves the half-built
+        // bundle behind, hundreds of megabytes of it (#294). Off the main actor.
+        Task.detached(priority: .utility) { ModelCacheSweep.removeOrphans() }
         setupMenuBar(coordinator: coordinator, settings: settings)
         setupDictation(coordinator: coordinator, settings: settings)
         setupHealthMonitor(coordinator: coordinator, settings: settings)
@@ -560,20 +563,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var terminationSignal: DispatchSourceSignal?
 
     private func handleTerminationSignal() {
-        signal(SIGTERM, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .userInitiated))
-        source.setEventHandler { [weak self] in
-            DispatchQueue.main.async {
+        terminationSignal = Self.installTerminationSource(
+            signal: SIGTERM,
+            lastSteps: { [weak self] in
                 self?.finishBeforeExit()
                 exit(0)
-            }
-            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
+            },
+            fallback: {
                 signal(SIGTERM, SIG_DFL)
                 raise(SIGTERM)
             }
+        )
+    }
+
+    /// `nonisolated` so the handler doesn't inherit `@MainActor`; the source runs
+    /// it off main (#292, same trap as `OnboardingModel.makePollTick`).
+    nonisolated static func installTerminationSource(
+        signal number: Int32,
+        lastSteps: @escaping @MainActor @Sendable () -> Void,
+        fallback: @escaping @Sendable () -> Void
+    ) -> DispatchSourceSignal {
+        signal(number, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: number, queue: .global(qos: .userInitiated))
+        source.setEventHandler {
+            DispatchQueue.main.async { lastSteps() }
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5, execute: fallback)
         }
         source.resume()
-        terminationSignal = source
+        return source
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -661,6 +678,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let model = OnboardingModel()
         let window = OnboardingWindowController(defaults: defaults)
 
+        // From the first screen (#294): the model downloads and compiles while
+        // the user reads and grants, and Try it joins that load.
+        model.prepareModel = { [weak self] in self?.prepareSpeechModel(coordinator: coordinator) }
         model.startDictationForTryIt = { [weak self] in
             self?.startDictationPipeline(coordinator: coordinator, settings: settings)
         }
@@ -858,17 +878,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         coordinator.dictationCoordinator.settings = settings
         coordinator.dictationCoordinator.audioBus = container?.audioBus
-        coordinator.dictationCoordinator.backendCache = coordinator.sharedBackendCache
+        prepareSpeechModel(coordinator: coordinator)
         coordinator.hotkeyManager.install(
             coordinator: coordinator.dictationCoordinator,
             settings: settings
         )
+    }
 
-        // Preload models so the first use is instant. Detached; launch never
-        // blocks. `prewarm()` covers the common warm set — the shared cache (the
-        // meeting's mic leg reuses it) and dictation's own instance, in that
-        // order. The meeting's system-audio backend is left lazy on purpose: it
-        // is a third copy only a meeting recording needs.
+    /// Preload the model so the first use is instant. Detached; launch never
+    /// blocks. `prewarm()` covers the common warm set — the shared cache (the
+    /// meeting's mic leg reuses it) and dictation's own instance, in that
+    /// order. The meeting's system-audio backend is left lazy on purpose: it
+    /// is a third copy only a meeting recording needs.
+    ///
+    /// Setup calls this from its first screen (#294) and the pipeline start
+    /// calls it again: the second call joins the load the first began, because
+    /// each cache builds its instance once.
+    private func prepareSpeechModel(coordinator: AppCoordinator) {
+        coordinator.dictationCoordinator.backendCache = coordinator.sharedBackendCache
         Task {
             await coordinator.dictationCoordinator.prewarm()
         }
@@ -878,7 +905,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !didSetupDictation else { return }
         didSetupDictation = true
 
+        // Taken before this launch's talk key exists (#294). The only takes of
+        // this process older than it are Try it's, whose pipelines are already
+        // ahead of the sweep in the transcription chain.
+        let launchedAt = Date()
         startDictationPipeline(coordinator: coordinator, settings: settings)
+        // A take a restart caught before its words were ready is transcribed
+        // into history once the model is — never pasted, never a click (#294).
+        coordinator.dictationCoordinator.transcribeStrandedTakesWhenReady(recordedBefore: launchedAt)
 
         coordinator.dictationIndicator.start(
             coordinator: coordinator.dictationCoordinator,

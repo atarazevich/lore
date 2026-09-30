@@ -54,6 +54,12 @@ struct DictationHistoryEntry: Identifiable, Codable, Equatable {
     /// by key, ignore the field entirely. `rawText`/`cleanedText` already carry
     /// the items in place, so nothing downstream has to assemble anything.
     var items: [DictationItem]?
+    /// How many times lore has transcribed this take by itself because a
+    /// restart caught it before its words were ready (#294). Counted before
+    /// each attempt starts, so an attempt that takes the process down still
+    /// counts. Optional for the same reason as `items`: nil until the first
+    /// attempt, so every other entry stays byte-identical on disk.
+    var automaticAttempts: Int?
 
     /// The text for the currently active version.
     var displayText: String? {
@@ -95,6 +101,7 @@ struct DictationHistoryEntry: Identifiable, Codable, Equatable {
         translatedToLanguage = try c.decodeIfPresent(String.self, forKey: .translatedToLanguage)
         operatorAddressed = try c.decodeIfPresent(Bool.self, forKey: .operatorAddressed)
         items = try c.decodeIfPresent([DictationItem].self, forKey: .items)
+        automaticAttempts = try c.decodeIfPresent(Int.self, forKey: .automaticAttempts)
     }
 }
 
@@ -288,11 +295,22 @@ final class DictationHistory {
         revision += 1
     }
 
-    func update(_ entry: DictationHistoryEntry) {
-        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return }
+    /// Whether the entry reached disk — false too when it is no longer in
+    /// history.
+    ///
+    /// - Parameter onlyIfSaved: keep memory as it was when the disk refused the
+    ///   change (#294: an attempt count nothing may act on unsaved, which a later
+    ///   write would otherwise carry to disk). By default memory takes the
+    ///   change regardless: a row the user is looking at keeps its words, and
+    ///   the status strip says history is not being saved (#51).
+    @discardableResult
+    func update(_ entry: DictationHistoryEntry, onlyIfSaved: Bool = false) -> Bool {
+        guard let index = entries.firstIndex(where: { $0.id == entry.id }) else { return false }
+        let written = writeEntryFile(entry)
+        guard written || !onlyIfSaved else { return false }
         entries[index] = entry
-        writeEntryFile(entry)
         revision += 1
+        return written
     }
 
     /// "Clear history" means everything: audio, the images the dictations

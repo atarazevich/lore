@@ -1,5 +1,23 @@
 # Changelog
 
+## v3.8.0 — 2026-09-30
+
+lore is ready before your first word, a dictation caught by a restart finishes by itself, and lore closes cleanly when it is ended from outside.
+
+**A reply from a chat started in Claude Code's agents view has a Go to (#293)**
+- A reply from a background chat started in Claude Code's agents view (`claude agents`) shows its terminal app, and Go to opens the pane the agents view runs in. Before, such a reply had no Go to
+- The reply keeps the chat's own name, not the name of the agents view's tab
+- With several agents views open, the one in the folder the chat started in is used; when none or more than one fits, the reply has no Go to rather than a wrong one
+- A chat moved to the background from a window that has since been closed is found in the agents view the same way
+
+**lore closes cleanly when it is ended from outside (#292)**
+- When lore was ended from Terminal or at shutdown, it could report that it quit unexpectedly. Now it finishes its last steps and closes cleanly
+
+**lore is ready before your first word (#294)**
+- Setup now downloads and prepares the speech model while you go through it, so your first dictation doesn't wait for it
+- A dictation caught by a restart before its words were ready is transcribed by itself when lore opens again. It lands in your history only; nothing is pasted
+- lore removes the half-prepared copies of the speech model that an interrupted start left behind, which could hold several hundred megabytes of disk
+
 ## v3.7.0 — 2026-09-30
 
 Meetings say who said what, and both sides of a recording stay in time at their true pitch. lore also no longer quits by itself after a few days open.

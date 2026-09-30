@@ -1,6 +1,7 @@
 import AppKit
 @preconcurrency import AVFoundation
 import CoreAudio
+import Observation
 import os
 
 enum UpgradeAction: Sendable {
@@ -170,6 +171,13 @@ final class DictationCoordinator {
     /// discard cancels it only when the epoch is the current session's own.
     private var latestTranscription: (epoch: Int, task: Task<Void, Never>)?
 
+    /// The newest link of any kind: what the next link awaits. A take lore
+    /// transcribes by itself (#294) is a link here and never
+    /// `latestTranscription`, which means "this session's own work" — the
+    /// link a discard cancels and a tail cut reads. An automatic job is
+    /// neither, so a live take's discard cannot cancel it.
+    private var chainEnd: Task<Void, Never>?
+
     /// The 300ms audio-tail sleep of the in-flight pipeline, separate from
     /// the pipeline Task so a new Fn press can cut the tail short without
     /// cancelling the pipeline itself (#104): `startPreBuffer` cancels it,
@@ -181,15 +189,27 @@ final class DictationCoordinator {
     /// Enqueue the newest transcription (#104). `work` receives the session
     /// epoch it was enqueued under and the previous link, which it must await
     /// before entering the shared ASR backend — the backend is never entered
-    /// by two transcriptions concurrently.
+    /// by two transcriptions concurrently. `sessionScoped: false` chains the
+    /// link without making it the session's own (see `chainEnd`).
     @discardableResult
     private func enqueueTranscription(
+        sessionScoped: Bool = true,
         _ work: @escaping @MainActor (_ epoch: Int, _ previous: Task<Void, Never>?) async -> Void
     ) -> Task<Void, Never> {
         let epoch = sessionEpoch
-        let previous = latestTranscription?.task
-        let task = Task { await work(epoch, previous) }
-        latestTranscription = (epoch: epoch, task: task)
+        let previous = chainEnd
+        let task = Task {
+            await work(epoch, previous)
+            // A link ends only after the one before it, on every path. A
+            // pipeline that stops before its own wait — a hold too short, no
+            // frames, a discard in the tail — would otherwise end first and let
+            // the next link into the backend beside a transcription still in
+            // it. Cancelling this task does not cancel `previous`: a discard
+            // still stops only its own session's work.
+            await previous?.value
+        }
+        chainEnd = task
+        if sessionScoped { latestTranscription = (epoch: epoch, task: task) }
         return task
     }
 
@@ -223,6 +243,12 @@ final class DictationCoordinator {
     @ObservationIgnored
     private let deliver: DictationDelivery
 
+    /// The microphone grant, read at every press. Injectable so a test can take
+    /// a whole gesture through on a machine that never granted the test runner
+    /// the microphone; no bus is wired there, so nothing is ever opened.
+    @ObservationIgnored
+    private let microphoneStatus: () -> AVAuthorizationStatus
+
     /// `history` is injectable so tests can back it with an ephemeral
     /// UserDefaults suite instead of the user's real dictation history;
     /// `cleanupClient` so tests can force LLM failures without the network;
@@ -238,12 +264,14 @@ final class DictationCoordinator {
         clipboard: ClipboardWatcher = ClipboardWatcher(),
         deliver: @escaping DictationDelivery = { steps in
             Task { @MainActor in await TextInserter.paste(steps) }
-        }
+        },
+        microphoneStatus: @escaping () -> AVAuthorizationStatus = { MicrophonePermission.status }
     ) {
         self.history = history
         self.cleanupClient = cleanupClient
         self.clipboard = clipboard
         self.deliver = deliver
+        self.microphoneStatus = microphoneStatus
         self.ownCache = backend.map { stub in SharedBackendCache(makeBackend: { stub }) }
             ?? SharedBackendCache()
     }
@@ -291,7 +319,7 @@ final class DictationCoordinator {
         // Microphone permission gate. The common (.authorized) case is a synchronous
         // status read, so it adds no latency to hold-to-talk. Only a first-ever
         // dictation hits the async .notDetermined branch.
-        switch MicrophonePermission.status {
+        switch microphoneStatus() {
         case .authorized:
             startMicCapture()
             // "Sound on start" (DSET-16, default off): chime at the point
@@ -1267,6 +1295,113 @@ final class DictationCoordinator {
         state = .idle
     }
 
+    // MARK: - Stranded takes (#294)
+
+    /// How many times lore transcribes a stranded take by itself, counted
+    /// across launches. Three, so a relaunch during the attempt itself — the
+    /// way a take gets stranded in the first place — does not use the take
+    /// up, while a take that takes the process down with it stops after three.
+    static let automaticAttemptLimit = 3
+
+    /// How old a stranded take may be and still be picked up: a week. A take a
+    /// restart caught is minutes old when lore opens again, or a weekend at
+    /// most; one that has stood with its Retry for longer is the owner's to
+    /// decide, and a launch never queues an archive in front of the next
+    /// dictation.
+    static let strandedTakeWindow: TimeInterval = 7 * 24 * 60 * 60
+
+    /// The launch's cutoff while its sweep waits for the model; nil before the
+    /// launch asks and once the sweep has started.
+    @ObservationIgnored private var strandedCutoff: Date?
+    /// This session's one sweep, once the model was ready for it.
+    @ObservationIgnored private(set) var strandedSweep: Task<Void, Never>?
+
+    /// Transcribe, into history only, the takes a restart caught between their
+    /// audio reaching disk and their words (#294) — the `audioSaved` rows that
+    /// otherwise wait for a click on Retry (`ui-language.md` rule 7). The words
+    /// only: no cleanup call, nothing pasted, nothing on screen but the row.
+    ///
+    /// Runs once per session, when the model is ready — now, if it is, or the
+    /// moment it becomes ready, however it gets there: the launch warm-up, the
+    /// download retry, the first dictation's load. No attempt is
+    /// charged while it is not.
+    ///
+    /// A live dictation never waits behind more than one bare transcription:
+    /// each take is its own link, enqueued only once the one before it has
+    /// ended, so a live take's link lands right behind the link running and
+    /// the next take lands behind the live one. A link makes no network call
+    /// and loads nothing, since the model is ready: it only runs the model.
+    ///
+    /// - Parameter cutoff: only takes recorded before this are candidates. The
+    ///   launch passes a moment before its talk key exists, so no take of this
+    ///   process can be one, whatever its own pipeline is doing with it.
+    func transcribeStrandedTakesWhenReady(recordedBefore cutoff: Date) {
+        guard strandedCutoff == nil, strandedSweep == nil else { return }
+        strandedCutoff = cutoff
+        startStrandedSweepIfReady()
+    }
+
+    /// Start the sweep if both instances are ready; otherwise watch them and
+    /// ask again when either changes.
+    private func startStrandedSweepIfReady() {
+        guard let cutoff = strandedCutoff else { return }
+        let ready = withObservationTracking {
+            backendCache?.isReady == true && ownCache.isReady
+        } onChange: { [weak self] in
+            // Called before the change lands: read it on the next turn.
+            Task { @MainActor [weak self] in self?.startStrandedSweepIfReady() }
+        }
+        guard ready else { return }
+        strandedCutoff = nil
+        strandedSweep = Task { await sweepStrandedTakes(recordedBefore: cutoff) }
+    }
+
+    private func sweepStrandedTakes(recordedBefore cutoff: Date) async {
+        let oldest = Date().addingTimeInterval(-Self.strandedTakeWindow)
+        let candidates = history.entries
+            .filter { $0.timestamp < cutoff && $0.timestamp > oldest && isStranded($0) }
+            .map(\.id)
+        for id in candidates {
+            // Chained, never the session's own: a live take's discard cancels
+            // that, and this is not its to cancel.
+            await enqueueTranscription(sessionScoped: false) { [weak self] epoch, previous in
+                await previous?.value
+                await self?.transcribeStrandedTake(id: id, epoch: epoch)
+            }.value
+        }
+    }
+
+    private func isStranded(_ entry: DictationHistoryEntry) -> Bool {
+        entry.status == .audioSaved && entry.hasAudio
+            && RetryBudget(limit: Self.automaticAttemptLimit, failures: entry.automaticAttempts ?? 0).allowsAttempt
+    }
+
+    /// One automatic attempt, read again at its turn in the chain: a Retry
+    /// clicked meanwhile may have settled the take, or a delete removed it.
+    private func transcribeStrandedTake(id: UUID, epoch: Int) async {
+        guard var entry = history.entries.first(where: { $0.id == id }), isStranded(entry) else { return }
+        let attempt = (entry.automaticAttempts ?? 0) + 1
+        entry.automaticAttempts = attempt
+        // On disk before the model is entered, or no attempt at all: a count
+        // that never reached disk (a full one) would let a take that brings the
+        // process down be tried at every launch. Nor is it kept in memory, where
+        // a later Retry would write it.
+        guard history.update(entry, onlyIfSaved: true) else { return }
+        DiagStore.record(.strandedDictationAttempt(attempt: attempt))
+
+        if let filename = entry.audioFilename, let samples = history.loadAudio(filename: filename) {
+            await transcribeEntry(&entry, samples: samples, epoch: epoch, showsProgress: false)
+            history.update(entry)
+        }
+
+        let outcome: DiagEvent.Outcome = switch entry.status {
+        case .transcribed, .cleaned: .ok
+        case .failed: .failed
+        case .audioSaved: .unknown
+        }
+        DiagStore.record(.strandedDictationSettled(outcome: outcome))
+    }
+
     // MARK: - Transcription
 
     /// Eagerly load both instances dictation needs so the first dictation pays
@@ -1308,7 +1443,8 @@ final class DictationCoordinator {
     ///   bubble — the model-download face, the `Transcribing` face, and the
     ///   failure that replaces them. False for a cancel (#219, #233), whose
     ///   own leaving face is what the shape shows from the entry's landing to
-    ///   the hide: nothing downstream may raise another.
+    ///   the hide: nothing downstream may raise another. False as well for a
+    ///   take lore transcribes by itself (#294), which has no face at all.
     private func transcribeEntry(
         _ entry: inout DictationHistoryEntry, samples: [Float], epoch: Int,
         showsProgress: Bool = true
