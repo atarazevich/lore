@@ -362,8 +362,15 @@ final class DictationHistory {
 
     /// Load raw audio samples from disk.
     func loadAudio(filename: String) -> [Float]? {
-        let url = audioDirectory.appendingPathComponent(filename)
-        guard let data = try? Data(contentsOf: url) else { return nil }
+        Self.readAudio(at: audioDirectory.appendingPathComponent(filename))
+    }
+
+    /// A recording, or at most its first `maxSamples`, off any actor (#269).
+    nonisolated static func readAudio(at url: URL, maxSamples: Int? = nil) -> [Float]? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let data = (try? maxSamples.map { try handle.read(upToCount: $0 * MemoryLayout<Float>.size) } ?? handle.readToEnd())
+            ?? Data()
         return data.withUnsafeBytes { buffer in
             guard let baseAddress = buffer.baseAddress else { return nil }
             let count = data.count / MemoryLayout<Float>.size

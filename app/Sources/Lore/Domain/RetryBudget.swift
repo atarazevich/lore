@@ -10,7 +10,13 @@ import Foundation
 struct RetryBudget {
     /// How many consecutive failures are tolerated before giving up.
     let limit: Int
-    private(set) var failures = 0
+    private(set) var failures: Int
+
+    /// `failures` already spent — a budget carried across launches on disk.
+    init(limit: Int, failures: Int = 0) {
+        self.limit = limit
+        self.failures = failures
+    }
 
     /// `false` once the budget is spent.
     var allowsAttempt: Bool { failures < limit }

@@ -272,8 +272,8 @@ final class AudioBus: @unchecked Sendable {
             &newIOProcID,
             resolved,
             ioQueue
-        ) { [weak self] _, inInputData, _, _, _ in
-            self?.handleInputData(inInputData)
+        ) { [weak self] _, inInputData, inInputTime, _, _ in
+            self?.handleInputData(inInputData, inputTime: inInputTime)
         }
         guard status == noErr, let newIOProcID else {
             let msg = "AudioDeviceCreateIOProcIDWithBlock failed (OSStatus \(status))"
@@ -558,42 +558,15 @@ final class AudioBus: @unchecked Sendable {
     /// Invoked by CoreAudio (sync-dispatched from the HAL IO thread) on ioQueue. Builds an
     /// AVAudioPCMBuffer, updates observable state, and fans out to consumers.
     /// Makes NO HAL calls and never blocks — see ioQueue docs (#64).
-    private func handleInputData(_ inputData: UnsafePointer<AudioBufferList>) {
+    private func handleInputData(
+        _ inputData: UnsafePointer<AudioBufferList>,
+        inputTime: UnsafePointer<AudioTimeStamp>
+    ) {
         guard let format = _currentFormat.withLock({ $0 }) else { return }
 
-        let sourceBuffers = UnsafeMutableAudioBufferListPointer(
-            UnsafeMutablePointer(mutating: inputData)
-        )
-        let streamDescription = format.streamDescription
-        let bytesPerFrame = Int(streamDescription.pointee.mBytesPerFrame)
-        guard bytesPerFrame > 0, let firstBuffer = sourceBuffers.first else { return }
-
-        let frameCount = AVAudioFrameCount(Int(firstBuffer.mDataByteSize) / bytesPerFrame)
-        guard frameCount > 0 else { return }
-
-        guard let pcmBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-            return
-        }
-        pcmBuffer.frameLength = frameCount
-
-        let destBuffers = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
-        guard destBuffers.count == sourceBuffers.count else { return }
-
-        for index in 0..<sourceBuffers.count {
-            let src = sourceBuffers[index]
-            let copySize = min(
-                Int(src.mDataByteSize),
-                Int(destBuffers[index].mDataByteSize)
-            )
-            guard copySize > 0,
-                  let sourceData = src.mData,
-                  let destinationData = destBuffers[index].mData
-            else {
-                continue
-            }
-            memcpy(destinationData, sourceData, copySize)
-            destBuffers[index].mDataByteSize = UInt32(copySize)
-        }
+        guard let pcmBuffer = CapturedBuffer.copy(
+            of: inputData, format: format, stamp: .init(inputTime: inputTime)
+        ) else { return }
 
         let rms = Self.normalizedRMS(from: pcmBuffer)
 
@@ -854,7 +827,7 @@ final class AudioBus: @unchecked Sendable {
         return uid.takeRetainedValue() as String
     }
 
-    private static func deviceNominalSampleRate(for deviceID: AudioDeviceID) -> Double? {
+    static func deviceNominalSampleRate(for deviceID: AudioDeviceID) -> Double? {
         dispatchPrecondition(condition: .onQueue(sharedHALQueue))
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyNominalSampleRate,

@@ -37,19 +37,25 @@ enum MarkdownMeetingWriter {
     ///
     /// - Parameters:
     ///   - metadata: Session metadata (title, dates, app, engine).
-    ///   - records: The transcript records from the JSONL session store.
+    ///   - transcript: The meeting's transcript as its readers read it (#269):
+    ///     with a speaker map, one line per paragraph of a turn, under the
+    ///     speaker's name; without one, one line per record, as before.
     ///   - notesMarkdown: Optional LLM-generated notes markdown to include before the transcript.
     ///   - outputDirectory: The directory to write into (the notes folder —
     ///     `~/Library/Application Support/Lore/Notes` by default, #148).
+    ///   - previousFileName: The name this meeting's mirror was last written
+    ///     under (#280). When the new name differs, that file is removed after
+    ///     the new one is in place — if it is still this meeting's mirror.
     /// - Returns: The URL of the written file, or `nil` on failure.
     @discardableResult
     static func write(
         metadata: Metadata,
-        records: [SessionRecord],
+        transcript: MeetingTranscript,
         notesMarkdown: String? = nil,
-        outputDirectory: URL
+        outputDirectory: URL,
+        previousFileName: String? = nil
     ) -> URL? {
-        guard !records.isEmpty else {
+        guard !transcript.records.isEmpty else {
             writerLogger.warning("MarkdownMeetingWriter: no records, skipping write")
             return nil
         }
@@ -59,19 +65,28 @@ enum MarkdownMeetingWriter {
         NotesFolder.prepare(outputDirectory)
 
         // Build the Markdown content
-        let content = buildMarkdown(metadata: metadata, records: records, notesMarkdown: notesMarkdown)
+        let content = buildMarkdown(metadata: metadata, transcript: transcript, notesMarkdown: notesMarkdown)
 
         // Generate filename with collision handling
         let fileURL = resolveFilename(
             title: metadata.title,
             startedAt: metadata.startedAt,
+            sessionID: metadata.sessionID,
             directory: outputDirectory
         )
 
-        // Write with restricted permissions
+        // Write with restricted permissions. The atomic write replaces the
+        // meeting's own file in one rename; the old name goes only after the
+        // new file is in place, so a crash leaves two mirrors, never none.
         do {
             try content.write(to: fileURL, atomically: true, encoding: .utf8)
             try fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: fileURL.path)
+            if let previousFileName, previousFileName != fileURL.lastPathComponent {
+                let previous = outputDirectory.appendingPathComponent(previousFileName)
+                if isMirror(previous, of: metadata.sessionID) {
+                    try? fm.removeItem(at: previous)
+                }
+            }
             // The file name is built from the meeting title — user content, not a
             // constant. `.public` here published it to the unified log (#82).
             writerLogger.info("Wrote meeting markdown: \(fileURL.lastPathComponent, privacy: .private)")
@@ -85,10 +100,11 @@ enum MarkdownMeetingWriter {
 
     // MARK: - Markdown Assembly
 
-    static func buildMarkdown(metadata: Metadata, records: [SessionRecord], notesMarkdown: String? = nil) -> String {
+    static func buildMarkdown(metadata: Metadata, transcript: MeetingTranscript, notesMarkdown: String? = nil) -> String {
         let resolvedTitle = metadata.title?.isEmpty == false ? metadata.title! : "Meeting"
-        let frontmatter = buildFrontmatter(metadata: metadata, records: records, title: resolvedTitle)
-        let body = buildBody(title: resolvedTitle, records: records, startedAt: metadata.startedAt, notesMarkdown: notesMarkdown)
+        let frontmatter = buildFrontmatter(metadata: metadata, transcript: transcript, title: resolvedTitle)
+        let body = buildBody(
+            title: resolvedTitle, transcript: transcript, startedAt: metadata.startedAt, notesMarkdown: notesMarkdown)
         return frontmatter + "\n" + body
     }
 
@@ -96,7 +112,7 @@ enum MarkdownMeetingWriter {
 
     static func buildFrontmatter(
         metadata: Metadata,
-        records: [SessionRecord],
+        transcript: MeetingTranscript,
         title: String
     ) -> String {
         var lines: [String] = ["---"]
@@ -104,19 +120,14 @@ enum MarkdownMeetingWriter {
         lines.append("schema: openoats/v1")
         lines.append("title: \(yamlQuote(title))")
         lines.append("date: \(formatISO8601(metadata.startedAt))")
-        lines.append("duration: \(computeDuration(records: records, metadata: metadata))")
+        lines.append("duration: \(computeDuration(records: transcript.records, metadata: metadata))")
 
-        // Participants - derived from actual speakers in the transcript
-        let speakerLabels: [String] = {
-            var seen: [String] = []
-            for r in records {
-                let label = r.speaker.displayLabel
-                if !seen.contains(label) { seen.append(label) }
-            }
-            return seen.isEmpty ? ["You", "Them"] : seen
-        }()
+        // Participants - derived from actual speakers in the transcript, by
+        // the names they read under (#269)
+        var seen: Set<String> = []
+        let names = transcript.labels.speakers.map(\.name).filter { seen.insert($0).inserted }
         lines.append("participants:")
-        for label in speakerLabels {
+        for label in names.isEmpty ? ["You", "Them"] : names {
             lines.append("  - \(label)")
         }
 
@@ -150,7 +161,7 @@ enum MarkdownMeetingWriter {
 
     // MARK: - Body
 
-    static func buildBody(title: String, records: [SessionRecord], startedAt: Date, notesMarkdown: String? = nil) -> String {
+    static func buildBody(title: String, transcript: MeetingTranscript, startedAt: Date, notesMarkdown: String? = nil) -> String {
         var parts: [String] = []
 
         // H1 title
@@ -169,7 +180,7 @@ enum MarkdownMeetingWriter {
         parts.append("## Transcript")
         parts.append("")
 
-        let transcriptLines = formatTranscriptLines(records: records, startedAt: startedAt)
+        let transcriptLines = formatTranscriptLines(transcript: transcript, startedAt: startedAt)
         parts.append(transcriptLines)
 
         return parts.joined(separator: "\n")
@@ -177,17 +188,18 @@ enum MarkdownMeetingWriter {
 
     // MARK: - Transcript Formatting
 
-    static func formatTranscriptLines(records: [SessionRecord], startedAt: Date) -> String {
+    /// One line per paragraph, at its first line's time, under its speaker's
+    /// name; a reply inside a turn reads "(Name: words)". Without a speaker
+    /// map each record is its own paragraph, so the lines are as before #269.
+    static func formatTranscriptLines(transcript: MeetingTranscript, startedAt: Date) -> String {
         var lines: [String] = []
 
-        for record in records {
+        for (speaker, paragraph) in transcript.paragraphs {
             let relativeTimestamp = formatRelativeTimestamp(
-                record.timestamp,
+                paragraph.time,
                 relativeTo: startedAt
             )
-            let speaker = speakerLabel(record.speaker)
-            let text = record.refinedText ?? record.text
-            lines.append("[\(relativeTimestamp)] **\(speaker):** \(text)")
+            lines.append("[\(relativeTimestamp)] **\(speaker.name):** \(transcript.text(of: paragraph))")
             lines.append("")
         }
 
@@ -233,12 +245,6 @@ enum MarkdownMeetingWriter {
         guard let first = records.first, let last = records.last else { return 1 }
         let seconds = last.timestamp.timeIntervalSince(first.timestamp)
         return max(1, Int((seconds / 60.0).rounded()))
-    }
-
-    // MARK: - Speaker Label
-
-    static func speakerLabel(_ speaker: Speaker) -> String {
-        speaker.displayLabel
     }
 
     // MARK: - YAML Quoting
@@ -319,8 +325,10 @@ enum MarkdownMeetingWriter {
     // MARK: - Filename Generation
 
     /// Generate the filename: `YYYY-MM-DD-HHMM-kebab-title.md`
-    /// Handles collisions by appending -2, -3, etc.
-    static func resolveFilename(title: String?, startedAt: Date, directory: URL) -> URL {
+    /// A name held by this meeting's own mirror is reused (#280); a name held
+    /// by anything else — another meeting's mirror, a hand-made file, an
+    /// evicted iCloud file — is skipped by appending -2, -3, etc.
+    static func resolveFilename(title: String?, startedAt: Date, sessionID: String, directory: URL) -> URL {
         let dateFmt = DateFormatter()
         dateFmt.dateFormat = "yyyy-MM-dd-HHmm"
         dateFmt.timeZone = TimeZone.current
@@ -333,12 +341,34 @@ enum MarkdownMeetingWriter {
         var candidate = directory.appendingPathComponent("\(baseName).md")
         var counter = 2
 
-        while fm.fileExists(atPath: candidate.path) {
+        while isTaken(candidate, forSessionID: sessionID, fileManager: fm) {
             candidate = directory.appendingPathComponent("\(baseName)-\(counter).md")
             counter += 1
         }
 
         return candidate
+    }
+
+    private static func isTaken(_ url: URL, forSessionID sessionID: String, fileManager fm: FileManager) -> Bool {
+        if fm.fileExists(atPath: NotesFolderMigration.placeholderURL(for: url).path) { return true }
+        return fm.fileExists(atPath: url.path) && !isMirror(url, of: sessionID)
+    }
+
+    /// Whether the file at `url` is this meeting's mirror: its frontmatter
+    /// carries `x_openoats_session` naming `sessionID` (#280). An evicted iCloud
+    /// file is never read — reading would download it — so it counts as not
+    /// ours and is neither overwritten nor removed.
+    static func isMirror(_ url: URL, of sessionID: String) -> Bool {
+        guard !NotesFolderMigration.isICloudPlaceholder(url),
+              let handle = try? FileHandle(forReadingFrom: url) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 8192) else { return false }
+        // `isNewline`, not "\n": a file re-saved with CRLF endings is still ours.
+        let lines = String(decoding: head, as: UTF8.self)
+            .split(omittingEmptySubsequences: false, whereSeparator: \.isNewline)
+        guard lines.first == "---" else { return false }
+        let marker = "x_openoats_session: \(yamlQuote(sessionID))"
+        return lines.dropFirst().prefix { $0 != "---" }.contains { $0 == marker }
     }
 
 }

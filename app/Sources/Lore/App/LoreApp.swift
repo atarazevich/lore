@@ -334,6 +334,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// refused elsewhere (#193) can arrive at any point once this is live.
     private var launchRefusedObserver: Any?
     private var menuBarController: MenuBarController?
+    private var commandServer: CLISocketServer?
     private var isTerminating = false
     var coordinator: AppCoordinator? {
         didSet { flushPendingDeepLinkCommand() }
@@ -397,8 +398,38 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         setupDictation(coordinator: coordinator, settings: settings)
         setupHealthMonitor(coordinator: coordinator, settings: settings)
         registerGlobalHotkey()
+        setupCommandLine(coordinator: coordinator)
         updaterController?.start()
         return true
+    }
+
+    /// The `lore` command's door (#254): the socket it talks to and the PATH
+    /// link it is run through. Behind the setup gate like everything above, so
+    /// a request can never reach a machine that has no model or permissions yet.
+    private func setupCommandLine(coordinator: AppCoordinator) {
+        guard commandServer == nil else { return }
+        let service = CLITranscribeService(
+            backendCache: coordinator.sharedBackendCache,
+            // `.ending` counts: the microphone leg's last words are still
+            // going through the shared model while the meeting finalizes.
+            isMeetingLive: { [weak coordinator] in coordinator.map { $0.state != .idle } ?? false }
+        )
+        coordinator.commandTranscription = service
+        // One socket, two requests (#257): a file to transcribe goes to the
+        // model, a reply to read aloud goes to the queue. The queue answers
+        // "not accepting" while its switch is off, and the command speaks the
+        // words itself — the socket is never taken away, because transcribing
+        // does not depend on that switch.
+        let replies = coordinator.agentReplies
+        commandServer = CLISocketServer { request in
+            switch request {
+            case .transcribe(let path):
+                return await service.respond(toFileAt: path)
+            case .say(let said):
+                return await CLISayReceiver.respond(to: said, replies: replies)
+            }
+        }
+        CommandLink.install()
     }
 
     private func setupMenuBar(coordinator: AppCoordinator, settings: AppSettings) {
@@ -508,8 +539,41 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// over whatever the surviving process writes for the event it is about
     /// to record on this process's behalf.
     func applicationWillTerminate(_ notification: Notification) {
+        finishBeforeExit()
+    }
+
+    /// The last steps of a quit, and of a SIGTERM (`terminationSignal`).
+    private func finishBeforeExit() {
         guard !isRefusedLaunch else { return }
+        // A quit mid-export is not a failed export (#290).
+        coordinator?.transcriptHealer?.willTerminate()
         DiagStore.shared.flush()
+    }
+
+    /// SIGTERM — `killall Lore`, as every dev install does — ends the process
+    /// without `applicationWillTerminate`, so a quit mid-export would spend
+    /// one of its attempts (#290). Heard here instead: the same last steps as
+    /// a quit, then the process exits at once, as the signal made it. Heard
+    /// off the main thread, so a main thread that never gets to them still
+    /// lets the signal end the process, as it did, half a second on — inside
+    /// the second `release.sh` waits after its `killall`.
+    private var terminationSignal: DispatchSourceSignal?
+
+    private func handleTerminationSignal() {
+        signal(SIGTERM, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGTERM, queue: .global(qos: .userInitiated))
+        source.setEventHandler { [weak self] in
+            DispatchQueue.main.async {
+                self?.finishBeforeExit()
+                exit(0)
+            }
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 0.5) {
+                signal(SIGTERM, SIG_DFL)
+                raise(SIGTERM)
+            }
+        }
+        source.resume()
+        terminationSignal = source
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -517,6 +581,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // timeline shows where one launch ends and the next begins — which is
         // exactly the question "did they restart after granting the permission?".
         DiagStore.record(.appLaunched(build: Self.currentBuildNumber))
+        handleTerminationSignal()
+        // Before anything can download a model: each from a fixed commit (#269).
+        ModelBundle.pinAll()
 
         // A launch refused elsewhere (#193) records into *this* process's ring
         // — the refused one never flushes its own (`applicationWillTerminate`).
@@ -818,20 +885,53 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hotkeyManager: coordinator.hotkeyManager
         )
 
-        // Read Aloud (#105): Fn+R / Fn+Q chords, floating player panel, and
+        // Read Aloud (#105): the Fn+R / Fn+Q selection chords (while agent
+        // replies are off, #259), floating player panel, and
         // the dictation interplay (capture start pauses playback before the
         // mic opens; capture end may auto-resume — a cancelled tap always,
         // a real dictation only when the setting opts in).
         let readAloud = coordinator.readAloudController
         readAloud.settings = settings
         coordinator.hotkeyManager.readAloudController = readAloud
-        coordinator.readAloudPanel.start(controller: readAloud)
-        coordinator.dictationCoordinator.onCaptureStarted = { [weak readAloud] in
-            readAloud?.pauseForDictation()
+        // One floating panel for both kinds of reading (#260): the selection's
+        // controls and the agent replies' list are plates in the same window,
+        // and each is drawn only while it has something to say.
+        coordinator.readAloudPanel.start(
+            controller: readAloud, replies: coordinator.agentReplies,
+            chats: coordinator.agentChats, settings: settings
+        )
+        let replies = coordinator.agentReplies
+        coordinator.dictationCoordinator.onCaptureEnded = { [weak readAloud, weak replies] in
+            readAloud?.dictationEnded()
+            replies?.loreCaptureEnded()
         }
-        coordinator.dictationCoordinator.onCaptureEnded = { [weak readAloud] cancelled in
-            readAloud?.dictationEnded(cancelled: cancelled)
+
+        // Going to a chat (#258) reads the switch and the resume command from
+        // the player that owns them: off, there is no destination for a row
+        // and no command is ever run.
+        coordinator.agentChats.replies = coordinator.agentReplies
+        // …and the player names a chat by what the navigator last read from
+        // herdr (#267): the workspace and tab labels the owner typed himself.
+        coordinator.agentReplies.chats = coordinator.agentChats
+        // Lore's own recording holds reading (#279): a dictation once the talk
+        // key has decided it is one, and a meeting. The microphone's own
+        // reading leaves lore out, so the pre-buffer at a key-down holds nothing.
+        coordinator.agentReplies.isLoreRecording = { [weak coordinator] in
+            guard let coordinator else { return false }
+            return coordinator.dictationCoordinator.state == .recording || coordinator.isRecording
         }
+        // Agent replies (#256): the controller follows its switch live and runs
+        // nothing — no queue, no microphone observer — while it is off.
+        coordinator.agentReplies.start(settings: settings)
+        // The player's keys (#259): while the switch is on, the letters on the
+        // talk key are the player's — Fn+R play/pause, Fn+[ previous, Fn+] next,
+        // Fn+J the reply's chat, Fn+M mute — and Esc stops a reply that is being
+        // read aloud. Off, the manager finds the switch off and every key is what
+        // it was, Fn+R and Fn+Q included. Wired here and not in
+        // `startDictationPipeline`, for the same reason the Read Aloud chords
+        // are: the onboarding Try-it step is hold-to-talk and nothing else.
+        coordinator.hotkeyManager.agentReplies = coordinator.agentReplies
+        coordinator.hotkeyManager.agentChats = coordinator.agentChats
     }
 
     /// Build the health monitor (#83, reworked #140/#151): an on-open fact sheet
@@ -871,6 +971,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         monitor.runModelWarmupTest = { [weak coordinator] in
             try? await coordinator?.sharedBackendCache.prepare()
         }
+        monitor.runVADLoadTest = { _ = try? await SileroVAD.load() }
         monitor.runOpenAITest = {
             let key = settings.openaiApiKey
             guard !key.isEmpty else { return }
@@ -892,8 +993,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // failure and the recovery behind it must not race each other onto the
         // mark, which two independent Tasks would allow.
         DiagStore.shared.setObserver { [weak monitor] event in
-            guard let signal = HealthMonitor.healthSignal(for: event) else { return }
-            Task { @MainActor in monitor?.note(signal) }
+            if let signal = HealthMonitor.healthSignal(for: event) {
+                Task { @MainActor in monitor?.note(signal) }
+            } else if HealthMonitor.refreshesPanel(for: event) {
+                Task { @MainActor in monitor?.refresh() }
+            }
         }
 
         // The #135 acknowledge rode the deleted 5 s cycle; now it rides its own

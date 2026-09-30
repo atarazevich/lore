@@ -168,6 +168,16 @@ struct NotesView: View {
                 detailViewMode = .transcript
             }
         }
+        // The open meeting's speaker pass settled (#269): its lines read
+        // through the new map.
+        .onChange(of: coordinator.transcriptHealer?.speakersGeneration) {
+            controller.reloadSpeakers()
+        }
+        // A meeting's recording lands after it is listed (#290): the open
+        // one gets its play button without a reselect.
+        .onChange(of: coordinator.transcriptHealer?.exportGeneration) {
+            controller.reloadAudio()
+        }
         // Fresh-marker lifetime (MREV-39): clears once the user views the
         // meeting while no job is in flight for it. Failure no longer blocks
         // the clear (#166) — failures are the healer's problem, not a state
@@ -178,9 +188,10 @@ struct NotesView: View {
             }
         }
         // The standing open re-summons (#166): when the pane settles empty
-        // with no job and no verdict, this open is itself the fresh signal —
-        // ensure resets the budget and starts a new cycle, so face 3 stays
-        // strictly behind the healer's own no-audio/no-speech verdict.
+        // with no job and no verdict, a job starts while this open's budget
+        // lasts — the open itself (`NotesController.selectSession`) is the
+        // only fresh signal, so a meeting whose passes keep failing does not
+        // loop while it stays open.
         .onChange(of: repairCandidate(controller: controller), initial: true) { _, candidate in
             if let candidate {
                 coordinator.transcriptHealer?.ensure(sessionID: candidate)
@@ -221,15 +232,15 @@ struct NotesView: View {
     /// The standing open's re-summon slot (#166): the pane is empty with no
     /// job running and no unavailable verdict — the shape a spent retry
     /// budget leaves behind while audio still exists. Face 3 must never
-    /// claim "no audio" over audio, so the open meeting summons a fresh
-    /// cycle instead (ensure resets the budget). Bounded by attention:
-    /// navigating away empties the candidate and the cycle is not renewed.
+    /// claim "no audio" over audio, so the open meeting summons another
+    /// attempt while its open's budget lasts. Bounded by the budget, once per
+    /// open: reopening the meeting is what grants a fresh one.
     private func repairCandidate(controller: NotesController) -> String? {
         let state = controller.state
         guard isActiveInShell,
               let id = state.selectedSessionID,
               state.transcriptLoaded,
-              state.loadedTranscript.isEmpty,
+              state.transcript.records.isEmpty,
               !isPreparing(id),
               !isSettledUnavailable(id, state: state)
         else { return nil }
@@ -325,19 +336,16 @@ struct NotesView: View {
                 .foregroundStyle(LoreTheme.TextColor.primary)
                 .lineLimit(1)
 
-            // Meta (#107 prototype `.dmeta`). The utterance count is the
-            // shown transcript's own (#166, ui-language rule 8): it appears
-            // only beside text that is actually on screen, so metadata can
-            // never contradict the pane under it. No state icon, no "whole"
-            // suffix — transcript states are not presented (#166).
-            metaLine(
+            // Meta (#107 prototype `.dmeta`). No count (#269, board §04 "The
+            // count"): the turns on screen are fewer than the lines, and no
+            // one opening a meeting needs the number. While the speaker pass
+            // runs, the end of the line says so (§01 V2), and then nothing.
+            (metaLine(
                 type: typeTag(session)?.rawValue,
-                components: metaComponents(
-                    session,
-                    detail: true,
-                    shownUtteranceCount: controller.state.loadedTranscript.count
-                )
-            )
+                components: MeetingMeta.components(session, detail: true)
+            ) + (controller.isFindingSpeakers
+                ? metaStatusSlot(MeetingMeta.findingSpeakers, colour: LoreTheme.TextColor.faint)
+                : Text(verbatim: "")))
             .font(LoreTheme.Typography.monoMeta)
             .lineLimit(1)
             .padding(.top, 4)
@@ -426,36 +434,13 @@ struct NotesView: View {
         controller.renameSession(sessionID: sessionID, newTitle: headerRenameText)
     }
 
-    /// Compact recorded duration for the list row meta (#58), derived from
-    /// SessionIndex startedAt/endedAt. Nil when endedAt is missing (legacy
-    /// or still-recording rows) — the row then shows utterances only.
-    private func durationLabel(_ session: SessionIndex) -> String? {
-        guard let endedAt = session.endedAt else { return nil }
-        let seconds = endedAt.timeIntervalSince(session.startedAt)
-        guard seconds >= 0 else { return nil }
-        let minutes = Int(seconds / 60)
-        if minutes < 1 { return "<1 min" }
-        let hours = minutes / 60
-        return hours > 0 ? "\(hours)h \(minutes % 60)m" : "\(minutes) min"
-    }
-
-    /// Meta components: `27 July · 09:58 · 29 min` (duration omitted when
-    /// unknown). Detail adds the year, and — only when text is on screen to
-    /// count (#166, rule 8) — that text's own utterance count:
-    /// `27 July 2026 · 09:58 · 29 min · 135 utterances`.
-    private func metaComponents(
-        _ session: SessionIndex, detail: Bool = false, shownUtteranceCount: Int = 0
-    ) -> [String] {
-        let dateFormat = Date.FormatStyle.dateTime.day().month(.wide)
-        var components = [
-            session.startedAt.formatted(detail ? dateFormat.year() : dateFormat),
-            session.startedAt.formatted(.dateTime.hour().minute()),
-            durationLabel(session)
-        ].compactMap { $0 }
-        if detail && shownUtteranceCount > 0 {
-            components.append("\(shownUtteranceCount) utterances")
-        }
-        return components
+    /// A meta line's last slot, ` · <status>` in italics: the row's
+    /// `preparing…` (#166) and the detail's `finding who spoke…` while the
+    /// open meeting's speaker pass runs (#269, board §01 V2). Nothing
+    /// replaces either after.
+    private func metaStatusSlot(_ status: String, colour: Color) -> Text {
+        Text(" \u{00B7} ").foregroundStyle(LoreTheme.TextColor.faint)
+            + Text(status).italic().foregroundStyle(colour)
     }
 
     /// Prototype `.prep` — dimmer than faint, italic: a row never asks for
@@ -464,28 +449,14 @@ struct NotesView: View {
         red: 0x4D / 255.0, green: 0x52 / 255.0, blue: 0x5C / 255.0
     )
 
-    /// The row's count slot (#166): a faint italic `· preparing…` while a
-    /// job runs, `· 189 utterances` beside readable text, and nothing when
-    /// no content's statistics could exist. Preparing takes precedence over
-    /// the index count — the A9CQC3BX shape is exactly an index promising
-    /// utterances over a transcript with no bytes, and while the healer
-    /// works, the promise is the less trustworthy of the two (rule 8). A
-    /// count the healer or the persisted no-speech verdict has declared
-    /// unhonorable is suppressed outright.
-    private func rowCountSlot(_ session: SessionIndex) -> Text {
-        let separator = Text(" \u{00B7} ").foregroundStyle(LoreTheme.TextColor.faint)
-        if isPreparing(session.id) {
-            return separator + Text("preparing\u{2026}")
-                .italic()
-                .foregroundStyle(Self.preparingSlotColor)
-        }
-        if session.utteranceCount > 0,
-           session.noSpeech != true,
-           coordinator.transcriptHealer?.isUnavailable(session.id) != true {
-            return separator + Text("\(session.utteranceCount) utterances")
-                .foregroundStyle(LoreTheme.TextColor.faint)
-        }
-        return Text(verbatim: "")
+    /// The row's status slot (#166): a faint italic `· preparing…` while a
+    /// job runs, and nothing otherwise — no count (#269, board §04 "The
+    /// count": "utterances" is our word, and its number would contradict the
+    /// turns on screen).
+    private func rowStatusSlot(_ session: SessionIndex) -> Text {
+        isPreparing(session.id)
+            ? metaStatusSlot("preparing\u{2026}", colour: Self.preparingSlotColor)
+            : Text(verbatim: "")
     }
 
     // MARK: - Meeting list rail (MREV-01…10)
@@ -684,12 +655,12 @@ struct NotesView: View {
                 }
             }
 
-            // Meta line with the row's whole vocabulary in the count slot
-            // (#166): `work · 27 July · 09:58 · 29 min · 189 utterances`, a
-            // faint "preparing…" while a job runs, or nothing at all. No
-            // dots, no state icons, no colors-as-meaning.
-            (metaLine(type: typeTag(session)?.rawValue, components: metaComponents(session))
-                + rowCountSlot(session))
+            // Meta line with the row's whole vocabulary in its last slot
+            // (#166, #269): `work · 27 July · 09:58 · 29 min`, and a faint
+            // "preparing…" while a job runs. No dots, no state icons, no
+            // colors-as-meaning.
+            (metaLine(type: typeTag(session)?.rawValue, components: MeetingMeta.components(session))
+                + rowStatusSlot(session))
                 .font(LoreTheme.Typography.monoMeta)
                 .lineLimit(1)
 
@@ -1047,7 +1018,7 @@ struct NotesView: View {
     /// utterance carries refined text (live refinement or batch enhance).
     @ViewBuilder
     private func transcriptToolbarActions(controller: NotesController, state: NotesState) -> some View {
-        if state.loadedTranscript.contains(where: { $0.refinedText != nil }) {
+        if state.transcript.records.contains(where: { $0.refinedText != nil }) {
             showOriginalButton(controller: controller, state: state)
         }
     }
@@ -1110,25 +1081,8 @@ struct NotesView: View {
     /// right now.
     @ViewBuilder
     private func transcriptView(controller: NotesController, state: NotesState) -> some View {
-        if !state.loadedTranscript.isEmpty {
-            ScrollView {
-                // Elapsed-stamp anchor (#63): the session's recorded start,
-                // falling back to the first utterance's timestamp for legacy
-                // sessions whose metadata never stored one.
-                let anchor = ElapsedStamp.anchor(
-                    startedAt: selectedSession(state)?.startedAt,
-                    firstTimestamp: state.loadedTranscript.first?.timestamp
-                )
-                LazyVStack(alignment: .leading, spacing: 16) {
-                    ForEach(Array(state.loadedTranscript.enumerated()), id: \.offset) { _, record in
-                        transcriptRow(record: record, anchor: anchor, showingOriginal: state.showingOriginal)
-                    }
-                }
-                .frame(maxWidth: 760, alignment: .leading)
-                .padding(.horizontal, 24)
-                .padding(.vertical, 18)
-                .frame(maxWidth: .infinity, alignment: .leading)
-            }
+        if !state.transcript.records.isEmpty {
+            speakerTurnsView(controller: controller, state: state)
         } else if !state.transcriptLoaded {
             // The async load is still in flight — no face may be claimed yet.
             Color.clear
@@ -1146,6 +1100,40 @@ struct NotesView: View {
             // open's re-summon (repairCandidate) fills this within a beat —
             // never the sentence, which would claim "no audio" unverified.
             Color.clear
+        }
+    }
+
+    /// The transcript as turns under their speakers' names (#269, board §04),
+    /// the names of found speakers opening the naming popover. Stamps count
+    /// from the session's recorded start, falling back to the first line's
+    /// time for legacy sessions that never stored one (#63).
+    private func speakerTurnsView(controller: NotesController, state: NotesState) -> some View {
+        ScrollView {
+            ReviewTranscriptTurns(
+                transcript: state.transcript,
+                anchor: ElapsedStamp.anchor(
+                    startedAt: selectedSession(state)?.startedAt,
+                    firstTimestamp: state.transcript.records.first?.timestamp
+                ),
+                original: state.showingOriginal,
+                choices: { speaker in
+                    SpeakerChoices.list(
+                        for: speaker,
+                        meeting: controller.state.transcript.labels.speakers,
+                        known: controller.suggestions(for: speaker.key)
+                    )
+                },
+                commit: { speaker, naming in
+                    switch naming {
+                    case .assign(let target): controller.assignSpeaker(speaker.key, to: target)
+                    case .name(let name): controller.nameSpeaker(speaker.key, as: name)
+                    }
+                }
+            )
+            .frame(maxWidth: 760, alignment: .leading)
+            .padding(.horizontal, 24)
+            .padding(.vertical, 18)
+            .frame(maxWidth: .infinity, alignment: .leading)
         }
     }
 
@@ -1206,19 +1194,12 @@ struct NotesView: View {
     // MARK: - Ask Lore chat tab (#62)
 
     /// The rail chat, re-hosted: persisted exchanges plus a live input over
-    /// the STORED transcript of the selected session. Same speaker-labeled
-    /// context lines as the live path (`Speaker.displayLabel: displayText`).
+    /// the STORED transcript of the selected session, read by names and
+    /// turns with the copy's clock times (#269), built when a question is sent.
     private func chatTab(state: NotesState) -> some View {
         AskLoreSection(
             model: reviewChat,
-            utterances: state.loadedTranscript.map {
-                Utterance(
-                    text: $0.text,
-                    speaker: $0.speaker,
-                    timestamp: $0.timestamp,
-                    refinedText: $0.refinedText
-                )
-            },
+            transcript: .review(state.transcript),
             apiKey: settings.openaiApiKey,
             isLive: false
         )
@@ -1249,21 +1230,10 @@ struct NotesView: View {
         }
     }
 
-    /// Speaker rows (MREV-13, #63): the live view's stamped row — elapsed
-    /// mono stamp + 64px speaker label — with the raw/original choice made
-    /// here. Copy keeps absolute HH:MM:SS (see copyCurrentContent).
-    private func transcriptRow(record: SessionRecord, anchor: Date?, showingOriginal: Bool) -> some View {
-        TranscriptSpeakerRow(
-            speaker: record.speaker,
-            text: showingOriginal ? record.text : record.displayText,
-            elapsed: record.timestamp.timeIntervalSince(anchor ?? record.timestamp)
-        )
-    }
-
     private func copyContentIsEmpty(state: NotesState) -> Bool {
         switch detailViewMode {
         case .transcript:
-            return state.loadedTranscript.isEmpty
+            return state.transcript.records.isEmpty
         case .chat:
             return !reviewChat.messages.contains { $0.role != .failure }
         case .notes:
@@ -1553,11 +1523,9 @@ struct NotesView: View {
         let text: String
         switch detailViewMode {
         case .transcript:
-            text = state.loadedTranscript.map { record in
-                let label = record.speaker.displayLabel
-                let content = state.showingOriginal ? record.text : record.displayText
-                return "[\(Self.transcriptTimeFormatter.string(from: record.timestamp))] \(label): \(content)"
-            }.joined(separator: "\n")
+            // One line per paragraph under its speaker's name (#269); one per
+            // line, as before, for a meeting without a speaker map.
+            text = state.transcript.clockLines(original: state.showingOriginal).joined(separator: "\n")
         case .chat:
             // The conversation as Q:/A: lines; failure bubbles are transient
             // UI, not conversation.
@@ -1572,12 +1540,36 @@ struct NotesView: View {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(text, forType: .string)
     }
-
-    private static let transcriptTimeFormatter: DateFormatter = {
-        let f = DateFormatter()
-        f.dateFormat = "HH:mm:ss"
-        return f
-    }()
 }
 
 // FlowLayout moved to FlowLayout.swift
+
+// MARK: - Meta line (#107, #269)
+
+/// The words of a meeting's mono meta line, detail and list row alike.
+enum MeetingMeta {
+    /// The detail line's last slot while the speaker pass runs (board §01 V2).
+    static let findingSpeakers = "finding who spoke\u{2026}"
+
+    /// `27 July · 09:58 · 29 min` (duration omitted when unknown); the detail
+    /// adds the year. No count (#269).
+    static func components(_ session: SessionIndex, detail: Bool = false) -> [String] {
+        let dateFormat = Date.FormatStyle.dateTime.day().month(.wide)
+        return [
+            session.startedAt.formatted(detail ? dateFormat.year() : dateFormat),
+            session.startedAt.formatted(.dateTime.hour().minute()),
+            duration(session)
+        ].compactMap { $0 }
+    }
+
+    /// Compact recorded duration (#58), from the index's start and end. Nil
+    /// when the end is missing (legacy or still-recording rows).
+    static func duration(_ session: SessionIndex) -> String? {
+        guard let endedAt = session.endedAt else { return nil }
+        let seconds = endedAt.timeIntervalSince(session.startedAt)
+        guard seconds >= 0 else { return nil }
+        let minutes = Int(seconds / 60)
+        if minutes < 1 { return "<1 min" }
+        return minutes < 60 ? "\(minutes) min" : ElapsedStamp.hours(Int(seconds))
+    }
+}

@@ -23,9 +23,10 @@ import AppKit
 /// pre-existing exception, untouched here.
 ///
 /// This type is the crosshair reading and Escape's keycode, and nothing else.
-/// Whose the key is, is one Bool at the caller (`HotkeyManager.escapeIsOurs`),
-/// read by both event paths so the local monitor and the CGEvent tap cannot
-/// disagree about it.
+/// Whose the key is, is one decision at the caller
+/// (`HotkeyManager.escapeAction` — a dictation's cancel, an agent reply's stop
+/// since #259, or the app in front's own key), read by both event paths so the
+/// local monitor and the CGEvent tap cannot disagree about it.
 enum DictationEscape {
     /// Escape's own key code, in the one place the event paths read it.
     static let keyCode: UInt16 = 53

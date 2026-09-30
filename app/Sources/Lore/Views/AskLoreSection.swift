@@ -174,8 +174,17 @@ final class AskLoreChatModel {
 /// transcript). Answers come from `AskLoreClient` over the speaker-labeled
 /// utterances — not the prototype's canned strings (MREC-31).
 struct AskLoreSection: View {
+    /// What the answers are made from.
+    enum Transcript {
+        /// The recording's lines so far, labelled You/Them.
+        case live([Utterance])
+        /// A finished meeting, read by names and turns with the copy's clock
+        /// times (#269) when a question is sent.
+        case review(MeetingTranscript)
+    }
+
     let model: AskLoreChatModel
-    let utterances: [Utterance]
+    let transcript: Transcript
     let apiKey: String
     /// Same chat, two hosts: live = rail during a recording, review = Chat
     /// tab over a finished meeting. Differs only in copy and bubble width —
@@ -195,13 +204,23 @@ struct AskLoreSection: View {
 
     private var hasKey: Bool { !apiKey.isEmpty }
     /// Asking needs material: at least one finalized utterance.
-    private var hasTranscript: Bool { !utterances.isEmpty }
+    private var hasTranscript: Bool {
+        switch transcript {
+        case .live(let utterances): !utterances.isEmpty
+        case .review(let meeting): !meeting.records.isEmpty
+        }
+    }
 
     /// Speaker-labeled transcript lines — built at send time.
     private var transcriptText: String {
-        utterances
-            .map { "\($0.speaker.displayLabel): \($0.displayText)" }
-            .joined(separator: "\n")
+        switch transcript {
+        case .live(let utterances):
+            utterances
+                .map { "\($0.speaker.displayLabel): \($0.displayText)" }
+                .joined(separator: "\n")
+        case .review(let meeting):
+            meeting.askLoreText
+        }
     }
 
     var body: some View {

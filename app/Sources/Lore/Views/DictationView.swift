@@ -349,8 +349,7 @@ struct DictationView: View {
             .frame(maxWidth: .infinity, alignment: .leading)
             .padding(.horizontal, 26)
             .padding(.vertical, 6)
-            .background(Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255).opacity(0.82))
-            .background(.ultraThinMaterial)
+            .background(LorePinnedBackdrop())
             .overlay(alignment: .bottom) { LoreDivider() }
     }
 

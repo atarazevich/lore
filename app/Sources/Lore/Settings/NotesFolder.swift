@@ -309,6 +309,12 @@ enum NotesFolderMigration {
         }
     }
 
+    /// Where the older sync path leaves the placeholder of an evicted `url`:
+    /// `.<name>.icloud` beside it.
+    static func placeholderURL(for url: URL) -> URL {
+        url.deletingLastPathComponent().appendingPathComponent(".\(url.lastPathComponent).icloud")
+    }
+
     /// iCloud's two tells that a listed entry has no bytes on this Mac: the
     /// downloading status the file provider publishes, and the `.icloud`
     /// placeholder name the older sync path leaves in the directory. Shallow by

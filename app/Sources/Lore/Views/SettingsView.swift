@@ -90,6 +90,7 @@ struct SettingsView: View {
                     generalSection.id(SettingsSection.general)
                     talkSection.id(SettingsSection.talk)
                     copyingSection.id(SettingsSection.copying)
+                    agentRepliesSection
                     readAloudSection.id(SettingsSection.readAloud)
                     modifiersSection.id(SettingsSection.modifiers)
                     meetingsSection.id(SettingsSection.meetings)
@@ -490,6 +491,66 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - AGENT REPLIES (#236, board §04)
+
+    /// The feature's own group, above Read aloud (board frames i and j). One
+    /// switch, off by default and marked experimental; while it is off the group
+    /// is only that switch, because nothing of the feature runs and there is
+    /// nothing to configure. The player's keys live in the Read aloud card,
+    /// where every reading key already is (#259).
+    private var agentRepliesSection: some View {
+        SettingsSectionCard(label: "Agent replies") {
+            toggleRow(
+                "Read agent replies aloud",
+                sub: "Agents' replies are read aloud one at a time and kept in a list",
+                isOn: $settings.agentRepliesEnabled,
+                badge: "Experimental"
+            )
+            if settings.agentRepliesEnabled {
+                LoreDivider()
+                // Nothing to install: the app puts the command on the terminal
+                // path at every start (#254), so the row states what to call.
+                SettingsRow(
+                    name: "Terminal command",
+                    sub: "What a chat calls instead of say \u{2014} it comes with the app"
+                ) {
+                    LoreMonoValueButton(title: "\(AgentReplyHelpCopy.command) \"\u{2026}\"")
+                }
+                LoreDivider()
+                SettingsRow(
+                    name: "Command to reopen a closed chat",
+                    sub: "Runs in a new herdr tab, with the chat's session id filled in"
+                ) {
+                    EmptyView()
+                }
+                resumeCommandField
+            }
+        }
+    }
+
+    /// The command itself, on one mono line across the card. An empty field
+    /// returns to the default, which is what the placeholder shows
+    /// (`activeAgentChatResumeCommand`).
+    private var resumeCommandField: some View {
+        TextField(
+            "", text: $settings.agentChatResumeCommand,
+            prompt: Text(AppSettings.defaultAgentChatResumeCommand)
+        )
+        .font(LoreTheme.Typography.mono(12))
+        .textFieldStyle(.plain)
+        .lineLimit(1)
+        .padding(.vertical, 4)
+        .padding(.horizontal, 8)
+        .background(
+            LoreTheme.Surface.card, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
+        )
+        .overlay(
+            RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
+                .strokeBorder(LoreTheme.Surface.line2, lineWidth: 1)
+        )
+        .padding(EdgeInsets(top: 0, leading: 16, bottom: 14, trailing: 16))
+    }
+
     // MARK: - READ ALOUD (#105)
 
     /// Paid tier is disclosed by key presence: Speechify voice groups and the
@@ -498,6 +559,21 @@ struct SettingsView: View {
     private var hasSpeechifyKey: Bool { !settings.speechifyApiKey.isEmpty }
 
     private var readAloudSection: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            readAloudCard
+            // Under the card, as System Settings sets a footnote: it belongs to
+            // the whole list of keys rather than to any one row (#263).
+            if settings.agentRepliesEnabled {
+                Text(Self.playerFootnote)
+                    .font(LoreTheme.Typography.meta)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
+                    .padding(EdgeInsets(top: 6, leading: 2, bottom: 0, trailing: 2))
+            }
+        }
+        .frame(maxWidth: 640, alignment: .leading)
+    }
+
+    private var readAloudCard: some View {
         SettingsSectionCard(label: "Read aloud") {
             SettingsRow(
                 name: "Speechify API key",
@@ -586,18 +662,61 @@ struct SettingsView: View {
                 isOn: $settings.readAloudResumeAfterDictation
             )
             LoreDivider()
-            shortcutRow(key: "fn R", name: "Read selection aloud", sub: "Replaces the current reading")
-            LoreDivider()
-            shortcutRow(key: "fn Q", name: "Add selection to queue", sub: "Reads after the current text")
+            shortcutRows
         }
     }
 
-    /// Static shortcut chip row — same `.keybtn` idiom as the Modifiers rows.
-    private func shortcutRow(key: String, name: String, sub: String) -> some View {
-        SettingsRow(name: name, sub: sub) {
-            LoreMonoValueButton(title: key, width: 64)
-        } trailing: {
-            EmptyView()
+    /// One key of this card: the chip, what it does, and the line under it.
+    private struct Shortcut: Identifiable {
+        let key: String
+        let name: String
+        var sub: String?
+
+        var id: String { key }
+    }
+
+    /// The keys this card ends with, and they are not the same keys in both
+    /// states of the agent-replies switch (#259). On, the letters on the talk
+    /// key are the player's and the selection has no key left; off, Fn+R and
+    /// Fn+Q read the selection as they have since #105. The names, the order and
+    /// the subs are the board's key strip
+    /// (`docs/design/prototypes/agent-replies-player.html`, frame j), and fn
+    /// tapped alone is the player's visibility since #278.
+    private static let playerShortcuts = [
+        Shortcut(key: "fn [", name: "Previous"),
+        Shortcut(key: "fn ]", name: "Next"),
+        Shortcut(key: "fn J", name: "Go to / Open", sub: "The chat of the reply in the player"),
+        Shortcut(key: "fn M", name: "Mute / Unmute", sub: "Replies keep arriving, silently"),
+        Shortcut(key: "fn R", name: "Play / Pause", sub: "The reply in the player"),
+        Shortcut(
+            key: "fn", name: "Hide / Show",
+            sub: "Tap it alone \u{2014} a reply being read carries on"
+        ),
+        Shortcut(
+            key: "esc", name: "Pause, then hide",
+            sub: "The second press hides the player; with nothing speaking, the first one does"
+        ),
+    ]
+    /// The pointer plays and pauses too (#263), and says so under the card, as
+    /// System Settings sets a footnote: it belongs to the whole list of keys.
+    private static let playerFootnote = "Click a reply to play it; click the one playing to pause."
+    private static let selectionShortcuts = [
+        Shortcut(key: "fn R", name: "Read selection aloud", sub: "Replaces the current reading"),
+        Shortcut(key: "fn Q", name: "Add selection to queue", sub: "Reads after the current text"),
+    ]
+
+    /// Static shortcut chip rows — same `.keybtn` idiom as the Modifiers rows,
+    /// and the same divider-between-rows loop as the health panel's.
+    private var shortcutRows: some View {
+        let shortcuts =
+            settings.agentRepliesEnabled ? Self.playerShortcuts : Self.selectionShortcuts
+        return ForEach(Array(shortcuts.enumerated()), id: \.element.id) { index, shortcut in
+            if index > 0 { LoreDivider() }
+            SettingsRow(name: shortcut.name, sub: shortcut.sub) {
+                LoreMonoValueButton(title: shortcut.key, width: 64)
+            } trailing: {
+                EmptyView()
+            }
         }
     }
 
@@ -1382,9 +1501,9 @@ struct SettingsView: View {
     // MARK: - Row helpers
 
     private func toggleRow(
-        _ name: String, sub: String?, isOn: Binding<Bool>
+        _ name: String, sub: String?, isOn: Binding<Bool>, badge: String? = nil
     ) -> some View {
-        SettingsRow(name: name, sub: sub) {
+        SettingsRow(name: name, sub: sub, badge: badge) {
             Toggle(name, isOn: isOn)
                 .toggleStyle(LoreToggleStyle())
                 .labelsHidden()
@@ -1576,6 +1695,9 @@ private struct SettingsRow<Leading: View, Trailing: View>: View {
     var sub: String?
     var subColor: Color
     var subLineLimit: Int?
+    /// A quiet System Settings mark beside the name — "Experimental" on the
+    /// agent-replies switch (#260, board §04).
+    var badge: String?
     let leading: Leading
     let trailing: Trailing
 
@@ -1584,6 +1706,7 @@ private struct SettingsRow<Leading: View, Trailing: View>: View {
         sub: String? = nil,
         subColor: Color = LoreTheme.TextColor.muted,
         subLineLimit: Int? = nil,
+        badge: String? = nil,
         @ViewBuilder leading: () -> Leading,
         @ViewBuilder trailing: () -> Trailing
     ) {
@@ -1591,6 +1714,7 @@ private struct SettingsRow<Leading: View, Trailing: View>: View {
         self.sub = sub
         self.subColor = subColor
         self.subLineLimit = subLineLimit
+        self.badge = badge
         self.leading = leading()
         self.trailing = trailing()
     }
@@ -1599,9 +1723,21 @@ private struct SettingsRow<Leading: View, Trailing: View>: View {
         HStack(spacing: 14) {
             leading
             VStack(alignment: .leading, spacing: 1) {
-                Text(name)
-                    .font(LoreTheme.Typography.control)
-                    .foregroundStyle(LoreTheme.TextColor.primary)
+                HStack(spacing: 7) {
+                    Text(name)
+                        .font(LoreTheme.Typography.control)
+                        .foregroundStyle(LoreTheme.TextColor.primary)
+                    if let badge {
+                        // The board's `.xmark`: the chip chrome every other
+                        // small mark in the app already wears.
+                        Text(badge)
+                            .font(.system(size: 10, weight: .semibold))
+                            .foregroundStyle(LoreTheme.TextColor.muted)
+                            .padding(.horizontal, 6)
+                            .frame(height: 16)
+                            .loreChipChrome(fill: LoreTheme.Surface.card3)
+                    }
+                }
                 if let sub, !sub.isEmpty {
                     Text(sub)
                         .font(.system(size: 12))
@@ -1623,6 +1759,7 @@ extension SettingsRow where Leading == EmptyView {
         sub: String? = nil,
         subColor: Color = LoreTheme.TextColor.muted,
         subLineLimit: Int? = nil,
+        badge: String? = nil,
         @ViewBuilder trailing: () -> Trailing
     ) {
         self.init(
@@ -1630,6 +1767,7 @@ extension SettingsRow where Leading == EmptyView {
             sub: sub,
             subColor: subColor,
             subLineLimit: subLineLimit,
+            badge: badge,
             leading: { EmptyView() },
             trailing: trailing
         )
@@ -1683,8 +1821,8 @@ private func nextCase<T: CaseIterable & Equatable>(after value: T) -> T {
 
 /// "Copy" chip in the default-preset prompt preview footer: writes the active
 /// prompt to the pasteboard and flashes "✓ Copied" in green for 1.4s — chip
-/// chrome over the shared `LoreCopyFlash` state machine. The hidden wider
-/// label fixes the chip width so the swap causes no layout shift.
+/// chrome over the shared `LoreCopyFlash` state machine and `LoreCopyLabel`,
+/// whose box is the wider word so the swap causes no layout shift.
 private struct CleanupPromptCopyChip: View {
     let text: String
 
@@ -1694,12 +1832,7 @@ private struct CleanupPromptCopyChip: View {
             NSPasteboard.general.setString(text, forType: .string)
         } content: { copied, fire in
             Button(action: fire) {
-                ZStack {
-                    Text("✓ Copied").hidden()
-                    Text(copied ? "✓ Copied" : "Copy")
-                }
-                .font(LoreTheme.Typography.mono(11, weight: .semibold))
-                .foregroundStyle(copied ? LoreTheme.Accent.green : LoreTheme.TextColor.muted)
+                LoreCopyLabel(copied: copied, weight: .semibold, ink: LoreTheme.TextColor.muted)
                 .padding(.vertical, 4)
                 .padding(.horizontal, 10)
                 .loreChipChrome(fill: Color.white.opacity(0.06))

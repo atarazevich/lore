@@ -9,7 +9,6 @@ final class AppContainer {
     let mode: AppRuntimeMode
     let defaults: UserDefaults
     let appSupportDirectory: URL
-    let notesDirectory: URL
 
     /// Persistent shared audio bus — one CoreAudio HAL IOProc for all consumers (D-029).
     let audioBus = AudioBus()
@@ -24,13 +23,11 @@ final class AppContainer {
     init(
         mode: AppRuntimeMode,
         defaults: UserDefaults,
-        appSupportDirectory: URL,
-        notesDirectory: URL
+        appSupportDirectory: URL
     ) {
         self.mode = mode
         self.defaults = defaults
         self.appSupportDirectory = appSupportDirectory
-        self.notesDirectory = notesDirectory
         // The Copying switches are read live by surfaces that hold no settings
         // object — the clipboard door, the paste's text, the event tap (#198).
         // Point them at this run's store so a UI test's suite, not the user's
@@ -57,11 +54,7 @@ final class AppContainer {
             let container = AppContainer(
                 mode: .live,
                 defaults: .standard,
-                appSupportDirectory: appSupportDirectory,
-                // #148: the app's own domain, same location `SettingsStorage.live`
-                // defaults to. Seed value only — `LiveSessionController` re-points
-                // the recorder at `notesFolderPath` once settings are observed.
-                notesDirectory: NotesFolder.notes(in: appSupportDirectory)
+                appSupportDirectory: appSupportDirectory
             )
             let settings = AppSettings()
             let coordinator = AppCoordinator()
@@ -123,8 +116,7 @@ final class AppContainer {
             let container = AppContainer(
                 mode: .uiTest(scenario),
                 defaults: defaults,
-                appSupportDirectory: appSupportDirectory,
-                notesDirectory: notesDirectory
+                appSupportDirectory: appSupportDirectory
             )
             let updaterController = AppUpdaterController()
             return AppLaunchContext(
@@ -141,6 +133,7 @@ final class AppContainer {
 
     func makeServices(settings: AppSettings, coordinator: AppCoordinator) -> AppServices {
         let transcriptionEngine: TranscriptionEngine
+        let batchEngine: BatchTranscriptionEngine
         switch mode {
         case .live:
             transcriptionEngine = TranscriptionEngine(
@@ -149,6 +142,8 @@ final class AppContainer {
                 sharedBackendCache: coordinator.sharedBackendCache,
                 audioBus: audioBus
             )
+            // Tracks stay for the speaker pass, the healer's own job (#269).
+            batchEngine = BatchTranscriptionEngine(keepsTracksForSpeakers: true)
         case .uiTest:
             transcriptionEngine = TranscriptionEngine(
                 transcriptStore: coordinator.transcriptStore,
@@ -156,6 +151,7 @@ final class AppContainer {
                 sharedBackendCache: coordinator.sharedBackendCache,
                 mode: .scripted(Self.scriptedUtterances)
             )
+            batchEngine = BatchTranscriptionEngine()
         }
 
         return AppServices(
@@ -164,8 +160,7 @@ final class AppContainer {
                 settings: settings,
                 transcriptStore: coordinator.transcriptStore
             ),
-            audioRecorder: AudioRecorder(outputDirectory: notesDirectory),
-            batchEngine: BatchTranscriptionEngine()
+            batchEngine: batchEngine
         )
     }
 
@@ -176,7 +171,6 @@ final class AppContainer {
         let services = makeServices(settings: settings, coordinator: coordinator)
         coordinator.transcriptionEngine = services.transcriptionEngine
         coordinator.refinementEngine = services.refinementEngine
-        coordinator.audioRecorder = services.audioRecorder
         coordinator.batchEngine = services.batchEngine
 
         // Everything below is live mode only: UI-test sessions must stay
@@ -199,18 +193,22 @@ final class AppContainer {
         // resets the enrichment marker and re-enriches exactly like the
         // end-of-meeting pass (#107/#109).
         let batchEngine = services.batchEngine
+        // The meeting's speaker pass (#269), with the owner's voice from their
+        // own dictations.
+        let speakers = SpeakerFinder(
+            models: .pinned,
+            owner: OwnerVoice(source: DictationHistoryAudio(history: coordinator.dictationCoordinator.history))
+        )
         coordinator.transcriptHealer = TranscriptHealer(
             repository: coordinator.sessionRepository,
             liveSessionID: { [weak coordinator] in
                 coordinator?.liveSessionController?.activeSessionID
             },
             onRepaired: { [weak coordinator] sessionID in
-                guard let coordinator else { return }
-                await coordinator.sessionRepository.updateSessionSummary(sessionID: sessionID, summary: nil)
-                await coordinator.loadHistory()
-                if let engine = coordinator.enrichmentEngine {
-                    await engine.enrichIfNeeded(sessionID: sessionID)
-                }
+                await coordinator?.resummarize(sessionID: sessionID)
+            },
+            onSpeakersSettled: { [weak coordinator] sessionID in
+                await coordinator?.speakersSettled(sessionID: sessionID)
             },
             onGaveUp: { [weak coordinator] sessionID in
                 // A failed repair leaves the live transcript in place —
@@ -223,7 +221,10 @@ final class AppContainer {
                 repository: coordinator.sessionRepository,
                 notesDirectory: { URL(fileURLWithPath: settings.notesFolderPath) }
             ),
-            cancelRun: { await batchEngine.cancel() }
+            cancelRun: { await batchEngine.cancel() },
+            runSpeakers: { [repository = coordinator.sessionRepository] sessionID in
+                await speakers.run(sessionID: sessionID, repository: repository)
+            }
         )
     }
 

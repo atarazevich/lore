@@ -1,4 +1,5 @@
 import Foundation
+import LoreCLIKit
 
 /// The one bit that decides which world the process runs in (#150): before it is
 /// set the onboarding window is the only surface. What it replaces, and why the
@@ -7,8 +8,9 @@ import Foundation
 enum SetupState {
 
     /// The single source of truth. Present and true ⟹ the app boots straight
-    /// into the configured world.
-    static let completedKey = "didCompleteSetup"
+    /// into the configured world. Spelled in `LoreCLIKit` because the `lore`
+    /// command reads it too (#254).
+    static let completedKey = CLIWire.setupCompletedKey
 
     /// The old 2-step meetings tour. It granted nothing and configured nothing,
     /// so on its own it is not evidence that setup ever happened.

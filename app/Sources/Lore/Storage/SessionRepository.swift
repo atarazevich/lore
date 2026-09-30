@@ -15,15 +15,20 @@ struct SessionStartConfig: Sendable {
     let templateSnapshot: TemplateSnapshot?
     /// Initial title written at creation (#58: "Weekday HH:MM" default).
     let title: String?
+    /// The recording's start, the instant its default title was made from
+    /// (#269); now when nil.
+    let startedAt: Date?
 
     init(
         templateID: UUID? = nil,
         templateSnapshot: TemplateSnapshot? = nil,
-        title: String? = nil
+        title: String? = nil,
+        startedAt: Date? = nil
     ) {
         self.templateID = templateID
         self.templateSnapshot = templateSnapshot
         self.title = title
+        self.startedAt = startedAt
     }
 }
 
@@ -83,7 +88,7 @@ struct NotesMeta: Codable, Sendable {
 /// The metadata file stored at `sessions/<id>/session.json`.
 struct SessionMetadata: Codable, Sendable {
     let id: String
-    let startedAt: Date
+    var startedAt: Date
     var endedAt: Date?
     var templateSnapshot: TemplateSnapshot?
     var title: String?
@@ -106,6 +111,10 @@ struct SessionMetadata: Codable, Sendable {
     /// session's audio produced no transcript. Cleared when a final
     /// transcript lands. Optional — absent in older files.
     var noSpeech: Bool? = nil
+    /// File name of this meeting's Markdown mirror in the notes folder (#280),
+    /// so a rename moves its one mirror instead of leaving the old one behind.
+    /// Optional — absent in older files and before the first mirror.
+    var mirrorFileName: String? = nil
 }
 
 extension SessionIndex {
@@ -214,9 +223,10 @@ actor SessionRepository {
 
     @discardableResult
     func startSession(config: SessionStartConfig = SessionStartConfig()) -> SessionHandle {
+        let startedAt = config.startedAt ?? Date()
         let formatter = DateFormatter()
         formatter.dateFormat = "yyyy-MM-dd_HH-mm-ss"
-        let sessionID = "session_\(formatter.string(from: Date()))"
+        let sessionID = "session_\(formatter.string(from: startedAt))"
         currentSessionID = sessionID
         hasReportedWriteError = false
         liveUtteranceCount = 0
@@ -238,7 +248,7 @@ actor SessionRepository {
         // Write initial session.json
         let metadata = SessionMetadata(
             id: sessionID,
-            startedAt: Date(),
+            startedAt: startedAt,
             templateSnapshot: config.templateSnapshot,
             title: config.title,
             utteranceCount: 0,
@@ -357,21 +367,29 @@ actor SessionRepository {
         // Backfill refined text into live transcript
         backfillRefinedText(sessionID: sessionID, from: metadata.utterances)
 
-        // Write session.json with final metadata. The stored title (set at
-        // creation, possibly renamed mid-recording) is preserved.
-        let storedTitle = loadSessionMetadataFile(sessionID: sessionID)?.title
-        let sessionMeta = SessionMetadata(
-            id: sessionID,
-            startedAt: metadata.utterances.first?.timestamp ?? Date(),
-            endedAt: metadata.endedAt,
-            templateSnapshot: metadata.templateSnapshot,
-            title: storedTitle,
-            utteranceCount: metadata.utteranceCount,
-            hasNotes: false,
-            language: metadata.language,
-            meetingApp: metadata.meetingApp,
-            engine: metadata.engine
-        )
+        // Write session.json with final metadata. Finalize derives only what
+        // the recording itself decides; everything set while it ran — a
+        // rename, tags, the mirror's file name (#280) — is kept from the
+        // stored file.
+        var sessionMeta = loadSessionMetadataFile(sessionID: sessionID)
+            ?? SessionMetadata(id: sessionID, startedAt: Date(), utteranceCount: 0, hasNotes: false)
+        // A title still the default for when the session was created becomes
+        // the default for when the recording started, the time the meta line
+        // shows (#269) — and so still reads as the default to enrichment.
+        let titleIsDefault = sessionMeta.title.map {
+            SessionIndex.isDefaultTitle($0, startedAt: sessionMeta.startedAt)
+        } ?? false
+        sessionMeta.startedAt = metadata.utterances.first?.timestamp ?? Date()
+        if titleIsDefault {
+            sessionMeta.title = SessionIndex.defaultTitle(startedAt: sessionMeta.startedAt)
+        }
+        sessionMeta.endedAt = metadata.endedAt
+        sessionMeta.templateSnapshot = metadata.templateSnapshot
+        sessionMeta.utteranceCount = metadata.utteranceCount
+        sessionMeta.hasNotes = false
+        sessionMeta.language = metadata.language
+        sessionMeta.meetingApp = metadata.meetingApp
+        sessionMeta.engine = metadata.engine
         writeSessionMetadata(sessionMeta, sessionID: sessionID)
         return SessionIndex(from: sessionMeta)
     }
@@ -499,7 +517,9 @@ actor SessionRepository {
     /// leaves either the previous good file or the new one — never a partial
     /// write, and never the remove-then-move window that used to lose an
     /// existing final transcript.
-    func saveFinalTranscript(sessionID: String, records: [SessionRecord]) {
+    /// True when the transcript is on disk.
+    @discardableResult
+    func saveFinalTranscript(sessionID: String, records: [SessionRecord]) -> Bool {
         let dir = sessionDirectory(for: sessionID)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
@@ -524,8 +544,14 @@ actor SessionRepository {
             }
         } catch {
             repoLog.error("Failed to write final transcript: \(error.localizedDescription, privacy: .private)")
-            return
+            return false
         }
+
+        // A speaker map names the lines of the transcript it was made with
+        // (#269); a new transcript leaves none until its own pass writes one,
+        // and the names given to the old map's voices leave with it.
+        try? FileManager.default.removeItem(at: dir.appendingPathComponent(SpeakerMap.fileName))
+        forgetNaming(sessionID: sessionID)
 
         // The index count follows the file it counts (#166, ui-language
         // rule 8): a rebuild that replaced the transcript must not leave a
@@ -540,7 +566,306 @@ actor SessionRepository {
 
         // Mirror to notesFolderPath
         mirrorNotesArtifacts(sessionID: sessionID)
+        return true
     }
+
+    // MARK: - Speakers
+
+    /// The meeting's speaker map (#269), written whole or not at all, 0600.
+    func saveSpeakerMap(_ map: SpeakerMap, sessionID: String) throws {
+        try Self.writePrivately(
+            SpeakerMap.encoder.encode(map),
+            to: sessionDirectory(for: sessionID).appendingPathComponent(SpeakerMap.fileName)
+        )
+    }
+
+    /// A file only this user may read, from its first byte: written to a
+    /// temporary created 0600 beside it, then renamed over it — whole or not
+    /// at all.
+    nonisolated static func writePrivately(_ data: Data, to url: URL) throws {
+        let fm = FileManager.default
+        let directory = url.deletingLastPathComponent()
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+        let temporary = directory.appendingPathComponent(".\(url.lastPathComponent).\(UUID().uuidString).tmp")
+        guard fm.createFile(atPath: temporary.path, contents: data, attributes: [.posixPermissions: 0o600]) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: url.path])
+        }
+        guard rename(temporary.path, url.path) == 0 else {
+            let error = POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            try? fm.removeItem(at: temporary)
+            throw error
+        }
+    }
+
+    func hasSpeakerMap(sessionID: String) -> Bool {
+        FileManager.default.fileExists(
+            atPath: sessionDirectory(for: sessionID).appendingPathComponent(SpeakerMap.fileName).path)
+    }
+
+    // MARK: - Speaker names (#269)
+
+    private var voicesDirectory: URL {
+        KnownVoices.directory(in: sessionsDirectory.deletingLastPathComponent())
+    }
+
+    /// The meeting's speaker map, only when it joins these lines
+    /// (`SpeakerMap.joins`); otherwise nil, and the lines read You/Them.
+    func loadSpeakerMap(sessionID: String, records: [SessionRecord]) -> SpeakerMap? {
+        let url = sessionDirectory(for: sessionID).appendingPathComponent(SpeakerMap.fileName)
+        guard let data = try? Data(contentsOf: url),
+              let map = try? SpeakerMap.decoder.decode(SpeakerMap.self, from: data),
+              map.joins(records) else { return nil }
+        return map
+    }
+
+    /// A naming file as it was found. One that is there but cannot be read —
+    /// torn, or written by a later version — is kept: readers go without it
+    /// and nothing writes over it.
+    enum NamingFile<Value> {
+        case absent
+        case read(Value)
+        case unreadable
+    }
+
+    private struct NamingVersion: Decodable { let version: Int }
+
+    /// Unreadable naming files already traced this launch.
+    private var tracedUnreadable: Set<String> = []
+
+    private func readNaming<Value: Decodable>(
+        _ type: Value.Type, at url: URL, file: DiagEvent.SpeakerNamesFile, currentVersion: Int
+    ) -> NamingFile<Value> {
+        guard FileManager.default.fileExists(atPath: url.path) else { return .absent }
+        let data = try? Data(contentsOf: url)
+        let problem: DiagEvent.SpeakerNamesProblem
+        if let version = data.flatMap({ try? SpeakerMap.decoder.decode(NamingVersion.self, from: $0) })?.version,
+           version > currentVersion {
+            problem = .newerVersion
+        } else if let data, let value = try? SpeakerMap.decoder.decode(type, from: data) {
+            return .read(value)
+        } else {
+            problem = .damaged
+        }
+        if tracedUnreadable.insert(url.path).inserted {
+            DiagStore.record(.speakerNamesUnreadable(file: file, problem: problem))
+        }
+        return .unreadable
+    }
+
+    /// Everyone the owner has named; empty before the first name, and when
+    /// the file cannot be read.
+    func loadKnownVoices() -> KnownVoices {
+        if case .read(let voices) = readKnownVoices() { return voices }
+        return KnownVoices()
+    }
+
+    private func readKnownVoices() -> NamingFile<KnownVoices> {
+        readNaming(
+            KnownVoices.self, at: voicesDirectory.appendingPathComponent(KnownVoices.fileName),
+            file: .people, currentVersion: KnownVoices.currentVersion)
+    }
+
+    /// The map that joins these lines, with this meeting's names and the known
+    /// people, and whether a naming change may be written over them; nil
+    /// without such a map.
+    private func naming(sessionID: String, records: [SessionRecord]) -> (speakers: MeetingSpeakers, writable: Bool)? {
+        guard let map = loadSpeakerMap(sessionID: sessionID, records: records) else { return nil }
+        let names = readNaming(
+            SpeakerNames.self, at: sessionDirectory(for: sessionID).appendingPathComponent(SpeakerNames.fileName),
+            file: .meeting, currentVersion: SpeakerNames.currentVersion)
+        let voices = readKnownVoices()
+        var writable = true
+        func value<V>(_ file: NamingFile<V>) -> V? {
+            switch file {
+            case .absent: return nil
+            case .read(let value): return value
+            case .unreadable:
+                writable = false
+                return nil
+            }
+        }
+        let speakers = MeetingSpeakers(map: map, names: value(names), voices: value(voices) ?? KnownVoices())
+        return (speakers, writable)
+    }
+
+    func meetingSpeakers(sessionID: String, records: [SessionRecord]) -> MeetingSpeakers? {
+        naming(sessionID: sessionID, records: records)?.speakers
+    }
+
+    /// The meeting's transcript as every reader reads it: its lines, their
+    /// speakers, its turns.
+    func meetingTranscript(sessionID: String) -> MeetingTranscript {
+        let records = loadTranscript(sessionID: sessionID)
+        return MeetingTranscript(records: records, speakers: meetingSpeakers(sessionID: sessionID, records: records))
+    }
+
+    /// What the naming popover changes.
+    enum SpeakerChange: Sendable {
+        /// To another speaker of the meeting, someone known, or You.
+        case assign(SpeakerKey, to: SpeakerKey)
+        /// As someone new.
+        case name(SpeakerKey, String)
+        case renamePerson(String, to: String)
+    }
+
+    /// What a naming change came to.
+    enum SpeakerChangeResult: Sendable {
+        /// Saved; the transcript as it now reads.
+        case changed(MeetingTranscript)
+        /// Nothing to change; nothing written.
+        case unchanged
+        /// Not applied, nothing written, traced: the meeting is not the one
+        /// the change was made on, or a naming file cannot be read.
+        case refused
+        /// The transcript as it now reads, when the change was saved.
+        var transcript: MeetingTranscript? {
+            if case .changed(let transcript) = self { transcript } else { nil }
+        }
+    }
+
+    /// Applies one naming change to the meeting as `basis` read it, saves the
+    /// names (0600) and rewrites the meeting's Markdown mirror. A change made
+    /// on other lines or another speaker map than those on disk (a
+    /// re-transcription, a new speaker pass: "system-1" is another voice) is
+    /// refused, as is one over a naming file that cannot be read.
+    ///
+    /// Written so that no failure loses a name or shows a false one: first
+    /// `names.json` with every person kept (a new person is there before
+    /// anything names them), then the meeting's file, then `names.json` again
+    /// pruned of people named nowhere. A failed second write leaves an
+    /// unreferenced person or a stale contribution, both harmless and made
+    /// right at the next write; a failed third leaves people to prune later.
+    /// A failed write is traced and thrown.
+    func changeSpeakers(_ change: SpeakerChange, sessionID: String, basis: MeetingTranscript) throws -> SpeakerChangeResult {
+        let records = loadTranscript(sessionID: sessionID)
+        guard records == basis.records, let loaded = naming(sessionID: sessionID, records: records),
+              loaded.speakers.map.createdAt == basis.speakers?.map.createdAt
+        else {
+            DiagStore.record(.speakerNamingNotSaved(reason: .staleBasis))
+            return .refused
+        }
+        guard loaded.writable else {
+            DiagStore.record(.speakerNamingNotSaved(reason: .unreadableFile))
+            return .refused
+        }
+        var speakers = loaded.speakers
+        let changed = switch change {
+        case .assign(let key, let target): speakers.assign(key, to: target)
+        case .name(let key, let name): speakers.name(key, as: name)
+        case .renamePerson(let id, let name): speakers.renamePerson(id, to: name)
+        }
+        guard changed else { return .unchanged }
+        speakers.syncContributions(meeting: sessionID)
+        let peopleURL = voicesDirectory.appendingPathComponent(KnownVoices.fileName)
+        do {
+            try Self.writePrivately(SpeakerMap.encoder.encode(speakers.voices), to: peopleURL)
+            try Self.writePrivately(
+                SpeakerMap.encoder.encode(speakers.names),
+                to: sessionDirectory(for: sessionID).appendingPathComponent(SpeakerNames.fileName))
+            let unpruned = speakers.voices
+            speakers.voices.prune()
+            if speakers.voices != unpruned {
+                try Self.writePrivately(SpeakerMap.encoder.encode(speakers.voices), to: peopleURL)
+            }
+        } catch {
+            DiagStore.record(.speakerNamingNotSaved(reason: .writeFailed))
+            throw error
+        }
+        mirrorNotesArtifacts(sessionID: sessionID)
+        return .changed(MeetingTranscript(records: records, speakers: speakers))
+    }
+
+    /// A meeting's namings leave the known voices — it was deleted, or its
+    /// speaker map is gone — with anyone they named nowhere else, and its
+    /// naming file goes. Not while `names.json` cannot be read: it is never
+    /// written over.
+    private func forgetNaming(sessionID: String) {
+        try? FileManager.default.removeItem(
+            at: sessionDirectory(for: sessionID).appendingPathComponent(SpeakerNames.fileName))
+        guard case .read(var voices) = readKnownVoices() else { return }
+        let before = voices
+        voices.forget(meeting: sessionID)
+        voices.prune()
+        guard voices != before else { return }
+        do {
+            try Self.writePrivately(
+                SpeakerMap.encoder.encode(voices), to: voicesDirectory.appendingPathComponent(KnownVoices.fileName))
+        } catch {
+            DiagStore.record(.speakerNamingNotSaved(reason: .writeFailed))
+        }
+    }
+
+    /// `transcript.final.jsonl` alone — what a speaker map is made for.
+    func finalTranscript(sessionID: String) -> [SessionRecord] {
+        let url = sessionDirectory(for: sessionID).appendingPathComponent("transcript.final.jsonl")
+        return (try? String(contentsOf: url, encoding: .utf8)).map(parseJSONL) ?? []
+    }
+
+    /// The final transcript's lines with where their words are in the tracks,
+    /// kept beside the tracks for the speaker pass and deleted with them. No
+    /// text. New lines are a new transcript: the pass's attempts start over.
+    @discardableResult
+    func saveSpeakerLines(_ lines: [SpeakerFinder.Line], sessionID: String) -> Bool {
+        guard let directory = stash(sessionID: sessionID)?.directory,
+              let data = try? JSONEncoder().encode(lines),
+              (try? data.write(to: BatchAudioStash.linesURL(in: directory), options: .atomic)) != nil
+        else { return false }
+        setStashCount(0, at: BatchAudioStash.attemptsURL, sessionID: sessionID)
+        return true
+    }
+
+    func speakerLines(sessionID: String) -> [SpeakerFinder.Line]? {
+        guard let directory = stash(sessionID: sessionID)?.directory,
+              let data = try? Data(contentsOf: BatchAudioStash.linesURL(in: directory)) else { return nil }
+        return try? JSONDecoder().decode([SpeakerFinder.Line].self, from: data)
+    }
+
+    /// Speaker passes started on this meeting's tracks, crashes included.
+    func speakerAttempts(sessionID: String) -> Int {
+        stashCount(at: BatchAudioStash.attemptsURL, sessionID: sessionID)
+    }
+
+    func setSpeakerAttempts(_ attempts: Int, sessionID: String) {
+        setStashCount(attempts, at: BatchAudioStash.attemptsURL, sessionID: sessionID)
+    }
+
+    /// Exports of this meeting's merged recording started, crashes included
+    /// (#290). Nonisolated, so a quit can put the running one's count back
+    /// before the process ends (`TranscriptHealer.willTerminate`).
+    nonisolated func exportAttempts(sessionID: String) -> Int {
+        stashCount(at: BatchAudioStash.exportAttemptsURL, sessionID: sessionID)
+    }
+
+    nonisolated func setExportAttempts(_ attempts: Int, sessionID: String) {
+        setStashCount(attempts, at: BatchAudioStash.exportAttemptsURL, sessionID: sessionID)
+    }
+
+    /// A count kept beside the tracks, gone with them — and never below what
+    /// this launch last set it to, so a count the disk refused (a full disk)
+    /// still bounds the attempts, which would otherwise start over at every
+    /// retry (#290).
+    nonisolated private func stashCount(at url: (URL) -> URL, sessionID: String) -> Int {
+        let key = url(audioDirectory(for: sessionID)).path
+        let floor = launchCounts.withLock { $0[key] } ?? 0
+        guard let directory = stash(sessionID: sessionID)?.directory,
+              let text = try? String(contentsOf: url(directory), encoding: .utf8) else { return floor }
+        return max(floor, Int(text.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0)
+    }
+
+    nonisolated private func setStashCount(_ count: Int, at url: (URL) -> URL, sessionID: String) {
+        let key = url(audioDirectory(for: sessionID)).path
+        launchCounts.withLock { $0[key] = count }
+        guard let directory = stash(sessionID: sessionID)?.directory else { return }
+        do {
+            try "\(count)".write(to: url(directory), atomically: true, encoding: .utf8)
+        } catch {
+            repoLog.error("attempt count not written: \(error.localizedDescription, privacy: .private)")
+        }
+    }
+
+    /// The counts this launch set, by the count's file in the meeting's
+    /// `audio/` directory (`stashCount`).
+    private let launchCounts = OSAllocatedUnfairLock<[String: Int]>(initialState: [:])
 
     // MARK: - Notes
 
@@ -637,6 +962,12 @@ actor SessionRepository {
         results.append(contentsOf: legacyResults)
 
         return results.sorted { $0.startedAt > $1.startedAt }
+    }
+
+    /// A session's index alone, canonical or legacy — no transcript read.
+    func sessionIndex(sessionID: String) -> SessionIndex {
+        loadSessionMetadataFile(sessionID: sessionID).map(SessionIndex.init(from:))
+            ?? LegacySessionReader.loadIndex(sessionID: sessionID, sessionsDirectory: sessionsDirectory)
     }
 
     func loadSession(id: String) -> SessionDetail {
@@ -837,6 +1168,8 @@ actor SessionRepository {
     }
 
     func deleteSession(sessionID: String) {
+        forgetNaming(sessionID: sessionID)
+        removePartialExport(sessionID: sessionID)
         let fm = FileManager.default
         let dir = sessionDirectory(for: sessionID)
 
@@ -855,7 +1188,9 @@ actor SessionRepository {
         sessionsDirectory.appendingPathComponent(".recently-deleted", isDirectory: true)
     }
 
+    /// Nothing restores from here, so the meeting's names leave now (#269).
     func moveToRecentlyDeleted(sessionID: String) {
+        forgetNaming(sessionID: sessionID)
         let fm = FileManager.default
         try? fm.createDirectory(at: recentlyDeletedDirectory, withIntermediateDirectories: true)
 
@@ -887,7 +1222,8 @@ actor SessionRepository {
     // MARK: - Plain Text Export
 
     func exportPlainText(sessionID: String) -> String {
-        let records = loadTranscript(sessionID: sessionID)
+        let transcript = meetingTranscript(sessionID: sessionID)
+        let records = transcript.records
         guard !records.isEmpty else { return "" }
 
         let meta = loadSessionMetadataFile(sessionID: sessionID)
@@ -898,12 +1234,7 @@ actor SessionRepository {
         headerFmt.timeStyle = .short
         var result = "\(LoreTheme.wordmark) - \(headerFmt.string(from: startDate))\n\n"
 
-        let timeFmt = DateFormatter()
-        timeFmt.dateFormat = "HH:mm:ss"
-
-        for record in records {
-            result += "[\(timeFmt.string(from: record.timestamp))] \(record.speaker.displayLabel): \(record.displayText)\n"
-        }
+        result += transcript.clockLines().map { $0 + "\n" }.joined()
 
         return result
     }
@@ -912,18 +1243,18 @@ actor SessionRepository {
 
     /// The session's own `audio/` directory. Not created — see
     /// `prepareAudioDirectory`.
-    private func audioDirectory(for sessionID: String) -> URL {
+    nonisolated private func audioDirectory(for sessionID: String) -> URL {
         sessionDirectory(for: sessionID).appendingPathComponent("audio", isDirectory: true)
     }
 
     /// Where a session's per-track stash can be, in preference order: the
     /// canonical `audio/` subdirectory, then the legacy layout that put the
     /// same three files straight in the session directory.
-    private func stashDirectories(sessionID: String) -> [URL] {
+    nonisolated private func stashDirectories(sessionID: String) -> [URL] {
         [audioDirectory(for: sessionID), sessionDirectory(for: sessionID)]
     }
 
-    /// The session's `audio/` directory, created — where `AudioRecorder`
+    /// The session's `audio/` directory, created — where `MeetingRecording`
     /// records the two tracks from the first buffer (#177).
     @discardableResult
     func prepareAudioDirectory(sessionID: String) -> URL {
@@ -933,23 +1264,155 @@ actor SessionRepository {
     }
 
     func batchAudioURLs(sessionID: String) -> (mic: URL?, sys: URL?) {
+        stash(sessionID: sessionID).map { ($0.mic, $0.sys) } ?? (nil, nil)
+    }
+
+    /// The stash directory holding the session's tracks, and the tracks in it.
+    nonisolated private func stash(sessionID: String) -> (directory: URL, mic: URL?, sys: URL?)? {
         let fm = FileManager.default
         for directory in stashDirectories(sessionID: sessionID) {
             let mic = BatchAudioStash.micURL(in: directory)
             let sys = BatchAudioStash.sysURL(in: directory)
             let found = (
+                directory: directory,
                 mic: fm.fileExists(atPath: mic.path) ? mic : nil,
                 sys: fm.fileExists(atPath: sys.path) ? sys : nil
             )
             if found.mic != nil || found.sys != nil { return found }
         }
-        return (mic: nil, sys: nil)
+        return nil
     }
 
+    /// Removes the session's tracks and the files that go with them — or,
+    /// while its merged recording is still to be written (#290), leaves the
+    /// removal to the export, which does it when it is done. Nothing removes
+    /// a track the export has yet to read, and the request outlives a quit.
     func cleanupBatchAudio(sessionID: String) {
+        if var pending = pendingExport(sessionID: sessionID) {
+            pending.removeTracks = true
+            writePendingExport(pending, sessionID: sessionID)
+            return
+        }
         for directory in stashDirectories(sessionID: sessionID) {
             BatchAudioStash.remove(in: directory)
         }
+    }
+
+    // MARK: - Merged recording export (#290)
+
+    /// A meeting's merged recording still to be written into the notes
+    /// folder: the marker finalize leaves beside the tracks when "Save audio
+    /// recording" is on, and the export removes once it is settled.
+    struct PendingExport: Codable, Sendable {
+        /// The m4a's file name in the notes folder.
+        let name: String
+        /// The tracks' timing as the recording closed with it. The export
+        /// merges by this and reads no other file; a marker without it gets
+        /// no export, since tracks merged without their timing are misaligned.
+        let meta: BatchMeta?
+        /// The tracks' removal was asked for meanwhile: nothing but the
+        /// export reads them any more.
+        var removeTracks = false
+    }
+
+    /// What an export can do now.
+    enum ExportPlan: Sendable {
+        /// Merge the tracks in `tracks` by `meta` into `file`, the partial
+        /// recording beside the m4a.
+        case ready(tracks: URL, meta: BatchMeta, file: URL)
+        /// No export is pending: the meeting was deleted, or its export is done.
+        case gone
+        /// The marker carries no timing for the tracks.
+        case noTiming
+        /// No notes folder is known yet to write into.
+        case notesFolderUnset
+    }
+
+    /// False when the marker is not on disk: then nothing keeps the tracks
+    /// for an export, and none may be queued.
+    func markExportPending(sessionID: String, name: String, meta: BatchMeta) -> Bool {
+        writePendingExport(PendingExport(name: name, meta: meta), sessionID: sessionID)
+    }
+
+    func pendingExport(sessionID: String) -> PendingExport? {
+        guard let data = try? Data(contentsOf: BatchAudioStash.pendingExportURL(in: audioDirectory(for: sessionID)))
+        else { return nil }
+        return try? JSONDecoder().decode(PendingExport.self, from: data)
+    }
+
+    @discardableResult
+    private func writePendingExport(_ pending: PendingExport, sessionID: String) -> Bool {
+        do {
+            try Self.writePrivately(
+                JSONEncoder().encode(pending),
+                to: BatchAudioStash.pendingExportURL(in: audioDirectory(for: sessionID))
+            )
+            return true
+        } catch {
+            repoLog.error("export marker not written: \(error.localizedDescription, privacy: .private)")
+            return false
+        }
+    }
+
+    func planExport(sessionID: String) -> ExportPlan {
+        guard let pending = pendingExport(sessionID: sessionID) else { return .gone }
+        guard let meta = pending.meta else { return .noTiming }
+        guard let notesFolderPath else { return .notesFolderUnset }
+        return .ready(
+            tracks: audioDirectory(for: sessionID), meta: meta,
+            file: Self.partialExport(of: notesFolderPath.appendingPathComponent(pending.name))
+        )
+    }
+
+    /// Where the export fills the m4a before it is renamed into place: one
+    /// fixed hidden name beside it, `.<stamp>.part.m4a`. Exports run one at a
+    /// time, and `AVAudioFile(forWriting:)` overwrites what a killed one left.
+    nonisolated static func partialExport(of recording: URL) -> URL {
+        recording.deletingLastPathComponent().appendingPathComponent(
+            ".\(recording.deletingPathExtension().lastPathComponent)\(partialExportSuffix)")
+    }
+
+    private static let partialExportSuffix = ".part.m4a"
+
+    /// Every partial recording a killed export left in the notes folder,
+    /// whichever meeting's — a deleted one's too. The launch sweep runs it
+    /// before any export of the launch.
+    func removePartialExports() {
+        guard let notesFolderPath,
+              let files = try? FileManager.default.contentsOfDirectory(
+                  at: notesFolderPath, includingPropertiesForKeys: nil)
+        else { return }
+        for file in files where file.lastPathComponent.hasPrefix(".")
+            && file.lastPathComponent.hasSuffix(Self.partialExportSuffix) {
+            try? FileManager.default.removeItem(at: file)
+        }
+    }
+
+    /// A deleted meeting's partial recording goes with it.
+    private func removePartialExport(sessionID: String) {
+        guard let notesFolderPath, let pending = pendingExport(sessionID: sessionID) else { return }
+        try? FileManager.default.removeItem(
+            at: Self.partialExport(of: notesFolderPath.appendingPathComponent(pending.name)))
+    }
+
+    /// The export is over: the file it wrote, if any, renamed over the m4a,
+    /// then the marker removed — and the tracks with it, when their removal
+    /// was asked for meanwhile. False, with the file removed, when no export
+    /// is pending any more: the meeting was deleted while it ran. Throws,
+    /// keeping the marker for another attempt, when the rename fails.
+    func finishExport(sessionID: String, writtenTo file: URL?) throws -> Bool {
+        guard let pending = pendingExport(sessionID: sessionID) else {
+            if let file { try? FileManager.default.removeItem(at: file) }
+            return false
+        }
+        if let file, rename(file.path, file.deletingLastPathComponent().appendingPathComponent(pending.name).path) != 0 {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        try? FileManager.default.removeItem(at: BatchAudioStash.pendingExportURL(in: audioDirectory(for: sessionID)))
+        if pending.removeTracks {
+            cleanupBatchAudio(sessionID: sessionID)
+        }
+        return true
     }
 
     /// Audio a session's transcript can be rebuilt from (#109), in
@@ -1008,7 +1471,7 @@ actor SessionRepository {
     }
 
     /// The merged m4a export in the notes folder for a session. The export
-    /// filename (`AudioRecorder.exportTimestampFormat`, minute resolution)
+    /// filename (`MeetingRecording.exportTimestampFormat`, minute resolution)
     /// and the session ID come from two independent `Date()` reads separated
     /// by actor hops — and, on the model-download-gate path, arbitrary user
     /// wait — so prefix equality can miss across a minute boundary. Tolerant
@@ -1025,7 +1488,7 @@ actor SessionRepository {
         else { return nil }
 
         let formatter = DateFormatter()
-        formatter.dateFormat = AudioRecorder.exportTimestampFormat
+        formatter.dateFormat = MeetingRecording.exportTimestampFormat
         let windowStart = meta.startedAt.addingTimeInterval(-60)
         let windowEnd = meta.endedAt ?? meta.startedAt.addingTimeInterval(600)
 
@@ -1154,7 +1617,7 @@ actor SessionRepository {
 
     // MARK: - Private Helpers
 
-    private func sessionDirectory(for sessionID: String) -> URL {
+    nonisolated private func sessionDirectory(for sessionID: String) -> URL {
         sessionsDirectory.appendingPathComponent(sessionID, isDirectory: true)
     }
 
@@ -1167,9 +1630,7 @@ actor SessionRepository {
             let enc = JSONEncoder()
             enc.dateEncodingStrategy = .iso8601
             enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-            let data = try enc.encode(metadata)
-            try data.write(to: url, options: .atomic)
-            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            try Self.writePrivately(enc.encode(metadata), to: url)
         } catch {
             repoLog.error("Failed to write session.json: \(error.localizedDescription, privacy: .private)")
         }
@@ -1258,12 +1719,14 @@ actor SessionRepository {
 
     // MARK: - Notes Folder Mirroring
 
-    /// Mirror notes.md and plain-text transcript to the user-visible notesFolderPath.
-    private func mirrorNotesArtifacts(sessionID: String) {
+    /// Mirror notes.md and plain-text transcript to the user-visible
+    /// notesFolderPath. Also called when a meeting's speaker pass settles (#269).
+    func mirrorNotesArtifacts(sessionID: String) {
         guard let outputDir = notesFolderPath else { return }
 
         let meta = loadSessionMetadataFile(sessionID: sessionID)
-        let records = loadTranscript(sessionID: sessionID)
+        let transcript = meetingTranscript(sessionID: sessionID)
+        let records = transcript.records
         guard !records.isEmpty else { return }
 
         let index = SessionIndex(
@@ -1284,13 +1747,18 @@ actor SessionRepository {
         // Load generated notes (if any) to include in the export
         let notes = loadNotes(sessionID: sessionID)
 
-        // Write/update Markdown meeting notes
-        MarkdownMeetingWriter.write(
+        // Write/update Markdown meeting notes — the meeting's one mirror (#280).
+        let written = MarkdownMeetingWriter.write(
             metadata: .init(from: index),
-            records: records,
+            transcript: transcript,
             notesMarkdown: notes?.markdown,
-            outputDirectory: outputDir
+            outputDirectory: outputDir,
+            previousFileName: meta?.mirrorFileName
         )
+        // Canonical sessions only: a mirror write must not migrate a legacy one.
+        if let meta, let name = written?.lastPathComponent, meta.mirrorFileName != name {
+            mutateSessionMetadata(sessionID: sessionID) { $0.mirrorFileName = name }
+        }
     }
 
 
@@ -1308,7 +1776,7 @@ enum RebuildAudioSource: Sendable {
     case file(URL)
 }
 
-/// The layout of a meeting's per-track stash. `AudioRecorder` writes it live
+/// The layout of a meeting's per-track stash. `MeetingRecording` writes it live
 /// (#177) and `SessionRepository` reads it, so the names and the meta format
 /// have exactly one owner. The same three names describe the legacy layout,
 /// which put them straight in the session directory instead of `audio/`.
@@ -1325,14 +1793,36 @@ enum BatchAudioStash {
         directory.appendingPathComponent("batch-meta.json")
     }
 
+    /// The speaker pass's inputs (#269): where each transcript line's words are,
+    /// and how many passes have started.
+    static func linesURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("speaker-lines.json")
+    }
+
+    static func attemptsURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("speaker-attempts.json")
+    }
+
+    /// Exports of the merged recording started (#290), beside the speaker
+    /// pass's count and gone with the tracks like it.
+    static func exportAttemptsURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("export-attempts.json")
+    }
+
+    /// The merged recording still to be written (#290): while it is here the
+    /// tracks stay (`SessionRepository.PendingExport`).
+    static func pendingExportURL(in directory: URL) -> URL {
+        directory.appendingPathComponent("export-pending.json")
+    }
+
     /// Logged, not swallowed: a meeting's timing anchors are written from an
     /// off-thread queue with nobody waiting on the result, so a failure that
     /// left no trace would surface much later as a rebuilt transcript stamped
-    /// at the moment of the rebuild. `AudioRecorder.finishTracks(for:)` writes
+    /// at the moment of the rebuild. `MeetingRecording.close()` writes
     /// the last snapshot again, which is the retry.
     static func writeMeta(_ meta: BatchMeta, in directory: URL) {
         do {
-            let data = try JSONEncoder.iso8601Encoder.encode(meta)
+            let data = try metaEncoder.encode(meta)
             try data.write(to: metaURL(in: directory), options: .atomic)
         } catch {
             repoLog.error("batch meta write failed: \(error.localizedDescription, privacy: .private)")
@@ -1341,15 +1831,42 @@ enum BatchAudioStash {
 
     static func readMeta(in directory: URL) -> BatchMeta? {
         guard let data = try? Data(contentsOf: metaURL(in: directory)) else { return nil }
-        return try? JSONDecoder.iso8601Decoder.decode(BatchMeta.self, from: data)
+        return try? metaDecoder.decode(BatchMeta.self, from: data)
     }
 
-    /// Remove the whole stash — both tracks and their timing meta.
+    /// Dates keep their fraction of a second: the merge places the two tracks
+    /// by their start dates to the sample, and the batch pass must place them
+    /// the same way (#268).
+    private static let metaEncoder: JSONEncoder = {
+        let encoder = JSONEncoder()
+        encoder.dateEncodingStrategy = .custom { date, encoder in
+            var container = encoder.singleValueContainer()
+            try container.encode(Date.ISO8601FormatStyle(includingFractionalSeconds: true).format(date))
+        }
+        return encoder
+    }()
+
+    /// Reads both forms, so meta written before #268 (whole seconds) still loads.
+    private static let metaDecoder: JSONDecoder = {
+        let decoder = JSONDecoder()
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            if let date = try? Date.ISO8601FormatStyle(includingFractionalSeconds: true).parse(text) {
+                return date
+            }
+            return try Date.ISO8601FormatStyle().parse(text)
+        }
+        return decoder
+    }()
+
+    /// Remove the whole stash — both tracks, their timing meta, and what the
+    /// speaker pass kept beside them.
     static func remove(in directory: URL) {
         let fm = FileManager.default
-        try? fm.removeItem(at: micURL(in: directory))
-        try? fm.removeItem(at: sysURL(in: directory))
-        try? fm.removeItem(at: metaURL(in: directory))
+        for url in [micURL(in: directory), sysURL(in: directory), metaURL(in: directory),
+                    linesURL(in: directory), attemptsURL(in: directory), exportAttemptsURL(in: directory)] {
+            try? fm.removeItem(at: url)
+        }
     }
 }
 
@@ -1360,20 +1877,13 @@ struct BatchMeta: Codable, Sendable {
     let micAnchors: [TimingAnchor]
     let sysAnchors: [TimingAnchor]
 
-    /// There is timing worth persisting. A track's first successful write is
-    /// also its first anchor, so an empty pair means no audio ever landed.
-    var hasAnchors: Bool { !micAnchors.isEmpty || !sysAnchors.isEmpty }
+    /// There is timing worth persisting: a track's first successful write
+    /// dates it, so neither date means no audio ever landed. (Anchors are
+    /// written only when a track has more than one stretch, #268.)
+    var hasTiming: Bool { micStartDate != nil || sysStartDate != nil }
 
     struct TimingAnchor: Codable, Sendable {
         let frame: Int64
         let date: Date
     }
-}
-
-extension JSONEncoder {
-    static let iso8601Encoder: JSONEncoder = {
-        let encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        return encoder
-    }()
 }

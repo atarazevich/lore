@@ -151,6 +151,9 @@ struct LoreIconButton: View {
 /// a rapid re-copy restarts the full window. The content closure supplies the
 /// button chrome for both states — icon button or chip.
 struct LoreCopyFlash<Content: View>: View {
+    /// The hover line; nil where the surface's copy table names none (the
+    /// replies player's card, #289).
+    var tooltip: String? = "Copy to clipboard"
     /// Performs the actual copy (pasteboard write).
     let copy: () -> Void
     @ViewBuilder let content: (_ copied: Bool, _ fire: @escaping () -> Void) -> Content
@@ -159,7 +162,7 @@ struct LoreCopyFlash<Content: View>: View {
     @State private var flashID = 0
 
     var body: some View {
-        content(copied) {
+        let flash = content(copied) {
             copy()
             copied = true
             flashID += 1
@@ -171,7 +174,31 @@ struct LoreCopyFlash<Content: View>: View {
                 copied = false
             }
         }
-        .help("Copy to clipboard")
+        if let tooltip { flash.help(tooltip) } else { flash }
+    }
+}
+
+/// The words of a text copy control — "Copy", then "✓ Copied" in green — in a
+/// box as wide as the longer of the two, so the swap never moves anything. The
+/// settings prompt chip (#146) and the replies player's card (#289) set it.
+struct LoreCopyLabel: View {
+    static let copy = "Copy"
+    static let copiedWords = "\u{2713} Copied"
+
+    let copied: Bool
+    var weight: Font.Weight = .regular
+    var ink: Color = LoreTheme.TextColor.primary
+    /// Where the word sits in the box: the card keeps it at the right end, so
+    /// the swap grows leftward.
+    var alignment: Alignment = .center
+
+    var body: some View {
+        ZStack(alignment: alignment) {
+            Text(Self.copiedWords).hidden()
+            Text(copied ? Self.copiedWords : Self.copy)
+        }
+        .font(LoreTheme.Typography.mono(11, weight: weight))
+        .foregroundStyle(copied ? LoreTheme.Accent.green : ink)
     }
 }
 
@@ -317,6 +344,83 @@ struct LorePrimaryButton: View {
     }
 }
 
+// MARK: - The line a floating surface draws for itself (#207, #260)
+
+/// One line of a copy table and whose it is: the bubble's tooltip (#207) and
+/// the replies player's (#260) are the same report.
+///
+/// Identity rather than the line, so the element the pointer *left* can only
+/// take its own line down: SwiftUI may report the neighbour's arrival before
+/// the departure, and a blind clear there would swallow the line that just
+/// replaced it.
+struct LoreTipLine<Owner: Hashable>: Equatable {
+    let owner: Owner
+    let text: String
+    /// The keys the copy table puts beside the line, as the keycaps print them.
+    let keys: [String]
+    /// Where the pointer crossed in, in the surface's own space. Taken once per
+    /// crossing, so following the mouse costs no re-render.
+    let pointerX: CGFloat
+
+    init(owner: Owner, text: String, keys: [String] = [], pointerX: CGFloat = 0) {
+        self.owner = owner
+        self.text = text
+        self.keys = keys
+        self.pointerX = pointerX
+    }
+}
+
+extension View {
+    /// What every element carrying a line in a copy table wears. It reports the
+    /// pointer and nothing else — no size, no padding, no background — so a
+    /// line can never move anything in the surface (#204).
+    ///
+    /// lore draws these because AppKit will not: `.help()` registers a tooltip
+    /// rect `NSToolTipManager` only ever shows for the *active* application's
+    /// window, and both surfaces are non-activating panels floating over
+    /// whichever app is in front (the finding behind #207).
+    ///
+    /// - Parameter pointer: a sink for the pointer on every move, for a surface
+    ///   whose card follows it (the bubble). Off the line's own value, which
+    ///   changes only on a real arrival — a write per mouse move would
+    ///   re-render the whole surface for a number that is read once.
+    func loreTipReport<Owner: Hashable>(
+        _ owner: Owner, _ text: String, keys: [String] = [], in space: String,
+        tip: Binding<LoreTipLine<Owner>?>, pointer: (@MainActor (CGFloat) -> Void)? = nil
+    ) -> some View {
+        onContinuousHover(coordinateSpace: .named(space)) { phase in
+            switch phase {
+            case .active(let location):
+                pointer?(location.x)
+                let standing = tip.wrappedValue
+                guard standing?.owner != owner || standing?.text != text else { return }
+                tip.wrappedValue = LoreTipLine(
+                    owner: owner, text: text, keys: keys, pointerX: location.x
+                )
+            case .ended:
+                if tip.wrappedValue?.owner == owner { tip.wrappedValue = nil }
+            }
+        }
+    }
+}
+
+/// The keycap run the boards print, on the bubble's own keycap plate — so a
+/// keycap in the player cannot drift from a keycap on the rail (#235).
+struct LoreKeycapRun: View {
+    let caps: [String]
+    /// Which line the caps stand in — the rail's own size everywhere but the
+    /// replies player's one-line key strip, which is a step smaller (#263).
+    var line: DictationIndicatorView.BubblePill.KeycapLine = .rail
+
+    var body: some View {
+        HStack(spacing: 3) {
+            ForEach(caps, id: \.self) { cap in
+                DictationIndicatorView.BubblePill.keycap(bright: false, line).label(cap)
+            }
+        }
+    }
+}
+
 // MARK: - Popover chrome (dictation `.pop`, transform menu)
 
 extension View {
@@ -403,6 +507,18 @@ struct LoreSegmentedSwitch<LeftLabel: View, RightLabel: View>: View {
     }
 }
 
+// MARK: - Pinned header backdrop
+
+/// What a pinned section header lies on, so the rows scrolling under it do
+/// not show through: the dictation history's day header and the meeting
+/// review's speaker name (#269).
+struct LorePinnedBackdrop: View {
+    var body: some View {
+        Color(red: 28 / 255, green: 28 / 255, blue: 30 / 255).opacity(0.82)
+            .background(.ultraThinMaterial)
+    }
+}
+
 // MARK: - Hairline divider (`.hairline`, `.srow` borders)
 
 /// 1px `--line` divider.
@@ -463,12 +579,16 @@ extension View {
 
 /// Generic picker popover: mono section header + item rows with hover fill
 /// and a trailing amber ✓ on the active item. Consumers: dictation cleanup
-/// method (224px) and translate language (180px).
-struct LorePickerPopover<Item: Identifiable, ItemLabel: View, Footer: View>: View {
-    let header: String
+/// method (224px) and translate language (180px). The header is a slot: the
+/// meeting review's speaker popover puts its name field there (#269), and
+/// marks the row its Return acts on as highlighted, as a completion list does.
+struct LorePickerPopover<Item: Identifiable, ItemLabel: View, Footer: View, Header: View>: View {
+    @ViewBuilder let header: () -> Header
     let items: [Item]
     let width: CGFloat
     let isActive: (Item) -> Bool
+    /// The row Return acts on; none unless a consumer says so.
+    var isHighlighted: (Item) -> Bool = { _ in false }
     let onSelect: (Item) -> Void
     @ViewBuilder let itemLabel: (Item) -> ItemLabel
     /// An action under the list, past a divider — the hotkey picker's key
@@ -478,8 +598,7 @@ struct LorePickerPopover<Item: Identifiable, ItemLabel: View, Footer: View>: Vie
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
-            LoreSectionLabel(text: header, size: 9, mono: true)
-                .padding(EdgeInsets(top: 6, leading: 9, bottom: 5, trailing: 9))
+            header()
             ForEach(items) { item in
                 Button {
                     onSelect(item)
@@ -498,7 +617,12 @@ struct LorePickerPopover<Item: Identifiable, ItemLabel: View, Footer: View>: Vie
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
-                .loreHoverFill(cornerRadius: LoreTheme.Radius.chip)
+                .background(
+                    isHighlighted(item) ? Color.white.opacity(0.12) : .clear,
+                    in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
+                )
+                .loreHoverFill(cornerRadius: LoreTheme.Radius.chip, enabled: !isHighlighted(item))
+                .accessibilityAddTraits(isHighlighted(item) ? .isSelected : [])
             }
             if Footer.self != EmptyView.self {
                 LoreDivider()
@@ -508,6 +632,16 @@ struct LorePickerPopover<Item: Identifiable, ItemLabel: View, Footer: View>: Vie
         }
         .frame(width: width)
         .lorePopoverChrome()
+    }
+}
+
+/// The picker's usual header: a mono section label.
+struct LorePickerHeader: View {
+    let text: String
+
+    var body: some View {
+        LoreSectionLabel(text: text, size: 9, mono: true)
+            .padding(EdgeInsets(top: 6, leading: 9, bottom: 5, trailing: 9))
     }
 }
 
@@ -524,7 +658,7 @@ struct LorePickerItemLabel: View {
     }
 }
 
-extension LorePickerPopover where Footer == EmptyView {
+extension LorePickerPopover where Footer == EmptyView, Header == LorePickerHeader {
     /// The plain picker: a list and nothing under it.
     init(
         header: String,
@@ -535,14 +669,14 @@ extension LorePickerPopover where Footer == EmptyView {
         @ViewBuilder itemLabel: @escaping (Item) -> ItemLabel
     ) {
         self.init(
-            header: header, items: items, width: width,
+            header: { LorePickerHeader(text: header) }, items: items, width: width,
             isActive: isActive, onSelect: onSelect,
             itemLabel: itemLabel, footer: { EmptyView() }
         )
     }
 }
 
-extension LorePickerPopover where ItemLabel == LorePickerItemLabel {
+extension LorePickerPopover where ItemLabel == LorePickerItemLabel, Header == LorePickerHeader {
     /// Convenience for plain-text pickers: pass a title per item instead of a
     /// label view.
     init(
@@ -555,7 +689,7 @@ extension LorePickerPopover where ItemLabel == LorePickerItemLabel {
         @ViewBuilder footer: @escaping () -> Footer
     ) {
         self.init(
-            header: header, items: items, width: width,
+            header: { LorePickerHeader(text: header) }, items: items, width: width,
             isActive: isActive, onSelect: onSelect,
             itemLabel: { item in LorePickerItemLabel(title: title(item)) },
             footer: footer
@@ -563,7 +697,7 @@ extension LorePickerPopover where ItemLabel == LorePickerItemLabel {
     }
 }
 
-extension LorePickerPopover where ItemLabel == LorePickerItemLabel, Footer == EmptyView {
+extension LorePickerPopover where ItemLabel == LorePickerItemLabel, Footer == EmptyView, Header == LorePickerHeader {
     init(
         header: String,
         items: [Item],

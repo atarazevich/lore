@@ -186,6 +186,12 @@ final class LoreUserDriver: SPUStandardUserDriver {
 private final class AppUpdaterDelegateProxy: NSObject, SPUUpdaterDelegate {
     weak var owner: AppUpdaterController?
 
+    /// Updates between releases sit on the feed's `beta` channel; a Mac takes them only
+    /// after `defaults write com.lore.app updateChannel beta`. Hidden, no UI.
+    func allowedChannels(for updater: SPUUpdater) -> Set<String> {
+        UserDefaults.standard.string(forKey: "updateChannel") == "beta" ? ["beta"] : []
+    }
+
     func updater(_ updater: SPUUpdater, didFinishUpdateCycleFor updateCheck: SPUUpdateCheck, error: (any Error)?) {
         owner?.handleUpdateCycleFinished()
     }

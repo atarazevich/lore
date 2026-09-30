@@ -20,6 +20,9 @@ enum LoreTheme {
         static let sidebar = rgb(255, 255, 255, 0.045)
         /// `--popover` rgba(58,58,60,.97) — menus / popovers.
         static let popover = rgb(58, 58, 60, 0.97)
+        /// The popover fill with nothing showing through — a card lying over
+        /// rows (#289); the board lays `--popover` twice (.97 over .97 is .999).
+        static let popoverOpaque = rgb(58, 58, 60)
         /// `--card` rgba(255,255,255,.03)
         static let card = rgb(255, 255, 255, 0.03)
         /// `--card-2` rgba(255,255,255,.04)
@@ -80,6 +83,10 @@ enum LoreTheme {
         static let chip: CGFloat = 6
         /// Popover 8px (`--r-pop`).
         static let popover: CGFloat = 8
+        /// The floating plates 12px (`--r-panel`): the recording bubble, the
+        /// Read Aloud player and the agent replies' own plate, which the boards
+        /// draw on one radius (#260 review — the three hardcoded it).
+        static let panel: CGFloat = 12
     }
 
     // MARK: - Type scale

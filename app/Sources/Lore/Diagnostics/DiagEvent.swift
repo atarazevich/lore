@@ -1,4 +1,5 @@
 import Foundation
+import LoreCLIKit
 
 /// Coarse grouping for the health panel's readiness chain (#83) and the
 /// problem report's timeline (#84).
@@ -11,6 +12,8 @@ enum DiagSubsystem: String, Codable, Sendable, CaseIterable {
     case dictation
     case meetings
     case storage
+    /// Agents' spoken replies read aloud by lore (#236).
+    case agentReplies
 }
 
 /// The only diagnostic record the app keeps (design: docs/design/diagnostics.md §4).
@@ -51,6 +54,12 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// The CoreAudio transport → `DeviceKind` classifier lives beside the
     /// recording allowlist it must agree with, in `AudioBus` (#39). This file
     /// stays free of `import CoreAudio` and of a second transport table.
+    /// One of a meeting's two recorded tracks.
+    enum RecordingTrack: String, Codable, Sendable, CaseIterable {
+        case mic
+        case system
+    }
+
     enum DeviceKind: String, Codable, Sendable, CaseIterable {
         case builtIn
         case wireless
@@ -92,6 +101,10 @@ enum DiagEvent: Codable, Sendable, Equatable {
     enum ModelKind: String, Codable, Sendable, CaseIterable {
         case asr
         case vad
+        /// Nemotron-3 speaker diarization, the meeting's speaker pass (#269).
+        case diarizer
+        /// CAM++ speaker embedding: the voiceprints of the speaker pass (#269).
+        case voiceprint
     }
 
     /// Where a HAL capture attempt died. Pairs with an `OSStatus`.
@@ -226,6 +239,33 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case modelLoadFailed
     }
 
+    /// Which audio stream a conversion failure hit: the 16 kHz conversion for
+    /// transcription (#271), or the system tap's return to its declared rate
+    /// (#272).
+    enum ResampleSource: String, Codable, Sendable, CaseIterable {
+        case dictation
+        case meetingMic
+        case meetingSystem
+        /// A recorded file read for batch transcription.
+        case file
+        /// The system tap read at its measured rate and resampled back to its
+        /// declared one (#272). Here the buffer is not lost but passed through
+        /// unconverted.
+        case systemTapRate
+    }
+
+    /// Why a conversion failed. The 16 kHz conversion loses that audio
+    /// (#271); the system tap's rate correction passes it through
+    /// unconverted (#272).
+    enum ResampleFailure: String, Codable, Sendable, CaseIterable {
+        /// No converter could be built for the input format.
+        case converterUnavailable
+        /// `AVAudioConverter.convert` returned an error; the converter is rebuilt.
+        case converterError
+        /// The converter returned without asking for the buffer.
+        case bufferNotTaken
+    }
+
     /// What summoned a transcript repair job (#166). A closed set — never the
     /// session id, which embeds the meeting's date and time.
     enum RepairReason: String, Codable, Sendable, CaseIterable {
@@ -244,6 +284,41 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case repaired
         case failed
         case unavailable
+    }
+
+    /// Where the speaker pass stopped (#269). The pass never fails the
+    /// transcript; this names what left the meeting without a speaker map.
+    enum SpeakerStage: String, Codable, Sendable, CaseIterable {
+        /// The saved transcript and the lines kept for it do not match (or one is gone).
+        case transcript
+        case models
+        case diarization
+        case voiceprints
+        case write
+    }
+
+    /// Which of the naming files could not be read (#269).
+    enum SpeakerNamesFile: String, Codable, Sendable, CaseIterable {
+        /// `Voices/names.json`, the people the owner named.
+        case people
+        /// `sessions/<id>/speaker-names.json`, one meeting's naming.
+        case meeting
+    }
+
+    enum SpeakerNamesProblem: String, Codable, Sendable, CaseIterable {
+        /// It exists and does not decode (torn, or edited by hand).
+        case damaged
+        /// A later version of lore wrote it.
+        case newerVersion
+    }
+
+    /// Why a naming change was not saved (#269).
+    enum SpeakerNamingProblem: String, Codable, Sendable, CaseIterable {
+        /// The lines or the speaker map on disk are not the ones the change was made on.
+        case staleBasis
+        /// A naming file cannot be read, so it is not written over.
+        case unreadableFile
+        case writeFailed
     }
 
     /// Why a summon left the screen (#149). Retired with the surface (#151) and
@@ -279,6 +354,69 @@ enum DiagEvent: Codable, Sendable, Equatable {
         case conditionCleared
         case recordingEnded
         case displaced
+    }
+
+    /// What started an agent reply speaking (#256). `arrival` and `continued`
+    /// are the two a reply starts by itself — the reply came in with nothing
+    /// speaking, or the one before it finished — kept apart so "how often a
+    /// reading that started by itself was stopped" can tell a fresh reply from
+    /// the queue running on. `click` is the pointer on a reply, which is what
+    /// plays and resumes since #263; `next`/`previous` a move. `key` is an
+    /// explicit play on the keyboard: Fn+R (#259, and again since #278).
+    enum ReplyStartTrigger: String, Codable, Sendable, CaseIterable {
+        case arrival
+        case continued
+        case click
+        case key
+        case next
+        case previous
+    }
+
+    /// Why a speaking agent reply stopped short of its end (#256). `mute` holds
+    /// reading the same way the microphone does, so it pauses a reply too.
+    /// `click` is the pointer on the reply being read (#263); `key` is Fn+R
+    /// (#259, and again since #278).
+    enum ReplyPauseReason: String, Codable, Sendable, CaseIterable {
+        case click
+        case key
+        case escape
+        case microphone
+        case mute
+    }
+
+    /// Who put the player on screen or took it away (#263) — the key, the
+    /// header's ×, or the Esc that follows a pause. Visibility only: a reply
+    /// being read carries on either way. `key` is a tap of the talk key since
+    /// #278; before it, Fn+R. `reading` is a reply beginning to be read over a
+    /// player the owner had put away (#285): it shows while the reply speaks.
+    enum ReplyVisibility: String, Codable, Sendable, CaseIterable {
+        case key
+        case closeMark
+        case escape
+        case reading
+    }
+
+    enum ReplyMove: String, Codable, Sendable, CaseIterable {
+        case previous
+        case next
+    }
+
+    /// Why a reply was not taken, and its words left to `say` (#257). The
+    /// switch being off is the designed answer; `unreadableRequest` is a line
+    /// on the command socket that decoded as no request at all — an oversize
+    /// reply, or a truncated write.
+    enum ReplyDeclined: String, Codable, Sendable, CaseIterable {
+        case switchOff
+        case unreadableRequest
+    }
+
+    /// Where a reply's chat was when the user went to it (#258) — read live,
+    /// never guessed: the host app running with the chat open, running with the
+    /// chat closed, or not running.
+    enum ReplyChatState: String, Codable, Sendable, CaseIterable {
+        case appRunningChatOpen
+        case appRunningChatClosed
+        case appNotRunning
     }
 
     // MARK: - App
@@ -374,14 +512,36 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// The system-audio capture stopped retrying (#149). Kept apart from the
     /// mic's `captureGaveUp` so a summon can name the side that failed.
     case systemAudioGaveUp(attempts: Int)
+    /// The system tap's rate, measured from its capture stamps (#272): the
+    /// first reading of every tap, then each change of the rate its audio is
+    /// read at, at most one per ten seconds. `declared` is the tap's format,
+    /// `device` the output device's nominal rate when the tap was made (nil
+    /// when unreadable), `delivered` the measurement — nil when the tap gave
+    /// no reading by the end of its hold, so its audio passes as declared. A
+    /// delivered rate away from the declared one is the half-speed tap, and
+    /// its audio is resampled back to `declared`.
+    case systemAudioRate(declared: Int, device: Int?, delivered: Int?)
     /// Latched: at most one per recording, never one per audio buffer.
     case recordingSaved(outcome: Outcome, frames: Int)
+    /// A meeting's merged recording in the notes folder (#290), once per
+    /// meeting: written, given up, or never queued — its marker could not
+    /// be written.
+    case recordingExported(outcome: Outcome, frames: Int)
     /// The meeting asked for audio and none will be captured: capture started
-    /// with no session to own the tracks, so the recorder was never armed
+    /// with no session to own the tracks, so no recording was created
     /// (#177). Not a `recordingSaved(.failed)` — nothing was saved and nothing
     /// was attempted, and reusing a save outcome here would put a second one in
     /// the ring for a meeting that still records its own.
     case recordingUnowned
+    /// A buffer reached the meeting recording without its capture time, so it
+    /// could not be placed on the capture clock (#268). Latched: once per
+    /// track per recording.
+    case recordingBufferUnstamped(track: RecordingTrack)
+    /// Audio did not make it through the 16 kHz conversion (#271). At most one
+    /// per source and reason per 10 s, carrying the buffers and frames lost
+    /// since that pair's previous event (a failing converter fails on every
+    /// buffer).
+    case resampleFailed(source: ResampleSource, reason: ResampleFailure, buffers: Int, frames: Int)
 
     // MARK: - Transcription
 
@@ -397,6 +557,41 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// retry may follow), `.unavailable` there is nothing to make a
     /// transcript from — the meeting settles into the one sentence.
     case transcriptRepairSettled(outcome: RepairOutcome)
+    /// The speaker pass wrote a meeting's speaker map (#269): how many voices
+    /// it found across both tracks, how many lines it placed, whether the
+    /// owner's voiceprint was there to compare against.
+    case speakerMapSaved(clusters: Int, records: Int, ownerKnown: Bool, ms: Int)
+    /// The speaker pass stopped at `stage`; the meeting keeps its transcript
+    /// and has no speaker map.
+    case speakerMapFailed(stage: SpeakerStage, ms: Int)
+    /// The speaker pass failed `attempts` times for one meeting; its tracks
+    /// were deleted without a map.
+    case speakerMapGaveUp(attempts: Int)
+    /// A second pass's transcript could not be written; the pass failed and
+    /// kept its audio for the retry.
+    case transcriptSaveFailed
+    /// The owner's voiceprint was made from dictation speech: `.ok` stored,
+    /// `.unknown` too little speech to store yet (used for this map only),
+    /// `.failed` it could not be made (the map goes on without it).
+    case ownerVoiceprint(outcome: Outcome, recordings: Int, speechSeconds: Int)
+    /// A naming file could not be read: readers go without it, and nothing
+    /// writes over it, so the names in it are kept.
+    case speakerNamesUnreadable(file: SpeakerNamesFile, problem: SpeakerNamesProblem)
+    /// A naming or merge from the review was not saved; the review reads the
+    /// meeting from disk again.
+    case speakerNamingNotSaved(reason: SpeakerNamingProblem)
+    /// `lore transcribe` asked the app for a file's transcript (#254). Never the
+    /// path, never the text: which file and what it said stay between the
+    /// command and the person who ran it.
+    case commandTranscribeReceived
+    /// The transcript went back to the command, `ms` after the request arrived.
+    /// `complete` is false when the file stopped decoding part-way.
+    case commandTranscribeFinished(ms: Int, complete: Bool)
+    /// No transcript went back; `reason` is the sentence the command printed,
+    /// as its closed case.
+    case commandTranscribeFailed(reason: TranscribeFailure, ms: Int)
+    /// The command went away (Ctrl-C) and the work stopped with no one to answer.
+    case commandTranscribeAbandoned(ms: Int)
     /// Per-session (or per-batch-pass) summary, never per suppressed utterance —
     /// an echoey meeting would otherwise evict the whole ring. Numbers only:
     /// never `you='…' them='…'`.
@@ -513,6 +708,51 @@ enum DiagEvent: Codable, Sendable, Equatable {
     /// Failure only. A *preempted* import (`.cancelled`, #43) is the normal
     /// "a recording started" path and is not recorded at all.
     case sessionImportFailed
+
+    // MARK: - Agent replies (#236)
+    //
+    // The whole feature's event set, added with the queue (#256); the receiver,
+    // the chat action and the keys only call these. No case carries the reply's
+    // text, the chat's name, a folder or an app — only whether a reply said
+    // where it came from.
+
+    case agentReplyArrived(hasHostApp: Bool, hasPane: Bool, hasSession: Bool)
+    /// A reply the app did not take, so the command spoke it through `say`
+    /// (#257) — the one answer to "why did lore not read this one". An
+    /// unreadable line is recorded here because this is the loss it hides:
+    /// `lore transcribe` prints its own failure, while a reply nobody could
+    /// read is spoken with nothing to say why.
+    case agentReplyDeclined(reason: ReplyDeclined)
+    case agentReplyReadingStarted(trigger: ReplyStartTrigger)
+    case agentReplyReadingFinished
+    case agentReplyReadingPaused(by: ReplyPauseReason)
+    /// An Esc within 2 s after an Esc that paused a reply, which reached the app
+    /// in front — so the first was probably meant for it too. Since #263 the
+    /// press straight after a pause is the player's own hide, and that one is
+    /// not this: it went to the player, which is the opposite evidence.
+    case agentReplyEscapeRepeated
+    /// A microphone came into use while the feature was on; reading holds.
+    case agentReplyHeldByMicrophone
+    /// Every microphone stopped; reading had not begun on `waiting` replies.
+    case agentReplyMicrophoneFreed(waiting: Int)
+    case agentReplyMoved(direction: ReplyMove)
+    case agentReplyChatOpened(state: ReplyChatState, outcome: Outcome)
+    case agentReplyMute(on: Bool)
+    /// The capsule that says how many replies wait went up (#260) — `muted`
+    /// tells the two reasons apart: mute is on, or a microphone is in use.
+    case agentReplyWaitingShown(muted: Bool, waiting: Int)
+    /// …and came down, because its condition stopped being true.
+    case agentReplyWaitingWithdrawn
+    /// The owner put the player on screen (#263), or a reply began to be read
+    /// over it put away (#285). Visibility only — nothing about it starts or
+    /// stops a reply.
+    case agentReplyPlayerShown(by: ReplyVisibility)
+    /// …and put it away again. A reply being read carries on unheard-of by this.
+    case agentReplyPlayerHidden(by: ReplyVisibility)
+    /// The owner dragged the player to another place (#267). Where he put it is
+    /// deliberately not here: a coordinate on his screen is as much about him as
+    /// a folder name, and nothing about this event needs it.
+    case agentReplyPlayerMoved
 }
 
 // MARK: - Grouping
@@ -534,12 +774,16 @@ extension DiagEvent {
         case .captureStart, .captureFailed, .captureStopped, .captureRetryScheduled,
              .captureGaveUp, .captureReconfigured, .inputDeviceSelected, .deviceSwitched,
              .noFramesRecovery, .micStalled, .micRecovered, .micFramesFlowing,
-             .systemAudioCapture, .systemAudioGaveUp, .recordingSaved,
-             .recordingUnowned:
+             .systemAudioCapture, .systemAudioGaveUp, .systemAudioRate, .recordingSaved,
+             .recordingExported, .recordingUnowned, .recordingBufferUnstamped, .resampleFailed:
             return .audio
 
         case .modelLoad, .modelCacheCleared, .transcribed, .echoSuppressed,
-             .transcriptRepairQueued, .transcriptRepairSettled:
+             .transcriptRepairQueued, .transcriptRepairSettled,
+             .speakerMapSaved, .speakerMapFailed, .speakerMapGaveUp, .ownerVoiceprint, .transcriptSaveFailed,
+             .speakerNamesUnreadable, .speakerNamingNotSaved,
+             .commandTranscribeReceived, .commandTranscribeFinished, .commandTranscribeFailed,
+             .commandTranscribeAbandoned:
             return .transcription
 
         case .apiCall:
@@ -564,6 +808,14 @@ extension DiagEvent {
              .notesFolderMigrated, .notesFolderLeftoverCleared, .corruptFileAside,
              .sessionImportFailed:
             return .storage
+
+        case .agentReplyArrived, .agentReplyDeclined,
+             .agentReplyReadingStarted, .agentReplyReadingFinished,
+             .agentReplyReadingPaused, .agentReplyEscapeRepeated, .agentReplyHeldByMicrophone,
+             .agentReplyMicrophoneFreed, .agentReplyMoved, .agentReplyChatOpened,
+             .agentReplyMute, .agentReplyWaitingShown, .agentReplyWaitingWithdrawn,
+             .agentReplyPlayerShown, .agentReplyPlayerHidden, .agentReplyPlayerMoved:
+            return .agentReplies
         }
     }
 
@@ -610,14 +862,29 @@ extension DiagEvent {
         case .micFramesFlowing: return "micFramesFlowing"
         case .systemAudioCapture: return "systemAudioCapture"
         case .systemAudioGaveUp: return "systemAudioGaveUp"
+        case .systemAudioRate: return "systemAudioRate"
         case .recordingSaved: return "recordingSaved"
+        case .recordingExported: return "recordingExported"
         case .recordingUnowned: return "recordingUnowned"
+        case .recordingBufferUnstamped: return "recordingBufferUnstamped"
+        case .resampleFailed: return "resampleFailed"
         case .modelLoad: return "modelLoad"
         case .modelCacheCleared: return "modelCacheCleared"
         case .transcribed: return "transcribed"
         case .echoSuppressed: return "echoSuppressed"
         case .transcriptRepairQueued: return "transcriptRepairQueued"
         case .transcriptRepairSettled: return "transcriptRepairSettled"
+        case .speakerMapSaved: return "speakerMapSaved"
+        case .speakerMapFailed: return "speakerMapFailed"
+        case .speakerMapGaveUp: return "speakerMapGaveUp"
+        case .transcriptSaveFailed: return "transcriptSaveFailed"
+        case .ownerVoiceprint: return "ownerVoiceprint"
+        case .speakerNamesUnreadable: return "speakerNamesUnreadable"
+        case .speakerNamingNotSaved: return "speakerNamingNotSaved"
+        case .commandTranscribeReceived: return "commandTranscribeReceived"
+        case .commandTranscribeFinished: return "commandTranscribeFinished"
+        case .commandTranscribeFailed: return "commandTranscribeFailed"
+        case .commandTranscribeAbandoned: return "commandTranscribeAbandoned"
         case .apiCall: return "apiCall"
         case .dictationRecorded: return "dictationRecorded"
         case .dictationZeroFrames: return "dictationZeroFrames"
@@ -655,6 +922,22 @@ extension DiagEvent {
         case .notesFolderLeftoverCleared: return "notesFolderLeftoverCleared"
         case .corruptFileAside: return "corruptFileAside"
         case .sessionImportFailed: return "sessionImportFailed"
+        case .agentReplyArrived: return "agentReplyArrived"
+        case .agentReplyDeclined: return "agentReplyDeclined"
+        case .agentReplyReadingStarted: return "agentReplyReadingStarted"
+        case .agentReplyReadingFinished: return "agentReplyReadingFinished"
+        case .agentReplyReadingPaused: return "agentReplyReadingPaused"
+        case .agentReplyEscapeRepeated: return "agentReplyEscapeRepeated"
+        case .agentReplyHeldByMicrophone: return "agentReplyHeldByMicrophone"
+        case .agentReplyMicrophoneFreed: return "agentReplyMicrophoneFreed"
+        case .agentReplyMoved: return "agentReplyMoved"
+        case .agentReplyChatOpened: return "agentReplyChatOpened"
+        case .agentReplyMute: return "agentReplyMute"
+        case .agentReplyWaitingShown: return "agentReplyWaitingShown"
+        case .agentReplyWaitingWithdrawn: return "agentReplyWaitingWithdrawn"
+        case .agentReplyPlayerShown: return "agentReplyPlayerShown"
+        case .agentReplyPlayerHidden: return "agentReplyPlayerHidden"
+        case .agentReplyPlayerMoved: return "agentReplyPlayerMoved"
         }
     }
 }

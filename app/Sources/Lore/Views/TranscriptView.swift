@@ -173,17 +173,36 @@ struct TranscriptView: View {
 
 // MARK: - Elapsed stamps (#63)
 
-/// Elapsed-from-start stamp for transcript rows: mm:ss below one hour,
-/// h:mm:ss from there. Visual only — the copy paths keep absolute HH:MM:SS,
-/// and the markdown mirror keeps its own relative format
-/// (`MarkdownMeetingWriter.formatRelativeTimestamp`). Negatives (clock skew,
-/// legacy data) clamp to 00:00.
+/// Elapsed-from-start stamp for transcript rows. Visual only — the copy
+/// paths keep absolute HH:MM:SS, and the markdown mirror keeps its own
+/// relative format (`MarkdownMeetingWriter.formatRelativeTimestamp`).
+/// Negatives (clock skew, legacy data) clamp to zero.
 enum ElapsedStamp {
-    static func label(_ seconds: TimeInterval) -> String {
+    enum Style {
+        /// The live view: mm:ss below one hour, h:mm:ss from there.
+        case clock
+        /// The review (#269): time into the meeting in words — `0m 05s`,
+        /// `12m 57s`, and from an hour `1h 2m`, as the meta line's duration
+        /// reads — so it never passes for a clock time beside the header's
+        /// start ("11:31").
+        case intoMeeting
+    }
+
+    static func label(_ seconds: TimeInterval, style: Style = .clock) -> String {
         let total = max(0, Int(seconds))
-        return total < 3600
-            ? String(format: "%02d:%02d", total / 60, total % 60)
-            : String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
+        switch style {
+        case .clock:
+            return total < 3600
+                ? String(format: "%02d:%02d", total / 60, total % 60)
+                : String(format: "%d:%02d:%02d", total / 3600, total / 60 % 60, total % 60)
+        case .intoMeeting:
+            return total < 3600 ? String(format: "%dm %02ds", total / 60, total % 60) : hours(total)
+        }
+    }
+
+    /// `1h 3m`: the review's stamps from an hour and the meta line's duration.
+    static func hours(_ seconds: Int) -> String {
+        "\(seconds / 3600)h \(seconds / 60 % 60)m"
     }
 
     /// The anchor both renderers stamp against: the recorded start when
@@ -200,9 +219,27 @@ enum ElapsedStamp {
 /// aligned across finalized and interim rows (#57).
 private let timestampColumnWidth: CGFloat = 54
 
+/// The transcript row's frame: the mono stamp in its 54 px gutter, the
+/// content beside it. The live row and the review's paragraph (#269) both.
+struct StampedRow<Content: View>: View {
+    let stamp: String
+    @ViewBuilder let content: Content
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 0) {
+            Text(stamp)
+                .font(LoreTheme.Typography.mono(10.5))
+                .foregroundStyle(LoreTheme.TextColor.muted)
+                .lineLimit(1)
+                .frame(width: timestampColumnWidth, alignment: .leading)
+                .padding(.top, 2)
+            content
+        }
+    }
+}
+
 /// Finalized utterance: elapsed mono stamp + 64px speaker label + body text
-/// (MREC-11, #57, #63). Shared by the live view and the review transcript;
-/// render-only.
+/// (MREC-11, #57, #63). The live view's row; render-only.
 struct TranscriptSpeakerRow: View {
     let speaker: Speaker
     let text: String
@@ -210,12 +247,7 @@ struct TranscriptSpeakerRow: View {
     let elapsed: TimeInterval
 
     var body: some View {
-        HStack(alignment: .top, spacing: 0) {
-            Text(ElapsedStamp.label(elapsed))
-                .font(LoreTheme.Typography.mono(10.5))
-                .foregroundStyle(LoreTheme.TextColor.muted)
-                .frame(width: timestampColumnWidth, alignment: .leading)
-                .padding(.top, 2)
+        StampedRow(stamp: ElapsedStamp.label(elapsed)) {
             LoreSpeakerRow(speaker: speaker) {
                 Text(text)
                     .font(LoreTheme.Typography.body)

@@ -28,11 +28,29 @@ struct DictationItemChip: Identifiable, Equatable {
     }
 }
 
-/// The two moments of a bubble drag the window has to hear about (#213). No
+/// The two moments of a drag the window has to hear about (#213). No
 /// translation rides along: the window reads the pointer off the screen itself,
 /// because a translation measured in the window's own space is a translation
 /// that collapses to nothing as the window follows it.
-enum BubbleDrag: Sendable { case moved, ended }
+///
+/// Both floating plates are dragged this way — the recording bubble by its
+/// shape, and the replies player and its capsule by their own (#267) — so the
+/// gesture that reports it is stated once, here.
+enum BubbleDrag: Equatable, Sendable {
+    case moved, ended
+
+    /// What keeps a click a click. A gesture that cannot be recognised before
+    /// the pointer has travelled this far cannot take a keycap's or a row's
+    /// click; past it the gesture has claimed the sequence, so the control the
+    /// press began on does not fire on release.
+    static let threshold: CGFloat = 4
+
+    static func gesture(_ report: @escaping (BubbleDrag) -> Void) -> some Gesture {
+        DragGesture(minimumDistance: threshold)
+            .onChanged { _ in report(.moved) }
+            .onEnded { _ in report(.ended) }
+    }
+}
 
 /// A moment in a dictation, said the same way wherever it appears — the live
 /// timer and an item's row read the same clock: `m:ss`, and `h:mm:ss` once an
@@ -130,42 +148,25 @@ enum BubbleTipOwner: Hashable, Sendable {
     case row(UUID)
 }
 
-/// One line of the copy table, and whose it is.
-private struct BubbleTip: Equatable {
-    let owner: BubbleTipOwner
-    let text: String
-}
+/// One line of the copy table, and whose it is — the report both this surface
+/// and the replies player make (`LoreTipLine`).
+private typealias BubbleTip = LoreTipLine<BubbleTipOwner>
 
 /// The canvas's own coordinate space, so every element reports the pointer in
 /// the numbers the card is placed in.
 private let bubbleTipSpace = "lore.bubble.tip"
 
 extension View {
-    /// What every element carrying a line in the copy table wears (#207). It
-    /// reports the pointer and nothing else — no size, no padding, no
-    /// background — so a tooltip can never move anything in the shape (#204).
-    ///
-    /// Continuous, and in the canvas's space, because the card is drawn under
-    /// whatever is being pointed at: the position arrives with the crossing
-    /// into the element and then follows the pointer across it.
+    /// This shape's elements on the one report (`loreTipReport`), in the
+    /// canvas's space, with the pointer going to the side channel the card
+    /// reads when it appears.
     fileprivate func bubbleTip(
         _ owner: BubbleTipOwner, _ text: String,
         hovered: Binding<BubbleTip?>, pointer: BubblePointer
     ) -> some View {
-        onContinuousHover(coordinateSpace: .named(bubbleTipSpace)) { phase in
-            switch phase {
-            case .active(let location):
-                pointer.x = location.x
-                // Every mouse move lands here; only a real arrival is a change
-                // the shape has to be re-rendered for.
-                let arrived = BubbleTip(owner: owner, text: text)
-                if hovered.wrappedValue != arrived { hovered.wrappedValue = arrived }
-            case .ended:
-                // Its own line only: SwiftUI may report the neighbour's
-                // arrival before this departure.
-                if hovered.wrappedValue?.owner == owner { hovered.wrappedValue = nil }
-            }
-        }
+        loreTipReport(
+            owner, text, in: bubbleTipSpace, tip: hovered, pointer: { pointer.x = $0 }
+        )
     }
 
     /// Where this element stands, for the hint that speaks from it (#235). A
@@ -208,8 +209,11 @@ extension View {
 /// 300 ms, so `.help` could not have delivered this even where it does show.
 ///
 /// Not private: `gap` and `height` are the room the canvas keeps under the
-/// shape, and `RecordingBubbleRenderTests` reads them to check the card lands
-/// inside it (the same reason `clipBox` is not private).
+/// shape, `RecordingBubbleRenderTests` reads them to check the card lands
+/// inside it (the same reason `clipBox` is not private) — and since #260 the
+/// replies player hangs the same card under its own plate, with its own width
+/// cap, the keys its copy table puts beside the line, and no arrow (its board
+/// draws the plain macOS tooltip).
 struct BubbleTipCard: View {
     let text: String
     /// Where the pointer was when the line appeared, in the shape's own space.
@@ -217,6 +221,13 @@ struct BubbleTipCard: View {
     /// The canvas the card must stay inside — a line for the gear may not hang
     /// off the right edge of the window.
     let canvasWidth: CGFloat
+    /// The keys beside the line, where the copy table puts them (#260).
+    var keys: [String] = []
+    /// The widest the card may be — the board's 222 under the bubble, the
+    /// plate's own width under the player, whose lines are whole sentences.
+    var widthCap: CGFloat = Self.maxWidth
+    /// The arrow standing on the card, pointing at what the line is about.
+    var showsArrow = true
 
     /// The hint this card is, if it is one (#235). Nil is the hover tooltip the
     /// card has always been: one line, no keycaps, no ×, and nothing the pointer
@@ -301,15 +312,11 @@ struct BubbleTipCard: View {
     var body: some View {
         // The cap reaches the line as a *proposal*, and the card is the size the
         // line answers with. Nothing here measures text.
-        CardWidthCap(maxWidth: Self.maxWidth - 2 * Self.padX) {
+        CardWidthCap(maxWidth: widthCap - 2 * Self.padX) {
             if let hint {
                 hintBody(hint)
             } else {
-                Text(text)
-                    .font(.system(size: Self.fontSize))
-                    .foregroundStyle(LoreTheme.TextColor.primary)
-                    .lineLimit(2)
-                    .fixedSize(horizontal: false, vertical: true)
+                plainBody
             }
         }
             // No shadow: the bubble this hangs under carries none either
@@ -325,7 +332,9 @@ struct BubbleTipCard: View {
             // guide and the overlay reads it off, rather than either of them
             // being told a number from outside.
             .alignmentGuide(.bubbleTipArrow) { arrowX(cardWidth: $0.width) }
-            .overlay(alignment: Alignment(horizontal: .bubbleTipArrow, vertical: .top)) { arrow }
+            .overlay(alignment: Alignment(horizontal: .bubbleTipArrow, vertical: .top)) {
+                if showsArrow { arrow }
+            }
             // And the same for where the card itself stands: its leading guide
             // is pushed right by `leading`, inside a box the width of the
             // canvas, so the placement is done with the width SwiftUI settled on.
@@ -346,6 +355,19 @@ struct BubbleTipCard: View {
             // a pointer, so it has no element being read alongside it — it
             // carries its own name, and its × carries another.
             .accessibilityHidden(hint == nil)
+    }
+
+    /// The hover tooltip: one line, and the keys the copy table puts beside it
+    /// (#260 — the player's strip and its capsule each print their own key).
+    private var plainBody: some View {
+        HStack(spacing: 6) {
+            Text(text)
+                .font(.system(size: Self.fontSize))
+                .foregroundStyle(LoreTheme.TextColor.primary)
+                .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            if !keys.isEmpty { LoreKeycapRun(caps: keys) }
+        }
     }
 
     /// The hint's sentence in the board's own lines, with the keys it names
@@ -960,8 +982,8 @@ struct DictationIndicatorView: View {
                 itemList(width: listWidth)
             }
         }
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
-        .clipShape(RoundedRectangle(cornerRadius: 12))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.panel))
+        .clipShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.panel))
     }
 
     private func paddedRow(open: Bool, measuring: Bool, paused: Bool) -> some View {
@@ -990,7 +1012,7 @@ struct DictationIndicatorView: View {
             // the last one left off must arrive, not dissolve in.
             .opacity(popping ? 0 : 1)
             .animation(popping ? Self.closeCurve : nil, value: popping)
-            .contentShape(RoundedRectangle(cornerRadius: 12))
+            .contentShape(RoundedRectangle(cornerRadius: LoreTheme.Radius.panel))
             // On the shape, past its own content shape, so the transparent
             // margin is not a handle (#213) — and after the keycaps, the rows
             // and the gear have theirs, so a click still belongs to whatever it
@@ -1118,23 +1140,13 @@ struct DictationIndicatorView: View {
     /// it; the canvas is mostly transparent margin, so that had to go — a window
     /// draggable by its background answers mouse-downs the app underneath never
     /// receives.
-    ///
-    /// `minimumDistance` is the whole of what keeps a click a click: a drag
-    /// gesture that cannot be recognised before the pointer has travelled cannot
-    /// take a keycap's click, and a keycap's click cannot become a drag. Past
-    /// that distance the gesture is the one that has claimed the sequence, so
-    /// the control the press began on does not fire on release.
     private var dragGesture: some Gesture {
-        DragGesture(minimumDistance: Self.dragThreshold)
-            .onChanged { _ in
-                // A line under a shape that is moving points at nothing.
-                if hoveredTip != nil || tipWarm { hideTip() }
-                onDrag?(.moved)
-            }
-            .onEnded { _ in onDrag?(.ended) }
+        BubbleDrag.gesture { phase in
+            // A line under a shape that is moving points at nothing.
+            if phase == .moved, hoveredTip != nil || tipWarm { hideTip() }
+            onDrag?(phase)
+        }
     }
-
-    private static let dragThreshold: CGFloat = 4
 
     private func followPointer() async {
         guard canExpand else {
@@ -1698,10 +1710,11 @@ struct DictationIndicatorView: View {
         let ink: Color
 
         /// Which line a keycap stands in: the rail's own 11 pt row (the board's
-        /// `.kb`), or the 10.5 pt of a hint card's sentence (`.kc`, #235). Two
-        /// sizes of one plate, so a keycap on a card cannot drift from a keycap
-        /// on the rail.
-        enum KeycapLine { case rail, card }
+        /// `.kb`), the 10.5 pt of a hint card's sentence (`.kc`, #235), or the
+        /// 9 pt of the replies player's one-line key strip (#263). Three sizes
+        /// of one plate, so a keycap in a strip cannot drift from a keycap on
+        /// the rail.
+        enum KeycapLine { case rail, card, strip }
 
         /// The rail's keycap, P1's inline action wearing it (`.kb`/`.kb.on`),
         /// and the key a hint's sentence names. No hover lift on any of them:
@@ -1711,11 +1724,17 @@ struct DictationIndicatorView: View {
         /// One width per line now the Space cap is gone (#235): every plate on
         /// the rail is a single letter on the board's own `.kb` floor.
         static func keycap(bright: Bool, _ line: KeycapLine = .rail) -> BubblePill {
-            BubblePill(
-                font: LoreTheme.Typography.mono(line == .rail ? 11 : 10.5, weight: .semibold),
-                insets: EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4),
-                minWidth: line == .rail ? 18 : 16,
-                minHeight: line == .rail ? 17 : 15,
+            let size: CGFloat = switch line {
+            case .rail: 11
+            case .card: 10.5
+            case .strip: 9
+            }
+            let inset: CGFloat = line == .strip ? 3 : 4
+            return BubblePill(
+                font: LoreTheme.Typography.mono(size, weight: .semibold),
+                insets: EdgeInsets(top: 0, leading: inset, bottom: 0, trailing: inset),
+                minWidth: line == .rail ? 18 : (line == .card ? 16 : 14),
+                minHeight: line == .rail ? 17 : (line == .card ? 15 : 14),
                 plate: bright ? 0.12 : 0.04,
                 ink: bright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted
             )
@@ -2616,12 +2635,7 @@ final class DictationIndicatorManager {
         // is read here, off the screen, rather than taken from the gesture:
         // SwiftUI measures a drag in the window's own space, and that number
         // stops moving the instant the window starts following it.
-        model.onDrag = { [weak self] phase in
-            switch phase {
-            case .moved: self?.panel?.drag(to: NSEvent.mouseLocation)
-            case .ended: self?.panel?.endDrag()
-            }
-        }
+        model.onDrag = { [weak self] phase in self?.panel?.drag(phase) }
         // The shape measures its own window and the window stops following it
         // (#204): one canvas per recording, and hover changes nothing about it.
         model.onCanvasChange = { [weak self] canvas in

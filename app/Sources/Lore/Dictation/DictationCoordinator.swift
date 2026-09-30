@@ -137,17 +137,11 @@ final class DictationCoordinator {
     /// Shared audio bus — set by AppDelegate during dictation setup.
     var audioBus: AudioBus?
 
-    /// Read Aloud interplay (#105), wired by the dictation setup. Capture
-    /// started (pre-buffer, before the mic opens) → pause playback so zero
-    /// TTS output enters the buffer; capture ended (`stopMicCapture`, the one
-    /// chokepoint every stop path crosses) → maybe auto-resume. `cancelled`
-    /// is true when the gesture never became a recording (a sub-150 ms tap):
-    /// not a dictation, so the listener resumes unconditionally.
-    var onCaptureStarted: (() -> Void)?
-    var onCaptureEnded: ((_ cancelled: Bool) -> Void)?
-    /// Whether the current capture gesture was confirmed as a recording —
-    /// distinguishes a cancelled tap from a real dictation for `onCaptureEnded`.
-    private var captureConfirmed = false
+    /// Capture ended (`stopMicCapture`, the one chokepoint every stop path
+    /// crosses, a tap's pre-buffer included), wired by the dictation setup:
+    /// Read Aloud may resume, and the replies read the other apps again. The
+    /// pause at the start belongs to the talk key's decision (#105, #279).
+    var onCaptureEnded: (() -> Void)?
 
     /// Shared backend cache — set by AppDelegate during dictation setup.
     var backendCache: SharedBackendCache?
@@ -299,10 +293,6 @@ final class DictationCoordinator {
         // dictation hits the async .notDetermined branch.
         switch MicrophonePermission.status {
         case .authorized:
-            captureConfirmed = false
-            // Pause Read Aloud before the mic opens — not at hold-confirm,
-            // by which point TTS output would already be in the buffer (#105).
-            onCaptureStarted?()
             startMicCapture()
             // "Sound on start" (DSET-16, default off): chime at the point
             // capture actually begins (mic live), not on key-down — the
@@ -424,7 +414,6 @@ final class DictationCoordinator {
         pendingOperatorAddressed = false
         llmStage = nil
         lastError = nil
-        captureConfirmed = true
         state = .recording
         // Only past the tap threshold does the audio start reaching disk (#182):
         // a pre-buffer is a gesture that may still turn out to be nothing, and
@@ -433,7 +422,7 @@ final class DictationCoordinator {
         liveRecording?.append(accumulatedSamples)
         // The audio's t=0 is the pre-buffer's first sample, so "now" in this
         // dictation is however much audio the pre-buffer already holds, plus
-        // whatever elapses from here (#192). Measured, not assumed at 150 ms:
+        // whatever elapses from here (#192). Measured, not assumed at the threshold:
         // a hold that beat the threshold by a few ms carries less.
         beginCaptureLeg()
         items.removeAll()
@@ -1097,7 +1086,7 @@ final class DictationCoordinator {
         recordingTask = Task { [weak self] in
             for await buffer in stream {
                 guard let self, !Task.isCancelled else { break }
-                if let samples = AudioUtils.extractSamples(buffer, converter: &self.converter) {
+                if let samples = AudioUtils.extractSamples(buffer, converter: &self.converter, source: .dictation) {
                     self.appendCapturedSamples(samples)
                 }
             }
@@ -1131,7 +1120,7 @@ final class DictationCoordinator {
         let recording = liveRecording
         liveRecording = nil
         recording?.finish()
-        onCaptureEnded?(!captureConfirmed)
+        onCaptureEnded?()
         return recording
     }
 

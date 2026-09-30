@@ -31,10 +31,7 @@ enum RichInput {
     /// the speaker hesitated landed before the word he was reaching for.
     private static let clauseGap: Double = 1.0
 
-    /// Every word of one transcription chunk, in order. Parakeet's tokens are
-    /// sub-word pieces whose text carries the word boundary as a leading
-    /// space, so a word runs from the first token that contributed a
-    /// non-space character to it to the last.
+    /// Every word of one transcription chunk, in order (`TranscribedToken.words`).
     ///
     /// `audioOffset` is where this chunk starts in the dictation's audio — the
     /// timings a chunk returns are its own, and a 40 s dictation is two
@@ -42,32 +39,9 @@ enum RichInput {
     /// punctuation can end its clause; the gap across a chunk seam is not this
     /// chunk's to measure.
     static func words(tokens: [TranscribedToken], audioOffset: Double) -> [Word] {
-        struct Spoken {
-            var text: String
-            var start: Double
-            var end: Double
+        let spoken = TranscribedToken.words(tokens).map {
+            TimedWord(text: $0.text, start: $0.start + audioOffset, end: $0.end + audioOffset)
         }
-        var spoken: [Spoken] = []
-        var pending: Spoken?
-        for token in tokens {
-            for character in token.text {
-                if character.isWhitespace {
-                    if let word = pending { spoken.append(word) }
-                    pending = nil
-                } else if pending == nil {
-                    pending = Spoken(
-                        text: String(character),
-                        start: token.start + audioOffset,
-                        end: token.end + audioOffset
-                    )
-                } else {
-                    pending?.text.append(character)
-                    pending?.end = token.end + audioOffset
-                }
-            }
-        }
-        if let word = pending { spoken.append(word) }
-
         return spoken.enumerated().map { index, word in
             let punctuated = word.text.last.map(clauseEnders.contains) ?? false
             let paused = index + 1 < spoken.count

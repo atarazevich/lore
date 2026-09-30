@@ -30,7 +30,8 @@ final class ParakeetBackend: TranscriptionBackend, @unchecked Sendable {
             onProgress(progress.fractionCompleted)
         }
         onStatus("Initializing \(displayName)...")
-        let asr = AsrManager(config: .default)
+        // Two of FluidAudio 0.15.7's long-form defaults, reverted (docs/decisions.md, #269).
+        let asr = AsrManager(config: ASRConfig(melChunkContext: true, seamGapRepair: false))
         // FluidAudio 0.14 renamed `initialize(models:)` to `loadModels(_:)`.
         try await asr.loadModels(models)
         // Vocabulary boosting removed with FluidAudio v0.14 bump (#35); the vocabulary track was retired entirely in #53.

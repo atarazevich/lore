@@ -317,9 +317,13 @@ enum HealthCatalog {
         case .vadModel:
             if ok { return ("Voice-activity model", "Downloaded and ready.", nil) }
             return ("Voice-activity model",
-                    "The Silero VAD model isn't on disk yet.",
-                    Remedy(instruction: "It downloads alongside the transcription model on first use.",
-                           actions: [.testNow(.modelWarmup)]))
+                    result.status == .failed
+                        ? "The voice-activity model couldn't be loaded."
+                        : "Not downloaded yet. Only meetings and file transcription use it.",
+                    Remedy(instruction: result.status == .failed
+                               ? "It loads again with the next meeting or file transcription, or now."
+                               : "It downloads (about 1 MB) with the first meeting or file transcription, or now.",
+                           actions: [.testNow(.vadModel)]))
 
         // MARK: Cleanup & Ask lore
 

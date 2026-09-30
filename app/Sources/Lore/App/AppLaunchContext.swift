@@ -14,7 +14,6 @@ enum AppRuntimeMode {
 struct AppServices {
     let transcriptionEngine: TranscriptionEngine
     let refinementEngine: TranscriptRefinementEngine
-    let audioRecorder: AudioRecorder
     let batchEngine: BatchTranscriptionEngine
 }
 

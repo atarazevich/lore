@@ -7,7 +7,7 @@ import Foundation
 /// `kbHits`, `suggestionDecision`, `surfacedSuggestionText`,
 /// `conversationStateSummary`); JSONDecoder skips unknown keys, so they
 /// decode unchanged.
-struct SessionRecord: Codable {
+struct SessionRecord: Codable, Equatable {
     let speaker: Speaker
     let text: String
     let timestamp: Date
@@ -136,6 +136,13 @@ extension SessionIndex {
     /// testDefaultTitleStyleMatchesTemplateAcrossLocales.
     static func defaultTitle(startedAt: Date) -> String {
         startedAt.formatted(.dateTime.weekday(.abbreviated).hour().minute())
+    }
+
+    /// Whether a stored title is still a default one (#269): the default for
+    /// any minute within two of the start. The title and the stored start
+    /// were read from different clocks before, a minute apart at times.
+    static func isDefaultTitle(_ title: String, startedAt: Date) -> Bool {
+        (-2...2).contains { title == defaultTitle(startedAt: startedAt.addingTimeInterval(Double($0) * 60)) }
     }
 
     /// Stored title, or the derived default when none is stored. Legacy

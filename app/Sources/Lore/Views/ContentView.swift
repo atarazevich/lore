@@ -336,7 +336,7 @@ struct ContentView: View {
             LoreDivider()
             AskLoreSection(
                 model: askLore,
-                utterances: state.liveTranscript,
+                transcript: .live(state.liveTranscript),
                 apiKey: settings.openaiApiKey
             )
             .frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -565,10 +565,8 @@ struct ContentView: View {
 
     private func copyTranscript() {
         guard let controller = liveSessionController else { return }
-        let timeFmt = DateFormatter()
-        timeFmt.dateFormat = "HH:mm:ss"
         let lines = controller.state.liveTranscript.map { u in
-            "[\(timeFmt.string(from: u.timestamp))] \(u.speaker.displayLabel): \(u.displayText)"
+            "[\(MeetingTranscript.clock.string(from: u.timestamp))] \(u.speaker.displayLabel): \(u.displayText)"
         }
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(lines.joined(separator: "\n"), forType: .string)

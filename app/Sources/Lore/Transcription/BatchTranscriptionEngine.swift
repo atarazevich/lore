@@ -5,12 +5,14 @@ import os
 private let batchLog = Logger(subsystem: "com.lore.app", category: "BatchTranscription")
 
 /// Maps a file frame position to wall-clock time using the timing anchors
-/// persisted in batch-meta.json (#128). A capture outage produces no silence
-/// padding — frames are appended contiguously — so pure `start + frame/rate`
-/// math drags every post-gap utterance earlier by the outage length. With two
-/// or more anchors the mapping is piecewise: each frame is based on the
-/// nearest anchor at-or-before it. With fewer anchors (legacy batch-meta.json)
-/// it reduces exactly to the start-date math.
+/// persisted in batch-meta.json (#128). The recording places every buffer by
+/// its capture time (#268): a gap up to `MeetingRecording.longestFill` is
+/// written as silence, so within a stretch `start + frame/rate` holds. A
+/// longer gap is not written out; the track starts a new stretch, and the
+/// anchor at its first frame carries that frame's capture date. With two or
+/// more anchors the mapping is piecewise: each frame is based on the nearest
+/// anchor at-or-before it. With fewer (one stretch, or legacy meta) it is the
+/// start-date math.
 struct AnchorClock {
     let startDate: Date
     let sampleRate: Double
@@ -59,6 +61,23 @@ actor BatchTranscriptionEngine {
     /// True when the current batch job is an audio file import (affects UI copy).
     private(set) var isImporting: Bool = false
     private var currentTask: Task<Void, Never>?
+    /// A meeting's tracks stay after its transcript is saved, with where each
+    /// line's words are, for the speaker pass — its own job, which deletes
+    /// them (#269). Otherwise they go with the transcript job, as before.
+    private let keepsTracksForSpeakers: Bool
+
+    init(keepsTracksForSpeakers: Bool = false) {
+        self.keepsTracksForSpeakers = keepsTracksForSpeakers
+    }
+
+    /// One transcribed line: the record, where its speech ends, and where it
+    /// and its words are in its file's frames.
+    struct FileLine {
+        let record: SessionRecord
+        let end: Date
+        let span: Span
+        let words: [Span]
+    }
 
     /// Process batch transcription for a completed session.
     func process(
@@ -195,12 +214,11 @@ actor BatchTranscriptionEngine {
             sessionID: sessionID,
             speaker: .them,
             startDate: startDate,
-            sampleRate: nil,
             backend: backend,
             vad: vad,
             progressBase: 0,
             progressScale: 1.0
-        )
+        ).map(\.record)
 
         try Task.checkCancellation()
 
@@ -218,8 +236,14 @@ actor BatchTranscriptionEngine {
         // Derive endedAt from last record timestamp
         let endedAt = records.last?.timestamp ?? startDate
 
-        // Save final transcript atomically
-        await sessionRepository.saveFinalTranscript(sessionID: sessionID, records: records)
+        // Save final transcript atomically. One that did not land is not "no
+        // speech": the pass fails and the healer retries.
+        guard await sessionRepository.saveFinalTranscript(sessionID: sessionID, records: records) else {
+            DiagStore.record(.transcriptSaveFailed)
+            status = .failed("The transcript could not be saved", sessionID: sessionID)
+            isImporting = false
+            return
+        }
 
         // Update session metadata with final counts
         await sessionRepository.finalizeImportedSession(
@@ -247,7 +271,7 @@ actor BatchTranscriptionEngine {
         }
         try Task.checkCancellation()
 
-        let vad = try await VadManager()
+        let vad = try await SileroVAD.load()
         try Task.checkCancellation()
 
         return (backend, vad)
@@ -285,19 +309,18 @@ actor BatchTranscriptionEngine {
         status = .transcribing(progress: 0, sessionID: sessionID)
 
         // Transcribe each audio file
-        var micRecords: [SessionRecord] = []
-        var sysRecords: [SessionRecord] = []
+        var micLines: [FileLine] = []
+        var sysLines: [FileLine] = []
 
         let totalFiles = (urls.mic != nil ? 1 : 0) + (urls.sys != nil ? 1 : 0)
         var filesProcessed = 0
 
         if let micURL = urls.mic {
-            micRecords = try await transcribeFile(
+            micLines = try await transcribeFile(
                 url: micURL,
                 sessionID: sessionID,
                 speaker: .you,
                 startDate: anchors?.micStartDate,
-                sampleRate: anchors?.micSampleRate,
                 anchors: anchors?.micAnchors ?? [],
                 backend: backend,
                 vad: vad,
@@ -305,35 +328,36 @@ actor BatchTranscriptionEngine {
                 progressScale: 1.0 / Double(totalFiles)
             )
             filesProcessed += 1
-            batchLog.info("Mic transcription: \(micRecords.count) records")
+            batchLog.info("Mic transcription: \(micLines.count) records")
         }
 
         try Task.checkCancellation()
 
         if let sysURL = urls.sys {
-            sysRecords = try await transcribeFile(
+            sysLines = try await transcribeFile(
                 url: sysURL,
                 sessionID: sessionID,
                 speaker: .them,
                 startDate: anchors?.sysStartDate,
-                sampleRate: anchors?.sysSampleRate,
                 anchors: anchors?.sysAnchors ?? [],
                 backend: backend,
                 vad: vad,
                 progressBase: Double(filesProcessed) / Double(totalFiles),
                 progressScale: 1.0 / Double(totalFiles)
             )
-            batchLog.info("Sys transcription: \(sysRecords.count) records")
+            batchLog.info("Sys transcription: \(sysLines.count) records")
         }
 
         try Task.checkCancellation()
 
         // Apply echo suppression
-        AcousticEchoFilter.suppress(micRecords: &micRecords, against: sysRecords)
+        AcousticEchoFilter.suppress(&micLines, against: sysLines.map(\.record)) { ($0.record, $0.end) }
 
         // Interleave by timestamp
-        var allRecords = micRecords + sysRecords
-        allRecords.sort { $0.timestamp < $1.timestamp }
+        var lines = micLines.map { (track: DiagEvent.RecordingTrack.mic, line: $0) }
+            + sysLines.map { (track: DiagEvent.RecordingTrack.system, line: $0) }
+        lines.sort { $0.line.record.timestamp < $1.line.record.timestamp }
+        let allRecords = lines.map(\.line.record)
 
         guard !allRecords.isEmpty else {
             batchLog.warning("Batch transcription produced no records for \(sessionID)")
@@ -342,11 +366,25 @@ actor BatchTranscriptionEngine {
             return
         }
 
-        // Atomic write of final transcript + full markdown regeneration via mirroring
-        await sessionRepository.saveFinalTranscript(sessionID: sessionID, records: allRecords)
+        // Atomic write of final transcript + full markdown regeneration via
+        // mirroring. A transcript that did not land fails the pass and keeps
+        // the tracks for the healer's retry.
+        guard await sessionRepository.saveFinalTranscript(sessionID: sessionID, records: allRecords) else {
+            DiagStore.record(.transcriptSaveFailed)
+            status = .failed("The transcript could not be saved", sessionID: sessionID)
+            return
+        }
 
-        // Cleanup audio files
-        await sessionRepository.cleanupBatchAudio(sessionID: sessionID)
+        // The tracks stay for the speaker pass only with the lines it joins to
+        // (#269); otherwise they go now.
+        var kept = false
+        if keepsTracksForSpeakers {
+            let speakerLines = lines.map { SpeakerFinder.Line(track: $0.track, span: $0.line.span, words: $0.line.words) }
+            kept = await sessionRepository.saveSpeakerLines(speakerLines, sessionID: sessionID)
+        }
+        if !kept {
+            await sessionRepository.cleanupBatchAudio(sessionID: sessionID)
+        }
 
         status = .completed(sessionID: sessionID)
         batchLog.info("Batch transcription completed for \(sessionID): \(allRecords.count) records")
@@ -359,227 +397,52 @@ actor BatchTranscriptionEngine {
         sessionID: String,
         speaker: Speaker,
         startDate: Date?,
-        sampleRate: Double?,
         anchors: [BatchMeta.TimingAnchor] = [],
         backend: any TranscriptionBackend,
         vad: VadManager,
         progressBase: Double,
         progressScale: Double
-    ) async throws -> [SessionRecord] {
+    ) async throws -> [FileLine] {
         guard let audioFile = try? AVAudioFile(forReading: url) else {
             batchLog.warning("Cannot open audio file: \(url.lastPathComponent)")
             return []
         }
+        let reader = AudioFileChunkReader(file: audioFile)
 
-        let fileSampleRate = audioFile.processingFormat.sampleRate
         let totalFrames = audioFile.length
         guard totalFrames > 0 else { return [] }
 
         let resolvedStartDate = startDate ?? Date()
-        let resolvedSampleRate = sampleRate ?? fileSampleRate
         let clock = AnchorClock(
             startDate: resolvedStartDate,
-            sampleRate: resolvedSampleRate,
+            sampleRate: audioFile.processingFormat.sampleRate,
             anchors: anchors
         )
 
-        // Process in 30-second chunks
-        let chunkFrames = Int64(30.0 * fileSampleRate)
-        var records: [SessionRecord] = []
-        var frameOffset: Int64 = 0
-
-        while frameOffset < totalFrames {
-            try Task.checkCancellation()
-
-            let framesToRead = min(chunkFrames, totalFrames - frameOffset)
-            let chunk = try readChunk(
-                file: audioFile,
-                startFrame: frameOffset,
-                frameCount: AVAudioFrameCount(framesToRead)
-            )
-
-            guard !chunk.isEmpty else {
-                frameOffset += framesToRead
-                continue
-            }
-
-            // Run VAD on the chunk to find speech segments
-            let speechSegments = try await detectSpeech(samples: chunk, vad: vad)
-
-            for segment in speechSegments {
-                try Task.checkCancellation()
-
-                let text = try await backend.transcribe(segment.samples, previousContext: nil)
-                guard !text.isEmpty else { continue }
-
-                // Calculate timestamp from frame position (anchor-aware, #128)
-                let sampleOffsetInFile = Double(frameOffset) + Double(segment.startSample) * fileSampleRate / 16000.0
-                let timestamp = clock.date(atFrame: sampleOffsetInFile)
-
-                records.append(SessionRecord(
-                    speaker: speaker,
-                    text: text,
-                    timestamp: timestamp
-                ))
-            }
-
-            frameOffset += framesToRead
-
-            // Update progress
-            let fileProgress = Double(frameOffset) / Double(totalFrames)
+        // 30-second blocks, one voice detector across them and one model call
+        // per segment (`AudioFileSpeech`, shared with `lore transcribe`, #254, #273).
+        let reading = try await AudioFileSpeech(backend: backend, vad: vad).read(nextChunk: reader.nextChunk) { chunk in
+            let fileProgress = Double(chunk.startFrame + chunk.frameCount) / Double(totalFrames)
             status = .transcribing(progress: progressBase + fileProgress * progressScale, sessionID: sessionID)
         }
+        // A track that stops decoding fails the pass, as before: a partial
+        // result would replace the live transcript and delete the audio, while
+        // a failed pass keeps both and the healer retries within its budget.
+        if let error = reading.decodeError { throw error }
 
-        return records
-    }
-
-    // MARK: - Audio Reading
-
-    /// Read a chunk from an AVAudioFile and resample to 16kHz mono Float32.
-    private func readChunk(
-        file: AVAudioFile,
-        startFrame: Int64,
-        frameCount: AVAudioFrameCount
-    ) throws -> [Float] {
-        let srcFormat = file.processingFormat
-        file.framePosition = startFrame
-
-        guard let readBuf = AVAudioPCMBuffer(pcmFormat: srcFormat, frameCapacity: frameCount) else {
-            return []
-        }
-        try file.read(into: readBuf)
-
-        let targetFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: 16000,
-            channels: 1,
-            interleaved: false
-        )!
-
-        // Fast path: already at target format
-        if srcFormat.sampleRate == 16000 && srcFormat.channelCount == 1
-            && srcFormat.commonFormat == .pcmFormatFloat32 {
-            guard let data = readBuf.floatChannelData else { return [] }
-            return Array(UnsafeBufferPointer(start: data[0], count: Int(readBuf.frameLength)))
-        }
-
-        // Downmix to mono first if needed
-        var inputBuffer = readBuf
-        if srcFormat.channelCount > 1, let src = readBuf.floatChannelData {
-            let monoFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: srcFormat.sampleRate,
-                channels: 1,
-                interleaved: false
-            )!
-            if let monoBuf = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: readBuf.frameCapacity),
-               let dst = monoBuf.floatChannelData?[0] {
-                monoBuf.frameLength = readBuf.frameLength
-                let channels = Int(srcFormat.channelCount)
-                let scale = 1.0 / Float(channels)
-                for i in 0..<Int(readBuf.frameLength) {
-                    var sum: Float = 0
-                    for ch in 0..<channels { sum += src[ch][i] }
-                    dst[i] = sum * scale
-                }
-                inputBuffer = monoBuf
-            }
-        }
-
-        // Resample via AVAudioConverter
-        guard let converter = AVAudioConverter(from: inputBuffer.format, to: targetFormat) else {
-            // If conversion not possible, try direct extraction
-            guard let data = inputBuffer.floatChannelData else { return [] }
-            return Array(UnsafeBufferPointer(start: data[0], count: Int(inputBuffer.frameLength)))
-        }
-
-        let ratio = 16000.0 / inputBuffer.format.sampleRate
-        let outFrames = AVAudioFrameCount(Double(inputBuffer.frameLength) * ratio) + 1
-        guard let outBuf = AVAudioPCMBuffer(pcmFormat: targetFormat, frameCapacity: outFrames) else {
-            return []
-        }
-
-        nonisolated(unsafe) var consumed = false
-        nonisolated(unsafe) let inputRef = inputBuffer
-        var convError: NSError?
-        converter.convert(to: outBuf, error: &convError) { _, status in
-            if consumed { status.pointee = .endOfStream; return nil }
-            consumed = true
-            status.pointee = .haveData
-            return inputRef
-        }
-
-        guard let data = outBuf.floatChannelData else { return [] }
-        return Array(UnsafeBufferPointer(start: data[0], count: Int(outBuf.frameLength)))
-    }
-
-    // MARK: - VAD
-
-    private struct SpeechSegment {
-        let startSample: Int
-        let samples: [Float]
-    }
-
-    /// Detect speech segments in a chunk of 16kHz mono audio using Silero VAD.
-    private func detectSpeech(samples: [Float], vad: VadManager) async throws -> [SpeechSegment] {
-        let vadChunkSize = 4096
-        let minimumSpeechSamples = 8000
-
-        var vadState = await vad.makeStreamState()
-        var segments: [SpeechSegment] = []
-        var speechBuffer: [Float] = []
-        var speechStart: Int?
-        var offset = 0
-
-        while offset + vadChunkSize <= samples.count {
-            try Task.checkCancellation()
-
-            let chunk = Array(samples[offset..<(offset + vadChunkSize)])
-
-            let result = try await vad.processStreamingChunk(
-                chunk,
-                state: vadState,
-                config: .default,
-                returnSeconds: true,
-                timeResolution: 2
+        // Timestamps from the frame position (anchor-aware, #128)
+        return reading.utterances.map { utterance in
+            FileLine(
+                record: SessionRecord(
+                    speaker: speaker,
+                    text: utterance.text,
+                    timestamp: clock.date(atFrame: utterance.fileFrame)
+                ),
+                end: clock.date(atFrame: utterance.endFileFrame),
+                span: Span(start: utterance.fileFrame, end: utterance.endFileFrame),
+                words: utterance.words
             )
-            vadState = result.state
-
-            if let event = result.event {
-                switch event.kind {
-                case .speechStart:
-                    if speechStart == nil {
-                        speechStart = offset
-                        speechBuffer = []
-                    }
-                case .speechEnd:
-                    if speechStart != nil {
-                        speechBuffer.append(contentsOf: chunk)
-                        if speechBuffer.count >= minimumSpeechSamples {
-                            segments.append(SpeechSegment(
-                                startSample: speechStart!,
-                                samples: speechBuffer
-                            ))
-                        }
-                        speechStart = nil
-                        speechBuffer = []
-                    }
-                }
-            }
-
-            if speechStart != nil {
-                speechBuffer.append(contentsOf: chunk)
-            }
-
-            offset += vadChunkSize
         }
-
-        // Flush remaining speech
-        if let start = speechStart, speechBuffer.count >= minimumSpeechSamples {
-            segments.append(SpeechSegment(startSample: start, samples: speechBuffer))
-        }
-
-        return segments
     }
 
     // MARK: - Batch Meta
@@ -587,8 +450,6 @@ actor BatchTranscriptionEngine {
     private struct ResolvedAnchors {
         let micStartDate: Date?
         let sysStartDate: Date?
-        let micSampleRate: Double?
-        let sysSampleRate: Double?
         let micAnchors: [BatchMeta.TimingAnchor]
         let sysAnchors: [BatchMeta.TimingAnchor]
     }
@@ -604,21 +465,9 @@ actor BatchTranscriptionEngine {
         return ResolvedAnchors(
             micStartDate: meta.micStartDate,
             sysStartDate: meta.sysStartDate,
-            micSampleRate: nil,
-            sysSampleRate: nil,
             micAnchors: meta.micAnchors,
             sysAnchors: meta.sysAnchors
         )
     }
 
-}
-
-// MARK: - JSONDecoder Extension
-
-extension JSONDecoder {
-    static let iso8601Decoder: JSONDecoder = {
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        return decoder
-    }()
 }

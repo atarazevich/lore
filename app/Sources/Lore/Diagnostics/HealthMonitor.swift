@@ -86,6 +86,7 @@ final class HealthMonitor {
     /// `refresh()` afterwards reads the new last-attempt.
     @ObservationIgnored var runMicCaptureTest: () async -> Void = {}
     @ObservationIgnored var runModelWarmupTest: () async -> Void = {}
+    @ObservationIgnored var runVADLoadTest: () async -> Void = {}
     @ObservationIgnored var runOpenAITest: () async -> Void = {}
 
     /// Re-checks the folder the #148 move could not empty, clearing its marker
@@ -179,6 +180,14 @@ final class HealthMonitor {
         default:
             return nil
         }
+    }
+
+    /// Events that move no condition but change a panel row read from disk: a
+    /// VAD load lands (or fails), so the voice-activity row re-reads at once
+    /// instead of waiting for the next open (rule 2 of `no-false-positives`).
+    nonisolated static func refreshesPanel(for event: DiagEvent) -> Bool {
+        if case .modelLoad(.vad, _, _, _) = event { return true }
+        return false
     }
 
     /// The single ordered path both halves take: re-probe so the panel is fresh,
@@ -284,8 +293,10 @@ final class HealthMonitor {
         switch id {
         case .micCapture:
             await runMicCaptureTest()
-        case .modelWarmup, .asrModel, .vadModel:
+        case .modelWarmup, .asrModel:
             await runModelWarmupTest()
+        case .vadModel:
+            await runVADLoadTest()
         case .openAILiveness:
             await runOpenAITest()
         default:

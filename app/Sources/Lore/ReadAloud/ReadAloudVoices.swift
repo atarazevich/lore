@@ -70,13 +70,19 @@ enum ReadAloudVoices {
         var seen = Set<String>()
         return AVSpeechSynthesisVoice.speechVoices()
             .filter { $0.language.hasPrefix(languagePrefix) }
-            .compactMap { voice in
-                guard seen.insert(voice.name).inserted else { return nil }
-                return ReadAloudVoiceChoice(
-                    engine: .system, id: voice.identifier, name: voice.name
-                )
-            }
+            .compactMap { seen.insert($0.name).inserted ? choice($0) : nil }
             .sorted { $0.name < $1.name }
+    }
+
+    /// Every installed system voice, in the system's own order and with the
+    /// compact/premium duplicates kept: an agent names the voice it wants by
+    /// name or by identifier (#256), and a collapse by name would hide one.
+    static func allSystemVoices() -> [ReadAloudVoiceChoice] {
+        AVSpeechSynthesisVoice.speechVoices().map(choice)
+    }
+
+    private static func choice(_ voice: AVSpeechSynthesisVoice) -> ReadAloudVoiceChoice {
+        ReadAloudVoiceChoice(engine: .system, id: voice.identifier, name: voice.name)
     }
 
     /// Panel avatar letter — the voice name's first letter.

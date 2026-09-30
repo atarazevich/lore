@@ -96,6 +96,15 @@ final class ReadAloudController {
     private(set) var runTexts: [QueueText] = []
 
     var isSessionActive: Bool { player != nil }
+    /// Whether there is a reading to control: the identity, progress and
+    /// transport rows exist for exactly this long.
+    var showsControls: Bool { status != .idle }
+    /// Whether the selected-text player has anything to show — the one
+    /// predicate the floating panel's poll and its view both read, so the
+    /// window is never up around an empty plate (#260, where agent replies
+    /// joined the same panel). Derived from the controls and the notice rather
+    /// than re-stating either.
+    var isPanelVisible: Bool { showsControls || notice != nil }
     var currentText: QueueText? { runTexts.first }
     var upcomingTexts: [QueueText] { Array(runTexts.dropFirst()) }
     /// Drives the queue chip (visible only when non-zero) and enables ⏭.
@@ -297,8 +306,8 @@ final class ReadAloudController {
 
     // MARK: - Dictation interplay (#105)
 
-    /// Dictation capture is about to open the mic (pre-buffer start) — pause
-    /// before any TTS output can enter the buffer.
+    /// The talk key has decided a dictation (#279) — pause. A tap never
+    /// reaches here, so nothing has to be resumed after one.
     func pauseForDictation() {
         guard status == .playing else { return }
         player?.pause()
@@ -307,12 +316,9 @@ final class ReadAloudController {
     }
 
     /// Dictation capture ended. Auto-resume only from this controller's own
-    /// pause (never a manual one). A `cancelled` gesture (Fn tap under 150 ms
-    /// — the recording was never confirmed) is not a dictation, so it always
-    /// resumes; a real dictation end resumes only when the setting opts in.
-    func dictationEnded(cancelled: Bool) {
-        let shouldResume = pausedByDictation
-            && (cancelled || (settings?.readAloudResumeAfterDictation ?? false))
+    /// pause (never a manual one), and only when the setting opts in.
+    func dictationEnded() {
+        let shouldResume = pausedByDictation && (settings?.readAloudResumeAfterDictation ?? false)
         pausedByDictation = false
         guard shouldResume, status == .paused, let player else { return }
         player.rate = Float(rate)

@@ -141,8 +141,11 @@ final class TranscriptionEngine {
     /// equivalent — the shared cache is where it survives.
     private var cachedSystemBackend: (any TranscriptionBackend)?
 
-    /// Audio recorder for tapping streams (set by ContentView when recording is enabled).
-    var audioRecorder: AudioRecorder?
+    /// The current meeting's recording, when it records audio (#268). Set by
+    /// `LiveSessionController` before `start()`. Each capture stream takes the
+    /// reference when it is built, so its buffers — late ones included — only
+    /// ever reach the meeting they were captured for.
+    var recording: MeetingRecording?
 
     /// The app's one prepared ASR instance. The engine asks it for the mic leg
     /// rather than building its own, so a meeting started while the launch
@@ -176,6 +179,9 @@ final class TranscriptionEngine {
     private var sysRestartTask: Task<Void, Never>?
     private var pendingMicDeviceID: AudioDeviceID?
     private var pendingSystemAudioRestart = false
+    private let loadVAD: @Sendable () async throws -> VadManager
+    /// Seams so a test can fail a load without touching the machine's real model.
+    private let clearASRCache: @Sendable () -> Void
 
     init(
         transcriptStore: TranscriptStore,
@@ -184,7 +190,9 @@ final class TranscriptionEngine {
         audioBus: AudioBus = AudioBus(),
         mode: Mode = .live,
         makeSystemBackend: @escaping @Sendable () -> any TranscriptionBackend = { ParakeetBackend() },
-        micAuthorization: @escaping @Sendable () -> AVAuthorizationStatus = { MicrophonePermission.status }
+        micAuthorization: @escaping @Sendable () -> AVAuthorizationStatus = { MicrophonePermission.status },
+        loadVAD: @escaping @Sendable () async throws -> VadManager = { try await SileroVAD.load() },
+        clearASRCache: @escaping @Sendable () -> Void = { ParakeetBackend().clearModelCache() }
     ) {
         self.transcriptStore = transcriptStore
         self.settings = settings
@@ -193,6 +201,8 @@ final class TranscriptionEngine {
         self.mode = mode
         self.makeSystemBackend = makeSystemBackend
         self.micAuthorization = micAuthorization
+        self.loadVAD = loadVAD
+        self.clearASRCache = clearASRCache
         switch mode {
         case .live:
             self.needsModelDownload = Self.modelNeedsDownload()
@@ -252,27 +262,17 @@ final class TranscriptionEngine {
             : "Loading Parakeet TDT v3..."
         if needsModelDownload { downloadProgress = 0 }
 
+        var asrLoaded = false
         do {
             // Each load records its own modelLoad event where it happens, so a
             // VAD failure is never reported as an ASR one.
             try await acquireASRBackends()
+            asrLoaded = true
 
             if vadManager == nil {
                 assetStatus = "Loading VAD model..."
-                let startedAt = Date()
-                do {
-                    vadManager = try await VadManager()
-                } catch {
-                    DiagStore.record(.modelLoad(
-                        model: .vad, outcome: .failed,
-                        seconds: Date().timeIntervalSince(startedAt), fromCache: false
-                    ))
-                    throw error
-                }
-                DiagStore.record(.modelLoad(
-                    model: .vad, outcome: .ok,
-                    seconds: Date().timeIntervalSince(startedAt), fromCache: false
-                ))
+                // `SileroVAD.load()` records its own modelLoad event.
+                vadManager = try await loadVAD()
             }
         } catch {
             let msg = "Failed to load models: \(error.localizedDescription)"
@@ -282,12 +282,15 @@ final class TranscriptionEngine {
             assetStatus = "Ready"
             isRunning = false
             downloadProgress = nil
+            // Only an ASR failure says the ASR cache is bad: a VAD failure (say,
+            // offline on its first download) must never delete a working model.
+            guard !asrLoaded else { return }
             // Clear corrupt cache so the next attempt triggers a fresh download.
             // The files go, the shared cache's loaded instance does not: after
             // this, disk and memory disagree until the app restarts — the cache
             // has no eviction entry point. Tracked as #186.
             invalidateBackendCache()
-            ParakeetBackend().clearModelCache()
+            clearASRCache()
             DiagStore.record(.modelCacheCleared)
             needsModelDownload = true
             downloadConfirmed = false
@@ -367,9 +370,9 @@ final class TranscriptionEngine {
     /// arrived meanwhile.
     ///
     /// Shared by `start()` (once models are loaded) and `resume()` (#153),
-    /// whose whole point is to reach this without re-entering `start()` —
-    /// that would restart the recorder's session, orphaning the pre-pause
-    /// audio and wiping its timing anchors.
+    /// whose whole point is to reach this without re-entering `start()`:
+    /// the same backends and the same meeting recording carry on, one pair of
+    /// track files across the pause.
     ///
     /// Assumes `isRunning` is already true and `isStarting` is set by the
     /// caller, so a `restartMic` arriving mid-flight defers instead of racing
@@ -450,8 +453,8 @@ final class TranscriptionEngine {
     /// down — the mic subscription and the system tap, both awaited so each
     /// transcriber flushes its tail as a final utterance, which is why no
     /// utterance ever splices across the gap — and keeps everything a resume
-    /// needs: loaded backends, the VAD, and the recorder's open files and
-    /// timing anchors.
+    /// needs: loaded backends, the VAD, and the meeting's recording with its
+    /// open files and timing.
     ///
     /// `isRunning` goes false because capture really has stopped; the paused
     /// *session* is `AppCoordinator.state`, which stays the single truth source
@@ -466,7 +469,7 @@ final class TranscriptionEngine {
     }
 
     /// Continue the paused session: fresh transcribers over fresh streams, the
-    /// same backends, the same recorder files. Never routes through `start()`.
+    /// same backends, the same recording. Never routes through `start()`.
     func resume() async {
         if case .scripted = mode {
             isRunning = true
@@ -492,11 +495,6 @@ final class TranscriptionEngine {
         systemCapture.resetFailureBudget()
         isStarting = true
         defer { isStarting = false }
-
-        // Armed before any buffer can arrive, so each track fills its own gap
-        // on its first post-resume write. Idempotent, so a failed resume needs
-        // no undo — the gap simply measures longer next time.
-        audioRecorder?.noteResumedFromPause()
 
         if await bringUpCapture(vadManager: vadManager) {
             engineLog.debug("capture resumed")
@@ -648,7 +646,7 @@ final class TranscriptionEngine {
     /// two transcriber tasks is what makes each flush its tail as a final
     /// utterance — the reason a pause splices nothing.
     ///
-    /// Deliberately leaves the backends, the VAD and the recorder alone: this
+    /// Deliberately leaves the backends, the VAD and the recording alone: this
     /// is the part `pause()` and `finalize()` agree on, and everything a resume
     /// would need survives it.
     private func tearDownCaptureLegs() async {
@@ -804,9 +802,9 @@ final class TranscriptionEngine {
         // Mute gate sits closest to the bus so everything downstream — the recorder tap
         // and the VAD/transcriber — sees silence while muted (#66).
         var micStream = Self.mutedStream(rawStream, muted: _micMuted)
-        if let recorder = audioRecorder {
+        if let recording {
             micStream = Self.tappedStream(micStream) { buffer in
-                recorder.writeMicBuffer(buffer)
+                recording.writeMicBuffer(buffer)
             }
         }
         let store = transcriptStore
@@ -862,9 +860,9 @@ final class TranscriptionEngine {
         }
 
         var sysStream = sysStreams.systemAudio
-        if let recorder = audioRecorder {
+        if let recording {
             sysStream = Self.tappedStream(sysStream) { buffer in
-                recorder.writeSysBuffer(buffer)
+                recording.writeSysBuffer(buffer)
             }
         }
 
@@ -946,7 +944,9 @@ final class TranscriptionEngine {
 
     /// A zeroed buffer matching the given buffer's format and frame length.
     private nonisolated static func silentBuffer(like buffer: AVAudioPCMBuffer) -> AVAudioPCMBuffer? {
-        AudioUtils.silentBuffer(format: buffer.format, frames: buffer.frameLength)
+        AudioUtils.silentBuffer(
+            format: buffer.format, frames: buffer.frameLength, stamp: (buffer as? CapturedBuffer)?.stamp
+        )
     }
 
     /// Wrap an audio stream to forward each buffer to a synchronous tap before yielding it downstream.

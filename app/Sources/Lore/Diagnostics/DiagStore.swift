@@ -41,14 +41,8 @@ final class DiagStore: @unchecked Sendable {
     /// beyond the immutable `let`s above.
     private let state: OSAllocatedUnfairLock<State>
 
-    /// The one observer (#140): `HealthMonitor` listens for failed user actions
-    /// so a summon fires *because something just failed*, not because a 5 s loop
-    /// re-read a state bit. Called synchronously from `record()` on whatever
-    /// thread recorded — the observer must filter cheaply and hop itself.
-    private let observer = OSAllocatedUnfairLock<(@Sendable (DiagEvent) -> Void)?>(initialState: nil)
-
     func setObserver(_ onRecord: (@Sendable (DiagEvent) -> Void)?) {
-        observer.withLock { $0 = onRecord }
+        state.withLock { $0.observer = onRecord }
     }
 
     private struct State {
@@ -59,6 +53,13 @@ final class DiagStore: @unchecked Sendable {
         var count = 0
         /// True while a coalesced flush is already scheduled.
         var flushScheduled = false
+        /// The one observer (#140): `HealthMonitor` listens for failed user actions
+        /// so a summon fires *because something just failed*, not because a 5 s loop
+        /// re-read a state bit. Called synchronously from `record()` on whatever
+        /// thread recorded — the observer must filter cheaply and hop itself.
+        /// A struct field (#291): a bare closure as `withLock`'s generic state is
+        /// re-thunked on every read, deepening the call per event.
+        var observer: (@Sendable (DiagEvent) -> Void)?
 
         /// Fold a consecutive repeat into the newest record, or take a fresh slot.
         ///
@@ -142,13 +143,12 @@ final class DiagStore: @unchecked Sendable {
 
     func record(_ event: DiagEvent) {
         let record = DiagRecord(event: event)
-        let needsSchedule = state.withLock { state -> Bool in
+        let (needsSchedule, observer) = state.withLock { state in
             state.append(record)
-            guard !state.flushScheduled else { return false }
-            state.flushScheduled = true
-            return true
+            defer { state.flushScheduled = true }
+            return (!state.flushScheduled, state.observer)
         }
-        observer.withLock { $0 }?(event)
+        observer?(event)
         guard needsSchedule else { return }
         flushQueue.asyncAfter(deadline: .now() + Self.flushInterval) { [weak self] in
             self?.flush()

@@ -39,6 +39,9 @@ struct HealthProber {
     var readNotesLeftover: () -> NotesLeftover?
     var store: DiagStore
     var now: () -> Date
+    /// Whether the voice-activity model is complete on disk; injected so the
+    /// row's rule is testable without this machine's model folder.
+    var vadModelPresent: () -> Bool
 
     init(
         readTapLiveness: @escaping () -> TapLiveness,
@@ -47,7 +50,8 @@ struct HealthProber {
         signingLedger: SigningIdentityLedger? = nil,
         readNotesLeftover: @escaping () -> NotesLeftover? = { nil },
         store: DiagStore = .shared,
-        now: @escaping () -> Date = Date.init
+        now: @escaping () -> Date = Date.init,
+        vadModelPresent: @escaping () -> Bool = { SileroVAD.isPresent }
     ) {
         self.readTapLiveness = readTapLiveness
         self.readSecureInput = readSecureInput
@@ -56,6 +60,7 @@ struct HealthProber {
         self.readNotesLeftover = readNotesLeftover
         self.store = store
         self.now = now
+        self.vadModelPresent = vadModelPresent
     }
 
     /// A probe result plus the machine-local notes (holder attribution, signing
@@ -128,7 +133,7 @@ struct HealthProber {
         case .secureInput: return secureInputReading(secureInput)
         case .microphone: return plain(id, Self.microphoneStatus())
         case .asrModel: return plain(id, ParakeetBackend().checkStatus() == .ready ? .ok : .failed)
-        case .vadModel: return plain(id, Self.vadModelPresent() ? .ok : .failed)
+        case .vadModel: return plain(id, vadStatus())
         case .openAIKey: return plain(id, hasOpenAIKey() ? .ok : .failed)
         case .notesFolder: return notesFolderReading()
         case .micCapture, .modelWarmup, .openAILiveness, .systemAudio, .paste:
@@ -334,14 +339,20 @@ struct HealthProber {
         Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "0"
     }
 
-    /// VAD presence, off FluidAudio's own path and file constants so the two
-    /// can't drift from where the library actually downloads the model — the ASR
-    /// probe reuses `ParakeetBackend`/`AsrModels` for the same reason.
-    private static func vadModelPresent() -> Bool {
-        let file = MLModelConfigurationUtils
-            .defaultModelsDirectory(for: .vad)
-            .appendingPathComponent(ModelNames.VAD.sileroVadFile, isDirectory: true)
-        return FileManager.default.fileExists(atPath: file.path)
+    /// The voice-activity model (#269). `.failed` only on a real VAD load that
+    /// failed within the 24 h ceiling, file present or not (`no-false-positives`
+    /// rules 1 and 3); a later success or the ceiling ends it. Otherwise the file
+    /// decides: present is `.ok`, missing is `.warning` — a download the first
+    /// meeting, file transcription or `lore transcribe` makes, and dictation
+    /// never needs it. Every VAD load refreshes the panel.
+    private func vadStatus() -> HealthStatus {
+        if let last = lastAttempt(Self.vadLoadOutcome), last.outcome == .failed, !last.isStale { return .failed }
+        return vadModelPresent() ? .ok : .warning
+    }
+
+    nonisolated private static func vadLoadOutcome(_ event: DiagEvent) -> DiagEvent.Outcome? {
+        if case .modelLoad(.vad, let outcome, _, _) = event, outcome != .unknown { return outcome }
+        return nil
     }
 
     private static func freeDiskGB() -> Int? {

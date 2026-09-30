@@ -1,5 +1,130 @@
 # Changelog
 
+## v3.7.0 — 2026-09-30
+
+Meetings say who said what, and both sides of a recording stay in time at their true pitch. lore also no longer quits by itself after a few days open.
+
+**lore no longer quits by itself after a few days open (#291)**
+- After being open for a few days, lore could quit by itself, usually just as the microphone started for a dictation or a meeting. Keeping it open for days no longer does that
+
+**A meeting is in the list the moment it ends (#290)**
+- When you stop a meeting, it is in the list and open straight away, with its live transcript and "preparing…" while the second pass runs. Before, a long meeting stayed out of the list for minutes while its recording was saved, and looked lost
+- With "Save audio recording" on, the recording is saved to the notes folder shortly after, in the background: the transcript first, then the recording, then finding who spoke. Its play button appears when it is there
+- If lore is quit before a recording is saved, it is saved the next time lore opens. A recording is in the notes folder whole or not at all
+
+**The replies player says what it is (#289)**
+- The player's top bar now carries lore's mark and the command that fills it, `lore say "message"`, with a ? beside it
+- The ? opens a card on hover: what the list is, and the one line to add to an agent's instructions, with Copy. A click on the ? keeps the card open until you click elsewhere or press Esc; while it is open, Esc closes the card first
+- The × still hides the player. The bar is 6 pt taller; the rows, the keys and the width are as before
+
+**A reply from a background session names the chat it came from (#288)**
+- A reply from a Claude Code background session is listed and announced under the herdr tab of the chat you moved it to the background from, and Go to opens that tab. Before, it took the tab of whichever chat had started Claude Code's background service
+- When that chat is closed or has moved on to another conversation, the reply shows its folder instead of another chat's name
+- Replies from chats in their own tab are named as before, and replies already in the list keep their names
+
+**Updates can arrive between releases (on Macs that opt in)**
+- A Mac can take updates between releases from a separate channel; it opts in by hand, and nothing changes for any other Mac
+
+**Meetings say who said what (#269)**
+- After a meeting, lore finds who spoke, on your microphone's side and on the other side separately, so several people in one room or on one call are no longer a single voice. It runs on this Mac, after the transcript is ready, and never holds up the next meeting
+- While it runs, the meeting's detail line ends with "finding who spoke…"; when it is done the line goes and the speakers are in place
+- Your own voice is You. Everyone else is Speaker 1, Speaker 2… numbered by when they first speak, and a number never shifts once given
+- Click a speaker's name to name them, or to merge them into You, into another speaker of the meeting or into someone you have named before. People you named are suggested first when their voice sounds alike, but never applied for you
+- The names reach the transcript, the summary, Ask Lore, copy and the meeting's notes file. Naming someone makes the summary again with the names in it; a title you set yourself is kept
+- The review reads by turns: one speaker's lines run together under their name, and a short reply of three words or fewer from someone else stays inside the turn as "(Name: words.)". Meetings from before this version read by turns too, as You and Them
+- Times in the review read as time into the meeting — "12m 57s", "1h 2m" — so they are not mistaken for the clock time in the header. Copy, export and Ask Lore keep clock times
+- The line count is gone from the meeting's detail line and the meeting list
+- A meeting's default title uses the time the recording started, the same time the detail line shows
+- Not yet: lore does not recognise a voice by itself in a later meeting, a merge cannot be undone, and a person's name cannot be changed everywhere at once. Meetings recorded before this version have no speakers to find
+- Speech recognition library updated to FluidAudio 0.17.4; transcripts read as they did before
+
+**A meeting keeps one notes file (#280)**
+- Renaming a meeting, by hand or by the automatic title, replaces its notes file instead of leaving the old one beside it under the old name. Saving the transcript again, or its notes, rewrites the same file
+- A file with the same name that belongs to another meeting, or one you made yourself, is never overwritten
+- A title or tags set while a meeting was still recording are kept when it finishes; before, finishing dropped them
+- Copies already left behind by earlier versions are not removed, and a meeting saved before this version can leave one old copy on its first rename
+
+**The meeting's second pass keeps speech whole (#273)**
+- Speech that runs across the edge of a 30-second block now comes out as one line instead of two, often mid-sentence
+- No audio at a block's edge is skipped, and a line keeps a short lead-in, so its first syllable is no longer lost
+- An echo — your microphone picking up the other side's words — is removed whichever side starts first. A real exchange with the same words in it is kept; when unsure, lore keeps the line
+
+**A Bluetooth headset in call mode no longer records the other side an octave high (#272)**
+- A headset in call mode can deliver the other side's sound at half the rate the Mac announces. lore now measures what actually arrives and corrects it, so the other side is recorded, transcribed and played back at its true pitch and speed, even when the headset switches mode partway through a meeting
+- The other side's speech is recognised better in those meetings, because the transcription no longer hears it at double speed
+- A headset or output that delivers its announced rate is not touched
+
+**Dictation and live meeting audio no longer lose a sliver every few seconds (#271)**
+- A tiny piece of audio, about a hundredth of a second, was dropped every 2.7 seconds in every dictation and in the live transcription of both meeting sides. Nothing is dropped now, so words falling on those moments are no longer clipped
+
+**The two sides of a meeting recording stay in time (#268)**
+- Your side and the other side are each placed by when they were captured, so a saved meeting recording no longer drifts into two voices talking over each other at different speeds
+- A pause in capture, or the other side dropping out for a while, leaves silence where it happened instead of pulling the rest of the recording out of step
+
+**The replies player shows which chat is talking, even when you put it away (#285)**
+- When a reply begins to be read, the player comes up with the chat's name, even if you put it away with `fn` or the ×. When reading ends it stays for ten seconds, then goes away again
+- Tap `fn` while a reply is read to put the player away for that reply; the next reply brings it back
+- The player never takes the keyboard from the app you are in, and during a dictation or a call it stays away as before
+
+**`fn` is decided once: a quick tap is the player, a hold is a dictation (#279)**
+- Let go of `fn` within 0.2 seconds, with no other key, and it is a tap: the replies player comes up or goes away, and nothing else happens. Still holding it at 0.2 seconds, it is a dictation
+- Pressing `fn` no longer touches a reply being read. A dictation pauses it once it has started; a tap and `fn R` no longer stop it for a moment first
+- A hold let go before any word could be heard is a dictation that came to nothing, as before, and no longer shows or hides the player
+- A chord whose `fn` flickers under the other key is no longer taken for a tap
+- `esc` while `fn` is still inside those 0.2 seconds cancels the dictation before it starts
+- Reading a selection aloud pauses when a dictation starts, not on every press of `fn`
+- A call or any other app using the microphone still holds replies, exactly as before
+- A tap on a real keyboard now shows and hides the player: the key-down macOS sends for the Globe key when `fn` is let go counted as a second key, so every tap was taken for a chord. Taps in quick succession each count, and a tap is not taken for a dictation when lore reads its release late
+- A tap of `fn` no longer flashes the "meeting detected" prompt
+
+**A tap of `fn` shows or hides the replies player, and `fn R` plays and pauses again (#278)**
+- Tap `fn` on its own to bring the player up, and tap it again to put it away. A tap is a quick press with no other key and no words in it; anything you say while holding `fn` is a dictation, as always, so a one-word dictation still pastes
+- A tap while a reply is being read leaves it being read
+- `fn R` pauses the reply being read, and pressing it again carries it on from where it stopped. It no longer opens or closes the player
+- A tap brings the player up even when every reply has been heard, muted or not, so the list of past replies is there to go back to
+- With no replies, a tap of `fn` does nothing, as before
+
+**`esc` stops a reply being read, wherever the player is (#277)**
+- While lore is reading a reply, `esc` pauses it even when the player is put away and another app is in front. The reply stays where it stopped and carries on from there when you play it again
+- `esc` right after the chat's name — in the short pause before the reply — now stops the reading too; before, that press was taken and nothing stopped
+- A recording and the screenshot tool still take `esc` first, and with nothing being read and the player put away, `esc` goes to the app in front as before
+
+**The replies player moves, says which chat is speaking, and calls a chat what you call it (#267)**
+- Press anywhere on the player — or on the waiting capsule — that is not a button and drag it where you want it. It opens there next time, and after a restart. If the screen you left it on is gone, it comes back under the recording bubble
+- The chat is now said on its own before the reply, with a clear pause after it, and in a voice that fits the name's own language — an English chat name is no longer read by a Russian voice, and no longer runs into the words
+- Clicking a reply in the list plays it without saying which chat it is: you are looking at the row you clicked. Everything that starts a reply away from the screen still says the chat first
+- A chat is named by the workspace and tab you typed in herdr — workspace, then tab — over what the chat calls itself: its own topic, its folder and the app it runs in. Renaming a tab changes what the player shows and says the next time it comes up. Outside herdr, the name you gave the chat yourself, else its folder — never a name the agent made up for you
+- A chat lore cannot ask about keeps the name it arrived with, and replies already in the list still show and play
+- The list is denser: seven chats where five stood, each on two lines, the second running the full width so two tabs of one workspace can be told apart
+
+**"Replies waiting" counts only what will be read (#266)**
+- A reply waits until it starts being read: one that was started and left behind — a row clicked while it was playing, a pause reading moved on from — stops being counted, so the capsule no longer says replies are waiting when the player has nothing left to read
+
+**The replies player answers to one key, one click and one × (#263)**
+- The player can be put away while a reply carries on being read
+- `esc` pauses the reply being read, and pressing it again puts the player away; with nothing being read, one press puts it away. A recording and the screenshot tool still take `esc` first, and every other moment leaves it to the app in front
+- Clicking a reply plays it; clicking the one playing pauses it; clicking it again carries on from where it stopped. A reply left and come back to starts again
+- The keys at the foot of the player are one quiet line instead of two rows, and the player has a translucent head with an × that puts it away
+
+**Coding chats speak through lore, one at a time (#236)**
+- A chat in the terminal can send lore what it just said, and lore reads those replies aloud one after another, the chat's name first, instead of several chats talking over each other
+- Every reply stays in a list in the player, so one can be heard again, and the last fifty survive a restart
+- Nothing is read while the microphone is in use — a dictation, a recording or a call. A quiet capsule says how many replies wait, and a short sound plays when the microphone is free again
+- From any reply, one control goes to its chat: it switches to the chat's app and shows its tab, or opens the chat again in a new tab when it is closed, or starts the app first when it is not running. The app's own icon says which app that is
+- Keys on the player: fn R play or pause, fn [ previous, fn ] next, fn J go to the chat, fn M mute, esc stop. While a reply is being read, esc stops it and the app in front does not receive that key
+- A chat sends a reply with `lore say "<text>"`, the same `lore` command that prints a file's transcript today; if lore is not running, or the feature is off, the system voice speaks it exactly as before
+- Off by default, under Settings as an experimental switch. While it is off nothing of this runs, and fn R and fn Q keep reading selected text
+
+**A development build no longer updates itself (#262)**
+- A build made for testing never checks for updates, so it cannot be replaced while it runs; released builds check as before
+
+**Transcribe a file from the command line (#254)**
+- `lore transcribe <audio file>` prints the file's transcript. lore itself reads the file and transcribes it with its own local speech model, so a recording only lore is allowed to open — a voice memo, with lore granted Full Disk Access — works from a terminal that has no such permission
+- Nothing is added to meetings, notes or dictation history; the transcript only goes to the terminal
+- The command opens lore if it isn't running, and says so plainly when lore is open but not answering
+- A recording being transcribed steps aside the moment a meeting starts, and Ctrl-C stops the work inside lore
+- A file that stops decoding part-way still prints the text up to that point, with one line saying the rest couldn't be read
+
 ## v3.6.0 — 2026-09-14
 
 A fix release: nothing new, one crash gone.

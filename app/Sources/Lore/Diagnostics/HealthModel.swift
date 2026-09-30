@@ -265,12 +265,15 @@ struct HealthSummary: Equatable {
     /// - `.microphone`: `.warning` is `.notDetermined` — macOS was never asked
     ///   (#140). A fresh install is not an issue; the first recording prompts.
     ///
+    /// - `.vadModel`: `.warning` is "not downloaded yet" (#269). Dictation never
+    ///   loads it, so a dictation-only user would otherwise carry an issue forever.
+    ///
     /// A real recorded failure still lands as `.failed` and counts.
     static func countsInFooter(_ result: HealthResult) -> Bool {
         switch result.status {
         case .ok: return false
         case .failed: return true
-        case .warning: return result.id.cost == .cheap && ![.tap, .microphone].contains(result.id)
+        case .warning: return result.id.cost == .cheap && ![.tap, .microphone, .vadModel].contains(result.id)
         }
     }
 

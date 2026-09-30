@@ -12,14 +12,15 @@ final class StreamingTranscriber: @unchecked Sendable {
     private let onFinal: @Sendable (String) -> Void
     private let log = Logger(subsystem: "com.lore", category: "StreamingTranscriber")
 
-    /// Resampler from source format to 16kHz mono Float32.
+    /// Resampler to 16kHz mono Float32, kept across buffers (AudioUtils.extractSamples).
     private var converter: AVAudioConverter?
-    private let targetFormat = AVAudioFormat(
-        commonFormat: .pcmFormatFloat32,
-        sampleRate: 16000,
-        channels: 1,
-        interleaved: false
-    )!
+    /// Names this stream in a resample failure event.
+    private var resampleSource: DiagEvent.ResampleSource {
+        switch speaker {
+        case .you: .meetingMic
+        case .them, .remote: .meetingSystem
+        }
+    }
 
     init(
         backend: any TranscriptionBackend,
@@ -35,11 +36,11 @@ final class StreamingTranscriber: @unchecked Sendable {
         self.onFinal = onFinal
     }
 
-    /// Silero VAD expects chunks of 4096 samples (256ms at 16kHz).
-    private static let vadChunkSize = 4096
+    private static let vadChunkSize = SileroVAD.windowSize
     /// Parakeet TDT requires >= 1s of audio; shorter segments produce unreliable output.
+    /// Live only: its 10 s flush makes short pieces; the file pass keeps 0.5 s (`AudioFileSpeech`).
     private static let minimumSpeechSamples = 16_000
-    private static let prerollChunkCount = 2
+    private static let prerollChunkCount = SileroVAD.leadInWindows
     /// Flush interval in 16kHz samples. Longer chunks give the decoder more
     /// context and reduce WER (5s=41% vs 10s=36% on OpenOats benchmark).
     private let flushInterval = 10 * 16_000
@@ -48,7 +49,7 @@ final class StreamingTranscriber: @unchecked Sendable {
 
     /// Main loop: reads audio buffers, runs VAD, transcribes speech segments.
     func run(stream: AsyncStream<AVAudioPCMBuffer>) async {
-        var vadState = await vadManager.makeStreamState()
+        let detector = SileroWindowDetector(vad: vadManager)
         var speechSamples: [Float] = []
         var vadBuffer: [Float] = []
         var vadReadIndex = 0
@@ -63,7 +64,7 @@ final class StreamingTranscriber: @unchecked Sendable {
                 log.debug("[\(self.speaker.storageKey, privacy: .public)] buffer #\(bufferCount, privacy: .public): frames=\(buffer.frameLength, privacy: .public) sr=\(fmt.sampleRate, privacy: .public) ch=\(fmt.channelCount, privacy: .public)")
             }
 
-            guard let samples = extractSamples(buffer) else { continue }
+            guard let samples = AudioUtils.extractSamples(buffer, converter: &converter, source: resampleSource) else { continue }
 
             if bufferCount <= 3 {
                 let maxVal = samples.max() ?? 0
@@ -86,14 +87,7 @@ final class StreamingTranscriber: @unchecked Sendable {
                 var startedSpeech = false
                 var endedSpeech = false
                 do {
-                    let result = try await vadManager.processStreamingChunk(
-                        chunk,
-                        state: vadState,
-                        config: .default,
-                        returnSeconds: true,
-                        timeResolution: 2
-                    )
-                    vadState = result.state
+                    let result = try await detector.read(chunk)
 
                     if let event = result.event {
                         switch event.kind {
@@ -167,87 +161,5 @@ final class StreamingTranscriber: @unchecked Sendable {
         } catch {
             log.error("ASR error: \(error.localizedDescription)")
         }
-    }
-
-    /// Extract [Float] samples from an AVAudioPCMBuffer, resampling if needed.
-    private func extractSamples(_ buffer: AVAudioPCMBuffer) -> [Float]? {
-        let sourceFormat = buffer.format
-        let frameLength = Int(buffer.frameLength)
-        guard frameLength > 0 else { return nil }
-
-        // Fast path: already Float32 at 16kHz (common for system audio capture)
-        if sourceFormat.commonFormat == .pcmFormatFloat32 && sourceFormat.sampleRate == 16000 {
-            guard let channelData = buffer.floatChannelData else { return nil }
-            if sourceFormat.channelCount == 1 {
-                // Mono — direct copy
-                return Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
-            } else {
-                // Multi-channel — take first channel only
-                return Array(UnsafeBufferPointer(start: channelData[0], count: frameLength))
-            }
-        }
-
-        // Downmix multi-channel to mono before resampling
-        // (AVAudioConverter mishandles deinterleaved multi-channel input)
-        var inputBuffer = buffer
-        if sourceFormat.channelCount > 1, let src = buffer.floatChannelData {
-            let monoFormat = AVAudioFormat(
-                commonFormat: .pcmFormatFloat32,
-                sampleRate: sourceFormat.sampleRate,
-                channels: 1,
-                interleaved: false
-            )!
-            if let monoBuf = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: buffer.frameCapacity),
-               let dst = monoBuf.floatChannelData?[0] {
-                monoBuf.frameLength = buffer.frameLength
-                let channels = Int(sourceFormat.channelCount)
-                let scale = 1.0 / Float(channels)
-                for i in 0..<frameLength {
-                    var sum: Float = 0
-                    for ch in 0..<channels { sum += src[ch][i] }
-                    dst[i] = sum * scale
-                }
-                inputBuffer = monoBuf
-            }
-        }
-
-        // Slow path: need to resample via AVAudioConverter
-        let inputFormat = inputBuffer.format
-        if converter == nil || converter?.inputFormat != inputFormat {
-            converter = AVAudioConverter(from: inputFormat, to: targetFormat)
-        }
-        guard let converter else { return nil }
-
-        let ratio = targetFormat.sampleRate / inputFormat.sampleRate
-        let outputFrames = AVAudioFrameCount(Double(inputBuffer.frameLength) * ratio)
-        guard outputFrames > 0 else { return nil }
-
-        guard let outputBuffer = AVAudioPCMBuffer(
-            pcmFormat: targetFormat,
-            frameCapacity: outputFrames
-        ) else { return nil }
-
-        var error: NSError?
-        nonisolated(unsafe) var consumed = false
-        converter.convert(to: outputBuffer, error: &error) { _, outStatus in
-            if consumed {
-                outStatus.pointee = .noDataNow
-                return nil
-            }
-            consumed = true
-            outStatus.pointee = .haveData
-            return inputBuffer
-        }
-
-        if let error {
-            log.error("Resample error: \(error.localizedDescription)")
-            return nil
-        }
-
-        guard let channelData = outputBuffer.floatChannelData else { return nil }
-        return Array(UnsafeBufferPointer(
-            start: channelData[0],
-            count: Int(outputBuffer.frameLength)
-        ))
     }
 }

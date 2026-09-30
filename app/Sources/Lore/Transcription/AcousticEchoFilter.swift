@@ -67,31 +67,45 @@ enum AcousticEchoFilter {
         echoScore(normalizedYou: normalizedYou, normalizedThem: normalizedThem, timeDelta: timeDelta) != nil
     }
 
-    /// Suppress mic records that are acoustic echoes of system records.
-    /// Modifies `micRecords` in place, removing entries that match.
+    /// Suppress mic lines that are acoustic echoes of system records. Each mic
+    /// line comes with where its speech ends. Modifies `micLines` in place,
+    /// removing entries that match.
+    ///
+    /// Either line may start first (#273): each track is cut into lines on its
+    /// own, so a mic copy can start before the system line it repeats. A mic
+    /// line that starts first is an echo only when the system line starts
+    /// within `window` and while the mic line is still speaking: the same
+    /// sound overlaps on both tracks, a reply starts after the line it answers
+    /// ends, so a real exchange of the same words is kept. Such a pair is
+    /// judged by Jaccard alone for eligible texts — containment would let a
+    /// short phrase the other side repeats delete a long line of the owner's —
+    /// and by the strict branch, at its signed delta, for short ones.
     ///
     /// Emits ONE summary event for the whole pass (#82). Per-utterance events would
     /// evict the launch, permission and identity history the ring exists to keep.
-    static func suppress(
-        micRecords: inout [SessionRecord],
-        against sysRecords: [SessionRecord]
+    ///
+    /// `parts` gives each line's record and where its speech ends; a line may
+    /// carry more (the batch pass's keep their word timings, #269).
+    static func suppress<Line>(
+        _ micLines: inout [Line],
+        against sysRecords: [SessionRecord],
+        by parts: (Line) -> (record: SessionRecord, end: Date)
     ) {
         var tally = EchoTally()
 
-        micRecords.removeAll { micRecord in
+        micLines.removeAll { line in
+            let (micRecord, micEnd) = parts(line)
             let normalizedYou = TextSimilarity.normalizedText(micRecord.text)
 
             for sysRecord in sysRecords.reversed() {
                 let timeDelta = micRecord.timestamp.timeIntervalSince(sysRecord.timestamp)
-                guard timeDelta >= 0 else { continue }
                 guard timeDelta <= window else { break }
+                guard timeDelta >= 0 || (-timeDelta <= window && sysRecord.timestamp < micEnd) else { continue }
 
                 let normalizedThem = TextSimilarity.normalizedText(sysRecord.text)
-                if let jaccard = echoScore(
-                    normalizedYou: normalizedYou,
-                    normalizedThem: normalizedThem,
-                    timeDelta: timeDelta
-                ) {
+                let score = echoScore(normalizedYou: normalizedYou, normalizedThem: normalizedThem, timeDelta: timeDelta)
+                    ?? micFirstJaccard(normalizedYou, normalizedThem, timeDelta: timeDelta)
+                if let jaccard = score {
                     tally.add(jaccard: jaccard)
                     return true
                 }
@@ -100,6 +114,13 @@ enum AcousticEchoFilter {
         }
 
         tally.recordSummary(path: .batch)
+    }
+
+    /// A mic-first pair of eligible texts: Jaccard alone, no containment.
+    private static func micFirstJaccard(_ you: String, _ them: String, timeDelta: TimeInterval) -> Double? {
+        guard timeDelta < 0, isEligible(you), isEligible(them) else { return nil }
+        let similarity = TextSimilarity.jaccard(you, them)
+        return similarity >= similarityThreshold ? similarity : nil
     }
 
     /// Running aggregate of one echo-suppression pass. Numbers only — never the

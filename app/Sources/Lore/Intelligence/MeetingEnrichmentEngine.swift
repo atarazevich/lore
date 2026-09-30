@@ -48,38 +48,86 @@ private struct GeneratedEnrichment {
 /// Manual titles are never overwritten: only a nil title or the untouched
 /// derived default (#58) is replaced.
 actor MeetingEnrichmentEngine {
+    /// What one run produced, whatever made it.
+    struct Enrichment: Sendable {
+        var title: String
+        /// "work" or "personal".
+        var type: String
+        var people: [String]
+        var organizations: [String]
+        var summary: String
+    }
+
+    /// Prompt → enrichment. Production uses the on-device model; tests hand
+    /// in their own.
+    typealias Summarize = @Sendable (_ prompt: String) async throws -> Enrichment
+
     private let repository: SessionRepository
     /// UI refresh hook, called after a session's enrichment writes land.
     private let onEnriched: @Sendable () async -> Void
+    private let summarize: Summarize?
+    /// The latest run asked for per meeting (#269): only it may run again
+    /// when the lines went stale under it.
+    private var runs: [String: Int] = [:]
 
-    init(repository: SessionRepository, onEnriched: @escaping @Sendable () async -> Void) {
+    init(
+        repository: SessionRepository,
+        onEnriched: @escaping @Sendable () async -> Void,
+        summarize: Summarize? = nil
+    ) {
         self.repository = repository
         self.onEnriched = onEnriched
+        self.summarize = summarize
+    }
+
+    /// Whether a summary can be made now: macOS 26 with Apple Intelligence
+    /// ready, or a summarizer handed in. Without it, a summary that exists is
+    /// kept (#269).
+    nonisolated var canSummarize: Bool {
+        summarize != nil || Self.isAvailable
+    }
+
+    static var isAvailable: Bool {
+        #if canImport(FoundationModels)
+        if #available(macOS 26.0, *), case .available = SystemLanguageModel.default.availability { return true }
+        #endif
+        return false
     }
 
     /// Enrich one session if it has a transcript and no summary yet. Actor
     /// isolation serializes concurrent triggers (finalize vs launch sweep);
     /// the summary check makes the loser a no-op.
+    ///
+    /// Lines that change while the model runs — a speaker pass settling, a
+    /// naming (#269) — make the result stale; it is not written. The latest
+    /// run asked for then runs once more on the lines as they read now, so a
+    /// meeting is never left without a summary by its own names landing.
     func enrichIfNeeded(sessionID: String) async {
-        #if canImport(FoundationModels)
-        guard #available(macOS 26.0, *) else { return }
-        guard case .available = SystemLanguageModel.default.availability else { return }
+        guard canSummarize else { return }
+        let run = (runs[sessionID] ?? 0) + 1
+        runs[sessionID] = run
+        for _ in 0..<2 {
+            guard await enrichOnce(sessionID: sessionID), runs[sessionID] == run else { return }
+        }
+    }
 
-        let detail = await repository.loadSession(id: sessionID)
-        let index = detail.index
-        guard index.summary == nil else { return }
-        let lines = Self.transcriptLines(detail.transcript)
-        guard !lines.isEmpty else { return }
+    /// One run; true when its result was stale and not written.
+    private func enrichOnce(sessionID: String) async -> Bool {
+        let index = await repository.sessionIndex(sessionID: sessionID)
+        guard index.summary == nil else { return false }
+        // Names and turns, as the review reads them (#269).
+        let lines = await repository.meetingTranscript(sessionID: sessionID).enrichmentLines
+        guard !lines.isEmpty else { return false }
 
         do {
-            let session = LanguageModelSession(
-                model: SystemLanguageModel.default,
-                instructions: Self.instructions
-            )
-            let transcript = Self.clipped(lines)
-            let prompt = "Transcript:\n\(transcript)\n\nProduce the title, type, people, organizations, and summary."
-            let result = try await session.respond(to: prompt, generating: GeneratedEnrichment.self).content
-            await apply(result, sessionID: sessionID)
+            let prompt = "Transcript:\n\(Self.clipped(lines))\n\nProduce the title, type, people, organizations, and summary."
+            let result: Enrichment
+            if let summarize {
+                result = try await summarize(prompt)
+            } else {
+                result = try await Self.onDevice(prompt)
+            }
+            guard await apply(result, sessionID: sessionID, lines: lines) else { return true }
             enrichLog.debug("enriched \(sessionID, privacy: .private)")
             await onEnriched()
         } catch {
@@ -87,6 +135,21 @@ actor MeetingEnrichmentEngine {
             // (e.g. model assets not downloaded yet, error 1013).
             enrichLog.debug("enrichment failed for \(sessionID, privacy: .private): \(error.localizedDescription, privacy: .private)")
         }
+        return false
+    }
+
+    private struct Unavailable: Error {}
+
+    private static func onDevice(_ prompt: String) async throws -> Enrichment {
+        #if canImport(FoundationModels)
+        guard #available(macOS 26.0, *) else { throw Unavailable() }
+        let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: instructions)
+        let result = try await session.respond(to: prompt, generating: GeneratedEnrichment.self).content
+        return Enrichment(
+            title: result.title, type: result.type.rawValue, people: result.people,
+            organizations: result.organizations, summary: result.summary)
+        #else
+        throw Unavailable()
         #endif
     }
 
@@ -104,31 +167,33 @@ actor MeetingEnrichmentEngine {
 
     // MARK: - Applying results
 
-    #if canImport(FoundationModels)
-    @available(macOS 26.0, *)
-    private func apply(_ result: GeneratedEnrichment, sessionID: String) async {
+    /// False, writing nothing, when the lines the result was made from are no
+    /// longer what the meeting reads.
+    private func apply(_ result: Enrichment, sessionID: String, lines: [String]) async -> Bool {
         // The model call takes seconds — re-load the index right before
         // writing so a rename or tag edit made during inference wins.
-        let index = await repository.loadSession(id: sessionID).index
+        let index = await repository.sessionIndex(sessionID: sessionID)
         // A summary that landed meanwhile means another trigger already
         // enriched this session — write nothing.
-        guard index.summary == nil else { return }
+        guard index.summary == nil else { return true }
+        guard await repository.meetingTranscript(sessionID: sessionID).enrichmentLines == lines else { return false }
 
         // Title: only nil or the untouched derived default (#58) is replaced —
         // anything else is a manual rename and is never overwritten.
         let generated = result.title.trimmingCharacters(in: .whitespacesAndNewlines)
-        let titleIsDefault = index.title == nil
-            || index.title == SessionIndex.defaultTitle(startedAt: index.startedAt)
+        let titleIsDefault = index.title.map { SessionIndex.isDefaultTitle($0, startedAt: index.startedAt) } ?? true
         if titleIsDefault && !generated.isEmpty {
             await repository.renameSession(sessionID: index.id, title: generated)
         }
 
         // Tags: appended behind whatever the user already set — pronouns and
         // junk the model emits as entities are dropped first (#131), then the
-        // repository normalizes (case-insensitive dedupe, cap).
+        // repository normalizes (case-insensitive dedupe, cap). A re-summary
+        // after a naming (#269) appends too: generated tags cannot be told
+        // from the user's, so a name the owner corrected can stay as a tag.
         let existing = index.tags ?? []
         let appended = Self.filteredTags(
-            [result.type.rawValue] + result.people + result.organizations
+            [result.type] + result.people + result.organizations
         )
         await repository.updateSessionTags(sessionID: index.id, tags: existing + appended)
 
@@ -137,10 +202,10 @@ actor MeetingEnrichmentEngine {
         // summary is not persisted — the session stays eligible and the
         // next sweep retries, mirroring the title guard above.
         let summary = result.summary.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !summary.isEmpty else { return }
+        guard !summary.isEmpty else { return true }
         await repository.updateSessionSummary(sessionID: index.id, summary: summary)
+        return true
     }
-    #endif
 
     // MARK: - Tag filtering (#131)
 
@@ -183,20 +248,11 @@ actor MeetingEnrichmentEngine {
     // MARK: - Prompt assembly (validated in experiments/enrichment)
 
     private static let instructions = """
-    You label voice-meeting transcripts. The transcript has two sides: "You" (the device owner) and "Them"/"Speaker N" (other participants). Speech-to-text noise and misrecognized words are expected — infer the intended meaning. Always answer in the dominant language of the transcript itself.
+    You label voice-meeting transcripts. Each line starts with its speaker: "You" (the device owner), or another participant — "Them", "Speaker N" or their name. Speech-to-text noise and misrecognized words are expected — infer the intended meaning. Always answer in the dominant language of the transcript itself.
     """
 
     /// Character budget fitting the ~4k-token on-device context window.
     private static let promptBudget = 5000
-
-    private static func transcriptLines(_ records: [SessionRecord]) -> [String] {
-        records.compactMap { record in
-            let text = record.displayText
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !text.isEmpty else { return nil }
-            return "\(record.speaker.displayLabel): \(text)"
-        }
-    }
 
     /// Head+tail truncation: keeps the opening and the close of the meeting,
     /// where the topic and the decisions live. Mid-line cuts are fine — the

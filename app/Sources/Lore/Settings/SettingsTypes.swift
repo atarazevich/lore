@@ -174,6 +174,9 @@ enum HotkeyKey: Hashable, Identifiable {
     // MARK: - Keycodes
 
     static let fnKeyCode: UInt16 = 63
+    /// The Globe key's key-down, which macOS sends at the release of a short
+    /// press of fn (#279) — the same physical key, never a second one.
+    static let globeKeyCode: UInt16 = 179
     static let rightOptionKeyCode: UInt16 = 61
     static let capsLockKeyCode: UInt16 = 57
     static let spaceKeyCode: UInt16 = 49

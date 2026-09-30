@@ -523,6 +523,70 @@ final class SettingsStore {
         }
     }
 
+    // MARK: - Agent replies (#236)
+
+    @ObservationIgnored nonisolated(unsafe) private var _agentRepliesEnabled: Bool
+    /// "Read agent replies aloud" — experimental, off by default for every
+    /// install (not the prior-install rule of the master switches above). Off,
+    /// nothing of the feature runs: no queue, no microphone observer, no events,
+    /// and Fn+R / Fn+Q keep reading selected text. Read live, so a change takes
+    /// effect without a relaunch.
+    var agentRepliesEnabled: Bool {
+        get { access(keyPath: \.agentRepliesEnabled); return _agentRepliesEnabled }
+        set {
+            withMutation(keyPath: \.agentRepliesEnabled) {
+                _agentRepliesEnabled = newValue
+                defaults.set(newValue, forKey: "agentRepliesEnabled")
+            }
+        }
+    }
+
+    /// What a chat closed since its reply is reopened with (#258), run in a
+    /// new herdr tab in the chat's folder. `<session id>` is replaced by the
+    /// reply's own session.
+    static let defaultAgentChatResumeCommand = "claude --dangerously-skip-permissions --resume <session id>"
+
+    @ObservationIgnored nonisolated(unsafe) private var _agentChatResumeCommand: String
+    /// The field as typed; empty is allowed while editing.
+    var agentChatResumeCommand: String {
+        get { access(keyPath: \.agentChatResumeCommand); return _agentChatResumeCommand }
+        set {
+            withMutation(keyPath: \.agentChatResumeCommand) {
+                _agentChatResumeCommand = newValue
+                defaults.set(newValue, forKey: "agentChatResumeCommand")
+            }
+        }
+    }
+
+    /// What actually runs: an empty field returns to the default.
+    var activeAgentChatResumeCommand: String {
+        let typed = agentChatResumeCommand.trimmingCharacters(in: .whitespacesAndNewlines)
+        return typed.isEmpty ? Self.defaultAgentChatResumeCommand : typed
+    }
+
+    @ObservationIgnored nonisolated(unsafe) private var _agentReplyPlayerPlace: CGPoint?
+    /// Where the player and its capsule were last dragged to (#267), as the
+    /// window's top-left corner in screen coordinates — the corner the shape
+    /// grows from, so a longer list pushes the bottom edge down rather than
+    /// walking the plate up the screen. Nil means the window has never been
+    /// moved, or the place it held is on no screen this Mac has now, and it
+    /// opens where it always did. No setting shows it: it is set by dragging
+    /// and read by showing.
+    var agentReplyPlayerPlace: CGPoint? {
+        get { access(keyPath: \.agentReplyPlayerPlace); return _agentReplyPlayerPlace }
+        set {
+            withMutation(keyPath: \.agentReplyPlayerPlace) {
+                _agentReplyPlayerPlace = newValue
+                defaults.set(
+                    newValue.flatMap { try? JSONEncoder().encode($0) },
+                    forKey: Self.agentReplyPlayerPlaceKey
+                )
+            }
+        }
+    }
+
+    private static let agentReplyPlayerPlaceKey = "agentReplyPlayerPlace"
+
     // MARK: - UI Settings
 
     @ObservationIgnored nonisolated(unsafe) private var _recPillEnabled: Bool
@@ -707,6 +771,13 @@ final class SettingsStore {
             100
         )
         self._readAloudResumeAfterDictation = defaults.bool(forKey: "readAloudResumeAfterDictation")
+        self._agentRepliesEnabled = defaults.bool(forKey: "agentRepliesEnabled")
+        self._agentChatResumeCommand = defaults.string(forKey: "agentChatResumeCommand")
+            ?? SettingsStore.defaultAgentChatResumeCommand
+        // Held as JSON, the way every compound value here is: an unreadable one
+        // is a player that opens where it always did.
+        self._agentReplyPlayerPlace = defaults.data(forKey: Self.agentReplyPlayerPlaceKey)
+            .flatMap { try? JSONDecoder().decode(CGPoint.self, from: $0) }
 
         // UI Settings
         self._recPillEnabled = defaults.object(forKey: "recPillEnabled") as? Bool ?? true

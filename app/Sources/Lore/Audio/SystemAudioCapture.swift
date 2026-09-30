@@ -14,9 +14,14 @@ final class SystemAudioCapture: @unchecked Sendable {
         uncheckedState: AudioObjectID(kAudioObjectUnknown)
     )
     private let _ioProcID = OSAllocatedUnfairLock<AudioDeviceIOProcID?>(uncheckedState: nil)
-    private let _sysContinuation = OSAllocatedUnfairLock<AsyncStream<AVAudioPCMBuffer>.Continuation?>(
-        uncheckedState: nil
-    )
+    /// The open stream: its consumer and, once a tap delivers into it, that
+    /// tap's rate correction (#272). One lock over both, so every path that
+    /// ends the stream ends both.
+    private struct OpenStream: Sendable {
+        let continuation: AsyncStream<AVAudioPCMBuffer>.Continuation
+        var deliveredRate: DeliveredRate?
+    }
+    private let _stream = OSAllocatedUnfairLock<OpenStream?>(uncheckedState: nil)
     private let callbackQueue = DispatchQueue(
         label: "com.lore.system-audio",
         qos: .userInteractive
@@ -73,7 +78,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         await stop()
 
         let sysStream = AsyncStream<AVAudioPCMBuffer> { continuation in
-            self._sysContinuation.withLock { $0 = continuation }
+            self._stream.withLock { $0 = OpenStream(continuation: continuation) }
         }
 
         do {
@@ -90,7 +95,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         } catch {
             // Every in-HAL guard already finishes the stream; this covers the
             // injected seam so a caller's `for await` never hangs on a dead start.
-            _sysContinuation.withLock { $0?.finish(); $0 = nil }
+            abandonStream()
             // A failure from a superseded generation spends nothing.
             let exhausted = _attempts.withLock { attempts -> Bool in
                 guard attempts.generation == generation else { return false }
@@ -127,7 +132,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         var tapID = AudioObjectID(kAudioObjectUnknown)
         var status = AudioHardwareCreateProcessTap(tapDescription, &tapID)
         guard status == noErr else {
-            _sysContinuation.withLock { $0?.finish(); $0 = nil }
+            abandonStream()
             throw CaptureError.tapCreationFailed(status)
         }
 
@@ -159,7 +164,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         )
         guard status == noErr else {
             _ = AudioHardwareDestroyProcessTap(tapID)
-            _sysContinuation.withLock { $0?.finish(); $0 = nil }
+            abandonStream()
             throw CaptureError.aggregateDeviceCreationFailed(status)
         }
 
@@ -168,8 +173,20 @@ final class SystemAudioCapture: @unchecked Sendable {
         guard let format = AVAudioFormat(streamDescription: &mutableStreamDescription) else {
             _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
             _ = AudioHardwareDestroyProcessTap(tapID)
-            _sysContinuation.withLock { $0?.finish(); $0 = nil }
+            abandonStream()
             throw CaptureError.invalidTapFormat
+        }
+
+        // The tap's declared format is not always what it delivers (#272).
+        // Each tap measures afresh, and its IOProc holds this stream's own
+        // continuation, so a block still queued when the stream finishes
+        // delivers into it rather than being dropped or reaching the next one.
+        let deliveredRate = DeliveredRate(
+            declared: format, deviceRate: AudioBus.deviceNominalSampleRate(for: outputDeviceID)
+        )
+        let continuation = _stream.withLock { stream in
+            stream?.deliveredRate = deliveredRate
+            return stream?.continuation
         }
 
         var ioProcID: AudioDeviceIOProcID?
@@ -177,13 +194,18 @@ final class SystemAudioCapture: @unchecked Sendable {
             &ioProcID,
             aggregateDeviceID,
             callbackQueue
-        ) { [weak self] _, inInputData, _, _, _ in
-            self?.handleInputData(inInputData, format: format)
+        ) { _, inInputData, inInputTime, _, _ in
+            guard let continuation,
+                  let buffer = CapturedBuffer.copy(of: inInputData, format: format, stamp: .init(inputTime: inInputTime))
+            else { return }
+            for corrected in deliveredRate.process(buffer) {
+                continuation.yield(corrected)
+            }
         }
         guard status == noErr, let ioProcID else {
             _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
             _ = AudioHardwareDestroyProcessTap(tapID)
-            _sysContinuation.withLock { $0?.finish(); $0 = nil }
+            abandonStream()
             throw CaptureError.ioProcCreationFailed(status)
         }
 
@@ -192,7 +214,7 @@ final class SystemAudioCapture: @unchecked Sendable {
             _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
             _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
             _ = AudioHardwareDestroyProcessTap(tapID)
-            _sysContinuation.withLock { $0?.finish(); $0 = nil }
+            abandonStream()
             throw CaptureError.startFailed(status)
         }
 
@@ -208,8 +230,24 @@ final class SystemAudioCapture: @unchecked Sendable {
 
     /// Finish the async stream so consumers exit their for-await loop.
     /// Call this before stop() when you need a graceful drain.
+    /// The end is queued on the callback queue: IOProc blocks already queued
+    /// there deliver first, then the buffers the rate correction still holds,
+    /// then the stream finishes. Blocks after it yield into a finished
+    /// stream, which drops them.
     func finishStream() {
-        _sysContinuation.withLock { $0?.finish(); $0 = nil }
+        guard let stream = _stream.withLock({ state in
+            defer { state = nil }
+            return state
+        }) else { return }
+        callbackQueue.async {
+            stream.deliveredRate?.flush().forEach { stream.continuation.yield($0) }
+            stream.continuation.finish()
+        }
+    }
+
+    /// A start that failed: the stream ends at once, with nothing to deliver.
+    private func abandonStream() {
+        _stream.withLock { $0?.continuation.finish(); $0 = nil }
     }
 
     func stop() async {
@@ -247,51 +285,6 @@ final class SystemAudioCapture: @unchecked Sendable {
                 _ = AudioHardwareDestroyProcessTap(tapID)
             }
         }
-    }
-
-    private func handleInputData(
-        _ inputData: UnsafePointer<AudioBufferList>,
-        format: AVAudioFormat
-    ) {
-        let sourceBuffers = UnsafeMutableAudioBufferListPointer(
-            UnsafeMutablePointer(mutating: inputData)
-        )
-        let streamDescription = format.streamDescription
-        let bytesPerFrame = Int(streamDescription.pointee.mBytesPerFrame)
-        guard bytesPerFrame > 0, let firstBuffer = sourceBuffers.first else { return }
-
-        let frameCount = AVAudioFrameCount(Int(firstBuffer.mDataByteSize) / bytesPerFrame)
-        guard frameCount > 0 else { return }
-
-        guard let pcmBuffer = AVAudioPCMBuffer(
-            pcmFormat: format,
-            frameCapacity: frameCount
-        ) else {
-            return
-        }
-        pcmBuffer.frameLength = frameCount
-
-        let destinationBuffers = UnsafeMutableAudioBufferListPointer(pcmBuffer.mutableAudioBufferList)
-        guard destinationBuffers.count == sourceBuffers.count else { return }
-
-        for index in 0..<sourceBuffers.count {
-            let source = sourceBuffers[index]
-            let copySize = min(
-                Int(source.mDataByteSize),
-                Int(destinationBuffers[index].mDataByteSize)
-            )
-            guard copySize > 0,
-                  let sourceData = source.mData,
-                  let destinationData = destinationBuffers[index].mData
-            else {
-                continue
-            }
-
-            memcpy(destinationData, sourceData, copySize)
-            destinationBuffers[index].mDataByteSize = UInt32(copySize)
-        }
-
-        _ = _sysContinuation.withLock { $0?.yield(pcmBuffer) }
     }
 
     private static func propertyAddress(

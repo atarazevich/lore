@@ -160,7 +160,7 @@ extension HealthResult {
         case .microphone: return "Microphone permission isn't granted."
         case .micCapture: return "The last microphone capture failed."
         case .asrModel: return "The transcription model isn't installed."
-        case .vadModel: return "The voice-activity model isn't installed."
+        case .vadModel: return "The voice-activity model couldn't be loaded."
         case .modelWarmup: return "The last model warm-up failed."
         case .openAIKey: return "No OpenAI key is set — cleanup, translation and Ask \(LoreTheme.wordmark) are off."
         case .openAILiveness: return "The last OpenAI check failed."

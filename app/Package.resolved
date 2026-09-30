@@ -1,5 +1,5 @@
 {
-  "originHash" : "398488b0c3e870995a43cfa158701c82ae718cd2c6d647cb1ab020e091af2765",
+  "originHash" : "c46bbcaf76658c47ede8df4e0bda568eb477787b0107b62d0586f9f0cc997c34",
   "pins" : [
     {
       "identity" : "dynamicnotchkit",
@@ -15,8 +15,8 @@
       "kind" : "remoteSourceControl",
       "location" : "https://github.com/FluidInference/FluidAudio.git",
       "state" : {
-        "revision" : "7f963cdc43ba89c5993654f1e138047d517a818d",
-        "version" : "0.15.2"
+        "revision" : "21493f8dac5a97e65742e6ff26f42f164c2fda0f",
+        "version" : "0.17.4"
       }
     },
     {

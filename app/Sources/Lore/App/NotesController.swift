@@ -2,13 +2,19 @@ import AppKit
 import AVFoundation
 import Foundation
 import Observation
+import os
+
+private let notesLog = Logger(subsystem: "com.lore.app", category: "NotesController")
 
 // MARK: - State
 
 struct NotesState {
     var sessionHistory: [SessionIndex] = []
     var selectedSessionID: String?
-    var loadedTranscript: [SessionRecord] = []
+    /// The loaded transcript: its raw lines (`records`), read through its
+    /// speaker map and names (#269) — a label per line and the turns. Built
+    /// once per load or naming change.
+    var transcript: MeetingTranscript = .empty
     /// False while the selected session's transcript load is in flight
     /// (#166): the pane renders none of its three faces until the load
     /// lands — an empty array must mean "no text", never "not read yet".
@@ -82,7 +88,7 @@ final class NotesController {
 
         guard let sessionID else {
             state.loadedNotes = nil
-            state.loadedTranscript = []
+            state.transcript = .empty
             state.transcriptLoaded = false
             state.loadedChat = []
             state.selectedSessionDirectory = nil
@@ -91,7 +97,7 @@ final class NotesController {
         }
 
         state.loadedNotes = nil
-        state.loadedTranscript = []
+        state.transcript = .empty
         state.transcriptLoaded = false
         state.loadedChat = []
         state.audioFileURL = nil
@@ -99,19 +105,21 @@ final class NotesController {
             .appendingPathComponent(sessionID, isDirectory: true)
         state.showingOriginal = false
 
+        let token = nextTranscriptToken()
+        let audioToken = nextAudioToken()
         Task {
             let notes = await coordinator.sessionRepository.loadNotes(sessionID: sessionID)
-            let transcript = await coordinator.sessionRepository.loadTranscript(sessionID: sessionID)
+            let meeting = await coordinator.sessionRepository.meetingTranscript(sessionID: sessionID)
             let audioURL = await coordinator.sessionRepository.audioFileURL(for: sessionID)
             let chat = await coordinator.sessionRepository.loadChat(sessionID: sessionID)
 
             guard state.selectedSessionID == sessionID else { return }
 
             state.loadedNotes = notes
-            state.loadedTranscript = transcript
+            if token == transcriptToken { state.transcript = meeting }
             state.transcriptLoaded = true
             state.loadedChat = chat
-            state.audioFileURL = audioURL
+            if audioToken == self.audioToken { state.audioFileURL = audioURL }
 
             // Open summons a job (#166): a meeting with nothing to read —
             // missing, damaged, or interrupted mid-processing — gets a fresh
@@ -119,13 +127,113 @@ final class NotesController {
             // The healer dedupes against running/queued jobs, excludes the
             // live session, and answers "unavailable" when nothing can be
             // made — the pane's three faces derive from exactly that.
-            if transcript.isEmpty {
-                coordinator.transcriptHealer?.ensure(sessionID: sessionID)
+            if meeting.records.isEmpty {
+                coordinator.transcriptHealer?.ensure(sessionID: sessionID, opened: true)
             }
         }
     }
 
+    // MARK: - Speakers (#269)
+
+    /// Every read or change of the open transcript takes a token; only the
+    /// latest may land, so a slow reload cannot put back what a naming change
+    /// replaced.
+    @ObservationIgnored private var transcriptToken = 0
+
+    private func nextTranscriptToken() -> Int {
+        transcriptToken += 1
+        return transcriptToken
+    }
+
+    /// The open meeting's speaker pass is running or waiting: the meta line's
+    /// "finding who spoke…".
+    var isFindingSpeakers: Bool {
+        guard let id = state.selectedSessionID else { return false }
+        return coordinator.transcriptHealer?.isFindingSpeakers(id) ?? false
+    }
+
+    /// Reads the open meeting's transcript again, as it is on disk — after a
+    /// speaker pass settled, or a naming change that did not land.
+    func reloadSpeakers() {
+        guard let sessionID = state.selectedSessionID, state.transcriptLoaded else { return }
+        let token = nextTranscriptToken()
+        Task {
+            let meeting = await coordinator.sessionRepository.meetingTranscript(sessionID: sessionID)
+            guard token == transcriptToken, state.selectedSessionID == sessionID else { return }
+            state.transcript = meeting
+        }
+    }
+
+    /// Known people for the naming popover, most alike to this speaker first.
+    func suggestions(for key: SpeakerKey) -> [SpeakerSuggestion] {
+        state.transcript.speakers?.suggestions(for: key) ?? []
+    }
+
+    /// Merge a speaker into another speaker of this meeting (by any of its
+    /// voices), someone known, or You.
+    func assignSpeaker(_ key: SpeakerKey, to target: SpeakerKey) {
+        changeSpeakers(.assign(key, to: target))
+    }
+
+    /// Name a speaker as someone new.
+    func nameSpeaker(_ key: SpeakerKey, as name: String) {
+        changeSpeakers(.name(key, name))
+    }
+
+    /// A new name for someone known, wherever they were named.
+    func renamePerson(_ personID: String, to name: String) {
+        changeSpeakers(.renamePerson(personID, to: name))
+    }
+
+    /// The change lands on disk (names, then the Markdown mirror) against the
+    /// transcript on screen, the open meeting reads through it, and its
+    /// summary is made again. A change that was refused, changed nothing or
+    /// failed to save leaves the screen reading the meeting from disk — as an
+    /// earlier change that landed while this one was on its way does.
+    private func changeSpeakers(_ change: SessionRepository.SpeakerChange) {
+        guard let sessionID = state.selectedSessionID, state.transcriptLoaded else { return }
+        let basis = state.transcript
+        let token = nextTranscriptToken()
+        Task {
+            let result: SessionRepository.SpeakerChangeResult?
+            do {
+                result = try await coordinator.sessionRepository.changeSpeakers(change, sessionID: sessionID, basis: basis)
+            } catch {
+                notesLog.error("speaker names not saved: \(error.localizedDescription, privacy: .private)")
+                result = nil
+            }
+            guard case .changed(let changed) = result else {
+                if token == transcriptToken { reloadSpeakers() }
+                return
+            }
+            if token == transcriptToken, state.selectedSessionID == sessionID { state.transcript = changed }
+            await coordinator.resummarizeAfterNaming(sessionID: sessionID)
+        }
+    }
+
     // MARK: - Audio Playback
+
+    /// Every read of the open meeting's recording takes a token; only the
+    /// latest may land, so an open's read from before the export settled
+    /// cannot put back "no recording" over the one found after.
+    @ObservationIgnored private var audioToken = 0
+
+    private func nextAudioToken() -> Int {
+        audioToken += 1
+        return audioToken
+    }
+
+    /// Looks for the open meeting's recording again — after an export
+    /// settled (#290), which lands after the meeting was listed and opened.
+    func reloadAudio() {
+        guard let sessionID = state.selectedSessionID else { return }
+        let token = nextAudioToken()
+        Task {
+            let audioURL = await coordinator.sessionRepository.audioFileURL(for: sessionID)
+            guard token == audioToken, state.selectedSessionID == sessionID else { return }
+            state.audioFileURL = audioURL
+        }
+    }
 
     func toggleAudioPlayback() {
         guard let url = state.audioFileURL else { return }

@@ -98,7 +98,6 @@ final class AppCoordinator {
 
     var transcriptionEngine: TranscriptionEngine?
     var refinementEngine: TranscriptRefinementEngine?
-    var audioRecorder: AudioRecorder?
     var batchEngine: BatchTranscriptionEngine?
     /// The transcript self-healing queue (#166) — the only dispatcher into
     /// `batchEngine`: end-of-meeting pass, launch sweep, open-summoned
@@ -107,6 +106,9 @@ final class AppCoordinator {
     /// Meeting auto-enrichment (#107). Live mode only — nil in UI tests, so
     /// every trigger is a no-op there.
     var enrichmentEngine: MeetingEnrichmentEngine?
+    /// `lore transcribe` (#254), which borrows the shared model a meeting's
+    /// microphone leg uses. Set once subsystems start; nil in UI tests.
+    var commandTranscription: CLITranscribeService?
 
     // MARK: - Shared Backend Cache
 
@@ -122,6 +124,14 @@ final class AppCoordinator {
 
     let readAloudController = ReadAloudController()
     let readAloudPanel = ReadAloudPanelManager()
+
+    /// Agent replies (#236): behind their own switch, off by default — nothing
+    /// runs until `agentRepliesEnabled` is turned on.
+    let agentReplies = AgentReplyController()
+
+    /// From a reply to its chat (#258): the live state of every row's button
+    /// and the action behind it. Reads nothing and runs nothing until asked.
+    let agentChats = AgentChatNavigator()
 
     /// Live health readiness (#83). Set once dictation is wired (it needs the
     /// hotkey tap's state); the shell footer and health panel read it. Nil in
@@ -309,6 +319,33 @@ final class AppCoordinator {
     /// Load session history from sidecars (lightweight index only).
     func loadHistory() async {
         sessionHistory = await sessionRepository.listSessions()
+    }
+
+    /// The meeting's text changed — its transcript was replaced (#109), or a
+    /// speaker was named or merged (#269): the summary is made again from it.
+    /// Clearing the summary is what makes enrichment run; its own rule keeps
+    /// any title other than the untouched default.
+    func resummarize(sessionID: String) async {
+        await sessionRepository.updateSessionSummary(sessionID: sessionID, summary: nil)
+        await loadHistory()
+        await enrichmentEngine?.enrichIfNeeded(sessionID: sessionID)
+    }
+
+    /// After a naming change (#269): the same, but only where a summary can be
+    /// made now — without Apple Intelligence, naming a speaker must not cost
+    /// the meeting its summary. Of two quick changes the later one's summary
+    /// is the one kept (`MeetingEnrichmentEngine.apply` checks the lines).
+    func resummarizeAfterNaming(sessionID: String) async {
+        guard enrichmentEngine?.canSummarize == true else { return }
+        await resummarize(sessionID: sessionID)
+    }
+
+    /// A meeting's speaker pass settled (#269). When it left a map, the
+    /// meeting's lines now read by speaker, not You/Them: the summary is made
+    /// again from them.
+    func speakersSettled(sessionID: String) async {
+        guard await sessionRepository.meetingTranscript(sessionID: sessionID).speakers != nil else { return }
+        await resummarizeAfterNaming(sessionID: sessionID)
     }
 
     func queueExternalCommand(_ command: ExternalCommand) {

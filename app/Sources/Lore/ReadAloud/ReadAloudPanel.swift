@@ -33,7 +33,7 @@ struct ReadAloudPanelView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            if controller.status != .idle {
+            if controller.showsControls {
                 identityRow
                 progressRow
                 transportRow
@@ -48,7 +48,7 @@ struct ReadAloudPanelView: View {
         .frame(width: Self.contentWidth)
         .padding(.horizontal, 14)
         .padding(.vertical, 12)
-        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.panel))
         .fixedSize()
         .environment(\.colorScheme, .dark)
         .onChange(of: controller.pendingCount) { _, count in
@@ -129,26 +129,15 @@ struct ReadAloudPanelView: View {
     private var progressRow: some View {
         // Playback time advances outside observation — tick to stay honest.
         TimelineView(.periodic(from: .now, by: 0.25)) { _ in
-            HStack(spacing: 8) {
-                Text(ReadAloudController.timeLabel(controller.elapsedSeconds))
-                    .monospacedDigit()
-                GeometryReader { geo in
-                    ZStack(alignment: .leading) {
-                        Capsule().fill(Color.white.opacity(0.12))
-                        Capsule()
-                            .fill(Color.white.opacity(0.45))
-                            .frame(width: max(3, geo.size.width * controller.currentProgress))
-                    }
-                }
-                .frame(height: 3)
-                .frame(maxWidth: .infinity)
-                // Total firms up once every chunk of the current text is synthesized.
-                Text(controller.totalSeconds.map(ReadAloudController.timeLabel) ?? "\u{2013}:\u{2013}\u{2013}")
-                    .monospacedDigit()
+            // The total firms up once every chunk of the current text is
+            // synthesized; until then the row says so.
+            PlayerProgressRow(
+                elapsed: controller.elapsedSeconds, total: controller.totalSeconds,
+                progress: controller.currentProgress
+            ) {
+                EmptyView()
             }
         }
-        .font(LoreTheme.Typography.mono(10))
-        .foregroundStyle(LoreTheme.TextColor.muted)
         .accessibilityLabel("Progress")
     }
 
@@ -341,36 +330,134 @@ struct ReadAloudPanelView: View {
     }
 }
 
+// MARK: - The reading row both players draw
+
+/// elapsed · bar · total, on the mono face, with whatever glyph the caller puts
+/// in front of it: the selected-text player's row (#105) and the replies card's
+/// (#260) are the same row in two colours.
+struct PlayerProgressRow<Leading: View>: View {
+    let elapsed: Double
+    /// Nil while the total is not known — the row says `–:––` rather than a
+    /// figure it would have to guess.
+    let total: Double?
+    let progress: Double
+    var fill: Color = Color.white.opacity(0.45)
+    var track: Color = Color.white.opacity(0.12)
+    @ViewBuilder var leading: () -> Leading
+
+    var body: some View {
+        HStack(spacing: 8) {
+            leading()
+            Text(ReadAloudController.timeLabel(elapsed))
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule().fill(track)
+                    Capsule()
+                        .fill(fill)
+                        .frame(width: max(3, geo.size.width * progress))
+                }
+            }
+            .frame(height: 3)
+            .frame(maxWidth: .infinity)
+            Text(total.map(ReadAloudController.timeLabel) ?? "\u{2013}:\u{2013}\u{2013}")
+        }
+        .font(LoreTheme.Typography.mono(10))
+        .monospacedDigit()
+        .foregroundStyle(LoreTheme.TextColor.muted)
+    }
+}
+
+// MARK: - The one floating surface, two kinds of reading
+
+/// What the floating panel holds (#260): the selected-text player (#105) and
+/// the agent replies (#236), each drawn only when it has something to say.
+///
+/// The two never clobber each other. They are separate plates in one window, so
+/// a reading of selected text that was already running when the feature's
+/// switch went on keeps its own controls while the replies keep their list —
+/// and in ordinary use only one of them exists at a time, because the selection
+/// has no keys while the switch is on (#259).
+struct PlayerPanelView: View {
+    let controller: ReadAloudController
+    let replies: AgentReplyController
+    let chats: AgentChatNavigator
+    /// Both reply plates move the one window they share (#267).
+    var onDrag: ((BubbleDrag) -> Void)?
+
+    var body: some View {
+        VStack(spacing: 8) {
+            if controller.isPanelVisible {
+                ReadAloudPanelView(controller: controller)
+            }
+            switch AgentReplySurface.of(replies) {
+            case .hidden:
+                EmptyView()
+            case .waiting(let capsule):
+                AgentReplyWaitingView(capsule: capsule, onDrag: onDrag)
+            case .player:
+                AgentReplyPlayerView(
+                    replies: replies, chats: chats, mark: LoreMark.chip, onDrag: onDrag
+                )
+            }
+        }
+        .fixedSize()
+        .environment(\.colorScheme, .dark)
+    }
+}
+
 // MARK: - Manager
 
-/// Owns the shared `TopCenteredPanel` and polls the controller for
+/// Owns the shared `TopCenteredPanel` and polls the controllers for
 /// visibility and content-driven resize (which also covers queue expand/
 /// collapse); everything else flows through observation — the view holds the
-/// controller directly. Sits lower than the dictation indicator so the two
-/// never overlap when both are visible.
+/// controllers directly. Sits lower than the dictation indicator so the two
+/// never overlap when both are visible, which is also where the board puts the
+/// waiting capsule: under the bubble — until it is dragged somewhere else, and
+/// then it opens there again for good (#267).
 @MainActor
 final class ReadAloudPanelManager {
-    private var panel: TopCenteredPanel<ReadAloudPanelView>?
+    private var panel: TopCenteredPanel<PlayerPanelView>?
     private var observationTask: Task<Void, Never>?
+    /// Whether the capsule is on screen, for the two events its appearance owes
+    /// (`no-false-positives.md`: every fire and clear leaves a trace). A
+    /// changing count is the same report, so what it says is not kept here.
+    private var isCapsuleShown = false
+    /// Whether the window is up, so the place it was left at is put back once
+    /// per showing rather than twenty times a second (#267).
+    private var isWindowShown = false
+    /// Where the place lives across launches; nil in a test with no settings.
+    private weak var settings: AppSettings?
 
     /// Vertical clearance under the menu bar: the dictation indicator sits at
     /// 8pt; this panel starts 56pt lower.
     private static let topInset: CGFloat = 64
 
-    func start(controller: ReadAloudController) {
+    func start(
+        controller: ReadAloudController, replies: AgentReplyController,
+        chats: AgentChatNavigator, settings: AppSettings?
+    ) {
+        self.settings = settings
         guard let panel = TopCenteredPanel(
-            content: ReadAloudPanelView(controller: controller), topInset: Self.topInset
+            content: PlayerPanelView(
+                controller: controller, replies: replies, chats: chats,
+                onDrag: { [weak self] phase in self?.drag(phase) }
+            ),
+            topInset: Self.topInset
         ) else { return }
         self.panel = panel
 
-        observationTask = Task { [weak self, weak controller] in
+        observationTask = Task { [weak self, weak controller, weak replies] in
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(50))
-                guard let self, let controller else { break }
+                guard let self, let controller, let replies else { break }
 
-                if controller.status != .idle || controller.notice != nil {
+                let surface = AgentReplySurface.of(replies)
+                self.trace(surface)
+                if controller.isPanelVisible || surface != .hidden {
+                    self.restorePlaceOnce()
                     self.panel?.show()
                 } else {
+                    self.isWindowShown = false
                     self.panel?.hide()
                 }
             }
@@ -381,5 +468,47 @@ final class ReadAloudPanelManager {
         observationTask?.cancel()
         observationTask = nil
         panel?.hide()
+        isCapsuleShown = false
+        isWindowShown = false
+    }
+
+    /// A drag on either plate. The window does the moving; the end of one is
+    /// what is worth remembering and worth a trace.
+    private func drag(_ phase: BubbleDrag) {
+        guard let panel else { return }
+        panel.drag(phase)
+        guard phase == .ended else { return }
+        settings?.agentReplyPlayerPlace = panel.placedTopLeft
+        DiagStore.record(.agentReplyPlayerMoved)
+    }
+
+    /// Puts the window back where it was left, once per showing, and judged
+    /// against the screens there are now: a place on a display that has been
+    /// unplugged is ignored rather than clamped onto whatever is left, and the
+    /// window opens where it always did.
+    ///
+    /// Ignored, never erased: the display comes back, and with it the place he
+    /// chose. Nothing about a monitor being unplugged is his decision to undo.
+    private func restorePlaceOnce() {
+        guard !isWindowShown else { return }
+        isWindowShown = true
+        panel?.place(at: TopCenteredFrame.remembered(
+            settings?.agentReplyPlayerPlace, visibleFrames: NSScreen.screens.map(\.visibleFrame)
+        ))
+    }
+
+    /// One event when the capsule appears and one when it withdraws — a
+    /// changing count is the same report, not a new one.
+    private func trace(_ surface: AgentReplySurface) {
+        if case .waiting(let capsule) = surface {
+            guard !isCapsuleShown else { return }
+            isCapsuleShown = true
+            DiagStore.record(
+                .agentReplyWaitingShown(muted: capsule.isMuted, waiting: capsule.waiting)
+            )
+        } else if isCapsuleShown {
+            isCapsuleShown = false
+            DiagStore.record(.agentReplyWaitingWithdrawn)
+        }
     }
 }

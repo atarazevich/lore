@@ -185,9 +185,9 @@ final class LiveSessionController {
             // `.recording` specifically, never "not idle" (#153): a paused
             // session also has a stopped engine, and routing it through
             // `startEngine` would re-run the whole capture bring-up under a
-            // pause. The recorder itself is safe either way since #177 — a
-            // second arm for the same meeting keeps the running tracks rather
-            // than wiping the anchors and truncating the audio.
+            // pause. The recording itself is safe either way: `startEngine`
+            // keeps this meeting's running recording rather than opening its
+            // tracks again and truncating the audio.
             coordinator.enqueueLifecycleEffect { [self] in
                 await startEngine(settings: settings)
             }
@@ -302,6 +302,11 @@ final class LiveSessionController {
         } else if let batchEngine = coordinator.batchEngine {
             await batchEngine.cancel()
         }
+        // `lore transcribe` borrows the shared model the microphone leg is
+        // about to use (#254): its request is cancelled here, and the only wait
+        // is for a call already inside the model — at most
+        // `CLITranscribeService.yieldBound` — never for its file or a model load.
+        await coordinator.commandTranscription?.yieldToMeeting()
 
         coordinator.lastEndedSession = nil
         coordinator.lastStorageError = nil
@@ -335,7 +340,8 @@ final class LiveSessionController {
                 templateSnapshot: coordinator.sessionTemplateSnapshot,
                 // Readable default name from the recording start (#58);
                 // rename replaces it, nothing regenerates it later.
-                title: SessionIndex.defaultTitle(startedAt: metadata.startedAt)
+                title: SessionIndex.defaultTitle(startedAt: metadata.startedAt),
+                startedAt: metadata.startedAt
             )
         )
         _currentSessionID = handle.sessionID
@@ -372,28 +378,34 @@ final class LiveSessionController {
     /// parked at the model-download gate.
     private func startEngine(settings: AppSettings) async {
         // Decided first, assigned once, after the await below: nilling the
-        // engine's recorder up front would leave it without one across an
+        // engine's recording up front would leave it without one across an
         // actor hop, which is exactly the window a re-entry here lands in.
-        let recorder: AudioRecorder?
+        let recording: MeetingRecording?
         if settings.saveAudioRecording || settings.enableBatchRefinement {
             if let sessionID = _currentSessionID {
-                // The tracks are the meeting's from the first buffer (#177).
-                let trackDirectory = await coordinator.sessionRepository
-                    .prepareAudioDirectory(sessionID: sessionID)
-                coordinator.audioRecorder?.startSession(id: sessionID, trackDirectory: trackDirectory)
-                recorder = coordinator.audioRecorder
+                if let running = coordinator.transcriptionEngine?.recording, running.sessionID == sessionID {
+                    // `confirmDownloadAndStart` continuing this meeting: a
+                    // new recording would open its tracks again and truncate them.
+                    recording = running
+                } else {
+                    // A new meeting gets its own recording, whose tracks are
+                    // the meeting's from the first buffer (#177).
+                    let trackDirectory = await coordinator.sessionRepository
+                        .prepareAudioDirectory(sessionID: sessionID)
+                    recording = MeetingRecording(sessionID: sessionID, directory: trackDirectory)
+                }
             } else {
                 // No session id, no owner for the audio — so this meeting
                 // records none. Traced: audio the user asked for and never got
                 // must not be a silent branch.
                 DiagStore.record(.recordingUnowned)
                 liveLog.error("no session id at engine start — this meeting records no audio")
-                recorder = nil
+                recording = nil
             }
         } else {
-            recorder = nil
+            recording = nil
         }
-        coordinator.transcriptionEngine?.audioRecorder = recorder
+        coordinator.transcriptionEngine?.recording = recording
 
         await coordinator.transcriptionEngine?.start()
     }
@@ -403,6 +415,9 @@ final class LiveSessionController {
         // a finalize that outlives its timeout (chain dropped, new session
         // started) must not touch the later session.
         let entrySessionID = _currentSessionID
+        // Its recording, taken now for the same reason: a later meeting may
+        // put its own on the engine before this finalize reaches step 5.
+        let recording = coordinator.transcriptionEngine?.recording
 
         // 1. Drain audio buffers
         await coordinator.transcriptionEngine?.finalize()
@@ -465,20 +480,33 @@ final class LiveSessionController {
             )
         )
 
-        // 5. Handle audio recording. The tracks are already inside this
-        //    meeting (#177), so nothing moves or is copied here. Every call
-        //    names the session, exactly as the delete below does: a finalize
-        //    that outlived its timeout reaches this line with the recorder
-        //    possibly armed for a LATER meeting, and exporting or closing that
-        //    one would merge another meeting's audio and leave the running
-        //    recording writing nothing.
-        if let settings, let recorder = coordinator.audioRecorder {
-            if settings.saveAudioRecording {
-                await recorder.exportMerged(for: sessionID)
+        // 5. Close this meeting's recording. The tracks are already inside
+        //    the meeting (#177), so nothing moves or is copied here. The close
+        //    is awaited, so the meta is complete before the batch pass below
+        //    is queued, and the export merges exactly the timing it returned.
+        //    The export is the healer's job, not finalize's (#290): a long
+        //    meeting's takes minutes, and the meeting is listed without it.
+        //    Finalize leaves a marker for it, with that timing, which keeps
+        //    the tracks until the export has read them, across a quit; the
+        //    transcript job queued in step 8 goes ahead of it.
+        if let recording {
+            let meta = await recording.close()
+            releaseFromEngine(recording)
+            if let settings, settings.saveAudioRecording {
+                if await coordinator.sessionRepository.markExportPending(
+                    sessionID: sessionID, name: recording.exportName, meta: meta
+                ) {
+                    coordinator.transcriptHealer?.enqueueExport(sessionID: sessionID)
+                } else {
+                    // No marker, so nothing would keep the tracks for the
+                    // healer's export: the recording is saved here, now,
+                    // before anything can remove them. Rare, and awaited.
+                    await recording.exportNow(meta, into: URL(fileURLWithPath: settings.notesFolderPath))
+                }
             }
-            await recorder.finishTracks(for: sessionID)
-            if !settings.enableBatchRefinement {
-                // No batch pass, so nothing will read the tracks again.
+            if let settings, !settings.enableBatchRefinement {
+                // No batch pass, so nothing will read the tracks again but the
+                // export, which removes them when it is done.
                 await coordinator.sessionRepository.cleanupBatchAudio(sessionID: sessionID)
             }
         }
@@ -516,18 +544,21 @@ final class LiveSessionController {
     }
 
     func discardSession() async {
+        let recording = coordinator.transcriptionEngine?.recording
         coordinator.transcriptionEngine?.stop()
         coordinator.transcriptStore.clear()
         let discardedSessionID = _currentSessionID
         _currentSessionID = nil
 
+        // `stop()` does not wait for the capture tasks, so buffers may still
+        // be on their way. They reach this meeting's recording and nothing
+        // else, and once it is closed they are dropped — so nothing can write
+        // after the delete below.
+        if let recording {
+            _ = await recording.close()
+            releaseFromEngine(recording)
+        }
         if let discardedSessionID {
-            // Close this meeting's tracks first, so no queued anchor write can
-            // land after the delete. Both calls name the session: the delete
-            // never goes by the recorder's memory of what it last recorded,
-            // and the close never touches a recorder a later meeting has
-            // already armed for itself.
-            await coordinator.audioRecorder?.finishTracks(for: discardedSessionID)
             await coordinator.sessionRepository.cleanupBatchAudio(sessionID: discardedSessionID)
         }
         await coordinator.sessionRepository.endSession()
@@ -539,6 +570,14 @@ final class LiveSessionController {
         // stopped being the live session they exclude the moment the id above
         // was cleared.
         coordinator.transcriptHealer?.resume()
+    }
+
+    /// Take a closed recording off the engine, unless a later meeting has
+    /// already put its own there. Internal for tests.
+    func releaseFromEngine(_ recording: MeetingRecording) {
+        if coordinator.transcriptionEngine?.recording === recording {
+            coordinator.transcriptionEngine?.recording = nil
+        }
     }
 
     // MARK: - State Refresh
@@ -585,7 +624,6 @@ final class LiveSessionController {
             Task {
                 await coordinator.sessionRepository.setNotesFolderPath(url)
             }
-            coordinator.audioRecorder?.updateDirectory(url)
         }
 
         if settings.inputDeviceID != observedInputDeviceID {

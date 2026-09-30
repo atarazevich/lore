@@ -15,6 +15,45 @@ struct TranscribedToken: Sendable, Equatable {
     let end: Double
 }
 
+/// One spoken word and the seconds it took, from the tokens that spelled it.
+struct TimedWord: Sendable, Equatable {
+    var text: String
+    let start: Double
+    var end: Double
+}
+
+/// A stretch between two points on one axis — a file's frames, or seconds.
+struct Span: Codable, Sendable, Equatable {
+    let start: Double
+    let end: Double
+}
+
+extension TranscribedToken {
+    /// The words `tokens` spell, in order. A word runs from the first token
+    /// that contributed a non-space character to it to the last: Parakeet's
+    /// tokens are sub-word pieces whose text carries the boundary as a
+    /// leading space.
+    static func words(_ tokens: [TranscribedToken]) -> [TimedWord] {
+        var words: [TimedWord] = []
+        var pending: TimedWord?
+        for token in tokens {
+            for character in token.text {
+                if character.isWhitespace {
+                    if let word = pending { words.append(word) }
+                    pending = nil
+                } else if pending == nil {
+                    pending = TimedWord(text: String(character), start: token.start, end: token.end)
+                } else {
+                    pending?.text.append(character)
+                    pending?.end = token.end
+                }
+            }
+        }
+        if let word = pending { words.append(word) }
+        return words
+    }
+}
+
 /// A transcription with the timings the model already produced (#192). The
 /// text is identical to what `transcribe` returns; `tokens` is empty for a
 /// backend that has no timings, and the caller falls back accordingly.

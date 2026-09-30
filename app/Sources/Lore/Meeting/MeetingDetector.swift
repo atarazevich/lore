@@ -51,10 +51,36 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
     /// Set on listenerQueue by shutdown(); read by deinit, which can only run
     /// after the shutdown block completes (the block retains self).
     private var didShutdown = false
+    /// Who this instance listens for. Meeting detection's source writes the
+    /// `detection…` events and stays edge-only, exactly as it always was; the
+    /// agent-replies hold (#256) must leave no detection traces while
+    /// detection is off, and must report a call that already holds the
+    /// microphone when the feature is switched on.
+    ///
+    /// Two instances, not one shared source (#256, weighed 2026-09-14): with
+    /// both features on, two listeners sit on each input device. Sharing would
+    /// mean a fan-out — `signals` is a single-consumer `AsyncStream` — plus an
+    /// owner outliving both, because either feature's teardown calls
+    /// `shutdown()` and would take the other's stream with it. A second
+    /// read-only listener costs a HAL callback per device edge; that owner and
+    /// its lifetime rules cost more than they buy.
+    private let purpose: Purpose
+
+    enum Purpose: Sendable {
+        case meetingDetection
+        /// Another app runs a microphone (#279). The device edges still say
+        /// *when* to look, but what is read is every process's own input
+        /// except lore's: lore's microphone opening — the talk key's
+        /// pre-buffer above all — is never a signal to anyone.
+        case microphoneHold
+    }
+
+    private var tracesDetection: Bool { purpose == .meetingDetection }
 
     let signals: AsyncStream<Bool>
 
-    init() {
+    init(purpose: Purpose = .meetingDetection) {
+        self.purpose = purpose
         var stream: AsyncStream<Bool>!
         var capturedContinuation: AsyncStream<Bool>.Continuation!
 
@@ -84,6 +110,11 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
             // and re-creates the device under a new AudioDeviceID — a static
             // listener set installed at init goes deaf to it.
             self.addDeviceListListener()
+            // The hold needs the reading taken here: a call already in
+            // progress when the feature is switched on holds reading at once.
+            if self.purpose == .microphoneHold {
+                self.checkAndEmit()
+            }
 
             let described = self.deviceIDs
                 .map { "\(Self.deviceName($0)) (\($0))" }
@@ -108,6 +139,10 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
             self.continuation?.finish()
         }
     }
+
+    /// Read the state again now and emit it if it changed — for a moment no
+    /// device edge marks (#279).
+    func refresh() { checkAndEmit() }
 
     deinit {
         // Fallback for instances that were never shut down (see the lifetime
@@ -167,11 +202,13 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
 
             let addedDesc = added.map { "\(Self.deviceName($0)) (\($0))" }.joined(separator: ", ")
             let removedDesc = removed.map(String.init).joined(separator: ", ")
-            DiagStore.record(.detectionDeviceListChanged(
-                added: added.count,
-                removed: removed.count,
-                monitored: latest.count
-            ))
+            if self.tracesDetection {
+                DiagStore.record(.detectionDeviceListChanged(
+                    added: added.count,
+                    removed: removed.count,
+                    monitored: latest.count
+                ))
+            }
             detectorLog.debug("device list changed: added [\(addedDesc, privacy: .private)], removed IDs [\(removedDesc, privacy: .public)]")
 
             // A newly appeared device may already be running (AirPods re-created
@@ -187,7 +224,7 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
         if status != kAudioHardwareNoError {
             // A silently failed add on a newly appeared device reproduces the
             // exact deafness #75 fixes — make it visible.
-            DiagStore.record(.detectionListenerFailed(osStatus: status))
+            if tracesDetection { DiagStore.record(.detectionListenerFailed(osStatus: status)) }
             detectorLog.error("add listener failed for device \(deviceID, privacy: .public), OSStatus \(status, privacy: .public)")
         }
     }
@@ -242,10 +279,12 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
             // Same post-shutdown straggler as refreshDeviceList: don't log a
             // spurious "mic signal -> inactive" from a dead instance (#78).
             guard !self.didShutdown else { return }
-            let anyRunning = self.deviceIDs.contains { Self.isDeviceRunning($0) }
+            let anyRunning = self.purpose == .microphoneHold
+                ? Self.anotherProcessRunsInput()
+                : self.deviceIDs.contains { Self.isDeviceRunning($0) }
             if anyRunning != self.lastEmittedValue {
                 self.lastEmittedValue = anyRunning
-                DiagStore.record(.detectionSignal(active: anyRunning))
+                if self.tracesDetection { DiagStore.record(.detectionSignal(active: anyRunning)) }
                 self.continuation?.yield(anyRunning)
             }
         }
@@ -298,15 +337,44 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
     }
 
     private static func isDeviceRunning(_ deviceID: AudioDeviceID) -> Bool {
+        readUInt32(deviceID, kAudioDevicePropertyDeviceIsRunningSomewhere) ?? 0 != 0
+    }
+
+    /// Whether a process other than this one has audio input running (#279).
+    /// Read at the device edge, when it is already current; the per-process
+    /// property itself sends no notification a listener here receives.
+    private static func anotherProcessRunsInput() -> Bool {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyDeviceIsRunningSomewhere,
+            mSelector: kAudioHardwarePropertyProcessObjectList,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        var isRunning: UInt32 = 0
+        let system = AudioObjectID(kAudioObjectSystemObject)
+        var size: UInt32 = 0
+        guard AudioObjectGetPropertyDataSize(system, &address, 0, nil, &size) == kAudioHardwareNoError
+        else { return false }
+        var processes = [AudioObjectID](repeating: 0, count: Int(size) / MemoryLayout<AudioObjectID>.size)
+        guard AudioObjectGetPropertyData(system, &address, 0, nil, &size, &processes) == kAudioHardwareNoError
+        else { return false }
+        let own = UInt32(bitPattern: getpid())
+        return processes.contains {
+            readUInt32($0, kAudioProcessPropertyPID) != own
+                && readUInt32($0, kAudioProcessPropertyIsRunningInput) ?? 0 != 0
+        }
+    }
+
+    private static func readUInt32(
+        _ object: AudioObjectID, _ selector: AudioObjectPropertySelector
+    ) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: selector,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: UInt32 = 0
         var size = UInt32(MemoryLayout<UInt32>.size)
-        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &size, &isRunning)
-        return status == kAudioHardwareNoError && isRunning != 0
+        let status = AudioObjectGetPropertyData(object, &address, 0, nil, &size, &value)
+        return status == kAudioHardwareNoError ? value : nil
     }
 }
 
@@ -377,6 +445,7 @@ actor MeetingDetector {
 
     deinit {
         monitorTask?.cancel()
+        debounceTask?.cancel()
         eventContinuation.finish()
     }
 
@@ -404,6 +473,8 @@ actor MeetingDetector {
             detectedApp = nil
             eventContinuation.yield(.ended)
         }
+        debounceTask?.cancel()
+        debounceTask = nil
         micActiveAt = nil
         // Finish the events stream so consumers that do NOT exit via task
         // cancellation terminate deterministically (the controller's
@@ -424,39 +495,27 @@ actor MeetingDetector {
 
     // MARK: - Signal Handling
 
-    private func handleMicSignal(_ micIsActive: Bool) async {
+    /// The debounce of the current activation, off the signal loop: the loop
+    /// has to read the microphone going quiet while the debounce waits, or a
+    /// blip — the talk key's pre-buffer on a tap — is judged five seconds
+    /// later against a state it never saw end, and the prompt flashes up and
+    /// away (#279).
+    private var debounceTask: Task<Void, Never>?
+
+    private func handleMicSignal(_ micIsActive: Bool) {
         if micIsActive {
-            if micActiveAt == nil {
-                micActiveAt = Date()
-                detectorLog.debug("mic active, debouncing \(self.debounceSeconds, privacy: .public)s")
-            }
-
-            // Wait for debounce period
-            let activeSince = micActiveAt!
-            try? await Task.sleep(for: .seconds(debounceSeconds))
-            guard !Task.isCancelled else { return }
-
-            // Verify mic is still considered active (debounce passed)
-            guard micActiveAt == activeSince else { return }
-
-            // Scan for meeting app; a signal-only hit falls back to the
-            // frontmost app so the prompt can name it and Ignore /
-            // Not-a-meeting have a real bundle ID to key on (#101).
-            let scanned = await scanForMeetingApp()
-            DiagStore.record(.detectionAppScan(found: scanned != nil))
-            let app = Self.attributedApp(
-                scanned: scanned,
-                frontmost: scanned == nil ? await frontmostApp() : nil,
-                selfBundleID: selfBundleID
-            )
-            detectorLog.debug("debounce confirmed, detected: \(app.map { "\($0.name) (\($0.bundleID))" } ?? "unattributed", privacy: .private)")
-
-            if !isActive {
-                isActive = true
-                detectedApp = app
-                eventContinuation.yield(.detected(app))
+            guard micActiveAt == nil else { return }
+            let activeSince = Date()
+            micActiveAt = activeSince
+            detectorLog.debug("mic active, debouncing \(self.debounceSeconds, privacy: .public)s")
+            debounceTask = Task { [weak self] in
+                try? await Task.sleep(for: .seconds(self?.debounceSeconds ?? 5))
+                guard !Task.isCancelled else { return }
+                await self?.confirmActivation(since: activeSince)
             }
         } else {
+            debounceTask?.cancel()
+            debounceTask = nil
             micActiveAt = nil
             if isActive {
                 isActive = false
@@ -464,6 +523,28 @@ actor MeetingDetector {
                 detectorLog.debug("mic inactive, detection ended")
                 eventContinuation.yield(.ended)
             }
+        }
+    }
+
+    /// The microphone stayed on through the debounce.
+    private func confirmActivation(since activeSince: Date) async {
+        // Scan for meeting app; a signal-only hit falls back to the
+        // frontmost app so the prompt can name it and Ignore /
+        // Not-a-meeting have a real bundle ID to key on (#101).
+        let scanned = await scanForMeetingApp()
+        DiagStore.record(.detectionAppScan(found: scanned != nil))
+        let app = Self.attributedApp(
+            scanned: scanned,
+            frontmost: scanned == nil ? await frontmostApp() : nil,
+            selfBundleID: selfBundleID
+        )
+        detectorLog.debug("debounce confirmed, detected: \(app.map { "\($0.name) (\($0.bundleID))" } ?? "unattributed", privacy: .private)")
+
+        // The scan suspended: the microphone may have gone quiet meanwhile.
+        if !isActive, micActiveAt == activeSince {
+            isActive = true
+            detectedApp = app
+            eventContinuation.yield(.detected(app))
         }
     }
 

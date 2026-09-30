@@ -13,6 +13,8 @@
 </p>
 
 <p align="center">
+  <a href="https://lore.dev.cognition.design">Website</a>
+  ·
   <a href="#download"><strong>Download</strong></a>
   ·
   <a href="#why">Why</a>
@@ -25,11 +27,11 @@
 </p>
 
 <p align="center">
-  <img src="images/bubble.gif" alt="The lore bubble while dictating: timer, paperclip count, screenshots joining the dictation">
+  <a href="https://lore.dev.cognition.design/#film"><img src="images/film.jpg" alt="The lore film: hold fn, talk to Claude Code, release. 45 seconds."></a>
 </p>
 
 <p align="center">
-  <em>A locked recording, a pause, two screenshots joining the dictation, then transcribing.</em>
+  <em>The 45-second film. Click to watch.</em>
 </p>
 
 Hold `fn`, say it the way it comes out, release. The text shows up at your cursor: in Claude Code, Cursor, a browser, anywhere you can paste. Transcription runs on your Mac. No account, no subscription.
@@ -49,6 +51,14 @@ Agents answer better when you give them the whole picture. Speaking is how you g
 - 📊 **Kept.** Every dictation stays in History with its text and duration, editable; audio for the last 500. Stats shows your words, time, and a per-day heatmap.
 - 💡 **Nothing to learn first.** No tutorial. Each feature says one sentence from its own place, the moment you could use it, and then leaves you alone.
 
+<p align="center">
+  <img src="images/bubble.gif" alt="The lore bubble while dictating: timer, paperclip count, screenshots joining the dictation">
+</p>
+
+<p align="center">
+  <em>A locked recording, a pause, two screenshots joining the dictation, then transcribing.</em>
+</p>
+
 ## Keys
 
 | Key | What it does |
@@ -56,11 +66,12 @@ Agents answer better when you give them the whole picture. Speaking is how you g
 | `fn` (hold) | Record while held, paste on release |
 | `Space` while holding | Lock the recording, hands free |
 | `fn`+`Space` while locked | Pause, and resume |
-| `Esc` | Cancel without pasting; the dictation goes to History |
+| `Esc` while recording | Cancel without pasting; the dictation goes to History |
 | `fn`+`V` while recording | Clean up on paste |
 | `fn`+`T` while recording | Translate to English on paste |
 | `fn`+`S` while recording | Screenshot into the dictation |
-| `fn`+`R` / `fn`+`Q` | Read the selected text aloud / add it to the queue |
+| `fn`+`R` / `fn`+`Q` | While agent replies are off: read the selected text aloud / add it to the queue |
+| `fn`+`R` `fn`+`[` `fn`+`]` `fn`+`J` `fn`+`M` | With agent replies switched on (experimental): Play / Pause, Previous, Next, Go to / Open, Mute / Unmute — and `Esc` stops a reply being read aloud |
 
 If macOS already uses `fn` for something else, onboarding offers Right Option or a key you record yourself.
 
