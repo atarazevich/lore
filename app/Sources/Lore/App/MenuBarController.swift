@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 import Observation
 import SwiftUI
 
@@ -117,6 +118,9 @@ final class MenuBarController {
             onQuit: { [weak self] in
                 self?.popover.performClose(nil)
                 self?.onQuitApp?()
+            },
+            onCloseForFix: { [weak self] in
+                self?.popover.performClose(nil)
             }
         )
         popover.contentViewController = NSHostingController(rootView: popoverView)
@@ -167,6 +171,9 @@ final class MenuBarController {
                         // Both the arrival of the monitor (it is built after this
                         // controller) and every amber transition it publishes.
                         _ = self.coordinator.healthMonitor?.hasSustainedFailure
+                        // Which conditions, too: the tooltip names them, and a
+                        // second can arrive while the dot is already lit.
+                        _ = self.coordinator.healthMonitor?.sustainedSubjects
                     } onChange: {
                         continuation.resume()
                     }
@@ -203,14 +210,14 @@ final class MenuBarController {
     /// ranked: a set has no order worth arbitrating over.
     static func label(for bead: MenuBarBead, standing: Set<DiagEvent.HealthTrigger>) -> String {
         switch bead {
-        case .none: return LoreTheme.wordmark
-        case .recording: return "\(LoreTheme.wordmark) \u{2014} recording"
-        case .paused: return "\(LoreTheme.wordmark) \u{2014} meeting paused"
+        case .none: return LoreBrand.wordmark
+        case .recording: return "\(LoreBrand.wordmark) \u{2014} recording"
+        case .paused: return "\(LoreBrand.wordmark) \u{2014} meeting paused"
         case .health:
             let what = standing.count == 1
-                ? "\(standing.first!.subject) needs a look"
+                ? standing.first!.standingLine
                 : "\(standing.count) things need a look"
-            return "\(LoreTheme.wordmark) \u{2014} \(what)"
+            return "\(LoreBrand.wordmark) \u{2014} \(what)"
         }
     }
 

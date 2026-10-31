@@ -1,19 +1,5 @@
 import Foundation
-
-/// What kind of thing rode along with a dictation (#192). A closed set: the
-/// clipboard door classifies file-url > image > url > text and nothing else
-/// becomes an item.
-enum DictationItemKind: String, Codable, Sendable, CaseIterable {
-    case text
-    case image
-    case fileURL
-    case url
-
-    /// Whether the item is a file on disk. These are the two kinds a composer
-    /// has to be *handed* rather than told about (#195); the other two are text
-    /// and travel inside the paste like the spoken words do.
-    var isFile: Bool { self == .image || self == .fileURL }
-}
+import LoreCore
 
 /// One thing the user copied — or screenshotted to the clipboard — while a
 /// dictation was recording (#192). It carries the second of the speech it

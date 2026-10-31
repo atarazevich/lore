@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 import SwiftUI
 
 /// The diagnostics health panel (#83, design §6): the readiness chain rendered
@@ -52,7 +53,7 @@ struct HealthPanelView: View {
                         .font(LoreTheme.Typography.control)
                         .foregroundStyle(LoreTheme.TextColor.primary)
                 }
-                Text("\(LoreTheme.wordmark) \(monitor.snapshot.marketingVersion) · build \(monitor.snapshot.build)")
+                Text("\(LoreBrand.wordmark) \(monitor.snapshot.marketingVersion) · build \(monitor.snapshot.build)")
                     .font(LoreTheme.Typography.monoMeta)
                     .foregroundStyle(LoreTheme.TextColor.muted)
             }
@@ -116,17 +117,27 @@ struct HealthPanelView: View {
     // MARK: - Remedy actions
 
     private func perform(_ action: HealthRemedyAction) {
-        switch action {
+        action.perform(monitor: monitor, openLoreSettings: onOpenSettings)
+    }
+}
+
+extension HealthRemedyAction {
+    /// What each remedy button does — the one dispatch the panel and the menu
+    /// bar's blocked-condition message share (#338).
+    @MainActor func perform(monitor: HealthMonitor?, openLoreSettings: () -> Void = {}) {
+        switch self {
         case .openSettings(let pane):
             pane.open()
         case .restartApp:
             AppRelauncher.relaunch()
         case .openLoreSettings:
-            onOpenSettings()
+            openLoreSettings()
         case .testNow(let id):
-            Task { await monitor.testNow(id) }
+            Task { await monitor?.testNow(id) }
         case .revealInFinder(let path):
             NSWorkspace.shared.open(URL(fileURLWithPath: path))
+        case .fixPermissions:
+            Task { await monitor?.fixPermissions() }
         }
     }
 }
@@ -141,14 +152,22 @@ private struct HealthRowView: View {
     /// and disable its button for the ~2s the test takes (#88).
     let isTesting: Bool
     let perform: (HealthRemedyAction) -> Void
+    /// "Do it by hand" is open (#338).
+    @State private var showsManualSteps = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: item.remedy == nil ? 0 : 8) {
             HStack(spacing: 10) {
-                HealthStatusDot(status: item.status)
+                // A row the blocked condition explains reads neutral (#338):
+                // no verdict of its own, so no colour of its own.
+                if item.isDependent {
+                    Circle().fill(LoreTheme.Surface.line3).frame(width: 8, height: 8)
+                } else {
+                    HealthStatusDot(status: item.status)
+                }
                 Text(item.title)
                     .font(LoreTheme.Typography.body)
-                    .foregroundStyle(LoreTheme.TextColor.primary)
+                    .foregroundStyle(item.isDependent ? LoreTheme.TextColor.muted : LoreTheme.TextColor.primary)
                 Spacer(minLength: 8)
                 Text(item.detail)
                     .font(LoreTheme.Typography.meta)
@@ -158,30 +177,102 @@ private struct HealthRowView: View {
             }
 
             if let remedy = item.remedy {
-                Text(remedy.instruction)
-                    .font(LoreTheme.Typography.meta)
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-                    .fixedSize(horizontal: false, vertical: true)
+                VStack(alignment: .leading, spacing: 4) {
+                    // The hedged cause sits a step quieter than the step to take (#341).
+                    if let cause = remedy.cause {
+                        Text(cause)
+                            .foregroundStyle(LoreTheme.TextColor.faint)
+                    }
+                    Text(remedy.instruction)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
+                }
+                .font(LoreTheme.Typography.meta)
+                .fixedSize(horizontal: false, vertical: true)
                 if !remedy.actions.isEmpty {
-                    HStack(spacing: 8) {
-                        ForEach(Array(remedy.actions.enumerated()), id: \.offset) { _, action in
-                            Button(action.buttonLabel) { perform(action) }
-                                .buttonStyle(HealthActionButtonStyle())
-                                .disabled(isTesting)
+                    if remedy.manualSteps.isEmpty {
+                        actionButtons(remedy)
+                    } else {
+                        // The same fix by hand, behind the disclosure beside
+                        // the primary button (#338).
+                        DisclosureGroup(isExpanded: $showsManualSteps) {
+                            manualStepsList(remedy.manualSteps)
+                        } label: {
+                            actionButtons(remedy)
                         }
-                        if isTesting {
-                            ProgressView()
-                                .controlSize(.small)
-                            Text("Testing…")
-                                .font(LoreTheme.Typography.meta)
-                                .foregroundStyle(LoreTheme.TextColor.muted)
-                        }
+                        .disclosureGroupStyle(ManualStepsDisclosureStyle())
                     }
                 }
             }
         }
         .padding(.horizontal, 12)
         .padding(.vertical, 10)
+    }
+
+    private func actionButtons(_ remedy: Remedy) -> some View {
+        HStack(spacing: 8) {
+            ForEach(Array(remedy.actions.enumerated()), id: \.offset) { _, action in
+                if action == .fixPermissions {
+                    // The one primary action (#338), in the focus accent.
+                    LorePrimaryButton(title: action.buttonLabel, size: .compact) { perform(action) }
+                } else {
+                    Button(action.buttonLabel) { perform(action) }
+                        .buttonStyle(HealthActionButtonStyle())
+                        .disabled(isTesting)
+                }
+            }
+            if isTesting {
+                ProgressView()
+                    .controlSize(.small)
+                Text("Testing…")
+                    .font(LoreTheme.Typography.meta)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
+            }
+        }
+    }
+
+    /// The same fix by hand, numbered, in the row's muted meta type.
+    private func manualStepsList(_ steps: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 2) {
+            ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                HStack(alignment: .firstTextBaseline, spacing: 6) {
+                    Text("\(index + 1).")
+                        .monospacedDigit()
+                    Text(step)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+        .font(LoreTheme.Typography.meta)
+        .foregroundStyle(LoreTheme.TextColor.muted)
+        .padding(.leading, 16)
+    }
+}
+
+/// "Do it by hand" as the board draws it (#338): the row's buttons, then a
+/// muted chevron and label 14 pt past them, and the steps under the whole row.
+private struct ManualStepsDisclosureStyle: DisclosureGroupStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 14) {
+                configuration.label
+                Button {
+                    configuration.isExpanded.toggle()
+                } label: {
+                    HStack(spacing: 5) {
+                        Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
+                            .font(.system(size: 8, weight: .semibold))
+                        Text(Remedy.manualStepsLabel)
+                            .font(LoreTheme.Typography.meta)
+                    }
+                    .foregroundStyle(LoreTheme.TextColor.muted)
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel(Remedy.manualStepsLabel)
+                .accessibilityValue(configuration.isExpanded ? "Expanded" : "Collapsed")
+            }
+            if configuration.isExpanded { configuration.content }
+        }
     }
 }
 
@@ -212,8 +303,9 @@ extension HealthStatus {
 
 // MARK: - Action button
 
-/// Small filled button matching the notch prompt's action style.
-private struct HealthActionButtonStyle: ButtonStyle {
+/// Small filled button matching the notch prompt's action style; also the
+/// iPhone notes line's "Open System Settings" (#309).
+struct HealthActionButtonStyle: ButtonStyle {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
     @Environment(\.isEnabled) private var isEnabled
 
@@ -235,14 +327,42 @@ private struct HealthActionButtonStyle: ButtonStyle {
 
 /// Relaunch the app in place — the common remedy when macOS has stopped
 /// recognizing a permission grant and only a fresh process picks it up.
+///
+/// The new copy can only start once this one is gone: LaunchServices starts
+/// no second instance while one runs, and one that started anyway would find
+/// `instance.lock` held and defer (#193). So a shell outside this process waits
+/// for it to exit, then opens this same bundle (#336). The shell is started at
+/// `applicationWillTerminate`, when the quit is certain, so a quit cancelled at
+/// the recording alert leaves nothing waiting.
+@MainActor
 enum AppRelauncher {
-    @MainActor
+    private(set) static var isRequested = false
+
     static func relaunch() {
-        let url = Bundle.main.bundleURL
-        let config = NSWorkspace.OpenConfiguration()
-        config.createsNewApplicationInstance = true
-        NSWorkspace.shared.openApplication(at: url, configuration: config) { _, _ in
-            Task { @MainActor in NSApp.terminate(nil) }
-        }
+        isRequested = true
+        NSApp.terminate(nil)
+    }
+
+    /// The quit was cancelled, or a SIGTERM ends the process: no relaunch.
+    static func cancel() {
+        isRequested = false
+    }
+
+    /// From `applicationWillTerminate`, before the event ring's last flush.
+    static func startIfRequested() {
+        guard isRequested else { return }
+        let waiter = waiter(for: ProcessInfo.processInfo.processIdentifier, thenOpen: Bundle.main.bundleURL)
+        DiagStore.record(.appRelaunch(waiterStarted: (try? waiter.run()) != nil))
+    }
+
+    /// Waits for `pid` to exit, then opens `bundle` through LaunchServices.
+    nonisolated static func waiter(for pid: Int32, thenOpen bundle: URL) -> Process {
+        let shell = Process()
+        shell.executableURL = URL(fileURLWithPath: "/bin/sh")
+        shell.arguments = [
+            "-c", #"while kill -0 "$0" 2>/dev/null; do sleep 0.1; done; exec /usr/bin/open "$1""#,
+            String(pid), bundle.path,
+        ]
+        return shell
     }
 }

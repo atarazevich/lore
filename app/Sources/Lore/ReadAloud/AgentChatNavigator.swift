@@ -1,6 +1,7 @@
 import AppKit
 import Foundation
 import LoreCLIKit
+import LoreCore
 import Observation
 
 /// What going to a chat comes down to (#258). One decision, read by the words
@@ -18,8 +19,8 @@ enum AgentChatMove: Equatable, Sendable {
     case frontApp
 }
 
-/// Where a reply's chat is right now, and what the one button on its row does
-/// (#258). Read live whenever a row is shown and again on the click, never
+/// Where a reply's chat is right now, and what the one button on its card does
+/// (#258). Read live whenever the card is drawn and again on the click, never
 /// stored on the reply: a chat closes while its reply sits in the list.
 struct AgentChatDestination: Equatable, Sendable {
     let state: DiagEvent.ReplyChatState
@@ -31,11 +32,6 @@ struct AgentChatDestination: Equatable, Sendable {
     /// The board's two words (`docs/design/prototypes/agent-replies-player.html`).
     var title: String {
         state == .appRunningChatOpen ? "Go to" : "Open"
-    }
-
-    /// The host app's icon is greyed while the app is not running.
-    var isHostRunning: Bool {
-        state != .appNotRunning
     }
 
     /// What the click will do, in the user's words — the board's copy table
@@ -102,15 +98,14 @@ struct ClaudeSessionIndex: Sendable {
 }
 
 /// The apps side of going to a chat (#258): which ones run, bringing one
-/// forward, starting one, and how it looks. A seam, so the three states and
-/// their actions are tested without launching anything.
+/// forward, starting one, and what it is called. A seam, so the three states
+/// and their actions are tested without launching anything.
 @MainActor
 protocol AgentChatHostApps: AnyObject {
     func runningBundleIDs() -> Set<String>
     func activate(bundleID: String) -> Bool
     func launch(bundleID: String) async -> Bool
     func displayName(bundleID: String) -> String?
-    func icon(bundleID: String) -> NSImage?
 }
 
 @MainActor
@@ -149,13 +144,6 @@ final class SystemAgentChatHostApps: AgentChatHostApps {
         }
         return FileManager.default.displayName(atPath: url.path)
     }
-
-    func icon(bundleID: String) -> NSImage? {
-        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
-            return nil
-        }
-        return NSWorkspace.shared.icon(forFile: url.path)
-    }
 }
 
 /// From a reply to its chat (#258). lore never guesses where a reply came
@@ -165,8 +153,9 @@ final class SystemAgentChatHostApps: AgentChatHostApps {
 /// Three states, one button: the app running with the chat open is "Go to"
 /// (focus the pane, bring the app forward); the app running with the chat
 /// closed is "Open" (a new herdr tab in the chat's folder running the resume
-/// command); the app not running is the same "Open" with a grey icon, after
-/// starting the app and waiting for its herdr to answer.
+/// command); the app not running is the same "Open", after starting the app
+/// and waiting for its herdr to answer. The button stands on the open reply's
+/// card alone (#264).
 ///
 /// Behind the switch the player owns (`AgentReplyController.isEnabled`): off,
 /// there is no destination, nothing is read and no command runs.
@@ -275,7 +264,7 @@ final class AgentChatNavigator {
     /// rename shows on the next reading, and a herdr nobody could ask leaves
     /// the reply named by the labels it arrived with.
     func name(for reply: AgentReply) -> AgentChatName {
-        AgentChatName(reply: reply, herdr: snapshot?.herdr, app: appName(of: reply))
+        AgentChatName(reply: reply, herdr: snapshot?.herdr)
     }
 
     /// The button for this reply, or nil when there is none: a reply that
@@ -292,14 +281,9 @@ final class AgentChatNavigator {
         )
     }
 
-    /// The host app's own icon, as installed on this Mac. LaunchServices —
-    /// which caches both the icon and the name — is not asked while the switch
-    /// is off.
-    func icon(for reply: AgentReply) -> NSImage? {
-        guard isEnabled, let bundleID = Self.hostApp(of: reply) else { return nil }
-        return apps.icon(bundleID: bundleID)
-    }
-
+    /// The host app as this Mac names it, for the button's tooltip.
+    /// LaunchServices is not asked while the switch is off: nothing calls
+    /// this without a destination, and there is none then.
     private func appName(of reply: AgentReply) -> String? {
         guard let bundleID = Self.hostApp(of: reply) else { return nil }
         return apps.displayName(bundleID: bundleID)
@@ -307,16 +291,17 @@ final class AgentChatNavigator {
 
     // MARK: - The action
 
-    /// Whether Fn+J has anywhere to go: a reply in the player, and no go of
-    /// its own already running. The key asks before it ends the dictation
+    /// Whether Fn+J has anywhere to go: a reply open in the player, and no go
+    /// of its own already running. The key asks before it ends the dictation
     /// gesture it arrived under (#259).
-    var canOpenCurrent: Bool { isEnabled && !isOpening && replies?.currentReply != nil }
+    var canOpenCurrent: Bool { isEnabled && !isOpening && replies?.openReply != nil }
 
-    /// Goes to the chat of the reply the player is on — its own current one, so
-    /// the key that presses this holds no second reference to it (#259).
+    /// Goes to the chat of the reply open in the player — the card's, past the
+    /// end the last one read (#264) — read off the player itself, so the key
+    /// that presses this holds no second reference to it (#259).
     @discardableResult
     func openCurrent() async -> DiagEvent.Outcome {
-        guard let reply = replies?.currentReply else { return .failed }
+        guard let reply = replies?.openReply else { return .failed }
         return await open(reply)
     }
 

@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 import os
 
 /// The one storage exception (#192, D4): an image that exists only on the
@@ -35,7 +36,7 @@ enum RichInputStore {
             try png.write(to: url, options: .atomic)
             return url.path
         } catch {
-            DiagStore.record(.historyWriteFailed)
+            DiagStore.record(.historyWriteFailed(reason: .init(error: error)))
             log.error("failed to write clipboard image: \(error.localizedDescription, privacy: .private)")
             return nil
         }
@@ -99,14 +100,16 @@ enum RichInputStore {
         DiagStore.record(.dictationItemsPruned(deleted: deleted, bytesFreed: Int(freed)))
     }
 
-    /// Everything these entries put on disk goes with them (#196). No index is
+    /// The files these entries collected, by entry (#196, #243). No index is
     /// kept anywhere: the file names carry the entry they belong to.
-    static func deleteFiles(ofEntries ids: Set<UUID>, directory: URL = defaultDirectory) {
-        guard !ids.isEmpty else { return }
+    static func files(ofEntries ids: Set<UUID>, in directory: URL) -> [UUID: [URL]] {
+        guard !ids.isEmpty else { return [:] }
+        var files: [UUID: [URL]] = [:]
         for file in contents(of: directory) {
             guard let owner = entryID(of: file.url), ids.contains(owner) else { continue }
-            try? FileManager.default.removeItem(at: file.url)
+            files[owner, default: []].append(file.url)
         }
+        return files
     }
 
     /// The entry a collected file belongs to. The name is `<entry id>-<n>.png`

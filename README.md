@@ -44,10 +44,10 @@ Agents answer better when you give them the whole picture. Speaking is how you g
 
 - 🎙️ **One key.** Hold `fn`, speak, release. Text is pasted at your cursor. lore never presses Enter for you.
 - ⏳ **No time limit.** A dictation runs as long as you keep talking. Lock it with `Space` and put your hands down.
-- 🗂️ **Never lost.** The audio is written to disk from the first second. If the app is killed mid-sentence, the dictation is in History at next launch with a Retry.
-- 📎 **Context without stopping.** While you speak, anything you copy joins the text at the clause you were saying: a screenshot (`fn`+`S`), a link, a snippet, or a file if you switch that on. Terminals and editors get the path, web composers get the file.
+- 🗂️ **Never lost.** The audio is written to disk from the first second. If the app is killed mid-sentence, lore transcribes it by itself at next launch and puts it in History.
+- 📎 **Context without stopping.** While you speak, text or an image you copy joins the text at the clause you were saying: a screenshot (`fn`+`S`), a link, a snippet, or a file if you switch that on. Terminal, iTerm2, Ghostty, VS Code and Cursor get the path; other apps get the file.
 - 🧹 **Clean up only when you ask.** Raw words paste by default. Press `fn`+`V` while recording to clean up on paste (self-corrections resolved, no paraphrasing), `fn`+`T` to translate to English on paste. Both use your own OpenAI key.
-- 🌍 **Any language, or several.** Russian, English, half of each in one sentence. No language switch to set.
+- 🌍 **Mixed languages.** Russian, English, half of each in one sentence; European languages. No language switch to set.
 - 📊 **Kept.** Every dictation stays in History with its text and duration, editable; audio for the last 500. Stats shows your words, time, and a per-day heatmap.
 - 💡 **Nothing to learn first.** No tutorial. Each feature says one sentence from its own place, the moment you could use it, and then leaves you alone.
 
@@ -113,9 +113,9 @@ If macOS already uses `fn` for something else, onboarding offers Right Option or
   </a>
 </p>
 
-Download [Lore.dmg](https://updates.dev.cognition.design/download/Lore.dmg), drag lore to Applications, open it. Every version is also on the [Releases](https://github.com/atarazevich/lore/releases) page.
+Download [Lore.dmg](https://updates.dev.cognition.design/download/Lore.dmg), drag lore to Applications, open it. Or with Homebrew: `brew install --cask atarazevich/tap/lore`. Every version is also on the [Releases](https://github.com/atarazevich/lore/releases) page.
 
-First launch asks for three permissions (Microphone, Accessibility, Input Monitoring) and downloads the speech models once, about 930 MB. Then hold `fn`.
+First launch asks for three permissions (Microphone, Accessibility, Input Monitoring) and downloads the speech model once, about 630 MB. Then hold `fn`.
 
 New versions appear on the Releases page; the app also offers them from the menu bar, Check for Updates.
 
@@ -145,4 +145,4 @@ MIT, see [LICENSE](LICENSE). lore started as a fork of OpenOats. Third-party not
 ## Acknowledgements
 
 - [OpenOats](https://github.com/yazinsai/OpenOats), which lore started as a fork of.
-- Speech recognition is NVIDIA Parakeet TDT 0.6B v3 ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)) running through [FluidAudio](https://github.com/FluidInference/FluidAudio).
+- Speech recognition is Parakeet Ultra by moondream, a post-training of NVIDIA Parakeet TDT 0.6B v3 ([CC BY 4.0](https://creativecommons.org/licenses/by/4.0/)), converted to Core ML by FluidInference and running through [FluidAudio](https://github.com/FluidInference/FluidAudio).

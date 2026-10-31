@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 
 /// Where a dictation's items land in its words, and how the words come back out
 /// again for cleanup (#192).

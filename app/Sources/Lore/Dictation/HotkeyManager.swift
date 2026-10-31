@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 import os
 
 @MainActor
@@ -145,8 +146,13 @@ final class HotkeyManager {
     /// Previous permission state, tracked per permission so each carries its own edge
     private var lastAccessibilityOK = true
     private var lastInputMonitoringOK = true
-    /// Tracks previous SecureInput state to log only on transitions
-    private var lastSecureInputActive = false
+    /// The last secure-input reading of the 5 s health cycle, to record the
+    /// flag's edges and to notice any change in what the panel would say.
+    private var lastSecureInput: SecureInput.State?
+    /// The secure-input reading changed — the flag, the holder or the lock — so
+    /// an open health panel re-reads and its row never states a stale holder
+    /// (#341). The launch path wires this to one `HealthMonitor.refresh()`.
+    var onSecureInputChanged: (() -> Void)?
 
     /// CGEvent tap for consuming Space/Esc when external apps are focused
     private var eventTap: CFMachPort?
@@ -169,6 +175,11 @@ final class HotkeyManager {
     /// tap can be enabled yet starved (the reported "Fn dead, all toggles on"
     /// incident), and only the pair is an honest verdict.
     private(set) var tapLiveness = TapLiveness()
+
+    /// The last attempt to create the tap failed (#338). The launch attempt
+    /// happens before the health monitor listens, so the monitor reads this
+    /// once when it starts: the effect it is told about, not a guess.
+    private(set) var lastTapCreateFailed = false
 
     /// Enabled/existence only — NOT event flow. Feeds `TapLiveness.isAlive`.
     /// Read live by the health probe and by the onboarding Try-it step (#150),
@@ -282,7 +293,7 @@ final class HotkeyManager {
             if event.modifierFlags.contains(.function) && self.isRecordingFlag {
                 if (event.keyCode == 9 && self.modifierOn({ $0.modifierCleanupEnabled }))
                     || (event.keyCode == 17 && self.modifierOn({ $0.modifierTranslateEnabled }))
-                    || (event.keyCode == 40 && self.operatorSendOn()) // V, T, or K (#122/#223)
+                    || event.keyCode == 40 // V, T, or K (#324: always on)
                     || (event.keyCode == 1 && RichInputSettings.screenshotsEnabled) { // S (#192)
                     Task { @MainActor in
                         self.handleKeyDown(event)
@@ -390,11 +401,10 @@ final class HotkeyManager {
         HotkeyManager.hkLog.info("Hotkey manager uninstalled")
     }
 
-    /// Modifier enable toggle lookup (DSET-05): Space lock, Fn+V cleanup,
-    /// Fn+T translate and Fn+K send-to-the-operator each gate on one
-    /// SettingsStore flag; absent settings default to enabled. (Fn+S is not
-    /// here — its switch is Copying's own, read live through
-    /// `RichInputSettings`.) The NSEvent
+    /// Modifier enable toggle lookup (DSET-05): Space lock, Fn+V cleanup and
+    /// Fn+T translate each gate on one SettingsStore flag; absent settings
+    /// default to enabled. (Fn+K has no switch. Fn+S is not here — its switch
+    /// is Copying's own, read live through `RichInputSettings`.) The NSEvent
     /// monitors and the CGEvent tap callback all run on the main thread (the
     /// tap source is added to CFRunLoopGetMain — see the Space path's
     /// assumeIsolated precedent), so this is a cheap cached-property read in
@@ -404,15 +414,6 @@ final class HotkeyManager {
             guard let settings else { return true }
             return read(settings)
         }
-    }
-
-    /// The Fn+K master switch (#223), read strictly: with no settings wired the
-    /// answer is *off*, where `modifierOn` answers on for its siblings. They
-    /// default to enabled and gate a key the user already knows; this one is off
-    /// on every fresh install, so "cannot tell" may not mean yes here. It is the
-    /// same reading `DictationCoordinator.toggleOperatorAddressed` takes.
-    nonisolated private func operatorSendOn() -> Bool {
-        MainActor.assumeIsolated { settings?.operatorSendEnabled == true }
     }
 
     /// Internal, not private, so `LockedFnHoldTests` can put a real
@@ -684,18 +685,10 @@ final class HotkeyManager {
                 if isLocked { fnHeldAtLock = true }
                 HotkeyManager.hkLog.debug("[HOTKEY] Fn+T → pending translate")
                 return
-            } else if event.keyCode == 40, operatorSendOn() { // K (#122/#223)
-                // Not a duplicate of the entry gates, for the same reason V and
-                // T carry their own: the local monitor's last branch passes
-                // every other key through to here, so this is reachable ungated
-                // whenever lore itself is focused. `toggleOperatorAddressed`
-                // would refuse anyway, but the two lines below are not its —
-                // an unswitched K counting as a chord would swallow the Fn
-                // release that ends a locked recording. Strict, like the entry
-                // sites: no settings means off.
-                coordinator.toggleOperatorAddressed()
+            } else if event.keyCode == 40 { // K (#324: mark for later, always on)
+                coordinator.toggleMark()
                 if isLocked { fnHeldAtLock = true }
-                HotkeyManager.hkLog.debug("[HOTKEY] Fn+K → operator addressed")
+                HotkeyManager.hkLog.debug("[HOTKEY] Fn+K → mark for later")
                 return
             } else if event.keyCode == 1, RichInputSettings.screenshotsEnabled { // S (#192/#198)
                 // Still consumed while paused, and deliberately does nothing:
@@ -1344,11 +1337,11 @@ final class HotkeyManager {
                             HotkeyManager.hkLog.debug("[HOTKEY] Fn+S (CGEvent) → screenshot to clipboard")
                         }
                         return nil
-                    } else if keyCode == 40, manager.operatorSendOn() { // K (#122/#223)
+                    } else if keyCode == 40 { // K (#324: mark for later, always on)
                         Task { @MainActor in
-                            manager.coordinator?.toggleOperatorAddressed()
+                            manager.coordinator?.toggleMark()
                             if manager.isLocked { manager.fnHeldAtLock = true }
-                            HotkeyManager.hkLog.debug("[HOTKEY] Fn+K (CGEvent) → operator addressed")
+                            HotkeyManager.hkLog.debug("[HOTKEY] Fn+K (CGEvent) → mark for later")
                         }
                         return nil
                     }
@@ -1466,6 +1459,7 @@ final class HotkeyManager {
             userInfo: userInfo
         )
 
+        lastTapCreateFailed = eventTap == nil
         if let eventTap {
             runLoopSource = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, eventTap, 0)
             CFRunLoopAddSource(CFRunLoopGetMain(), runLoopSource, .commonModes)
@@ -1604,17 +1598,18 @@ final class HotkeyManager {
         //    often cannot supply, and gating on it is what kept this event from
         //    ever firing (#93).
         let secureInput = SecureInput.read()
-        if secureInput.active {
-            if !lastSecureInputActive {
-                DiagStore.record(.secureInputChanged(active: true, holderPID: secureInput.pid))
-                // The holder's *name* identifies software the user runs — os.Logger only.
-                HotkeyManager.hkLog.error("[HK] Health: SecureInput active — associated with \(secureInput.name ?? "an unnamed process", privacy: .private) (pid \(secureInput.pid.map(String.init) ?? "none", privacy: .public))")
-            }
-            lastSecureInputActive = true
-        } else if lastSecureInputActive {
+        let wasActive = lastSecureInput?.active ?? false
+        if secureInput.active, !wasActive {
+            DiagStore.record(.secureInputChanged(active: true, holderPID: secureInput.pid))
+            // The holder's *name* identifies software the user runs — os.Logger only.
+            HotkeyManager.hkLog.error("[HK] Health: SecureInput active — associated with \(secureInput.name ?? "an unnamed process", privacy: .private) (pid \(secureInput.pid.map(String.init) ?? "none", privacy: .public))")
+        } else if !secureInput.active, wasActive {
             DiagStore.record(.secureInputChanged(active: false, holderPID: nil))
             HotkeyManager.hkLog.info("[HK] Health: SecureInput cleared")
-            lastSecureInputActive = false
+        }
+        if secureInput != lastSecureInput {
+            lastSecureInput = secureInput
+            onSecureInputChanged?()
         }
 
         // 4. Tap liveness. "We saw no key events for 30s" is not a fault — the user

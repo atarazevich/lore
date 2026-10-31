@@ -1,3 +1,5 @@
+import LoreCore
+import LoreFormat
 import SwiftUI
 
 /// Live transcript in the Lore design (MREC-11/12): speaker rows with a 64px
@@ -217,7 +219,7 @@ enum ElapsedStamp {
 
 /// Fixed leading column width for the elapsed stamp so speaker labels stay
 /// aligned across finalized and interim rows (#57).
-private let timestampColumnWidth: CGFloat = 54
+let timestampColumnWidth: CGFloat = 54
 
 /// The transcript row's frame: the mono stamp in its 54 px gutter, the
 /// content beside it. The live row and the review's paragraph (#269) both.

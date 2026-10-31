@@ -1,6 +1,7 @@
 import AppKit
 import CoreAudio
 import Foundation
+import LoreCore
 import os
 
 // Same category as MeetingDetectionController: one subsystem, one Console filter.
@@ -16,10 +17,15 @@ protocol AudioSignalSource: Sendable {
     /// Tear down any platform listeners and finish `signals`. Called from
     /// `MeetingDetector.stop()`. Default: no-op (mocks have nothing to remove).
     func shutdown()
+
+    /// Read the state again now and emit it if it changed, for a moment no
+    /// platform edge marks (#279, #327). Default: no-op.
+    func refresh()
 }
 
 extension AudioSignalSource {
     func shutdown() {}
+    func refresh() {}
 }
 
 // MARK: - CoreAudio HAL Signal Source
@@ -140,8 +146,6 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
         }
     }
 
-    /// Read the state again now and emit it if it changed — for a moment no
-    /// device edge marks (#279).
     func refresh() { checkAndEmit() }
 
     deinit {
@@ -341,8 +345,9 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
     }
 
     /// Whether a process other than this one has audio input running (#279).
-    /// Read at the device edge, when it is already current; the per-process
-    /// property itself sends no notification a listener here receives.
+    /// Read at the device edge, when it is already current, and again every
+    /// 2 s while a reply hold stands (#327); the per-process property itself
+    /// sends no notification a listener here receives.
     private static func anotherProcessRunsInput() -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyProcessObjectList,
@@ -393,6 +398,22 @@ actor MeetingDetector {
     /// protocol — the repo's test-seam doctrine (HealthProbes.swift).
     private let frontmostApp: @Sendable () async -> MeetingApp?
 
+    /// One running application as the scan sees it: bundle ID and the name
+    /// the system reports, if any.
+    struct RunningApp: Sendable {
+        let bundleID: String
+        let localizedName: String?
+    }
+
+    /// Running-apps read for the meeting-app scan (#214). Defaults to
+    /// NSWorkspace; tests inject their own so a meeting app running on the
+    /// machine cannot reach them.
+    private let runningApps: @Sendable () async -> [RunningApp]
+
+    /// The debounce's wait (#333). Defaults to `Task.sleep`; tests inject a
+    /// clock they move, so the debounce never waits on real time.
+    private let sleep: @Sendable (TimeInterval) async -> Void
+
     /// Set to true once the debounce expires and we have confirmed detection.
     private(set) var isActive = false
 
@@ -417,7 +438,9 @@ actor MeetingDetector {
     init(
         audioSource: (any AudioSignalSource)? = nil,
         customBundleIDs: [String] = [],
-        frontmostApp: (@Sendable () async -> MeetingApp?)? = nil
+        frontmostApp: (@Sendable () async -> MeetingApp?)? = nil,
+        runningApps: (@Sendable () async -> [RunningApp])? = nil,
+        sleep: (@Sendable (TimeInterval) async -> Void)? = nil
     ) {
         self.audioSource = audioSource ?? CoreAudioSignalSource()
         self.customBundleIDs = customBundleIDs
@@ -427,6 +450,14 @@ actor MeetingDetector {
                 guard let app = NSWorkspace.shared.frontmostApplication,
                       let bundleID = app.bundleIdentifier else { return nil }
                 return MeetingApp(bundleID: bundleID, name: app.localizedName ?? bundleID)
+            }
+        }
+        self.sleep = sleep ?? { try? await Task.sleep(for: .seconds($0)) }
+        self.runningApps = runningApps ?? {
+            await MainActor.run {
+                NSWorkspace.shared.runningApplications.compactMap { app in
+                    app.bundleIdentifier.map { RunningApp(bundleID: $0, localizedName: app.localizedName) }
+                }
             }
         }
 
@@ -508,8 +539,8 @@ actor MeetingDetector {
             let activeSince = Date()
             micActiveAt = activeSince
             detectorLog.debug("mic active, debouncing \(self.debounceSeconds, privacy: .public)s")
-            debounceTask = Task { [weak self] in
-                try? await Task.sleep(for: .seconds(self?.debounceSeconds ?? 5))
+            debounceTask = Task { [weak self, sleep, debounceSeconds] in
+                await sleep(debounceSeconds)
                 guard !Task.isCancelled else { return }
                 await self?.confirmActivation(since: activeSince)
             }
@@ -567,12 +598,8 @@ actor MeetingDetector {
     // MARK: - Process Scanning
 
     private func scanForMeetingApp() async -> MeetingApp? {
-        let runningApps = await MainActor.run {
-            NSWorkspace.shared.runningApplications
-        }
-
-        for app in runningApps {
-            guard let bundleID = app.bundleIdentifier else { continue }
+        for app in await runningApps() {
+            let bundleID = app.bundleID
             if knownBundleIDs.contains(bundleID) {
                 let name = app.localizedName
                     ?? knownApps.first(where: { $0.bundleID == bundleID })?.displayName
@@ -585,21 +612,20 @@ actor MeetingDetector {
 
     // MARK: - Default Meeting Apps
 
-    static var bundledMeetingApps: [MeetingAppEntry] {
-        defaultMeetingApps
-    }
-
+    /// Each ID is the one the shipping macOS app reports (#332): read from the
+    /// installed bundle where it is installed here, otherwise from the vendor's
+    /// Homebrew cask or, for the Meet web app, Chromium's own app-ID constant.
     private static let defaultMeetingApps: [MeetingAppEntry] = [
         MeetingAppEntry(bundleID: "us.zoom.xos", displayName: "Zoom"),
         MeetingAppEntry(bundleID: "com.microsoft.teams", displayName: "Microsoft Teams (classic)"),
         MeetingAppEntry(bundleID: "com.microsoft.teams2", displayName: "Microsoft Teams"),
         MeetingAppEntry(bundleID: "com.apple.FaceTime", displayName: "FaceTime"),
-        MeetingAppEntry(bundleID: "com.cisco.webexmeetingsapp", displayName: "Webex"),
+        MeetingAppEntry(bundleID: "Cisco-Systems.Spark", displayName: "Webex"),
+        MeetingAppEntry(bundleID: "com.cisco.webexmeetingsapp", displayName: "Webex Meetings"),
         MeetingAppEntry(bundleID: "app.tuple.app", displayName: "Tuple"),
-        MeetingAppEntry(bundleID: "co.around.Around", displayName: "Around"),
-        MeetingAppEntry(bundleID: "com.slack.Slack", displayName: "Slack"),
+        MeetingAppEntry(bundleID: "com.tinyspeck.slackmacgap", displayName: "Slack"),
         MeetingAppEntry(bundleID: "com.hnc.Discord", displayName: "Discord"),
         MeetingAppEntry(bundleID: "net.whatsapp.WhatsApp", displayName: "WhatsApp"),
-        MeetingAppEntry(bundleID: "com.google.Chrome.app.kjgfgldnnfobanmcafgkdilakhehfkbm", displayName: "Google Meet (PWA)"),
+        MeetingAppEntry(bundleID: "com.google.Chrome.app.kjgfgldnnfoeklkmfkjfagphfepbbdan", displayName: "Google Meet (PWA)"),
     ]
 }

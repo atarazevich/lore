@@ -1,6 +1,8 @@
 import AVFoundation
 import CoreAudio
 import FluidAudio
+import LoreCore
+import LoreFormat
 import Observation
 import os
 
@@ -127,8 +129,12 @@ final class TranscriptionEngine {
 
     /// The two backends a live session transcribes through: the mic leg draws
     /// the app's single prepared instance from `sharedBackendCache`, the system
-    /// leg keeps its own (why they are two, and for how long: `docs/decisions.md`
-    /// 2026-08-15 (#169), #185).
+    /// leg keeps its own, for isolation: a second instance costs about 16 MB
+    /// after short clips, about 36 MB after 30 s ones (scratch buffers grow with
+    /// audio length), because Core ML shares the ~600 MB of Neural Engine
+    /// weights per process, and the two
+    /// legs decode no faster apart than taking turns on one (measured 2026-10-26,
+    /// `experiments/model-memory`; `docs/decisions.md` 2026-10-26, #185).
     ///
     /// Readable (never writable) from outside so a test can assert the mic leg
     /// really is the shared instance and not a copy of it.
@@ -151,6 +157,12 @@ final class TranscriptionEngine {
     /// rather than building its own, so a meeting started while the launch
     /// warm-up is still loading joins that load instead of doubling it (#169).
     let sharedBackendCache: SharedBackendCache
+
+    /// Every cache serving the speech model, the shared one included: when a
+    /// failed load deletes the model's files, each is evicted, so none goes on
+    /// believing it has a model (#186). The app passes the same list the
+    /// speech-model upgrade installs into (`AppCoordinator.speechModelCaches`).
+    private let speechModelCaches: [SharedBackendCache]
 
     /// Factory for the system leg's backend — the production Parakeet instance;
     /// injectable so tests can drive the model path without a CoreML load.
@@ -181,22 +193,31 @@ final class TranscriptionEngine {
     private var pendingSystemAudioRestart = false
     private let loadVAD: @Sendable () async throws -> VadManager
     /// Seams so a test can fail a load without touching the machine's real model.
-    private let clearASRCache: @Sendable () -> Void
+    /// Removes the named model's files (nil: the model in use) and says
+    /// whether anything went — v3 never does (#299).
+    private let clearASRCache: @Sendable (SpeechModel?) -> Bool
+    /// The model of the system leg's failed load, when that leg is what failed;
+    /// nil for the mic leg, whose load is the shared cache's, on the model in use.
+    private var failedSystemModel: SpeechModel?
 
     init(
         transcriptStore: TranscriptStore,
         settings: AppSettings,
         sharedBackendCache: SharedBackendCache,
+        speechModelCaches: [SharedBackendCache]? = nil,
         audioBus: AudioBus = AudioBus(),
         mode: Mode = .live,
         makeSystemBackend: @escaping @Sendable () -> any TranscriptionBackend = { ParakeetBackend() },
         micAuthorization: @escaping @Sendable () -> AVAuthorizationStatus = { MicrophonePermission.status },
         loadVAD: @escaping @Sendable () async throws -> VadManager = { try await SileroVAD.load() },
-        clearASRCache: @escaping @Sendable () -> Void = { ParakeetBackend().clearModelCache() }
+        clearASRCache: @escaping @Sendable (SpeechModel?) -> Bool = {
+            SpeechModelFiles.shared.clear($0 ?? SpeechModelFiles.shared.working)
+        }
     ) {
         self.transcriptStore = transcriptStore
         self.settings = settings
         self.sharedBackendCache = sharedBackendCache
+        self.speechModelCaches = speechModelCaches ?? [sharedBackendCache]
         self.audioBus = audioBus
         self.mode = mode
         self.makeSystemBackend = makeSystemBackend
@@ -258,8 +279,8 @@ final class TranscriptionEngine {
 
         // 1. Load transcription models via backend protocol
         assetStatus = needsModelDownload
-            ? "Downloading Parakeet TDT v3..."
-            : "Loading Parakeet TDT v3..."
+            ? "Downloading speech model..."
+            : "Loading speech model..."
         if needsModelDownload { downloadProgress = 0 }
 
         var asrLoaded = false
@@ -286,14 +307,22 @@ final class TranscriptionEngine {
             // offline on its first download) must never delete a working model.
             guard !asrLoaded else { return }
             // Clear corrupt cache so the next attempt triggers a fresh download.
-            // The files go, the shared cache's loaded instance does not: after
-            // this, disk and memory disagree until the app restarts — the cache
-            // has no eviction entry point. Tracked as #186.
             invalidateBackendCache()
-            clearASRCache()
+            let failedModel = failedSystemModel
+            failedSystemModel = nil
+            // A confirmation covers one start: the next one asks again.
+            downloadConfirmed = false
+            // Nothing removed (v3, the fallback, never is): the model is still
+            // on disk, and the next meeting must not ask to download it.
+            guard clearASRCache(failedModel) else { return }
+            // The files are gone: no cache may go on serving an instance
+            // built from them (#186). Synchronous with the delete on the main
+            // actor, so no prepare lands between them. The next dictation or
+            // meeting loads again, one download shared through the shared
+            // cache; a take already transcribing keeps its instance and ends.
+            for cache in speechModelCaches { cache.evict() }
             DiagStore.record(.modelCacheCleared)
             needsModelDownload = true
-            downloadConfirmed = false
             return
         }
 
@@ -331,6 +360,7 @@ final class TranscriptionEngine {
     /// Separate from `start()` so the model path can be exercised without a
     /// microphone permission, an audio device, or the VAD model.
     func acquireASRBackends() async throws {
+        failedSystemModel = nil
         micBackend = try await sharedBackendCache.prepare(
             onStatus: { [weak self] in self?.assetStatus = $0 },
             onProgress: { [weak self] in self?.downloadProgress = $0 }
@@ -346,11 +376,13 @@ final class TranscriptionEngine {
         do {
             try await sys.prepare { _ in }
         } catch {
+            failedSystemModel = sys.speechModel
             DiagStore.record(.modelLoad(
                 model: .asr,
                 outcome: .failed,
                 seconds: Date().timeIntervalSince(startedAt),
-                fromCache: false
+                fromCache: false,
+                speechModel: sys.speechModel
             ))
             throw error
         }
@@ -358,7 +390,8 @@ final class TranscriptionEngine {
             model: .asr,
             outcome: .ok,
             seconds: Date().timeIntervalSince(startedAt),
-            fromCache: false
+            fromCache: false,
+            speechModel: sys.speechModel
         ))
         systemBackend = sys
         cachedSystemBackend = sys
@@ -902,7 +935,7 @@ final class TranscriptionEngine {
         }
         return StreamingTranscriber(
             backend: backend,
-            vadManager: vadManager,
+            detector: SileroWindowDetector(vad: vadManager),
             speaker: speaker,
             onPartial: onPartial,
             onFinal: onFinal
@@ -996,7 +1029,9 @@ final class TranscriptionEngine {
     /// Drop the system leg's backend so the next start() builds a fresh one.
     /// The mic leg has no equivalent: the engine never invalidates an instance
     /// it borrows.
-    private func invalidateBackendCache() {
+    /// Also called when the speech model is swapped (#299), while no meeting
+    /// is live: the next meeting builds its system leg on the new model.
+    func invalidateBackendCache() {
         cachedSystemBackend = nil
         engineLog.debug("system backend discarded")
     }

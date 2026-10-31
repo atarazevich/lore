@@ -2,6 +2,8 @@ import Darwin
 import FluidAudio
 import Foundation
 import LoreCLIKit
+import LoreCore
+import LoreFormat
 
 /// `lore transcribe` inside the app (#254): a file in, its text out, and nothing
 /// written anywhere — no meeting, no healer job, no history entry. It reads the
@@ -25,6 +27,10 @@ final class CLITranscribeService {
     /// The request being answered, which a meeting start can take the model back from.
     private var current: Current?
 
+    /// No request being answered and no call inside the model — an abandoned
+    /// or yielded request's included: the speech model may be swapped (#299).
+    var isIdle: Bool { current == nil && !gate.hasCallInside }
+
     private struct Current {
         let work: Task<Void, Never>
         let door: ModelGate.Door
@@ -43,23 +49,27 @@ final class CLITranscribeService {
         self.isMeetingLive = isMeetingLive
     }
 
-    /// The text of one file, and whether decoding reached its end.
+    /// The text of one file, and whether decoding reached its end. `turns`
+    /// is set only when the request asked for speakers and they were told apart.
     struct Pass: Sendable, Equatable {
         var texts: [String] = []
         var complete = true
+        var turns: String?
+        /// Where telling the speakers apart stopped, when it did.
+        var speakersStopped: DiagEvent.SpeakerStage?
     }
 
     /// One `lore transcribe` request. Nil when the command went away and
     /// cancelled the work: there is no one to answer. The wire's other request
     /// (`lore say`, #257) is routed to its own receiver, so this service never
     /// sees one.
-    func respond(toFileAt path: String) async -> CLIResponse? {
+    func respond(toFileAt path: String, speakers: Bool = false) async -> CLIResponse? {
         DiagStore.record(.commandTranscribeReceived)
         let startedAt = Date()
-        let response = await transcribe(path: path)
+        let response = await transcribe(path: path, speakers: speakers)
         let ms = Int(Date().timeIntervalSince(startedAt) * 1000)
         switch response {
-        case .transcript(_, let complete):
+        case .transcript(_, let complete), .speakerTurns(_, let complete, _):
             DiagStore.record(.commandTranscribeFinished(ms: ms, complete: complete))
         case .failed(let reason, _):
             DiagStore.record(.commandTranscribeFailed(reason: reason, ms: ms))
@@ -91,7 +101,7 @@ final class CLITranscribeService {
         await gate.waitForCallInside(bound: Self.yieldBound)
     }
 
-    private func transcribe(path: String) async -> CLIResponse? {
+    private func transcribe(path: String, speakers: Bool) async -> CLIResponse? {
         // Checked and `current` set with no suspension between them, so a
         // meeting either is live here or finds the request to take back.
         guard !isMeetingLive() else { return .failed(.meetingInProgress) }
@@ -100,7 +110,7 @@ final class CLITranscribeService {
         let (decisions, decide) = AsyncStream<Result<Pass, any Error>?>.makeStream()
         let work = Task {
             do {
-                decide.yield(.success(try await self.readAndTranscribe(path: path, door: door)))
+                decide.yield(.success(try await self.readAndTranscribe(path: path, speakers: speakers, door: door)))
             } catch {
                 decide.yield(.failure(error))
             }
@@ -123,29 +133,115 @@ final class CLITranscribeService {
         case nil:
             return .failed(.meetingInProgress)
         case .success(let pass)?:
-            let text = Self.joined(pass.texts)
-            guard !text.isEmpty else { return .failed(reason: .noSpeech, complete: pass.complete) }
-            return .transcript(text: text, complete: pass.complete)
+            if let trace = Self.fallbackTrace(pass) { DiagStore.record(trace) }
+            return Self.answer(pass, speakers: speakers)
         case .failure(let error)?:
             return .failed(error as? TranscribeFailure ?? .transcriptionFailed)
         }
+    }
+
+    /// What a finished pass answers. Without `speakers` it is the joined
+    /// transcript, as before the flag existed.
+    nonisolated static func answer(_ pass: Pass, speakers: Bool) -> CLIResponse {
+        if let turns = pass.turns, !turns.isEmpty {
+            return .speakerTurns(text: turns, complete: pass.complete, found: true)
+        }
+        let text = joined(pass.texts)
+        guard !text.isEmpty else { return .failed(reason: .noSpeech, complete: pass.complete) }
+        // Asked for speakers and they could not be told apart: the transcript still stands.
+        return speakers
+            ? .speakerTurns(text: text, complete: pass.complete, found: false)
+            : .transcript(text: text, complete: pass.complete)
+    }
+
+    /// The trace of a plain transcript answered in place of turns. None when
+    /// there is no plain transcript to answer: no speech is its own answer.
+    nonisolated static func fallbackTrace(_ pass: Pass) -> DiagEvent? {
+        guard pass.turns == nil, let stage = pass.speakersStopped, !joined(pass.texts).isEmpty else { return nil }
+        return .commandSpeakersNotFound(stage: stage)
     }
 
     /// Off the main actor from the first file-system call on: opening a file
     /// that another app's data protection covers can wait on a system consent
     /// prompt, and decoding a long file is real work.
     @concurrent
-    nonisolated private func readAndTranscribe(path: String, door: ModelGate.Door) async throws -> Pass {
+    nonisolated private func readAndTranscribe(path: String, speakers: Bool, door: ModelGate.Door) async throws -> Pass {
         if let failure = Self.unreadableReason(path: path) { throw failure }
         // Before the models: a file that is not audio should not wait on a load.
-        guard let reader = await AssetChunkReader(url: URL(fileURLWithPath: path)) else {
+        let url = URL(fileURLWithPath: path)
+        guard let reader = await AssetChunkReader(url: url) else {
             throw TranscribeFailure.notAudio
         }
         let (shared, vad) = try await models()
         let backend = gate.guarding(shared, through: door)
-        return try await Self.pass {
-            try await AudioFileSpeech(backend: backend, vad: vad).read(nextChunk: reader.nextChunk)
+        let speech = AudioFileSpeech(backend: backend, vad: vad)
+        guard speakers else {
+            return try await Self.pass { try await speech.read(nextChunk: reader.nextChunk) }
         }
+
+        // With speakers, the diarizer hears every block the transcript pass
+        // reads. One that fails to load or to run is dropped and gets one
+        // second try over the file once the read is done (#328); failing that
+        // it is traced and leaves `turns` nil and the transcript standing.
+        var notFound: DiagEvent.SpeakerStage?
+        var failure: (any Error)?
+        var listener: FileSpeakers?
+        do {
+            listener = try await FileSpeakers.load()
+        } catch {
+            notFound = .models
+            failure = error
+        }
+        try Task.checkCancellation()
+        var words: [TimedWord] = []
+        var pass = try await Self.pass {
+            let reading = try await speech.read(nextChunk: reader.nextChunk) { chunk in
+                do {
+                    try listener?.hear(chunk)
+                } catch {
+                    listener = nil
+                    notFound = .diarization
+                    failure = error
+                }
+            }
+            // In the file's seconds, for the stamps and the voices.
+            let rate = AssetChunkReader.frameRate
+            words = reading.utterances.flatMap(\.words).map {
+                TimedWord(text: $0.text, start: $0.start / rate, end: $0.end / rate)
+            }
+            return reading
+        }
+        try Task.checkCancellation()
+        notFound = Self.firstStop(failedAt: notFound, words: words)
+        if let listener, notFound == nil {
+            do {
+                pass.turns = SpeakerTurns.text(words: words, voices: try listener.speakers(of: words))
+            } catch {
+                notFound = .diarization
+                failure = error
+            }
+        }
+        if let first = notFound, let failure, !words.isEmpty, SpeakerFinder.retries(after: failure) {
+            do {
+                pass.turns = SpeakerTurns.text(words: words, voices: try await FileSpeakers.again(words, url: url))
+                notFound = nil
+                DiagStore.record(.diarizerFellBack(stage: first))
+            } catch let stopped as SpeakerFinder.Stopped {
+                notFound = stopped.stage
+            }
+        }
+        pass.speakersStopped = notFound
+        return pass
+    }
+
+    /// Where telling the speakers apart stops before the voices are asked
+    /// for: the first try's own failure, else `.transcript` when no word has
+    /// a time to place. A diarizer that did not load says so even when there
+    /// were no words (as before #328).
+    nonisolated static func firstStop(
+        failedAt: DiagEvent.SpeakerStage?, words: [TimedWord]
+    ) -> DiagEvent.SpeakerStage? {
+        failedAt ?? (words.isEmpty ? .transcript : nil)
     }
 
     /// The model the launch already prepared (or the load in progress), and the
@@ -183,10 +279,10 @@ final class CLITranscribeService {
     nonisolated static func unreadableReason(path: String) -> TranscribeFailure? {
         let fd = open(path, O_RDONLY)
         guard fd >= 0 else {
-            switch errno {
-            case ENOENT, ENOTDIR: return .fileNotFound
-            case EACCES, EPERM: return .notPermitted
-            default: return .couldNotOpen
+            switch FileOpenFailure(errno: errno) {
+            case .missing: return .fileNotFound
+            case .notPermitted: return .notPermitted
+            case .other: return .couldNotOpen
             }
         }
         defer { close(fd) }
@@ -219,7 +315,7 @@ final class ModelGate: @unchecked Sendable {
     private let lock = NSLock()
     private var callInside = false
 
-    /// `backend`, with every `transcribe` call going in through `door`.
+    /// `backend`, with every transcription call going in through `door`.
     func guarding(_ backend: any TranscriptionBackend, through door: Door) -> any TranscriptionBackend {
         Gated(backend: backend, gate: self, door: door)
     }
@@ -231,10 +327,12 @@ final class ModelGate: @unchecked Sendable {
         lock.withLock { door.closed = true }
     }
 
+    var hasCallInside: Bool { lock.withLock { callInside } }
+
     /// Returns once no call is inside the model, or after `bound`.
     func waitForCallInside(bound: Duration) async {
         let deadline = ContinuousClock.now + bound
-        while lock.withLock({ callInside }), ContinuousClock.now < deadline {
+        while hasCallInside, ContinuousClock.now < deadline {
             try? await Task.sleep(for: .milliseconds(5))
         }
     }
@@ -270,6 +368,12 @@ final class ModelGate: @unchecked Sendable {
             try await gate.enter(through: door)
             defer { gate.leave() }
             return try await backend.transcribe(samples, previousContext: previousContext)
+        }
+
+        func transcribeDetailed(_ samples: [Float], previousContext: String?) async throws -> TranscriptionResult {
+            try await gate.enter(through: door)
+            defer { gate.leave() }
+            return try await backend.transcribeDetailed(samples, previousContext: previousContext)
         }
     }
 }

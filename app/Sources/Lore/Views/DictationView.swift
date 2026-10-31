@@ -1,3 +1,5 @@
+import LoreCore
+import LoreFormat
 import SwiftUI
 
 private struct HistoryDayGroup: Identifiable {
@@ -115,6 +117,12 @@ struct DictationView: View {
     @FocusState private var isEditorFocused: Bool
     @State private var activePopover: RowPopover?
     @State private var projectionCache = HistoryProjectionCache()
+    /// Select Multiple… (#243, dictation-delete.html §02): the select bar is up
+    /// and a click on a row chooses it, as on meetings.
+    @State private var selecting = false
+    /// Empty whenever `selecting` is false: only `startSelecting` fills it,
+    /// and `leaveSelecting`, the one way out, empties it.
+    @State private var chosen: Set<UUID> = []
 
     var body: some View {
         VStack(spacing: 0) {
@@ -198,17 +206,10 @@ struct DictationView: View {
 
             Spacer()
 
-            if let error = dictation.lastError {
+            // A take that missed history is the row's to say (#265), not this
+            // strip's: the strip would latch it in red after the row clears.
+            if let error = dictation.lastError, !error.isPastedNotInHistory {
                 Text(error.sentence)
-                    .font(.system(size: 11))
-                    .foregroundStyle(LoreTheme.Accent.red)
-                    .lineLimit(1)
-            }
-
-            // A history entry that silently failed to persist must be
-            // visible — cleared automatically by the next successful save.
-            if let saveError = dictation.history.lastSaveError {
-                Text(saveError)
                     .font(.system(size: 11))
                     .foregroundStyle(LoreTheme.Accent.red)
                     .lineLimit(1)
@@ -221,7 +222,7 @@ struct DictationView: View {
                 // (`DictationActivityFormat.groupedNumber`, review — A6), so
                 // this strip and that pane never disagree on how a count reads.
                 Text(searchText.isEmpty
-                    ? "\(DictationActivityFormat.groupedNumber(dictation.history.entries.count)) entries"
+                    ? DictationDeleteCopy.count(dictation.history.entries.count)
                     : "\(DictationActivityFormat.groupedNumber(historyProjection.filtered.count)) of "
                         + "\(DictationActivityFormat.groupedNumber(dictation.history.entries.count))")
                     .font(LoreTheme.Typography.mono(11.5))
@@ -285,6 +286,10 @@ struct DictationView: View {
                 VStack(spacing: 0) {
                     searchRow
                     LoreDivider()
+                    if selecting {
+                        selectBar
+                        LoreDivider()
+                    }
 
                     if historyProjection.filtered.isEmpty && !searchText.isEmpty {
                         VStack(spacing: 8) {
@@ -302,7 +307,9 @@ struct DictationView: View {
                                     Section {
                                         ForEach(group.entries) { entry in
                                             historyRow(entry)
-                                            LoreDivider()
+                                            if !joinsNext(entry, in: group.entries) {
+                                                LoreDivider()
+                                            }
                                         }
                                     } header: {
                                         dayHeader(group.label)
@@ -342,6 +349,89 @@ struct DictationView: View {
         .padding(.vertical, 8)
     }
 
+    // MARK: - Select bar (#243, dictation-delete.html §02)
+
+    /// Meetings' bar, word for word except the delete, which names its count
+    /// and noun. Select All takes what the search shows.
+    private var selectBar: some View {
+        let count = visibleChosen.count
+        return HStack(spacing: 14) {
+            Button("Select All") {
+                chosen = dictation.history.deletable(Set(historyProjection.filtered.map(\.id)))
+            }
+            Spacer()
+            if count > 0 {
+                Button(DictationDeleteCopy.deleteChosen(count)) {
+                    DictationDeleteConfirmation.ask(
+                        DictationDeleteRequest(visibleChosen, in: dictation.history),
+                        history: dictation.history,
+                        onConfirm: leaveSelecting
+                    )
+                }
+                .padding(.trailing, 10)
+            }
+            Button("Done") { leaveSelecting() }
+        }
+        .font(.system(size: 11))
+        .buttonStyle(.plain)
+        .foregroundStyle(LoreTheme.Accent.blue)
+        .padding(.horizontal, 26)
+        .padding(.vertical, 10)
+    }
+
+    /// What the bar's delete counts and takes: chosen, still shown by the
+    /// search, and not being worked on.
+    private var visibleChosen: Set<UUID> {
+        guard !chosen.isEmpty else { return [] }
+        let shown = Set(historyProjection.filtered.map(\.id))
+        return dictation.history.deletable(chosen.intersection(shown))
+    }
+
+    private func startSelecting(with entry: DictationHistoryEntry) {
+        if editingEntryID != nil { cancelEdit() }
+        activePopover = nil
+        selecting = true
+        chosen = dictation.history.deletable([entry.id])
+    }
+
+    private func leaveSelecting() {
+        selecting = false
+        chosen = []
+    }
+
+    private func toggleChosen(_ entry: DictationHistoryEntry) {
+        if chosen.contains(entry.id) {
+            chosen.remove(entry.id)
+        } else if dictation.history.inFlight[entry.id] == nil {
+            chosen.insert(entry.id)
+        }
+    }
+
+    private func isChosen(_ entry: DictationHistoryEntry) -> Bool {
+        chosen.contains(entry.id)
+    }
+
+    /// A run of chosen rows reads as one block: no hairline inside it.
+    private func joinsNext(_ entry: DictationHistoryEntry, in entries: [DictationHistoryEntry]) -> Bool {
+        guard isChosen(entry), let index = entries.firstIndex(where: { $0.id == entry.id }),
+              index + 1 < entries.count else { return false }
+        return isChosen(entries[index + 1])
+    }
+
+    /// Whether the row offers Delete — the rail's trash and the right-click
+    /// menu ask this one question, so the two never disagree (#243). Not while
+    /// the row is being edited, and not while a transcription, retry or
+    /// transform is working on it: that take lands first, then it can go.
+    private func offersDelete(_ entry: DictationHistoryEntry) -> Bool {
+        dictation.history.inFlight[entry.id] == nil && editingEntryID != entry.id
+    }
+
+    private func askToDelete(_ entry: DictationHistoryEntry) {
+        DictationDeleteConfirmation.ask(
+            DictationDeleteRequest([entry.id], in: dictation.history), history: dictation.history
+        )
+    }
+
     // MARK: - Day Header (DIC-26)
 
     private func dayHeader(_ label: String) -> some View {
@@ -361,6 +451,14 @@ struct DictationView: View {
 
         return HoverRevealRow(forceRevealed: popoverOpen) { revealed in
             HStack(alignment: .top, spacing: 18) {
+                if selecting {
+                    Image(systemName: isChosen(entry) ? "checkmark.circle.fill" : "circle")
+                        .font(.system(size: 14))
+                        .foregroundStyle(isChosen(entry) ? LoreTheme.Accent.green : LoreTheme.TextColor.muted)
+                        .opacity(dictation.history.inFlight[entry.id] == nil ? 1 : 0.4)
+                        .frame(width: 14, height: 14)
+                        .padding(.top, 2)
+                }
                 // 56px centered mono time + duration column
                 VStack(spacing: 3) {
                     Text(timeString(entry.timestamp))
@@ -376,14 +474,68 @@ struct DictationView: View {
                 rowContent(entry)
                     .frame(maxWidth: .infinity, alignment: .leading)
 
-                rowActions(entry, revealed: revealed)
+                if !selecting {
+                    rowActions(entry, revealed: revealed)
+                }
             }
             .padding(EdgeInsets(top: 13, leading: 18, bottom: 13, trailing: 26))
+            .background(isChosen(entry) ? LoreTheme.Surface.line : Color.clear)
+            .overlay {
+                // While choosing, a click anywhere on the row chooses it — it
+                // never starts an edit.
+                if selecting {
+                    Color.clear
+                        .contentShape(Rectangle())
+                        .onTapGesture { toggleChosen(entry) }
+                }
+            }
+        }
+        .contextMenu {
+            if !selecting {
+                // The rail's bookmark under the same name, in a menu's title
+                // case (board §03 M1/M2), first and with a separator after it.
+                let waiting = isWaiting(entry)
+                Button(waiting ? DictationMarkCopy.unmark : DictationMarkCopy.menuMark) {
+                    dictation.history.setMarked(!waiting, id: entry.id, source: .menu)
+                }
+                Divider()
+                Button("Select Multiple\u{2026}") { startSelecting(with: entry) }
+                if offersDelete(entry) {
+                    Divider()
+                    Button("Delete") { askToDelete(entry) }
+                }
+            }
         }
     }
 
     @ViewBuilder
     private func rowContent(_ entry: DictationHistoryEntry) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            rowBody(entry)
+            // A take with no words yet, or none at all, still carries its mark
+            // (#324): the meta line below its body is the only one it has.
+            if entry.status == .audioSaved || entry.status == .failed, let mark = markLabel(entry) {
+                mark.font(LoreTheme.Typography.mono(11))
+            }
+            // Only memory holds this take's newest state (#265, board §02):
+            // the latest attempt's reason, gone the moment a write lands.
+            if let reason = dictation.history.unsaved[entry.id] {
+                HStack(spacing: 6) {
+                    Image(systemName: "exclamationmark.circle.fill")
+                        .font(.system(size: 12))
+                    Text(reason.rowLine)
+                        .font(LoreTheme.Typography.secondary)
+                }
+                .foregroundStyle(LoreTheme.TextColor.muted)
+                .help(reason == .permission
+                    ? "lore couldn't write to \(dictation.history.folderForDisplay)." : "")
+                .accessibilityElement(children: .combine)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func rowBody(_ entry: DictationHistoryEntry) -> some View {
         switch entry.status {
         case .audioSaved:
             HStack(spacing: 9) {
@@ -484,19 +636,42 @@ struct DictationView: View {
     /// "✦ cleaned · <method>" / "✦ translated → <lang>" under the text
     /// (DIC-37); "original" when the raw version is active (keeps the current
     /// two-version indicator semantics).
+    ///
+    /// The mark (#324, board §02) joins the same line after a " · ", or stands
+    /// alone on it: "Marked for later" behind a filled bookmark, or the
+    /// receipt behind a check.
     @ViewBuilder
     private func metaLine(_ entry: DictationHistoryEntry) -> some View {
-        if entry.hasBothVersions {
-            Group {
-                if entry.activeVersion == .cleaned {
-                    Text("\u{2726} ").foregroundStyle(LoreTheme.Accent.amber)
-                        + Text(cleanedMetaLabel(entry)).foregroundStyle(LoreTheme.TextColor.muted)
-                } else {
-                    Text("original").foregroundStyle(LoreTheme.TextColor.muted)
+        let mark = markLabel(entry)
+        if entry.hasBothVersions || mark != nil {
+            HStack(spacing: 0) {
+                if entry.hasBothVersions {
+                    if entry.activeVersion == .cleaned {
+                        Text("\u{2726} ").foregroundStyle(LoreTheme.Accent.amber)
+                            + Text(cleanedMetaLabel(entry)).foregroundStyle(LoreTheme.TextColor.muted)
+                    } else {
+                        Text("original").foregroundStyle(LoreTheme.TextColor.muted)
+                    }
+                    if mark != nil {
+                        Text("\u{00A0}\u{00B7}\u{00A0}").foregroundStyle(LoreTheme.TextColor.muted)
+                    }
                 }
+                mark
             }
             .font(LoreTheme.Typography.mono(11))
         }
+    }
+
+    /// Whether the row's mark is waiting for an agent: the one state Unmark
+    /// is offered in. A taken row is marked again instead (board §04).
+    private func isWaiting(_ entry: DictationHistoryEntry) -> Bool {
+        if case .waiting = dictation.history.mark(of: entry) { true } else { false }
+    }
+
+    /// The mark's part of the meta line, nil when the row is not marked.
+    private func markLabel(_ entry: DictationHistoryEntry) -> DictationMarkLabel? {
+        let mark = dictation.history.mark(of: entry)
+        return mark == .none ? nil : DictationMarkLabel(mark: mark)
     }
 
     /// Single source of truth for the cleaned meta text: the new key fields
@@ -519,28 +694,57 @@ struct DictationView: View {
         // Retry requires the audio to still exist — after retention pruning
         // (#52) a failed/audio-only entry may have lost its file, and a
         // button that can only log "no audio" is a lie. Hidden, not disabled.
-        if (entry.status == .failed || entry.status == .audioSaved) && entry.hasAudio {
-            // Retry stays visible without hover, like the design's error row.
-            LoreIconButton(
-                systemName: "arrow.clockwise",
-                label: "Retry transcription",
-                tint: LoreTheme.Accent.red,
-                background: LoreTheme.Accent.red.opacity(0.12)
-            ) {
-                Task {
-                    await dictation.retryTranscription(entryID: entry.id)
+        let retry = (entry.status == .failed || entry.status == .audioSaved)
+            && dictation.history.hasAudio(entry)
+        let actions = !retry && entry.displayText != nil
+        // The trash (#243, board §01 V1): last on every row's rail, Retry's
+        // too, and not while the row is being edited or worked on.
+        let trash = offersDelete(entry)
+        // The bookmark (#324, board §03): on every row, just before the
+        // trash's gap. A mark is not a job: a row being worked on keeps it.
+        let waiting = isWaiting(entry)
+        HStack(alignment: .top, spacing: 6) {
+            if retry {
+                // Retry stays visible without hover, like the design's error row.
+                LoreIconButton(
+                    systemName: "arrow.clockwise",
+                    label: "Retry transcription",
+                    tint: LoreTheme.Accent.red,
+                    background: LoreTheme.Accent.red.opacity(0.12)
+                ) {
+                    Task {
+                        await dictation.retryTranscription(entryID: entry.id)
+                    }
                 }
+                .help("Retry transcription")
             }
-            .help("Retry transcription")
-        } else if entry.displayText != nil {
             HStack(alignment: .top, spacing: 6) {
-                copyButton(entry)
-                if entry.rawText != nil {
-                    cleanupButton(entry)
-                    translateButton(entry)
+                if actions {
+                    copyButton(entry)
+                    if entry.rawText != nil {
+                        cleanupButton(entry)
+                        translateButton(entry)
+                    }
+                    if entry.hasBothVersions {
+                        versionToggleButton(entry)
+                    }
                 }
-                if entry.hasBothVersions {
-                    versionToggleButton(entry)
+                LoreIconButton(
+                    systemName: waiting ? "bookmark.fill" : "bookmark",
+                    label: waiting ? DictationMarkCopy.unmark : DictationMarkCopy.mark,
+                    tint: waiting ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted,
+                    background: waiting ? LoreTheme.Surface.line2 : Color.white.opacity(0.07)
+                ) {
+                    dictation.history.setMarked(!waiting, id: entry.id, source: .row)
+                }
+                .help(waiting ? DictationMarkCopy.unmark : DictationMarkCopy.mark)
+                if trash {
+                    // One step apart, so a reach for the bookmark never lands on it.
+                    Color.clear.frame(width: 6, height: 30)
+                    LoreIconButton(systemName: "trash", label: "Delete") {
+                        askToDelete(entry)
+                    }
+                    .help("Delete")
                 }
             }
             .opacity(revealed ? 1 : 0)
@@ -897,6 +1101,41 @@ struct DictationView: View {
 
     private func timeString(_ date: Date) -> String {
         Self.timeFormatter.string(from: date)
+    }
+}
+
+// MARK: - The mark on the meta line (#324)
+
+/// "Marked for later" behind a filled bookmark, or "Taken by <agent> · <time>"
+/// behind a check (board §02): the glyph and the agent's name in the primary
+/// tone, the words muted. Draws nothing for a row not marked.
+private struct DictationMarkLabel: View {
+    let mark: DictationMark
+
+    var body: some View {
+        switch mark {
+        case .none:
+            EmptyView()
+        case .waiting:
+            label("bookmark.fill", Text(DictationMarkCopy.marked).foregroundStyle(LoreTheme.TextColor.muted))
+        case .taken(let take):
+            label(
+                "checkmark",
+                Text(DictationMarkCopy.takenBy).foregroundStyle(LoreTheme.TextColor.muted)
+                    + Text(take.by).foregroundStyle(LoreTheme.TextColor.primary)
+                    + Text(DictationMarkCopy.takenTail(take.at)).foregroundStyle(LoreTheme.TextColor.muted)
+            )
+        }
+    }
+
+    private func label(_ glyph: String, _ words: Text) -> some View {
+        HStack(spacing: 5) {
+            Image(systemName: glyph)
+                .font(.system(size: 9, weight: .bold))
+                .foregroundStyle(LoreTheme.TextColor.primary)
+                .accessibilityHidden(true)
+            words
+        }
     }
 }
 

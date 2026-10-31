@@ -1,0 +1,1 @@
+../../../skills/lore/SKILL.md

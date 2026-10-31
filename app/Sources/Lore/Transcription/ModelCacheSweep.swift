@@ -1,5 +1,6 @@
 import Darwin
 import Foundation
+import LoreCore
 
 /// Half-finished compiles of the speech model, cleared out of lore's own
 /// Neural Engine cache at launch (#294).

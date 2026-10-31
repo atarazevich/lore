@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 import Observation
 
 extension DiagEvent.HealthTrigger {
@@ -6,7 +7,11 @@ extension DiagEvent.HealthTrigger {
     /// event-derived four age out with the panel's 24 h ceiling, because the row
     /// behind each of them does. `.identityMigration` is re-derived live from
     /// the ledger at every launch and its row never stales, so neither does it.
-    var ages: Bool { self != .identityMigration }
+    var ages: Bool { ![.identityMigration, .permissionsBlocked].contains(self) }
+
+    /// Shown at once rather than after it has stood (#338): an effect already
+    /// proved the claim, and someone whose keys are dead needs to hear it now.
+    var showsAtOnce: Bool { self == .permissionsBlocked }
 
     /// What the mark's tooltip names when this condition stands alone. A
     /// *subject*, never a diagnosis: the dot may say where to look (a proxy
@@ -18,8 +23,83 @@ extension DiagEvent.HealthTrigger {
         case .systemAudioFailed: return "meeting audio"
         case .pasteFailed: return "paste"
         case .modelLoadFailed: return "transcription"
+        case .permissionsBlocked: return HealthSummary.blockedName
+        // Never raised by this build; a decoded one names nothing in particular.
+        case .unknown: return "something"
         }
     }
+
+    /// What the mark says when this condition stands alone. The blocked
+    /// condition says what is happening (#338): the effect proved it, so it is
+    /// a statement and not a summons to check.
+    var standingLine: String {
+        switch self {
+        case .permissionsBlocked: return "macOS is blocking shortcuts and paste"
+        default: return "\(subject) needs a look"
+        }
+    }
+}
+
+/// Where the blocked condition's fix stands (#338) — what the popover's message
+/// says and offers. Nil on the monitor whenever the condition does not stand.
+enum PermissionsBlock: String, Equatable, Sendable {
+    /// An effect proved macOS is ignoring lore's switches.
+    case blocked
+    /// "Fix permissions" cleared lore's entries and asked again; the switches
+    /// are the user's to turn on.
+    case waiting
+    /// The switches are on and the key listener still fails after its retries.
+    case restart
+
+    /// The popover's message, byte-identical to the board's copy table.
+    var message: String {
+        switch self {
+        case .blocked: return "macOS is blocking \(LoreBrand.wordmark)'s shortcuts and paste."
+        case .waiting: return "Switch \(LoreBrand.wordmark) on in System Settings."
+        case .restart: return "Restart \(LoreBrand.wordmark) to finish."
+        }
+    }
+
+    var hint: String? {
+        switch self {
+        case .blocked: return HealthCatalog.blockedHint
+        case .waiting: return "Under Accessibility and Input Monitoring."
+        case .restart: return nil
+        }
+    }
+
+    /// The message's one primary button, the panel's own actions.
+    var action: HealthRemedyAction {
+        switch self {
+        case .blocked: return .fixPermissions
+        // The Accessibility pane — the first of the two switches.
+        case .waiting: return .openSettings(.accessibility)
+        case .restart: return .restartApp
+        }
+    }
+
+    /// The button's words. The waiting stage names System Settings, not the
+    /// pane: the person is looking for two switches, not one (board copy table).
+    var actionLabel: String {
+        self == .waiting ? "Open System Settings" : action.buttonLabel
+    }
+
+    /// The stage as the event stream names it; `.blocked` is the condition's
+    /// own `healthConditionSustained`, not a stage.
+    var traced: DiagEvent.PermissionFixStage? { DiagEvent.PermissionFixStage(rawValue: rawValue) }
+}
+
+/// The reads that confirm or clear the blocked condition (#338), taken at the
+/// moment of the event that asks — never stored.
+struct TrustReading: Equatable, Sendable {
+    var accessibility: Bool
+    var inputMonitoring: Bool
+    /// The key listener exists and is enabled.
+    var tapAlive: Bool
+
+    var grantReadsOff: Bool { !accessibility || !inputMonitoring }
+    /// Lore is allowed again and its key listener is live.
+    var isClear: Bool { accessibility && inputMonitoring && tapAlive }
 }
 
 /// Owns the health state as an **on-open fact sheet** (#140) and the menu-bar
@@ -62,7 +142,9 @@ final class HealthMonitor {
     /// The conditions that have crossed the window. Kept so each one's crossing
     /// can be traced at its own instant — two failures standing at once are two
     /// traces, not one arbitrated winner.
-    @ObservationIgnored private var sustained: Set<DiagEvent.HealthTrigger> = []
+    /// Observed, so the mark's tooltip follows a second condition arriving
+    /// while the dot is already lit (#338).
+    private var sustained: Set<DiagEvent.HealthTrigger> = []
 
     /// One-shot re-read at the next crossing. Internal so a test can await it.
     @ObservationIgnored private(set) var sustainWake: Task<Void, Never>?
@@ -95,6 +177,41 @@ final class HealthMonitor {
     /// run only with the panel on screen — never from `init`, which is launch.
     @ObservationIgnored var verifyNotesLeftover: () -> Void = {}
 
+    // MARK: - macOS blocking lore (#338)
+
+    /// Where the blocked condition's fix stands; nil while it does not stand.
+    private(set) var permissionsBlock: PermissionsBlock?
+
+    /// The live reads behind the blocked condition. Unwired, they read healthy:
+    /// a refused tap then confirms nothing, so an unwired monitor never claims.
+    @ObservationIgnored var readTrust: () -> TrustReading = {
+        TrustReading(accessibility: true, inputMonitoring: true, tapAlive: true)
+    }
+    /// Both grants read by a process that did not exist a moment ago
+    /// (`GrantCheck`), so an in-process cache cannot answer. Nil when no such
+    /// read could be had.
+    @ObservationIgnored var readFreshGrants: @Sendable () async -> Bool? = { nil }
+    /// Removes lore's own two entries (`PermissionReset`). Injected: a test
+    /// must never run tccutil.
+    @ObservationIgnored var resetPermissions: () async -> Void = {}
+    /// Asks macOS again for both grants, so its own prompt appears.
+    @ObservationIgnored var requestPermissions: () -> Void = {}
+
+    /// The wait for the switches, after "Fix permissions". Internal so a test
+    /// can await it.
+    @ObservationIgnored private(set) var waitTask: Task<Void, Never>?
+    @ObservationIgnored private var fixing = false
+
+    /// How often the wait reads the switches, and for how long at most: a
+    /// spawned read every few seconds while someone is in System Settings, and
+    /// none once they have plainly walked away. The event path clears the
+    /// condition with or without it.
+    static let waitInterval: Duration = .seconds(3)
+    static let waitTicks = 200
+    /// Reads in a row with both switches on and the listener still dead before
+    /// lore asks for a restart (#303): one read can land between the two flips.
+    static let staleTicksBeforeRestart = 2
+
     init(
         prober: HealthProber,
         sustainedDelay: TimeInterval = HealthMonitor.sustainedFailureDelay,
@@ -105,7 +222,7 @@ final class HealthMonitor {
         self.sustainedDelay = sustainedDelay
         self.now = now
         self.sleep = sleep
-        let initial = prober.probe()
+        let initial = prober.probe(permissionsBlocked: false)
         self.snapshot = initial.snapshot
         self.items = initial.items
     }
@@ -116,6 +233,8 @@ final class HealthMonitor {
     func refreshForPanel() {
         refillTapRepairs()
         verifyNotesLeftover()
+        // An open panel is a fresh read: the switches may have just come on.
+        if permissionsBlock != nil { note(.mayHaveCleared) }
         refresh()
     }
 
@@ -123,7 +242,7 @@ final class HealthMonitor {
     /// open, after a Test-now, and by `note` so the panel behind a condition is
     /// as fresh as the condition — never on a timer.
     func refresh() {
-        let report = prober.probe()
+        let report = prober.probe(permissionsBlocked: permissionsBlock != nil)
         snapshot = report.snapshot
         items = report.items
         // Close the signing-identity migration (#135, rationale on
@@ -171,14 +290,136 @@ final class HealthMonitor {
             return HealthSignal(trigger: .systemAudioFailed, succeeded: false)
         case .systemAudioCapture(.ok, _):
             return HealthSignal(trigger: .systemAudioFailed, succeeded: true)
-        case .pasteAttempt(_, let created, _):
+        // A paste posted while lore was untrusted is the blocked condition's
+        // (`blockEvidence`), not a paste failure of its own: one cause, one
+        // report (#338).
+        case .pasteAttempt(_, let created, true):
             return HealthSignal(trigger: .pasteFailed, succeeded: created)
         // A real load attempt only: a cache hit loaded nothing and cannot clear
         // a leg whose own load failed (#169) — see `HealthProbes.modelWarmupOutcome`.
-        case .modelLoad(.asr, let outcome, _, false) where outcome != .unknown:
+        case .modelLoad(.asr, let outcome, _, false, _) where outcome != .unknown:
             return HealthSignal(trigger: .modelLoadFailed, succeeded: outcome == .ok)
         default:
             return nil
+        }
+    }
+
+    /// One event's bearing on the blocked condition (#338).
+    enum BlockEvidence: Equatable, Sendable {
+        /// A paste was posted while macOS reported lore untrusted, so macOS
+        /// dropped it. The event carries its own read, so it is proof alone.
+        case pasteDropped
+        /// The key listener could not be created. A block only when a grant
+        /// reads off at that moment; otherwise the repair budget's business.
+        case tapRefused
+        /// Something that needs the grants just worked, so the condition may be
+        /// over. Cleared only if the reads say so now.
+        case mayHaveCleared
+        /// The key listener still fails after its retries, with the grants on.
+        case tapGaveUp
+    }
+
+    /// The blocked condition's own table, beside `healthSignal`: the effects
+    /// that raise it, the events after which it may be over, and the one that
+    /// asks for a restart. A permission read alone appears only as a chance to
+    /// clear — never to raise (#303: reads can be stale while things work).
+    nonisolated static func blockEvidence(for event: DiagEvent) -> BlockEvidence? {
+        switch event {
+        case .pasteAttempt(_, _, false): return .pasteDropped
+        case .tapCreate(.failed, _): return .tapRefused
+        case .tapCreate(.ok, _), .pasteAttempt(_, true, true),
+             .permissionTransition(_, granted: true):
+            return .mayHaveCleared
+        case .tapGaveUp: return .tapGaveUp
+        default: return nil
+        }
+    }
+
+    /// Move the blocked condition on one piece of evidence, confirmed by the
+    /// reads where the evidence alone is not proof.
+    func note(_ evidence: BlockEvidence) {
+        switch evidence {
+        case .pasteDropped:
+            raiseBlock()
+        case .tapRefused:
+            if readTrust().grantReadsOff { raiseBlock() }
+        case .mayHaveCleared:
+            if permissionsBlock != nil, readTrust().isClear { clearBlock() }
+        case .tapGaveUp:
+            if permissionsBlock != nil, !readTrust().grantReadsOff { enter(.restart) }
+        }
+    }
+
+    private func raiseBlock() {
+        if permissionsBlock == nil { permissionsBlock = .blocked }
+        noteFailure(.permissionsBlocked)
+        refresh()
+    }
+
+    private func clearBlock() {
+        waitTask?.cancel()
+        waitTask = nil
+        permissionsBlock = nil
+        clearFailure(.permissionsBlocked)
+        refresh()
+    }
+
+    private func enter(_ stage: PermissionsBlock) {
+        guard permissionsBlock != nil, permissionsBlock != stage else { return }
+        permissionsBlock = stage
+        if let traced = stage.traced { DiagStore.record(.permissionFixStage(stage: traced)) }
+    }
+
+    /// "Fix permissions" (#338): remove lore's own two entries, ask macOS
+    /// again, and wait for the switches. Runs on the user's click only — from
+    /// the blocked condition, or from a stale-grant row (signing, tap) where no
+    /// block stands. The reset switches both grants off either way, so the
+    /// condition stands from here and the wait follows it to clear or restart.
+    func fixPermissions() async {
+        guard !fixing else { return }
+        fixing = true
+        defer { fixing = false }
+        await resetPermissions()
+        requestPermissions()
+        if permissionsBlock == nil {
+            permissionsBlock = .blocked
+            noteFailure(.permissionsBlocked)
+        }
+        enter(.waiting)
+        refresh()
+        startWaiting()
+    }
+
+    /// Read the switches from a fresh process while the user is in System
+    /// Settings. Both on: retry the key listener at once, then either the reads
+    /// clear the condition, or — after a second such read — the listener is
+    /// dead with the grants on and only a restart is left (#303).
+    private func startWaiting() {
+        waitTask?.cancel()
+        waitTask = Task { [weak self, sleep] in
+            var staleTicks = 0
+            for _ in 0..<Self.waitTicks {
+                await sleep(Self.waitInterval)
+                guard !Task.isCancelled, let fresh = self?.readFreshGrants else { return }
+                let granted = await fresh()
+                guard !Task.isCancelled, let self, self.permissionsBlock == .waiting else { return }
+                guard granted == true else {
+                    staleTicks = 0
+                    continue
+                }
+                self.refillTapRepairs()
+                if self.readTrust().isClear {
+                    self.clearBlock()
+                    return
+                }
+                staleTicks += 1
+                if staleTicks >= Self.staleTicksBeforeRestart {
+                    self.enter(.restart)
+                    return
+                }
+            }
+            // Out of reads, the stage stays waiting: HotkeyManager's 5 s cycle
+            // still rebuilds the tap on the grant's edge and clears it then.
         }
     }
 
@@ -186,7 +427,7 @@ final class HealthMonitor {
     /// VAD load lands (or fails), so the voice-activity row re-reads at once
     /// instead of waiting for the next open (rule 2 of `no-false-positives`).
     nonisolated static func refreshesPanel(for event: DiagEvent) -> Bool {
-        if case .modelLoad(.vad, _, _, _) = event { return true }
+        if case .modelLoad(.vad, _, _, _, _) = event { return true }
         return false
     }
 
@@ -194,8 +435,10 @@ final class HealthMonitor {
     /// then move the condition's clock. One hop, so the panel's rows and the
     /// mark's dot are always published from the same pass and cannot disagree.
     func note(_ signal: HealthSignal) {
-        refresh()
         if signal.succeeded { clearFailure(signal.trigger) } else { noteFailure(signal.trigger) }
+        // After the clock, so a clear the paste row reads (#338) is already in
+        // the stream when the row is re-read.
+        refresh()
     }
 
     /// Start a failure's clock, or leave a running one alone. Also the entry for
@@ -225,7 +468,8 @@ final class HealthMonitor {
         delay: TimeInterval
     ) -> Set<DiagEvent.HealthTrigger> {
         Set(failingSince.filter { trigger, since in
-            now.timeIntervalSince(since) >= delay && isFresh(trigger, since: since, at: now)
+            now.timeIntervalSince(since) >= (trigger.showsAtOnce ? 0 : delay)
+                && isFresh(trigger, since: since, at: now)
         }.keys)
     }
 
@@ -270,7 +514,9 @@ final class HealthMonitor {
     private func scheduleSustainWake(from at: Date) {
         sustainWake?.cancel()
         sustainWake = nil
-        guard let deadline = failingSince.values
+        guard let deadline = failingSince
+            .filter({ !$0.key.showsAtOnce })
+            .values
             .map({ $0.addingTimeInterval(sustainedDelay) })
             .filter({ $0 > at })
             .min()

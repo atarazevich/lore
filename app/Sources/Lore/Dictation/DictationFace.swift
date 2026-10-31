@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 
 /// What the floating bubble says when a dictation could not be finished (#209).
 ///
@@ -29,10 +30,19 @@ enum DictationFace: Equatable, Sendable {
     /// F5 — the synthetic Cmd+V could not even be created, which is the whole
     /// of what this path can observe (`TextInserter.postCommandChord`).
     case pasteFailed
+    /// The paste was posted while macOS blocked lore, and dropped (#338,
+    /// `untrusted-after-reinstall.html` §03). The words come first — they are
+    /// on the clipboard — and the fix is the second step.
+    case pasteBlocked
     /// F6 — the words landed raw because the cleanup call failed (DIC-48's
     /// fallback, unchanged).
     case cleanupFailed
     case translateFailed
+    /// The words were pasted and the take could not be written to history
+    /// (#265, `dictation-full-disk.html` §01). Not a failure of the dictation:
+    /// the row keeps the words and lore saves them by itself, so the face has
+    /// no action and its glyph is the neutral exclamation, not the red mark.
+    case pastedNotInHistory(DiagEvent.HistoryWriteReason)
 
     /// The one line the person reads. Byte-identical to the board's copy table.
     var sentence: String {
@@ -41,8 +51,10 @@ enum DictationFace: Equatable, Sendable {
         case .nothingCameThrough: "Nothing came through."
         case .modelDownloadFailed: "Couldn't download the speech model. Check your connection."
         case .pasteFailed: "Couldn't paste."
+        case .pasteBlocked: "Couldn't paste. Press \(Self.pasteKeys) \u{2014} it's on the clipboard."
         case .cleanupFailed: "Cleanup failed \u{2014} pasted raw text."
         case .translateFailed: "Translation failed \u{2014} pasted raw text."
+        case .pastedNotInHistory(let reason): reason.bubbleSentence
         }
     }
 
@@ -53,9 +65,20 @@ enum DictationFace: Equatable, Sendable {
     var detail: String? {
         switch self {
         case .pasteFailed: "Your text is on the clipboard \u{2014} press Cmd+V to paste it now."
+        case .pasteBlocked: pasteBlockedExtras?.hoverLine
         default: nil
         }
     }
+
+    /// What the blocked-paste sentence carries beyond its words (#338 §03): the
+    /// keys it names, drawn as a keycap in the run, and the line the bubble
+    /// shows when the pointer rests on it. Nil for every other face.
+    var pasteBlockedExtras: (keycap: String, hoverLine: String)? {
+        self == .pasteBlocked ? (Self.pasteKeys, "macOS blocked the paste.") : nil
+    }
+
+    /// The keys the blocked-paste sentence names.
+    static let pasteKeys = "Cmd+V"
 
     /// The one thing this face offers, or nothing. A face with no action is a
     /// face where there is nothing left for the person to decide: the raw text
@@ -65,15 +88,24 @@ enum DictationFace: Equatable, Sendable {
         case .micUnavailable, .nothingCameThrough: .openLoreSettings
         case .modelDownloadFailed: .tryAgain
         case .pasteFailed: .openSettings(.accessibility)
-        case .cleanupFailed, .translateFailed: nil
+        case .pasteBlocked: .fixPermissions
+        case .cleanupFailed, .translateFailed, .pastedNotInHistory: nil
         }
+    }
+
+    /// The paste worked and only history missed the take (#265): the face
+    /// reads in the row's muted tone with the neutral exclamation, and the
+    /// window's strip leaves it to the row.
+    var isPastedNotInHistory: Bool {
+        if case .pastedNotInHistory = self { return true }
+        return false
     }
 
     /// P1, chosen 2026-08-30: this one face folds its action into the row past
     /// a hairline, in the rail's own keycap idiom. Every other face stands its
     /// action on its own line under the sentence, as the board draws them.
     var actionIsInline: Bool {
-        self == .pasteFailed
+        self == .pasteFailed || self == .pasteBlocked
     }
 }
 
@@ -93,12 +125,38 @@ enum DictationFaceAction: Equatable, Sendable {
     /// The model download the next dictation would attempt anyway, now — for
     /// whoever has just fixed their connection and does not want to wait for it.
     case tryAgain
+    /// The blocked condition's fix (#338), the same action the panel and the
+    /// popover offer under the same name.
+    case fixPermissions
 
     var label: String {
         switch self {
         case .openSettings(let pane): pane.buttonLabel
         case .openLoreSettings: HealthRemedyAction.openLoreSettings.buttonLabel
         case .tryAgain: "Try again"
+        case .fixPermissions: HealthRemedyAction.fixPermissions.buttonLabel
+        }
+    }
+}
+
+/// What lore says about a take whose write was refused (#265), on the two
+/// surfaces that say it — fixed by `dictation-full-disk.html`'s copy table.
+extension DiagEvent.HistoryWriteReason {
+    /// The bubble, the second the words land.
+    var bubbleSentence: String {
+        switch self {
+        case .noSpace: "Pasted, not in history \u{2014} the disk is full."
+        case .permission: "Pasted, not in history \u{2014} lore can't write to its folder."
+        case .other: "Pasted, not in history."
+        }
+    }
+
+    /// The history row, under the words, until the take is written.
+    var rowLine: String {
+        switch self {
+        case .noSpace: "Not in history yet \u{2014} it saves itself once there's space."
+        case .permission: "Not in history yet \u{2014} lore can't write to its folder."
+        case .other: "Not in history yet."
         }
     }
 }

@@ -1,3 +1,5 @@
+import LoreCore
+import LoreFormat
 import SwiftUI
 
 /// Meetings review (Lore Stage E, MREV-01…40): designed header + 228px meeting
@@ -338,17 +340,12 @@ struct NotesView: View {
 
             // Meta (#107 prototype `.dmeta`). No count (#269, board §04 "The
             // count"): the turns on screen are fewer than the lines, and no
-            // one opening a meeting needs the number. While the speaker pass
-            // runs, the end of the line says so (§01 V2), and then nothing.
-            (metaLine(
-                type: typeTag(session)?.rawValue,
-                components: MeetingMeta.components(session, detail: true)
-            ) + (controller.isFindingSpeakers
-                ? metaStatusSlot(MeetingMeta.findingSpeakers, colour: LoreTheme.TextColor.faint)
-                : Text(verbatim: "")))
-            .font(LoreTheme.Typography.monoMeta)
-            .lineLimit(1)
-            .padding(.top, 4)
+            // one opening a meeting needs the number. Its end is the speaker
+            // slot (#308, meeting-speakers-switch.html §02): "finding who
+            // spoke…" while a pass runs, Who spoke? while one can, and the one
+            // failure with the same button and a ×.
+            detailMeta(controller: controller, session: session)
+                .padding(.top, 4)
 
             if let summary = session.summary, !summary.isEmpty {
                 sparkSummary(summary, size: 12.5)
@@ -372,6 +369,48 @@ struct NotesView: View {
         }
         .frame(maxWidth: .infinity, alignment: .leading)
         .padding(.init(top: 16, leading: 20, bottom: 14, trailing: 20))
+    }
+
+    /// The detail's mono meta line and its speaker slot (#308). Without a
+    /// control it is the one Text it has always been; Who spoke? and the ×
+    /// follow it in a row only while they are offered.
+    @ViewBuilder
+    private func detailMeta(controller: NotesController, session: SessionIndex) -> some View {
+        let slot = controller.speakerSlot
+        let line = metaLine(
+            type: typeTag(session)?.rawValue,
+            components: MeetingMeta.components(session, detail: true)
+        )
+        let separator = Text(" \u{00B7} ").foregroundStyle(LoreTheme.TextColor.faint)
+        switch slot {
+        case .none, .finding:
+            (slot == .finding
+                ? line + metaStatusSlot(MeetingMeta.findingSpeakers, colour: LoreTheme.TextColor.faint)
+                : line)
+            .font(LoreTheme.Typography.monoMeta)
+            .lineLimit(1)
+        case .offer, .failed:
+            HStack(spacing: 0) {
+                line.lineLimit(1)
+                if slot == .failed {
+                    metaStatusSlot(MeetingMeta.speakersFailed, colour: LoreTheme.TextColor.faint)
+                        .lineLimit(1)
+                        .help(MeetingMeta.speakersFailedTip)
+                }
+                separator
+                WhoSpokeButton(action: controller.findSpeakers)
+                if slot == .failed {
+                    LoreIconButton(
+                        systemName: "xmark", label: "Dismiss", tint: LoreTheme.TextColor.faint,
+                        background: .clear, size: 16, glyphSize: 7,
+                        action: controller.dismissSpeakerFailure
+                    )
+                    .help("Dismiss")
+                    .padding(.leading, 4)
+                }
+            }
+            .font(LoreTheme.Typography.monoMeta)
+        }
     }
 
     /// Uniform entity chip: 10.5/muted on card-2, 1px line border, 6px radius.
@@ -652,6 +691,15 @@ struct NotesView: View {
                         .font(.system(size: 9))
                         .foregroundStyle(LoreTheme.TextColor.muted)
                         .accessibilityLabel("Has notes")
+                }
+                // Recorded on the phone (#309, phone-notes-on-mac.html §02): the
+                // one difference from any other row.
+                if session.source == PhoneNotes.source {
+                    Image(systemName: "iphone")
+                        .font(.system(size: 10))
+                        .foregroundStyle(LoreTheme.TextColor.muted)
+                        .help("Recorded on iPhone")
+                        .accessibilityLabel("Recorded on iPhone")
                 }
             }
 
@@ -1128,7 +1176,11 @@ struct NotesView: View {
                     case .assign(let target): controller.assignSpeaker(speaker.key, to: target)
                     case .name(let name): controller.nameSpeaker(speaker.key, as: name)
                     }
-                }
+                },
+                gaps: state.gaps,
+                showsSpeakerNames: PhoneNoteReview.showsSpeakerNames(
+                    source: selectedSession(state)?.source, labels: state.transcript.labels
+                )
             )
             .frame(maxWidth: 760, alignment: .leading)
             .padding(.horizontal, 24)
@@ -1550,16 +1602,20 @@ struct NotesView: View {
 enum MeetingMeta {
     /// The detail line's last slot while the speaker pass runs (board §01 V2).
     static let findingSpeakers = "finding who spoke\u{2026}"
+    /// The slot after the last pass asked for gave up (#308), and its tooltip.
+    static let speakersFailed = "couldn't finish finding who spoke"
+    static let speakersFailedTip = "lore tried again by itself before stopping."
 
     /// `27 July · 09:58 · 29 min` (duration omitted when unknown); the detail
     /// adds the year. No count (#269).
     static func components(_ session: SessionIndex, detail: Bool = false) -> [String] {
+        start(session.startedAt, detail: detail) + [duration(session)].compactMap { $0 }
+    }
+
+    /// `27 July · 09:58`'s two parts; the detail adds the year.
+    static func start(_ date: Date, detail: Bool = false) -> [String] {
         let dateFormat = Date.FormatStyle.dateTime.day().month(.wide)
-        return [
-            session.startedAt.formatted(detail ? dateFormat.year() : dateFormat),
-            session.startedAt.formatted(.dateTime.hour().minute()),
-            duration(session)
-        ].compactMap { $0 }
+        return [date.formatted(detail ? dateFormat.year() : dateFormat), date.formatted(.dateTime.hour().minute())]
     }
 
     /// Compact recorded duration (#58), from the index's start and end. Nil
@@ -1571,5 +1627,28 @@ enum MeetingMeta {
         let minutes = Int(seconds / 60)
         if minutes < 1 { return "<1 min" }
         return minutes < 60 ? "\(minutes) min" : ElapsedStamp.hours(Int(seconds))
+    }
+}
+
+/// Who spoke? (#308, meeting-speakers-switch.html §02): a borderless text
+/// button in the UI font at the end of the mono meta line — primary text, the
+/// shared hover fill hugging the word, the app's press.
+private struct WhoSpokeButton: View {
+    let action: () -> Void
+
+    var body: some View {
+        Button(action: action) {
+            Text("Who spoke?")
+                .font(.system(size: 12, weight: .medium))
+                .foregroundStyle(LoreTheme.TextColor.primary)
+                .padding(.horizontal, 5)
+                .frame(height: 18)
+                .loreHoverFill(cornerRadius: LoreTheme.Radius.button)
+                .contentShape(Rectangle())
+        }
+        .buttonStyle(LorePressButtonStyle())
+        .padding(.horizontal, -3)
+        .help("Works out who said what in this meeting.")
+        .accessibilityLabel("Who spoke?")
     }
 }

@@ -1,18 +1,15 @@
 import Foundation
 
 /// What the sending shell reads from herdr about its own pane (#257, #267):
-/// what the chat is about, and the labels on the workspace and tab it sits in.
+/// the labels on the workspace and tab it sits in.
 ///
-/// Every field stands on its own. herdr may name a tab and not a workspace, or
-/// a pane and no title, and an absent field is absent rather than filled in.
+/// Each field stands on its own. herdr may name a tab and not a workspace, and
+/// an absent field is absent rather than filled in.
 public struct HerdrPaneFacts: Equatable, Sendable {
-    /// The terminal title as the terminal set it, spinner and all.
-    public var title: String?
     public var workspaceLabel: String?
     public var tabLabel: String?
 
-    public init(title: String? = nil, workspaceLabel: String? = nil, tabLabel: String? = nil) {
-        self.title = title
+    public init(workspaceLabel: String? = nil, tabLabel: String? = nil) {
         self.workspaceLabel = workspaceLabel
         self.tabLabel = tabLabel
     }
@@ -48,13 +45,13 @@ public enum Herdr {
 
     /// `herdr api snapshot` — the one call `lore say` makes.
     ///
-    /// One call and not three (#267). The title, the tab label and the
-    /// workspace label live in three different answers — `agent get`, `tab get`,
-    /// `workspace get` — and the snapshot carries all three in the shapes those
-    /// answers use, so asking once costs 8 ms against the 5 ms `agent get`
-    /// alone cost before (measured 2026-09-21) and the three facts come from one
-    /// instant rather than three. It is part of herdr's published API, not a
-    /// debug dump: `herdr api schema` declares it.
+    /// One call and not three (#267). The pane's own tab and workspace, the tab
+    /// label and the workspace label live in three different answers — `agent
+    /// get`, `tab get`, `workspace get` — and the snapshot carries all three in
+    /// the shapes those answers use, so asking once costs 8 ms against the 5 ms
+    /// `agent get` alone cost before (measured 2026-09-21) and the facts come
+    /// from one instant rather than three. It is part of herdr's published API,
+    /// not a debug dump: `herdr api schema` declares it.
     public static let snapshotArguments = ["api", "snapshot"]
 
     /// What that snapshot says about one pane; nil when the body did not decode
@@ -73,7 +70,6 @@ public enum Herdr {
         let tabID = tab ?? agent?.tabID
         let workspaceID = workspace ?? agent?.workspaceID
         return HerdrPaneFacts(
-            title: agent?.title,
             workspaceLabel: workspaceID.flatMap { id in
                 snapshot.workspaces.first { $0.workspaceID == id }?.label
             },
@@ -95,13 +91,11 @@ public enum Herdr {
             let paneID: String
             let tabID: String?
             let workspaceID: String?
-            let title: String?
 
             enum CodingKeys: String, CodingKey {
                 case paneID = "pane_id"
                 case tabID = "tab_id"
                 case workspaceID = "workspace_id"
-                case title = "terminal_title_stripped"
             }
         }
         struct Tab: Decodable {

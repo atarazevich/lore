@@ -1,5 +1,188 @@
 # Changelog
 
+## v3.9.0 — 2026-10-31
+
+**3.8.46 (#341) The health panel says which app turned lore's shortcuts off**
+- When another app holds secure input, the Keyboard shortcuts row says the shortcuts are off, names the app that probably caused it, and says how to turn it off: a password field, Terminal's or iTerm2's Secure Keyboard Entry, or the lock screen. It is amber, not red, and clears itself when secure input goes off
+- The bubble holds back its lock, pause and cleanup tips while secure input is on
+
+**3.8.45 (#324) Mark a dictation for later, and agents pick it up**
+- Press K while dictating, or Mark for later on a history row, to keep a dictation for an agent. The row reads "Marked for later" until an agent takes it, then "Taken by <agent> · <time>"; Unmark takes the mark off
+- Agents list the marks with `lore marks`, with lore open or closed, and sign for one with `lore marks take <id> --by <name>`; `lore search --marked` finds them too
+- K no longer sends a dictation to the operator, and its Settings switch is gone
+
+**3.8.44 (#338) lore says when macOS is blocking its shortcuts and paste**
+- After a reinstall macOS can keep an old permission, so the switches look on while lore's shortcuts do nothing and its pastes are dropped. lore now says so at once in the menu bar, and Fix permissions clears lore's old entries and asks again
+- A paste macOS dropped no longer counts as ok: the bubble says to press Cmd+V, and the words stay on the clipboard
+
+**3.8.43 (#329) A muted iPad microphone shows in the note**
+- A phone note from an iPad whose microphone was cut, for example by closing its cover, now shows that stretch on the Mac as "Microphone off" with its times
+
+**3.8.42 (#315) The iPhone can find its pinned models' folders**
+- Plumbing for the iPhone app, nothing changes on the Mac: lore's shared code now tells the iPhone where each pinned model is downloaded, so it can check which version is there
+
+**3.8.41 (#311) The iPhone traces its Watch remote**
+- The iPhone now records each command the Watch sends its recorder (start, pause, resume or stop) and what became of it: done, waiting for lore to open, refused, or meant for a different recording; and when the Watch comes into reach or goes out of it
+
+**3.8.40 (#336) Restart lore opens lore again**
+- Restart lore, offered in the health panel and during setup, now quits and opens lore again; before, it quit and lore stayed closed
+
+**3.8.39 (#193) Only one copy of lore runs at a time**
+- A copy of lore started straight from its folder, as test tools do, now steps aside for the one already running instead of running beside it, so a hold of Fn is heard once
+
+**3.8.38 (#243) Delete dictations from history**
+- Hover a dictation and click the trash, or right-click it and choose Delete, to remove it with its audio and screenshots
+- Right-click and choose Select Multiple… to delete several at once; Select All takes what the search shows
+- Settings has a new History card with Delete All
+- Every delete asks first, and the files go to the Trash; if one can't be moved, the dictation stays in history and lore says so
+- A dictation still being transcribed can't be deleted until it lands
+- The history count now reads "dictations" instead of "entries"
+
+**3.8.37 (#313) The iPhone traces its Lock Screen card**
+- The iPhone now records when its Lock Screen card appears, whether lore put it back, and why it went away: dismissed, ended by iOS after 8 hours, switched off in lore's settings, Live Activities turned off, or the recording stopped
+
+**3.8.36 (#333) Meeting detection tests no longer wait on the clock**
+- Nothing changes for users; meeting detection still waits five seconds before asking, and its tests now give the same result however busy the Mac is
+
+**3.8.35 (#332) Slack huddles are recognised as Slack**
+- A Slack huddle is now named Slack in the meeting prompt; lore was looking for Slack under the wrong app name
+- The current Webex app and the installed Google Meet web app are recognised too; Around, which has shut down, is no longer listed
+
+**3.8.34 (#214) Meeting detection tests no longer depend on which apps are running**
+- Nothing changes for users; a test-only change so meeting detection's tests give the same result on any Mac
+
+**3.8.33 (#185) Measured: separate speech-model copies cost a few tens of MB each**
+- Nothing changes for users; the code's notes now give the measured reason the copies stay
+
+**3.8.32 (#330) Meeting audio is never deleted before it is saved**
+- "Save audio recording" is now on unless you turn it off; a missing setting no longer means off, which let some meetings lose their audio
+- A meeting's recorded audio is kept until its saved recording is in your notes folder and plays back whole; if saving fails, the audio stays in the meeting and lore tries again at the next launch
+
+**3.8.31 (#306) The iPhone traces why Resume is blocked and how a recording is written**
+- The iPhone now records why a stopped recording can't resume, how long that lasted, how it ended and when retries gave up, and when a recording's audio writer stops, a new part starts or the parts are joined
+
+**3.8.30 (#328) Meeting speakers go back to the earlier model**
+- Telling speakers apart in a meeting, and in `lore transcribe --speakers`, uses the earlier model again: on real meetings it was better, inventing fewer speakers and merging fewer people into one
+- If it fails on a file, lore still tries once more before giving up; the newer model's files (about 21 MB) are removed
+
+**3.8.29 (#186) A failed model load no longer leaves other features on deleted files**
+- When a meeting's speech model failed to load and lore removed its files to download them again, dictation went on using a copy that no longer matched the files on disk; now every part of lore lets that copy go, and the next dictation or meeting downloads the model once for both
+- A dictation already being transcribed at that moment still finishes
+
+**3.8.28 (#327) Spoken replies no longer stay stuck waiting after a dictation ends**
+- When a dictation ended at the same moment a reply came in, lore could keep the reply waiting for the microphone until it was relaunched; it now checks again every couple of seconds and lets the reply through once the microphone is free
+- A call or recording in another app still keeps replies waiting, as before
+
+**3.8.27 (#310) iPad notes say when the closed cover muted the microphone**
+- When closing an iPad's cover cuts its microphone mid-note, the note's transcript now shows "Cover closed" and the time it lasted, instead of a bare "Paused"
+
+**3.8.26 (#328) Meetings hear more of the voices in the room**
+- Telling speakers apart in a meeting, and in `lore transcribe --speakers`, now uses a model that catches voices the old one merged into one; where the old one already heard everyone, the result is the same
+- If the new model fails on a file, lore tries again and then uses the old one, so a meeting always gets its speakers
+- The new model (about 21 MB) downloads in the background after launch, with the old one it falls back to; nothing waits for them, and until both are there lore works as before
+
+**3.8.25 (#276) lore transcribe can say who spoke**
+- `lore transcribe --speakers <file>` prints the transcript as turns, one paragraph each: `[mm:ss] Speaker 1: …`, speakers numbered in the order they first speak
+- If lore can't tell the speakers apart, you still get the plain transcript, with a note saying so
+- Without the flag, `lore transcribe` prints exactly what it did before
+
+**3.8.24 (#313) The phone's note deletions and its "Hard to hear" hint are traced**
+- Deleting notes in the coming iPhone app leaves one entry in its diagnostics with how many notes went, and nothing about what they were; its "Hard to hear" hint leaves one entry when it appears and one when it goes, with how long it was up
+
+**3.8.23 (#265) Dictation on a full disk keeps your words and says so**
+- When a dictation can't be written to history, for example because the disk is full, its words stay on the row and the row says "Not in history yet". lore saves it by itself once there is space again; there is nothing to click
+- The bubble says so the moment it happens: "Pasted, not in history — the disk is full."
+- When the speech model takes more than 10 seconds to get ready, the bubble says "Preparing the speech model — about a minute" instead of a "Transcribing" that looks stuck
+
+**3.8.22 (#308) The phone offers to find speakers only when it can**
+- The coming iPhone app shows Separate speakers on a note only when that note can be given speakers, and does not keep retrying one that cannot until it is transcribed again
+
+**3.8.21 (#308) A phone note can tell its speakers apart**
+- The coming iPhone app can find who spoke in a note after it is transcribed, on the phone itself, and label the lines Speaker 1, Speaker 2… in the order the voices first speak. The phone knows nobody's voice, so no line is ever labelled You. Meetings on the Mac are unchanged: the same speaker pass, the same You and Them, the same labels
+
+**3.8.20 (#322) A long cleanup is never pasted cut off**
+- A long dictation, around 15 minutes or more, is now cleaned up or translated in full instead of stopping partway through. If an answer still stops before the end, lore pastes your own words in full instead of a half text, with "Cleanup failed — pasted raw text." for a cleanup and "Translation failed — pasted raw text." for a translation
+
+**3.8.19 (#321) A translation never comes back in the language you spoke**
+- A translation that comes back in Russian, or half in Russian, is no longer pasted as the translation. lore asks once more, and if the second answer is still not in the target language it pastes your own words with "Translation failed — pasted raw text." Short takes and English full of Russian names are not affected
+
+**3.8.18 (#313) The iPhone can show text while it records**
+- The coming iPhone app can show what is being said, a few seconds behind, while it records. The final text still comes from the full pass after Stop, which uses the speech model the live text already loaded instead of a second copy. The Mac's live meeting transcription now runs on the same shared code and is unchanged for the user
+
+**3.8.17 (#316) A meeting lore is quit in the middle of keeps its timing**
+- When lore is force-quit or crashes during a meeting on the Mac, the saved timing for the microphone and the other side's audio no longer occasionally loses one of the two, so the rebuilt transcript is placed at the time it was spoken
+
+**3.8.16 (#314) The diagnostic log is no longer wiped by one entry it can't read**
+- An entry written by a newer or different build of lore no longer makes the whole diagnostic log restart empty. The entries this build reads are kept, and the ones it can't read are kept as written, so the build that wrote them can still read them
+
+**3.8.15 (#306) The iPhone app can report a transcription cut short and a title it could not make**
+- The coming iPhone app records in its private diagnostic log when iOS stops a transcription before it finishes, so the note is transcribed again, and when it cannot make a note's title. Nothing changes on the Mac
+
+**3.8.14 (#306) A note keeps its real length, and a recording that can't be read is tried again**
+- A transcript no longer changes a recording's stored length. On the Mac this fixes imported audio files, which were cut to their last spoken line; live meetings and phone notes already kept their real length
+- A recording that can't be opened or decoded is tried again later instead of being remembered as holding no speech, on the Mac and on the phone
+
+**3.8.13 (#306) The iPhone app can tell a transcribed note from one still waiting**
+- Whether a meeting already has its final transcript is now readable by the coming iPhone app, so it does not transcribe a note twice after a crash. Nothing changes on the Mac
+
+**3.8.12 (#306) The iPhone can make a meeting's title on the device**
+- The Mac's on-device maker of meeting titles and summaries is now shared, so the coming iPhone app can use it. Nothing changes on the Mac
+- A phone note whose recording holds no speech is remembered as such, so it is not transcribed again for nothing
+
+**3.8.11 (#306) The iPhone app can record what happens to a recording**
+- The coming iPhone app keeps the same private diagnostic log as the Mac when a recording is stopped, resumed or alerted. Nothing changes on the Mac
+
+**3.8.10 (#309) Notes from your iPhone show up in Meetings**
+- Turn on "Show notes from iPhone" in Settings › Meetings, and notes you record with the iPhone app appear among your meetings, marked with a small phone, and `lore search` finds them
+- Where the phone had to stop recording, for a call, an alarm or music, the transcript says so in one quiet line at that moment
+- If macOS doesn't let lore read iCloud Drive, or a note can't be copied over, Settings says so under the switch
+
+**3.8.9 (#308) Choose when lore works out who spoke**
+- A new setting, Separate speakers, under Enhance transcript after meeting. It is on by default, so meetings are sorted by speaker as before
+- With it off, lore keeps both sides of each meeting's audio, so you can still find the speakers later
+- Who spoke? on a meeting works out who said what in that meeting, whenever you ask
+
+**3.8.8 (#306) The coming iPhone app can transcribe its notes with lore's own engine**
+- A meeting that ended with no live text keeps its real start time instead of the time it stopped
+
+**3.8.7 (#309) The shared format knows how phone notes arrive**
+- The folder and file layout a phone note travels in is now part of lore's shared format, so the coming iPhone app and the Mac agree on it. Nothing changes on the Mac yet
+
+**3.8.6 (#305) The Mac and the coming iPhone app share one core**
+- Transcription, speakers, meeting storage and the file format now live in a shared core that also builds for iOS. Nothing changes on the Mac
+
+**3.8.5 (#300) Setup lets you drag lore straight into System Settings**
+- Allow on Accessibility or Input Monitoring opens the right page of System Settings, with a small card holding lore just under the list. Drag lore into the list, then turn its switch on
+- The card follows the Settings window and steps aside when another app is in front
+- A grant shows as done only once lore has read it for real; dropping lore in the list alone changes nothing
+- Can't drag? The card says to use the + button under the list
+- Apple's own Accessibility popup no longer appears first
+
+**3.8.4 (#301) Agents can find and read what you said**
+- `lore search` finds your dictations and meetings by words and dates, newest first; `--json` for scripts
+- `lore show` prints one dictation, or a meeting's transcript with the speakers' names; `--notes` adds its notes
+- `lore skill` prints a short guide that teaches an agent `say`, `transcribe`, `search` and `show`; `bunx skills add atarazevich/lore` installs it into Claude Code, Codex and other agents
+- The `lore` command now goes where your Terminal finds it: `/opt/homebrew/bin` or `/usr/local/bin` when lore can write there, else `~/.local/bin`
+- These commands only read. They work while lore is closed
+
+**3.8.3 (#299) A new speech model: Parakeet Ultra**
+- lore now transcribes with Parakeet Ultra, a more accurate version of the model it used before, in the same 25 languages and at the same speed
+- Speech that mixes Russian and English comes out right much more often: phrases that used to turn into made-up English now keep their words
+- After the update, dictation and meetings keep working on the previous model while the new one downloads (about 630 MB) in the background. lore switches when nothing is recording, and removes the previous model the next time it starts
+- Without a connection, lore stays on the previous model and tries again on a later launch
+
+**3.8.2 (#296) A reply from a background chat carries the chat's name**
+- A chat with no tab of its own is named as Claude Code's agents view names it, a fork included, instead of by its folder
+- A chat whose agent moved to another folder keeps the name of the folder it started in
+
+**3.8.1 (#264) The replies player shows every reply in the order it came, with its time**
+- One list: the oldest reply at the top, the newest at the bottom, and the player opens scrolled to the bottom
+- Every reply shows when it arrived: "now", minutes up to ten, then the clock, "Yesterday", the weekday, or the date. The times update while the player is open
+- Each row shows the chat's name and the first line of what it said. A blue dot marks a reply not heard yet, and a speaker takes its place while it is read
+- The workspace shows only when two chats in the list have the same name. The app icon and the line with the topic and folder are gone
+- The reply being read opens in place with all its words, the time gone and the time left, and one Go to back to its chat. A reply with no chat to go to has no button, and the Go to key (fn J) dims while that reply is in the player
+- In the seconds after the last reply, its Go to stays open, and fn J goes to its chat and fn R plays it again
+
 ## v3.8.0 — 2026-09-30
 
 lore is ready before your first word, a dictation caught by a restart finishes by itself, and lore closes cleanly when it is ended from outside.

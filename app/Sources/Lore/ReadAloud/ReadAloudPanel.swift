@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 import SwiftUI
 
 // MARK: - View
@@ -131,12 +132,19 @@ struct ReadAloudPanelView: View {
         TimelineView(.periodic(from: .now, by: 0.25)) { _ in
             // The total firms up once every chunk of the current text is
             // synthesized; until then the row says so.
-            PlayerProgressRow(
-                elapsed: controller.elapsedSeconds, total: controller.totalSeconds,
-                progress: controller.currentProgress
-            ) {
-                EmptyView()
+            HStack(spacing: 8) {
+                Text(ReadAloudController.timeLabel(controller.elapsedSeconds))
+                PlayerProgressBar(progress: controller.currentProgress)
+                // Nil while the total is not known — the row says `–:––`
+                // rather than a figure it would have to guess.
+                Text(
+                    controller.totalSeconds.map(ReadAloudController.timeLabel)
+                        ?? "\u{2013}:\u{2013}\u{2013}"
+                )
             }
+            .font(LoreTheme.Typography.mono(10))
+            .monospacedDigit()
+            .foregroundStyle(LoreTheme.TextColor.muted)
         }
         .accessibilityLabel("Progress")
     }
@@ -330,40 +338,29 @@ struct ReadAloudPanelView: View {
     }
 }
 
-// MARK: - The reading row both players draw
+// MARK: - The bar both players draw
 
-/// elapsed · bar · total, on the mono face, with whatever glyph the caller puts
-/// in front of it: the selected-text player's row (#105) and the replies card's
-/// (#260) are the same row in two colours.
-struct PlayerProgressRow<Leading: View>: View {
-    let elapsed: Double
-    /// Nil while the total is not known — the row says `–:––` rather than a
-    /// figure it would have to guess.
-    let total: Double?
+/// How far reading has got, as both players draw it: a 3 pt track and its
+/// fill — the selected-text player's (#105) and the replies card's (#264). A
+/// reply not begun shows no fill at all; once begun, never less than a dot.
+struct PlayerProgressBar: View {
     let progress: Double
     var fill: Color = Color.white.opacity(0.45)
     var track: Color = Color.white.opacity(0.12)
-    @ViewBuilder var leading: () -> Leading
 
     var body: some View {
-        HStack(spacing: 8) {
-            leading()
-            Text(ReadAloudController.timeLabel(elapsed))
-            GeometryReader { geo in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(track)
+        GeometryReader { geo in
+            ZStack(alignment: .leading) {
+                Capsule().fill(track)
+                if progress > 0 {
                     Capsule()
                         .fill(fill)
                         .frame(width: max(3, geo.size.width * progress))
                 }
             }
-            .frame(height: 3)
-            .frame(maxWidth: .infinity)
-            Text(total.map(ReadAloudController.timeLabel) ?? "\u{2013}:\u{2013}\u{2013}")
         }
-        .font(LoreTheme.Typography.mono(10))
-        .monospacedDigit()
-        .foregroundStyle(LoreTheme.TextColor.muted)
+        .frame(height: 3)
+        .frame(maxWidth: .infinity)
     }
 }
 

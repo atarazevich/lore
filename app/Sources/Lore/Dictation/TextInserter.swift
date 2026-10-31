@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 import os
 
 /// Marks the key events Lore itself synthesizes (paste's Cmd+V/Z, Read Aloud's
@@ -60,6 +61,17 @@ final class PasteboardWriteLedger: @unchecked Sendable {
     }
 }
 
+/// What a paste could observe (#209, #338). Never "the text landed":
+/// `CGEvent.post` gives no receipt.
+enum PasteResult: Equatable, Sendable {
+    /// The keystrokes were created and posted while lore was trusted.
+    case posted
+    /// Posted while macOS reported lore untrusted, so macOS dropped them.
+    case blocked
+    /// The keystrokes could not even be created.
+    case notCreated
+}
+
 enum TextInserter {
     private static let log = Logger(subsystem: "com.lore.app", category: "TextInserter")
 
@@ -67,14 +79,9 @@ enum TextInserter {
         AXIsProcessTrusted()
     }
 
-    static func requestAccessibilityIfNeeded() {
-        let options = ["AXTrustedCheckOptionPrompt": true] as CFDictionary
-        AXIsProcessTrustedWithOptions(options)
-    }
-
     @MainActor
     @discardableResult
-    static func paste(_ text: String) async -> Bool {
+    static func paste(_ text: String) async -> PasteResult {
         await paste([.text(text)])
     }
 
@@ -88,16 +95,17 @@ enum TextInserter {
     /// the last, because restoring between steps would hand the target its own
     /// old clipboard mid-sequence.
     ///
-    /// Answers whether every step's keystrokes could be **created** (#209) —
-    /// the only fact this path has, and the whole of what the bubble's
-    /// paste-failed face is allowed to claim. Whoever wants that answer waits
+    /// Answers whether every step's keystrokes could be **created** (#209),
+    /// and whether lore was trusted when it posted them (#338) — the only
+    /// facts this path has, and the whole of what the bubble's paste faces are
+    /// allowed to claim. Whoever wants that answer waits
     /// for it; whoever does not, does not, which is how the bubble leaves at the
     /// first step while a web composer is still being handed its third.
     @MainActor
     @discardableResult
-    static func paste(_ steps: [RichInput.DeliveryStep]) async -> Bool {
+    static func paste(_ steps: [RichInput.DeliveryStep]) async -> PasteResult {
         // Nothing was asked for, so nothing failed.
-        guard !steps.isEmpty else { return true }
+        guard !steps.isEmpty else { return .posted }
         let granted = isAccessibilityGranted
 
         // Even if AXIsProcessTrusted returns false, try the paste anyway —
@@ -144,6 +152,12 @@ enum TextInserter {
             try? await Task.sleep(for: settle(after: step))
         }
 
+        // Untrusted, macOS drops a posted Cmd+V (#338): the words did not go,
+        // whatever the events said.
+        let result: PasteResult = !granted ? .blocked : (allPosted ? .posted : .notCreated)
+        // Nothing landed, so the words stay where the bubble says they are —
+        // on the clipboard, for the Cmd+V the person presses themselves.
+        guard result == .posted else { return result }
         // The clipboard goes back behind the answer, not in front of it: the
         // 800 ms the target needs to absorb the last paste is not the caller's
         // wait, and the caller's question was answered a line ago.
@@ -152,7 +166,7 @@ enum TextInserter {
             restorePasteboard(NSPasteboard.general, items: savedItems)
             log.debug("clipboard restored")
         }
-        return allPosted
+        return result
     }
 
     /// How long the target needs before the next step. A composer attaches a

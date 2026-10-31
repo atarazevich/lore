@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import LoreCore
 
 /// Pure microphone-permission core shared by the dictation and meeting paths.
 ///

@@ -15,12 +15,6 @@ public struct CLISayRequest: Codable, Sendable, Equatable {
     /// session was given by hand, else the folder. What the player falls back
     /// to when herdr cannot be asked for the labels the owner typed (#267).
     public var name: String
-    /// What the chat is about, as Claude Code writes it into the terminal
-    /// title, spinner stripped (#267). Never the chat's name: the owner does
-    /// not read this anywhere, so it is the second line, not the first.
-    /// Absent in a reply stored before #267, and outside a terminal that
-    /// sets one.
-    public var topic: String?
     /// The terminal app the chat runs in (`__CFBundleIdentifier`).
     public var hostBundleID: String?
     public var herdrPaneID: String?
@@ -47,7 +41,6 @@ public struct CLISayRequest: Codable, Sendable, Equatable {
         text: String,
         voice: String? = nil,
         name: String,
-        topic: String? = nil,
         hostBundleID: String? = nil,
         herdrPaneID: String? = nil,
         herdrTabID: String? = nil,
@@ -60,7 +53,6 @@ public struct CLISayRequest: Codable, Sendable, Equatable {
         self.text = CLISay.capped(text, bytes: CLISay.maxTextBytes)
         self.voice = CLISay.capped(voice)
         self.name = CLISay.capped(name, bytes: CLISay.maxNameBytes)
-        self.topic = topic.map { CLISay.capped($0, bytes: CLISay.maxNameBytes) }
         self.hostBundleID = CLISay.capped(hostBundleID)
         self.herdrPaneID = CLISay.capped(herdrPaneID)
         self.herdrTabID = CLISay.capped(herdrTabID)
@@ -83,9 +75,9 @@ public struct ChatPlace: Equatable, Sendable {
     public var herdrTabID: String?
     public var herdrWorkspaceID: String?
     public var hostBundleID: String?
-    /// Whether the tab is the chat's own, so its id, its label and the topic
-    /// in it name the chat. Not in Claude Code's agents view (#293): that tab
-    /// shows every background chat and is named for none of them.
+    /// Whether the tab is the chat's own, so its id and its label name the
+    /// chat. Not in Claude Code's agents view (#293): that tab shows every
+    /// background chat and is named for none of them.
     public let ownTab: Bool
 
     public init(environment: [String: String], ownTab: Bool = true) {
@@ -184,19 +176,6 @@ public enum CLISay {
 
     // MARK: - Who is speaking
 
-    /// The glyphs a working agent's tab title is drawn with. herdr passes the
-    /// title through as the terminal set it, so they arrive with it and would
-    /// otherwise be read aloud.
-    private static let spinnerGlyphs = Set("◐◑◒◓●○◍◌✳✴✶✷✸✹✺✻✽∗*⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏".unicodeScalars)
-
-    /// The tab title as the user reads it, without the spinner in front.
-    public static func stripSpinner(_ title: String) -> String {
-        let named = title.drop { character in
-            character.isWhitespace || character.unicodeScalars.allSatisfy(spinnerGlyphs.contains)
-        }
-        return String(named).trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
     /// The name this shell can give its own chat: the name the Claude Code
     /// session carries, else the folder the agent works in. Empty only for a
     /// shell with no folder to name, and then the reply is read without one.
@@ -204,8 +183,8 @@ public enum CLISay {
     /// The terminal title is deliberately not here (#267). It is the topic
     /// Claude Code writes by itself, which herdr does not show in its tab bar
     /// — a reply was read out under a title nobody had ever seen, for a chat
-    /// whose tab says something else. It rides along as `topic` instead, and
-    /// the labels the owner typed are read from herdr on the other side.
+    /// whose tab says something else. The labels the owner typed are read
+    /// from herdr instead; the title is not sent at all since #264.
     public static func chatName(sessionName: String?, cwd: String) -> String {
         let named = sessionName?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         if !named.isEmpty { return named }
@@ -262,16 +241,14 @@ public enum CLISay {
     }
 
     /// What `herdr api snapshot`'s answer says about this shell's own pane: the
-    /// topic without its spinner, and the two labels. Every field that herdr
-    /// left blank comes back nil rather than as an empty string, so nothing
-    /// empty is ever sent or spoken.
+    /// two labels. A label herdr left blank comes back nil rather than as an
+    /// empty string, so nothing empty is ever sent or spoken.
     public static func herdrFacts(
         from data: Data, pane: String, tab: String?, workspace: String?
     ) -> HerdrPaneFacts? {
         guard let read = Herdr.paneFacts(from: data, pane: pane, tab: tab, workspace: workspace)
         else { return nil }
         return HerdrPaneFacts(
-            title: read.title.map(stripSpinner).flatMap(present),
             workspaceLabel: present(read.workspaceLabel),
             tabLabel: present(read.tabLabel)
         )
@@ -286,7 +263,8 @@ public enum CLISay {
 
     /// One reply as its own shell describes it: the host terminal, the herdr
     /// pane and its labels, the Claude Code session, the folder — each one read,
-    /// none inferred. `place` is `place(environment:…)`'s answer.
+    /// none inferred. `cwd` is the shell's folder, used only when no session
+    /// file says the chat's own. `place` is `place(environment:…)`'s answer.
     public static func request(
         text: String,
         voice: String?,
@@ -296,23 +274,22 @@ public enum CLISay {
         herdr: HerdrPaneFacts?,
         session: ClaudeSessionFile?
     ) -> CLISayRequest {
-        CLISayRequest(
+        let folder = present(session?.cwd) ?? cwd
+        return CLISayRequest(
             text: text,
             voice: voice,
-            // Only a name the owner typed himself: a derived one is the folder
-            // with a suffix, which the folder says better (#267).
-            name: chatName(sessionName: session?.handGivenName, cwd: cwd),
-            // Not the agents view's (#293): its tab names the view, and the
-            // player names a row by its tab's live label. Go to needs the pane.
-            topic: place.ownTab ? present(herdr?.title) : nil,
+            // The name the owner sees for the chat, else its folder (#267, #296).
+            name: chatName(sessionName: session?.shownName, cwd: folder),
             hostBundleID: place.hostBundleID,
             herdrPaneID: place.herdrPaneID,
+            // Not the agents view's (#293): its tab names the view, and the
+            // player names a row by its tab's live label. Go to needs the pane.
             herdrTabID: place.ownTab ? place.herdrTabID : nil,
             herdrWorkspaceID: place.herdrWorkspaceID,
             herdrWorkspaceLabel: present(herdr?.workspaceLabel),
             herdrTabLabel: place.ownTab ? present(herdr?.tabLabel) : nil,
             sessionID: present(environment["CLAUDE_CODE_SESSION_ID"]) ?? present(session?.sessionId),
-            cwd: present(cwd)
+            cwd: present(folder)
         )
     }
 

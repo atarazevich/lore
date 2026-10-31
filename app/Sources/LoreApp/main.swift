@@ -3,4 +3,8 @@
 // LoreRootApp.sharedContext.
 import LoreKit
 
+// `Lore --check-grants` (#300): onboarding's fresh-process grant reading
+// answers and exits here, before any of the app exists.
+GrantCheck.runIfRequested()
+
 LoreRootApp.main()

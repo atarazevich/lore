@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 
 /// The Copying section's switches (#198), and the one place their UserDefaults
 /// keys and defaults are written down.

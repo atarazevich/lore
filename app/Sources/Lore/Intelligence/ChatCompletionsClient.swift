@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 
 /// Client for the OpenAI chat-completions endpoint — the one LLM transport
 /// behind dictation cleanup, translation, Ask Lore, and transcript refinement.

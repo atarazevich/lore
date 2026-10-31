@@ -1,3 +1,4 @@
+import LoreCore
 import SwiftUI
 
 struct MenuBarPopoverView: View {
@@ -10,6 +11,9 @@ struct MenuBarPopoverView: View {
     let onShowHealth: () -> Void
     let onCheckForUpdates: () -> Void
     let onQuit: () -> Void
+    /// Closes the popover before the blocked condition's fix opens macOS's
+    /// prompt or System Settings (#338).
+    var onCloseForFix: () -> Void = {}
 
     @State private var elapsedSeconds: Int = 0
     @State private var timerTask: Task<Void, Never>?
@@ -23,6 +27,13 @@ struct MenuBarPopoverView: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
+            // macOS blocking lore (#338): the message and its one button, at
+            // the top, in place of the "needs a look" row for this condition.
+            if let block = coordinator.healthMonitor?.permissionsBlock {
+                PermissionsBlockMessage(block: block, perform: perform)
+                LoreDivider()
+            }
+
             // The whole meeting block, or none of it (#221, board frame E): no
             // status line, no Start/Stop, no Resume. The menu-bar icon itself
             // does not change — only what the popover opens on.
@@ -45,7 +56,9 @@ struct MenuBarPopoverView: View {
                 // Only while a condition actually stands, so the popover carries
                 // no standing "check your health" nag — the row exists to answer
                 // the amber bead the user just clicked on.
-                if let standing = coordinator.healthMonitor?.sustainedSubjects, !standing.isEmpty {
+                // The blocked condition speaks in its own message above.
+                if let standing = coordinator.healthMonitor?.sustainedSubjects
+                    .subtracting([.permissionsBlocked]), !standing.isEmpty {
                     PopoverMenuRow(
                         title: MenuBarController.label(for: .health, standing: standing),
                         systemImage: "exclamationmark.circle",
@@ -54,7 +67,7 @@ struct MenuBarPopoverView: View {
                     )
                 }
                 PopoverMenuRow(
-                    title: "Show \(LoreTheme.wordmark)",
+                    title: "Show \(LoreBrand.wordmark)",
                     systemImage: "macwindow",
                     action: onShowMainWindow
                 )
@@ -70,7 +83,7 @@ struct MenuBarPopoverView: View {
             LoreDivider()
 
             PopoverMenuRow(
-                title: "Quit \(LoreTheme.wordmark)",
+                title: "Quit \(LoreBrand.wordmark)",
                 systemImage: "power",
                 muted: true,
                 action: onQuit
@@ -154,6 +167,14 @@ struct MenuBarPopoverView: View {
         }
     }
 
+    /// The panel's own dispatch. The popover closes first: macOS's prompt or
+    /// System Settings comes up over everything, and the next opening shows
+    /// the stage that follows.
+    private func perform(_ action: HealthRemedyAction) {
+        onCloseForFix()
+        action.perform(monitor: coordinator.healthMonitor)
+    }
+
     private var formattedTime: String {
         let minutes = elapsedSeconds / 60
         let seconds = elapsedSeconds % 60
@@ -223,5 +244,43 @@ private struct PopoverMenuRow: View {
         }
         .buttonStyle(.plain)
         .loreHoverFill(cornerRadius: LoreTheme.Radius.button)
+    }
+}
+
+/// The blocked condition's message (#338, `untrusted-after-reinstall.html`
+/// §01/§04): the amber mark, one sentence, a hint, and one primary button.
+private struct PermissionsBlockMessage: View {
+    let block: PermissionsBlock
+    let perform: (HealthRemedyAction) -> Void
+
+    var body: some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: "exclamationmark.circle")
+                .font(.system(size: 13, weight: .medium))
+                .foregroundStyle(LoreTheme.Accent.amber)
+                .frame(width: 15, height: 15)
+                .padding(.top, 1)
+            VStack(alignment: .leading, spacing: 0) {
+                Text(block.message)
+                    .font(LoreTheme.Typography.control)
+                    .foregroundStyle(LoreTheme.TextColor.primary)
+                    .fixedSize(horizontal: false, vertical: true)
+                if let hint = block.hint {
+                    Text(hint)
+                        .font(LoreTheme.Typography.meta)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
+                        .lineSpacing(2)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 3)
+                }
+                LorePrimaryButton(title: block.actionLabel, size: .compact) { perform(block.action) }
+                    .padding(.top, 10)
+            }
+            Spacer(minLength: 0)
+        }
+        .padding(.leading, 14)
+        .padding(.trailing, 16)
+        .padding(.vertical, 14)
+        .accessibilityElement(children: .contain)
     }
 }

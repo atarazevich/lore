@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 import Observation
 import os
 
@@ -106,6 +107,8 @@ final class AppCoordinator {
     /// Meeting auto-enrichment (#107). Live mode only — nil in UI tests, so
     /// every trigger is a no-op there.
     var enrichmentEngine: MeetingEnrichmentEngine?
+    /// Notes from the iPhone into Meetings (#309). Live mode only.
+    var phoneNoteImporter: PhoneNoteImporter?
     /// `lore transcribe` (#254), which borrows the shared model a meeting's
     /// microphone leg uses. Set once subsystems start; nil in UI tests.
     var commandTranscription: CLITranscribeService?
@@ -117,6 +120,10 @@ final class AppCoordinator {
     // MARK: - Dictation
 
     let dictationCoordinator = DictationCoordinator()
+
+    /// Every cache serving the speech model: the one list the model upgrade
+    /// installs into (#299) and a deleting load failure evicts (#186).
+    var speechModelCaches: [SharedBackendCache] { [sharedBackendCache, dictationCoordinator.ownCache] }
     let hotkeyManager = HotkeyManager()
     let dictationIndicator = DictationIndicatorManager()
 
@@ -194,6 +201,13 @@ final class AppCoordinator {
     /// divergence produced the ghost recording (#42).
     var canStartCapture: Bool {
         state == .idle && transcriptionEngine?.isRunning != true
+    }
+
+    /// Meeting work holds a speech model right now: a meeting live, paused or
+    /// finishing, or the healer running a job through the batch engine. Read
+    /// live from the owners, never from the poll's copy (#299).
+    var isMeetingWorkActive: Bool {
+        !canStartCapture || transcriptHealer?.isRunningJob == true
     }
 
     /// Drive the meeting lifecycle through the state machine, then dispatch side effects.

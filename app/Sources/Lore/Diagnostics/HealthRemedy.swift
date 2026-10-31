@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import LoreCore
 
 /// A System Settings pane a remedy can deep-link to. The URL is the documented
 /// `x-apple.systempreferences:` scheme; the onboarding permission cards
@@ -16,6 +17,9 @@ enum SettingsPane: String, CaseIterable, Equatable, Sendable {
     /// Not a privacy grant but the same kind of round trip: the Fn-key behaviour
     /// the onboarding step watches lives here (#150).
     case keyboard
+    /// Privacy & Security › Files & Folders, where lore's iCloud Drive access
+    /// lives (#309). The anchor is in macOS 27's Privacy & Security extension.
+    case filesAndFolders
 
     var settingsURL: URL? {
         switch self {
@@ -29,6 +33,8 @@ enum SettingsPane: String, CaseIterable, Equatable, Sendable {
             return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture")
         case .keyboard:
             return URL(string: "x-apple.systempreferences:com.apple.Keyboard-Settings.extension")
+        case .filesAndFolders:
+            return URL(string: "x-apple.systempreferences:com.apple.preference.security?Privacy_FilesAndFolders")
         }
     }
 
@@ -49,6 +55,7 @@ enum SettingsPane: String, CaseIterable, Equatable, Sendable {
         case .microphone: return "Open Microphone"
         case .screenRecording: return "Open Screen & System Audio Recording"
         case .keyboard: return "Open Keyboard Settings"
+        case .filesAndFolders: return "Open System Settings"
         }
     }
 }
@@ -66,14 +73,19 @@ enum HealthRemedyAction: Equatable, Sendable {
     /// Open Finder on a folder the row names (#148). The path is machine-local
     /// and rides on the action, not on the serialized result.
     case revealInFinder(String)
+    /// Remove lore's own Accessibility and Input Monitoring entries and ask
+    /// macOS again (#338). The one primary action of the panel, the popover
+    /// and the bubble's blocked-paste face, under one name.
+    case fixPermissions
 
     var buttonLabel: String {
         switch self {
         case .openSettings(let pane): return pane.buttonLabel
-        case .restartApp: return "Restart \(LoreTheme.wordmark)"
+        case .restartApp: return "Restart \(LoreBrand.wordmark)"
         case .openLoreSettings: return "Open Settings"
         case .testNow: return "Test now"
         case .revealInFinder: return "Show in Finder"
+        case .fixPermissions: return "Fix permissions"
         }
     }
 }
@@ -83,7 +95,16 @@ enum HealthRemedyAction: Equatable, Sendable {
 /// shows-it-enabled reads differently from never-granted.
 struct Remedy: Equatable, Sendable {
     let instruction: String
-    let actions: [HealthRemedyAction]
+    var actions: [HealthRemedyAction] = []
+    /// The same fix done by hand, behind a "Do it by hand" disclosure (#338) —
+    /// for whoever prefers to do it themselves. Empty for every other remedy.
+    var manualSteps: [String] = []
+    /// A hedged hint at why, drawn faint above the instruction (#341: "Probably
+    /// caused by Terminal."). `nil` for every remedy that has none.
+    var cause: String? = nil
+
+    /// The disclosure's label, in the board's copy table.
+    static let manualStepsLabel = "Do it by hand"
 }
 
 /// The human face of a probe result: title, the one-line detail, and the
@@ -95,6 +116,9 @@ struct HealthItem: Identifiable, Equatable {
     let title: String
     let detail: String
     let remedy: Remedy?
+    /// The blocked condition explains this row (#338): it reads neutral and
+    /// points at the Accessibility row instead of counting as its own issue.
+    var isDependent = false
 
     var id: HealthProbeID { result.id }
     var status: HealthStatus { result.status }
@@ -106,37 +130,91 @@ struct HealthItem: Identifiable, Equatable {
 /// the critical ones carry actionable buttons.
 enum HealthCatalog {
 
-    /// The one procedure that re-binds a TCC grant: macOS keys the grant to the
-    /// signature, so toggling off and on reuses the stale binding while removing
-    /// and re-adding forces a fresh one. Two rows reach the same dead end — a
-    /// measured stale grant on `.tap`, and a signature change on `.signing`
-    /// (#135) — and must not drift apart in wording.
-    private static let reGrantWalkthrough = "Remove \(LoreTheme.wordmark) from Privacy & Security → Accessibility with the “−” button, do the same under Input Monitoring, quit \(LoreTheme.wordmark), then add it back to both and open it again."
+    /// The blocked condition's copy (#338), byte-identical to the board's copy
+    /// table (`untrusted-after-reinstall.html`). The popover's hint and the
+    /// Accessibility row's line are one sentence, so they are one constant.
+    static let blockedDetail = "Blocked by macOS."
+    static let blockedHint = "The switches in System Settings look on, but macOS kept an old permission."
+
+    /// The one procedure that re-binds a stale TCC grant, by hand: macOS keys
+    /// the grant to the signature, so toggling off and on reuses the stale
+    /// binding while removing and re-adding forces a fresh one. Every row that
+    /// reaches that dead end — the blocked condition (#338), a measured stale
+    /// grant on `.tap`, a signature change on `.signing` (#135), a failed paste
+    /// — shows these steps behind "Do it by hand", and all but the paste offer
+    /// Fix permissions, which does the same thing.
+    static let staleGrantSteps = [
+        "In System Settings \u{2192} Privacy & Security \u{2192} Accessibility, select \(LoreBrand.wordmark) and click \u{2212}.",
+        "Do the same under Input Monitoring.",
+        "Add \(LoreBrand.wordmark) back to both with +.",
+    ]
+    static let seeAccessibility = "See Accessibility."
+    static let pasteBlockedSeeAccessibility = "Last paste was blocked \u{2014} see Accessibility."
+    static let nothingPastedSinceFix = "Nothing pasted since the fix."
+
+    // MARK: Keyboard shortcuts under secure input (#341)
+
+    /// The row's detail while another app holds secure input — the one place
+    /// this sentence lives (board `secure-input.html`, copy table).
+    static func shortcutsOffDetail(talkKey: String) -> String {
+        "Off \u{2014} holding \(talkKey) still records and pastes."
+    }
+
+    static let unknownHolderStep = "Close any password field or password manager, or turn off Secure Keyboard Entry in Terminal or iTerm2."
+
+    /// What the row says about who probably holds secure input and how to turn
+    /// it off. The holder is a hint (rdar://48953777), so every cause is
+    /// "Probably"; with nothing to go on, every likely cause is one step.
+    static func secureInputRemedy(_ holder: SecureInput.Attribution?) -> Remedy {
+        switch holder {
+        case .terminal(let name):
+            return Remedy(instruction: "Turn off Secure Keyboard Entry in the \(name) menu.",
+                          cause: "Probably caused by \(name).")
+        case .app(let name):
+            return Remedy(instruction: "Click out of the password field in \(name), or quit \(name).",
+                          cause: "Probably caused by \(name).")
+        case .process(let pid):
+            return Remedy(instruction: unknownHolderStep, cause: "Probably caused by process \(pid).")
+        case .lockScreen:
+            return Remedy(instruction: "Lock the screen (Control-Command-Q), then unlock. If shortcuts are still off, restart the Mac.",
+                          cause: "Probably left on by the lock screen.")
+        case .nobody, nil:
+            return Remedy(instruction: unknownHolderStep)
+        }
+    }
 
     /// - Parameters:
     ///   - result: the PII-free probe result.
     ///   - secureInputHolder: who the panel may say holds secure input —
     ///     machine-local, shown in the detail line, never serialized (#98).
     ///   - teamID: signing team identifier, shown in the detail line only.
-    ///   - secureInputActive: secure input starves the tap, so it is the cause of
-    ///     the tap's non-ok state — which under it is `.warning`, never `.failed`
-    ///     (#94). The tap remedy points at it instead of offering a useless
-    ///     restart. Also set for the `.secureInput` row itself, whose ok copy must
-    ///     not read "Inactive" while the flag is up (benign locked console, #98).
+    ///   - secureInputActive: the raw flag, for the `.secureInput` row, whose ok
+    ///     copy must not read "Inactive" while the flag is up (benign locked
+    ///     console, #98).
     ///   - notesLeftover: the folder the #148 move could not empty and why —
     ///     named in the detail line, revealed by the remedy's button, and the
     ///     cause picks the remedy. Machine-local, never serialized.
+    ///   - talkKey: the keycap of the key held to talk (#341), named in the
+    ///     row that carries secure input.
     static func describe(
         _ result: HealthResult,
         secureInputHolder: SecureInput.Attribution? = nil,
         teamID: String? = nil,
         secureInputActive: Bool = false,
-        notesLeftover: NotesLeftover? = nil
+        notesLeftover: NotesLeftover? = nil,
+        talkKey: String = HotkeyKey.fn.shortName
     ) -> HealthItem {
         let (title, detail, remedy) = copy(
             for: result, holder: secureInputHolder, teamID: teamID,
-            secureInputActive: secureInputActive, notesLeftover: notesLeftover
+            secureInputActive: secureInputActive, notesLeftover: notesLeftover,
+            talkKey: talkKey
         )
+        // The block explains this row (#338): neutral, pointing at Accessibility,
+        // so one cause reads as one issue.
+        if result.blockedByMacOS == true, HealthProbeID.explainedByTheBlock.contains(result.id) {
+            let pointer = result.pasteNote == .blocked ? pasteBlockedSeeAccessibility : seeAccessibility
+            return HealthItem(result: result, title: title, detail: pointer, remedy: nil, isDependent: true)
+        }
         return HealthItem(result: result, title: title, detail: detail, remedy: remedy)
     }
 
@@ -145,7 +223,8 @@ enum HealthCatalog {
         holder: SecureInput.Attribution?,
         teamID: String?,
         secureInputActive: Bool,
-        notesLeftover: NotesLeftover?
+        notesLeftover: NotesLeftover?,
+        talkKey: String
     ) -> (title: String, detail: String, remedy: Remedy?) {
         // Expensive probes share one card shape (last outcome + Test now),
         // dispatched by `cost` so a new expensive probe can't land in the cheap
@@ -170,9 +249,9 @@ enum HealthCatalog {
                 // to re-grant permissions macOS will drop again next launch.
                 if result.signingIdentityChanged == true {
                     return (title,
-                            "\(LoreTheme.wordmark)'s signature changed since the last launch — macOS drops permission grants when that happens, even where the toggles still look on.",
-                            Remedy(instruction: "\(LoreTheme.wordmark) is signed with a different certificate than last time, and macOS tied its Accessibility and Input Monitoring grants to the old one. \(reGrantWalkthrough) This row clears itself as soon as a keystroke actually reaches \(LoreTheme.wordmark).",
-                                   actions: [.openSettings(.accessibility), .openSettings(.inputMonitoring), .restartApp]))
+                            "\(LoreBrand.wordmark)'s signature changed since the last launch — macOS drops permission grants when that happens, even where the toggles still look on.",
+                            Remedy(instruction: "\(LoreBrand.wordmark) is signed with a different certificate than last time, and macOS tied its Accessibility and Input Monitoring grants to the old one. This row clears itself as soon as a keystroke actually reaches \(LoreBrand.wordmark).",
+                                   actions: [.fixPermissions, .restartApp], manualSteps: staleGrantSteps))
                 }
                 let kind = result.signingCert == .developerID ? "Developer ID" : "Apple Development"
                 let team = teamID.map { " (team \($0))" } ?? ""
@@ -180,8 +259,7 @@ enum HealthCatalog {
             case .adHoc, .none:
                 return (title,
                         "Ad-hoc signed — macOS resets permissions on every launch. Reinstall a properly signed build.",
-                        Remedy(instruction: "This build isn't signed with a developer certificate, so macOS forgets its permission grants each launch. Reinstall the signed release.",
-                               actions: []))
+                        Remedy(instruction: "This build isn't signed with a developer certificate, so macOS forgets its permission grants each launch. Reinstall the signed release."))
             case .unknown:
                 return (title, "Signature could not be read.", nil)
             }
@@ -191,23 +269,22 @@ enum HealthCatalog {
             if ok { return ("Disk space", free, nil) }
             return ("Disk space",
                     "Low disk space — \(free) Transcripts and recordings may fail to save.",
-                    Remedy(instruction: "Free up disk space; recordings and transcripts need room to save.",
-                           actions: []))
+                    Remedy(instruction: "Free up disk space; recordings and transcripts need room to save."))
 
         // MARK: Input
 
         case .accessibility:
-            if ok { return ("Accessibility", "Granted — \(LoreTheme.wordmark) can post keystrokes.", nil) }
-            return ("Accessibility",
-                    "macOS reports Accessibility as off for \(LoreTheme.wordmark). If the toggle looks on, macOS no longer recognizes this build.",
-                    Remedy(instruction: "macOS shows \(LoreTheme.wordmark) as enabled but no longer recognizes it. Turn \(LoreTheme.wordmark) off, then on again in Privacy & Security → Accessibility, then restart \(LoreTheme.wordmark).",
-                           actions: [.openSettings(.accessibility), .restartApp]))
+            if ok { return ("Accessibility", "Granted — \(LoreBrand.wordmark) can post keystrokes.", nil) }
+            // Turning the switch off and on is the step that fails (#338): macOS
+            // keeps the old entry. Removing it and asking again is the fix.
+            return ("Accessibility", blockedDetail,
+                    Remedy(instruction: blockedHint, actions: [.fixPermissions], manualSteps: staleGrantSteps))
 
         case .inputMonitoring:
-            if ok { return ("Input Monitoring", "Granted — \(LoreTheme.wordmark) receives the Fn key.", nil) }
+            if ok { return ("Input Monitoring", "Granted — \(LoreBrand.wordmark) receives the Fn key.", nil) }
             return ("Input Monitoring",
-                    "Input Monitoring is off, so the Fn hotkey never reaches \(LoreTheme.wordmark).",
-                    Remedy(instruction: "Enable \(LoreTheme.wordmark) under Privacy & Security → Input Monitoring, then restart \(LoreTheme.wordmark).",
+                    "Input Monitoring is off, so the Fn hotkey never reaches \(LoreBrand.wordmark).",
+                    Remedy(instruction: "Enable \(LoreBrand.wordmark) under Privacy & Security → Input Monitoring, then restart \(LoreBrand.wordmark).",
                            actions: [.openSettings(.inputMonitoring), .restartApp]))
 
         case .tap:
@@ -216,17 +293,6 @@ enum HealthCatalog {
                 let age = result.tapLiveness.map { "last key event \(relativeAge($0.tapSilentSeconds))" }
                     ?? "receiving key events"
                 return (title, "Live — \(age).", nil)
-            }
-            // Secure input starves every tap on the machine by design, so whether
-            // *ours* is otherwise healthy cannot be measured while it is on —
-            // `TapLiveness.observe` deliberately draws no verdict there (#97). The
-            // row says so instead of asserting a conclusion it never drew (#99),
-            // and surfaces the cause rather than a restart that cannot help.
-            if secureInputActive {
-                return (title,
-                        "Can't be measured while secure input is on — it starves every app's keyboard tap by design. See Secure input above.",
-                        Remedy(instruction: "Secure input is holding the keyboard; that is what stops \(LoreTheme.wordmark)'s shortcuts. Release it (see the Secure input item above) — restarting \(LoreTheme.wordmark) will not help while it is on.",
-                               actions: []))
             }
             // A live tap that is starved is the *only* case a restart cannot fix:
             // the session is being given key-downs and we are not. That is a
@@ -241,53 +307,31 @@ enum HealthCatalog {
             // subtraction the reader can get sign-wrong (#99).
             if let liveness = result.tapLiveness, liveness.isStarved == true, liveness.isAlive {
                 return (title,
-                        "Keystrokes are reaching the Mac but not \(LoreTheme.wordmark) — the Mac's last keystroke was \(silence(liveness.sessionSilentSeconds)) ago, while \(LoreTheme.wordmark)'s tap has been silent for \(silence(liveness.tapSilentSeconds)).",
-                        Remedy(instruction: "macOS reports Accessibility and Input Monitoring as granted, yet no keystroke is reaching \(LoreTheme.wordmark) — that is what a stale permission grant looks like, and toggling the switch off and on does not clear it. \(reGrantWalkthrough)",
-                               actions: [.openSettings(.accessibility), .openSettings(.inputMonitoring)]))
+                        "Keystrokes are reaching the Mac but not \(LoreBrand.wordmark) — the Mac's last keystroke was \(silence(liveness.sessionSilentSeconds)) ago, while \(LoreBrand.wordmark)'s tap has been silent for \(silence(liveness.tapSilentSeconds)).",
+                        Remedy(instruction: "macOS reports Accessibility and Input Monitoring as granted, yet no keystroke is reaching \(LoreBrand.wordmark) — that is what a stale permission grant looks like, and toggling the switch off and on does not clear it.",
+                               actions: [.fixPermissions], manualSteps: staleGrantSteps))
             }
             return (title,
-                    "\(LoreTheme.wordmark)'s keyboard tap isn't installed.",
-                    Remedy(instruction: "Restart \(LoreTheme.wordmark) to reinstall the keyboard tap. If it keeps failing, check Input Monitoring above.",
+                    "\(LoreBrand.wordmark)'s keyboard tap isn't installed.",
+                    Remedy(instruction: "Restart \(LoreBrand.wordmark) to reinstall the keyboard tap. If it keeps failing, check Input Monitoring above.",
                            actions: [.restartApp, .openSettings(.inputMonitoring)]))
 
         case .secureInput:
             if ok {
                 // `.ok` while the flag is up is the benign locked-console case
-                // (#98); claiming "Inactive" there would contradict the tap row,
-                // which is gated on the raw flag and says secure input is on.
+                // (#98, `SecureInput.State.isProblem`); "Inactive" would be
+                // untrue there, so the row says whose it is.
                 return secureInputActive
                     ? ("Secure input", "Active, held by the lock screen — normal while the console is locked.", nil)
                     : ("Secure input", "Inactive — the Fn key isn't being starved.", nil)
             }
-            // A misattributed holder gets no name, no pid, and a procedure instead
-            // of a target (#98). The panel itself is the bisection instrument:
-            // the health loop re-probes every few seconds, so the row clears
-            // almost immediately when the real holder quits.
-            if holder == .misattributed {
-                return ("Secure input",
-                        "Secure input is active, held by a process macOS won't name — the recorded holder is a system process that was merely in front when the flag was grabbed. While on, no app — including \(LoreTheme.wordmark) — receives keystrokes.",
-                        Remedy(instruction: "Quit likely holders one at a time while watching this panel — this row clears within about 5 seconds of quitting the right one. Prime suspects: Electron and Chromium apps, password managers, and Terminal or iTerm with Secure Keyboard Entry enabled. If nothing clears it, log out or restart the Mac; locking and unlocking the screen does not release it.",
-                               actions: []))
-            }
-            // The pid is a hint, not an identification: macOS records whichever app
-            // was frontmost when secure input went on, which per rdar://48953777 is
-            // often not the caller. So the copy suggests where to look; it does not
-            // accuse a named app of holding the user's keyboard. A CLI or daemon
-            // holder has no `NSRunningApplication`, so the pid stands in — and a
-            // daemon holding the flag is the case where the user most needs the
-            // hint (we hit it live twice) (#92).
-            let hintTarget: String? = switch holder {
-            case .app(let name): name
-            case .process(let pid): "process \(pid)"
-            case .misattributed, .nobody, nil: nil
-            }
-            let hint = hintTarget.map {
-                ", and macOS associates it with \($0) — though it names whichever app was in front, which may not be the one responsible"
-            } ?? ""
-            return ("Secure input",
-                    "Secure input is active\(hint). While on, no app — including \(LoreTheme.wordmark) — receives keystrokes.",
-                    Remedy(instruction: "A password field or app has locked keyboard input. Close it (or click out of the password field) to release the Fn key.",
-                           actions: []))
+            // A problem: this row takes the name of what stopped and carries the
+            // whole condition — what stopped, who probably caused it, how to turn
+            // it off (#341). The tap row is not shown then (`HealthProber.probe`):
+            // its verdict cannot be measured under secure input (#97), and one
+            // condition is one row and one count. No restart is offered; it
+            // cannot help while secure input is on.
+            return ("Keyboard shortcuts", shortcutsOffDetail(talkKey: talkKey), secureInputRemedy(holder))
 
         // MARK: Audio
 
@@ -297,12 +341,12 @@ enum HealthCatalog {
             // asked yet, and the first recording triggers the prompt.
             if result.status == .warning {
                 return ("Microphone permission",
-                        "Not requested yet — macOS asks the first time \(LoreTheme.wordmark) records.",
+                        "Not requested yet — macOS asks the first time \(LoreBrand.wordmark) records.",
                         nil)
             }
             return ("Microphone permission",
                     "Microphone access is off, so dictation and meetings can't record.",
-                    Remedy(instruction: "Enable \(LoreTheme.wordmark) under Privacy & Security → Microphone.",
+                    Remedy(instruction: "Enable \(LoreBrand.wordmark) under Privacy & Security → Microphone.",
                            actions: [.openSettings(.microphone), .restartApp]))
 
         // MARK: Transcription
@@ -310,8 +354,8 @@ enum HealthCatalog {
         case .asrModel:
             if ok { return ("Transcription model", "Downloaded and ready.", nil) }
             return ("Transcription model",
-                    "The Parakeet model isn't on disk yet.",
-                    Remedy(instruction: "The model downloads (~1 GB) on first use. Start a dictation, or warm it up now.",
+                    "The speech model isn't on disk yet.",
+                    Remedy(instruction: "The model downloads (~630 MB) on first use. Start a dictation, or warm it up now.",
                            actions: [.testNow(.modelWarmup)]))
 
         case .vadModel:
@@ -330,8 +374,8 @@ enum HealthCatalog {
         case .openAIKey:
             if ok { return ("OpenAI key", "Present in Keychain.", nil) }
             return ("OpenAI key",
-                    "No OpenAI key is set, so cleanup, translate and Ask \(LoreTheme.wordmark) are unavailable.",
-                    Remedy(instruction: "Add your OpenAI API key in Settings to enable cleanup and Ask \(LoreTheme.wordmark).",
+                    "No OpenAI key is set, so cleanup, translate and Ask \(LoreBrand.wordmark) are unavailable.",
+                    Remedy(instruction: "Add your OpenAI API key in Settings to enable cleanup and Ask \(LoreBrand.wordmark).",
                            actions: [.openLoreSettings]))
 
         // MARK: Meetings
@@ -340,15 +384,15 @@ enum HealthCatalog {
         // deleted, this row goes with it.
         case .notesFolder:
             let title = "Notes folder"
-            if ok { return (title, "Meeting notes are stored inside \(LoreTheme.wordmark)'s own folder.", nil) }
+            if ok { return (title, "Meeting notes are stored inside \(LoreBrand.wordmark)'s own folder.", nil) }
             // Never phrased as loss: nothing was deleted, and the row withdraws
             // itself once that folder is empty. The cause picks the instruction —
             // an iCloud placeholder is this Mac's only handle on the recording,
             // so that copy never suggests deleting anything.
             let folder = notesLeftover.map { " (\(($0.path as NSString).abbreviatingWithTildeInPath))" } ?? ""
             let instruction = notesLeftover?.hasEvicted == true
-                ? "Those files are stored in iCloud and haven't been downloaded to this Mac, so \(LoreTheme.wordmark) left them where they are rather than pulling them down. Open the folder and download them, then move them into the new notes folder — or leave them; nothing else is waiting on it."
-                : "\(LoreTheme.wordmark) now keeps meeting notes in its own folder. A few files there had the same name as files already in the new one, so both copies were kept. Move or delete the leftovers and this row clears itself."
+                ? "Those files are stored in iCloud and haven't been downloaded to this Mac, so \(LoreBrand.wordmark) left them where they are rather than pulling them down. Open the folder and download them, then move them into the new notes folder — or leave them; nothing else is waiting on it."
+                : "\(LoreBrand.wordmark) now keeps meeting notes in its own folder. A few files there had the same name as files already in the new one, so both copies were kept. Move or delete the leftovers and this row clears itself."
             return (title,
                     "Some meeting files couldn't be moved out of your old notes folder\(folder) — they're still there, nothing was deleted.",
                     Remedy(instruction: instruction,
@@ -383,7 +427,7 @@ enum HealthCatalog {
         case .modelWarmup:
             return .init(title: "Model warm-up", okDetail: "Last load succeeded",
                          failDetail: "Last load failed", warnDetail: "Not warmed up yet.",
-                         sideEffect: "loads the model (~1 GB) if it isn't already in memory — instant if already warm")
+                         sideEffect: "loads the model (~630 MB) if it isn't already in memory — instant if already warm")
         case .openAILiveness:
             return .init(title: "OpenAI reachability", okDetail: "Key accepted",
                          failDetail: "Key rejected (HTTP 401)", warnDetail: "Not checked yet.",
@@ -395,7 +439,7 @@ enum HealthCatalog {
             return .init(title: "System-audio capture", okDetail: "Last capture succeeded",
                          failDetail: "Last capture failed", warnDetail: "No meeting recorded yet.",
                          failureRemedy: Remedy(
-                            instruction: "macOS gates system-audio capture behind Screen & System Audio Recording — a separate grant from the microphone, and the one a fresh install is missing. Enable \(LoreTheme.wordmark) under Privacy & Security → Screen & System Audio Recording, then start the meeting again.",
+                            instruction: "macOS gates system-audio capture behind Screen & System Audio Recording — a separate grant from the microphone, and the one a fresh install is missing. Enable \(LoreBrand.wordmark) under Privacy & Security → Screen & System Audio Recording, then start the meeting again.",
                             actions: [.openSettings(.screenRecording)]))
         case .paste:
             // No sideEffect: a synthetic Cmd+V into whatever happens to be
@@ -407,8 +451,8 @@ enum HealthCatalog {
                          failDetail: "Last paste posted nothing",
                          warnDetail: "Nothing pasted yet.",
                          failureRemedy: Remedy(
-                            instruction: "\(LoreTheme.wordmark) pastes by posting Cmd+V, which macOS allows only with Accessibility. Your text is still on the clipboard — press Cmd+V yourself to recover it, then re-grant Accessibility so the next one lands. \(reGrantWalkthrough)",
-                            actions: [.openSettings(.accessibility)]))
+                            instruction: "\(LoreBrand.wordmark) pastes by posting Cmd+V, which macOS allows only with Accessibility. Your text is still on the clipboard — press Cmd+V yourself to recover it, then re-grant Accessibility so the next one lands.",
+                            actions: [.openSettings(.accessibility)], manualSteps: staleGrantSteps))
         case .signing, .diskSpace, .accessibility, .inputMonitoring,
              .tap, .secureInput, .microphone, .asrModel, .vadModel, .openAIKey,
              .notesFolder:
@@ -424,6 +468,10 @@ enum HealthCatalog {
     /// in cost — the #83 split is unchanged; it simply lacks a test.
     private static func expensiveCopy(_ result: HealthResult) -> (String, String, Remedy?) {
         let labels = expensiveLabels(result.id)
+        // The blocked condition cleared and nothing was pasted since (#338).
+        if result.pasteNote == .nothingSinceFix {
+            return (labels.title, nothingPastedSinceFix, nil)
+        }
         func remedy(_ lead: String) -> Remedy? {
             labels.sideEffect.map {
                 Remedy(instruction: "\(lead) — \($0).", actions: [.testNow(result.id)])

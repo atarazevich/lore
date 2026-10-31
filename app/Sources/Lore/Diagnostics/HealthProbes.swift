@@ -2,6 +2,7 @@ import ApplicationServices
 import CoreGraphics
 import FluidAudio
 import Foundation
+import LoreCore
 
 /// Runs the readiness chain's probes and assembles a `HealthSnapshot`.
 ///
@@ -42,6 +43,9 @@ struct HealthProber {
     /// Whether the voice-activity model is complete on disk; injected so the
     /// row's rule is testable without this machine's model folder.
     var vadModelPresent: () -> Bool
+    /// The keycap of the key held to talk, named in the Keyboard shortcuts row
+    /// while secure input is on (#341).
+    var readTalkKey: () -> String
 
     init(
         readTapLiveness: @escaping () -> TapLiveness,
@@ -51,7 +55,8 @@ struct HealthProber {
         readNotesLeftover: @escaping () -> NotesLeftover? = { nil },
         store: DiagStore = .shared,
         now: @escaping () -> Date = Date.init,
-        vadModelPresent: @escaping () -> Bool = { SileroVAD.isPresent }
+        vadModelPresent: @escaping () -> Bool = { SileroVAD.isPresent },
+        readTalkKey: @escaping () -> String = { HotkeyKey.fn.shortName }
     ) {
         self.readTapLiveness = readTapLiveness
         self.readSecureInput = readSecureInput
@@ -61,12 +66,13 @@ struct HealthProber {
         self.store = store
         self.now = now
         self.vadModelPresent = vadModelPresent
+        self.readTalkKey = readTalkKey
     }
 
     /// A probe result plus the machine-local notes (holder attribution, signing
     /// team) that render in the panel but must never enter the serialized snapshot.
     private struct Reading {
-        let result: HealthResult
+        var result: HealthResult
         var holder: SecureInput.Attribution?
         var teamID: String?
         /// The leftover folder and its cause (#148) — the row names it, its
@@ -77,30 +83,41 @@ struct HealthProber {
 
     /// The snapshot and the renderable items in one pass — the monitor uses this
     /// so a health cycle probes the OS once, not twice.
-    func probe() -> (snapshot: HealthSnapshot, items: [HealthItem]) {
+    ///
+    /// - Parameter permissionsBlocked: the blocked condition stands (#338). The
+    ///   monitor owns it, and passes it in so the rows and the mark are
+    ///   published from one pass.
+    func probe(permissionsBlocked: Bool = false) -> (snapshot: HealthSnapshot, items: [HealthItem]) {
         // One read per cycle, shared: the `.secureInput` row, the `.tap` gate and
-        // the tap's remedy are views of the same fact and must never disagree (#93).
+        // the hiding of the tap row are views of the same fact and must never
+        // disagree (#93).
         let secureInput = readSecureInput()
-        let readings = readings(secureInput)
+        let readings = readings(secureInput, permissionsBlocked: permissionsBlocked)
         let snapshot = HealthSnapshot(
             marketingVersion: Self.marketingVersion,
             build: Self.build,
             results: readings.map(\.result)
         )
-        // Secure input active is the likeliest CAUSE of a starved tap, so the
-        // tap item's remedy points at it rather than at a useless restart. The
-        // `.secureInput` row needs the same fact: it can read `.ok` while the
-        // flag is up (benign behind a locked console, #98), and the ok copy must
-        // not claim "Inactive" then.
-        let items = readings.map { reading in
-            HealthCatalog.describe(
-                reading.result,
-                secureInputHolder: reading.holder,
-                teamID: reading.teamID,
-                secureInputActive: [.tap, .secureInput].contains(reading.result.id) && secureInput.active,
-                notesLeftover: reading.notesLeftover
-            )
-        }
+        // The `.secureInput` row can read `.ok` while the flag is up (benign
+        // behind a locked console, #98), and its ok copy must not claim
+        // "Inactive" then.
+        let talkKey = readTalkKey()
+        let items = readings
+            // While secure input stands, its row carries the condition under the
+            // name "Keyboard shortcuts" (#341) and a live tap's row, whose verdict
+            // it makes unmeasurable, is not shown: the header counts exactly the
+            // rows shown (the tap's `.warning` never counts). A dead tap stays.
+            .filter { !(secureInput.isProblem && $0.result.id == .tap && $0.result.status != .failed) }
+            .map { reading in
+                HealthCatalog.describe(
+                    reading.result,
+                    secureInputHolder: reading.holder,
+                    teamID: reading.teamID,
+                    secureInputActive: reading.result.id == .secureInput && secureInput.active,
+                    notesLeftover: reading.notesLeftover,
+                    talkKey: talkKey
+                )
+            }
         return (snapshot, items)
     }
 
@@ -110,9 +127,56 @@ struct HealthProber {
     /// expensive split. `countsInFooter` reads the same property, so a probe's
     /// auto-run-at-open verdict and its footer-cry-wolf exclusion cannot drift.
     /// `allCases` is declared in chain order, so this preserves the panel order.
-    private func readings(_ secureInput: SecureInput.State) -> [Reading] {
+    private func readings(_ secureInput: SecureInput.State, permissionsBlocked: Bool) -> [Reading] {
         HealthProbeID.allCases.map { id in
-            id.cost == .expensive ? expensiveReading(id) : cheapReading(id, secureInput)
+            var reading = switch id {
+            case .accessibility: accessibilityReading(blocked: permissionsBlocked)
+            case .paste: pasteReading()
+            default: id.cost == .expensive ? expensiveReading(id) : cheapReading(id, secureInput)
+            }
+            // The rows the block explains carry it too, so they point at the
+            // one row with the fix (#338).
+            if permissionsBlocked, HealthProbeID.explainedByTheBlock.contains(id) {
+                reading.result.blockedByMacOS = true
+            }
+            return reading
+        }
+    }
+
+    /// The grant's read, or the blocked condition when it stands (#338): an
+    /// effect has proved macOS ignores the switches, so the row fails whatever
+    /// the read says, and it is the one row that carries the fix.
+    private func accessibilityReading(blocked: Bool) -> Reading {
+        let granted = PermissionReader.accessibilityGranted()
+        return Reading(result: HealthResult(
+            id: .accessibility,
+            status: granted && !blocked ? .ok : .failed,
+            blockedByMacOS: blocked ? true : nil
+        ))
+    }
+
+    /// The last paste, read from the stream like every last-attempt row — or,
+    /// when the blocked condition cleared after it, nothing since the fix
+    /// (#338): a paste macOS dropped before the fix is not a verdict on the
+    /// paste after it.
+    private func pasteReading() -> Reading {
+        let latest = store.last { Self.isPasteOrFix($0.event) }
+        if let latest, case .healthConditionCleared = latest.event,
+           now().timeIntervalSince(latest.lastAt) <= TimeInterval(HealthLastAttempt.maxFreshAgeSeconds) {
+            return Reading(result: HealthResult(id: .paste, status: .ok, pasteNote: .nothingSinceFix))
+        }
+        var reading = expensiveReading(.paste)
+        if let latest, case .pasteAttempt(_, _, false) = latest.event,
+           reading.result.lastAttempt?.isStale == false {
+            reading.result.pasteNote = .blocked
+        }
+        return reading
+    }
+
+    nonisolated private static func isPasteOrFix(_ event: DiagEvent) -> Bool {
+        switch event {
+        case .pasteAttempt, .healthConditionCleared(trigger: .permissionsBlocked): return true
+        default: return false
         }
     }
 
@@ -127,7 +191,6 @@ struct HealthProber {
         // Both grants through `PermissionReader`, the app's one reader (#150):
         // the panel is the only repair surface once setup is done, and it must
         // not disagree with the flow that collected the grant.
-        case .accessibility: return plain(id, PermissionReader.accessibilityGranted() ? .ok : .failed)
         case .inputMonitoring: return plain(id, PermissionReader.inputMonitoringGranted() ? .ok : .failed)
         case .tap: return tapReading(secureInput)
         case .secureInput: return secureInputReading(secureInput)
@@ -138,6 +201,8 @@ struct HealthProber {
         case .notesFolder: return notesFolderReading()
         case .micCapture, .modelWarmup, .openAILiveness, .systemAudio, .paste:
             preconditionFailure("expensive probe \(id.rawValue) routed to cheapReading — check id.cost")
+        case .accessibility:
+            preconditionFailure("accessibility is read by accessibilityReading — see readings()")
         }
     }
 
@@ -151,7 +216,7 @@ struct HealthProber {
         let liveness = readTapLiveness()
         return Reading(result: HealthResult(
             id: .tap,
-            status: tapStatus(liveness, secureInputActive: secureInput.active),
+            status: tapStatus(liveness, secureInputProblem: secureInput.isProblem),
             tapLiveness: liveness
         ))
     }
@@ -164,10 +229,13 @@ struct HealthProber {
     /// (`countsInFooter` excludes `.tap` warnings) and summons nothing. Under
     /// secure input even that much is unmeasurable: every app is starved, so the
     /// starvation says nothing about *our* tap (#94, #97) and the row says
-    /// "can't be measured".
-    private func tapStatus(_ liveness: TapLiveness, secureInputActive: Bool) -> HealthStatus {
-        guard !secureInputActive else { return .warning }
+    /// so (#341). Behind a locked console the flag is the lock screen's and
+    /// `TapLiveness` draws no verdict anyway, so the row reads as usual.
+    private func tapStatus(_ liveness: TapLiveness, secureInputProblem: Bool) -> HealthStatus {
+        // A dead tap is dead whatever else is true: it stays `.failed`, shown
+        // and counted with its own remedy, secure input or not.
         guard liveness.isAlive else { return .failed }
+        guard !secureInputProblem else { return .warning }
         // `isStarved` is tri-state (#99); "no verdict drawn" is not degradation.
         return liveness.isStarved == true ? .warning : .ok
     }
@@ -221,17 +289,20 @@ struct HealthProber {
         // there, so nothing is surfaced at every lock screen (#98).
         // A genuinely stuck flag resurfaces on the first tick
         // after unlock: the lock state is re-read every cycle.
-        let problem = state.active && !state.consoleLocked
+        let problem = state.isProblem
         return Reading(
             result: HealthResult(
                 id: .secureInput,
-                status: problem ? .failed : .ok,
+                // A warning, not a failure (#341): only the shortcuts stop. It
+                // counts once in the header, as "Keyboard shortcuts" (`shortName`).
+                status: problem ? .warning : .ok,
                 // The pid rides iff the row is a problem, so a report's reader can
                 // decode `holderPID` unambiguously (#92) — `read()` checks the flag
                 // before walking the registry, so a holder appearing between the
                 // two yields `active: false, pid: n` for one tick, and a pid on an
-                // `ok` row would be noise. It rides for a misattributed holder too:
-                // suppression is a display rule, and the report keeps the truth.
+                // `ok` row would be noise. It rides for loginwindow and SecurityAgent
+                // too: not naming them is a display rule, and the report keeps
+                // the truth.
                 secureInputHolderPID: problem ? state.pid : nil
             ),
             holder: problem ? state.attribution : nil
@@ -286,9 +357,12 @@ struct HealthProber {
     /// the mark's dot cannot disagree, and both age out at the 24 h ceiling.
     /// `eventsCreated` is all the attempt can observe: `CGEvent.post` returns
     /// nothing, so this is "we managed to build and post the keystrokes", never
-    /// "the text landed".
+    /// "the text landed". A paste posted while lore was untrusted is a failure
+    /// (#338): macOS drops it, and calling it ok was the false green.
     nonisolated private static func pasteOutcome(_ event: DiagEvent) -> DiagEvent.Outcome? {
-        if case .pasteAttempt(_, let created, _) = event { return DiagEvent.Outcome(success: created) }
+        if case .pasteAttempt(_, let created, let trusted) = event {
+            return DiagEvent.Outcome(success: created && trusted)
+        }
         return nil
     }
 
@@ -313,7 +387,7 @@ struct HealthProber {
     /// leaves the last real attempt standing instead of overwriting it with a
     /// load that never happened. Same rule in `HealthMonitor.healthSignal`.
     nonisolated private static func modelWarmupOutcome(_ event: DiagEvent) -> DiagEvent.Outcome? {
-        if case .modelLoad(.asr, let outcome, _, false) = event { return outcome }
+        if case .modelLoad(.asr, let outcome, _, false, _) = event { return outcome }
         return nil
     }
 
@@ -351,7 +425,7 @@ struct HealthProber {
     }
 
     nonisolated private static func vadLoadOutcome(_ event: DiagEvent) -> DiagEvent.Outcome? {
-        if case .modelLoad(.vad, let outcome, _, _) = event, outcome != .unknown { return outcome }
+        if case .modelLoad(.vad, let outcome, _, _, _) = event, outcome != .unknown { return outcome }
         return nil
     }
 

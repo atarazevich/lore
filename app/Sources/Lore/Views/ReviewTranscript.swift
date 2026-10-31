@@ -1,20 +1,8 @@
+import LoreCore
+import LoreFormat
 import SwiftUI
 
-// MARK: - Identity (#269)
-
-/// A turn and a paragraph are keyed by their first line's record position,
-/// which a rename or a merge regrouping the turns around them does not move.
-extension TranscriptTurn: Identifiable {
-    var id: Int { paragraphs[0].id }
-}
-
-extension TranscriptTurn.Paragraph: Identifiable {
-    var id: Int { pieces[0].record }
-}
-
-extension SpeakerLabel: Identifiable {
-    var id: SpeakerKey { key }
-
+extension SpeakerLabel {
     /// You is blue; n is the nth speaker colour — the live view's rule.
     var loreColor: Color {
         (colour == 0 ? Speaker.you : .remote(colour)).loreColor
@@ -93,6 +81,10 @@ struct ReviewTranscriptTurns: View {
     /// The popover's rows for a speaker, built when it opens.
     let choices: (SpeakerLabel) -> [SpeakerLabel]
     let commit: (SpeakerLabel, SpeakerNaming) -> Void
+    /// A phone note's gaps (#309), each a quiet line at its time.
+    var gaps: [PhoneNoteGap] = []
+    /// False for a phone note with one unnamed speaker: time and text only.
+    var showsSpeakerNames = true
     /// The turn whose name popover is open: every other row steps back to
     /// 0.28. Kept here, under the rows, so opening it redraws no row.
     @State var namingTurn: Int?
@@ -100,27 +92,31 @@ struct ReviewTranscriptTurns: View {
     @Environment(\.accessibilityReduceMotion) private var reduceMotion
 
     var body: some View {
+        let placed = PhoneNoteReview.place(gaps, in: transcript.viewTurns, anchor: anchor)
         LazyVStack(alignment: .leading, spacing: 0, pinnedViews: .sectionHeaders) {
+            ForEach(placed.leading, id: \.start) { gap in
+                PhoneNoteGapLine(gap: gap).padding(.bottom, 14)
+            }
             ForEach(transcript.viewTurns) { turn in
                 Section {
                     ForEach(turn.paragraphs) { paragraph in
-                        ReviewParagraphRow(transcript: transcript, paragraph: paragraph, anchor: anchor, original: original)
-                            .equatable()
-                            .padding(.top, paragraph.id == turn.id ? 0 : 8)
-                            .padding(.bottom, paragraph.id == turn.paragraphs.last?.id && turn.id != transcript.viewTurns.last?.id ? 20 : 0)
-                            .opacity(namingTurn == nil ? 1 : 0.28)
+                        VStack(alignment: .leading, spacing: 0) {
+                            ReviewParagraphRow(transcript: transcript, paragraph: paragraph, anchor: anchor, original: original)
+                                .equatable()
+                            // A gap after the last line before it: between two
+                            // turns it closes the first, above the next name.
+                            ForEach(placed.after[paragraph.id] ?? [], id: \.start) { gap in
+                                PhoneNoteGapLine(gap: gap).padding(.top, 14).padding(.bottom, 6)
+                            }
+                        }
+                        .padding(.top, paragraph.id == turn.id ? 0 : 8)
+                        .padding(.bottom, paragraph.id == turn.paragraphs.last?.id && turn.id != transcript.viewTurns.last?.id ? 20 : 0)
+                        .opacity(namingTurn == nil ? 1 : 0.28)
                     }
                 } header: {
-                    SpeakerNameLine(
-                        speaker: turn.speaker,
-                        isNaming: Binding(
-                            get: { namingTurn == turn.id },
-                            set: { namingTurn = $0 ? turn.id : (namingTurn == turn.id ? nil : namingTurn) }
-                        ),
-                        choices: { choices(turn.speaker) },
-                        commit: { commit(turn.speaker, $0) }
-                    )
-                    .opacity(namingTurn == nil || namingTurn == turn.id ? 1 : 0.28)
+                    if showsSpeakerNames {
+                        speakerName(turn)
+                    }
                 }
             }
         }
@@ -128,6 +124,87 @@ struct ReviewTranscriptTurns: View {
         // A reload or a naming change can take the open turn away with its
         // popover; nothing may stay stepped back behind no popover.
         .onChange(of: transcript) { namingTurn = nil }
+    }
+
+    private func speakerName(_ turn: TranscriptTurn) -> some View {
+        SpeakerNameLine(
+            speaker: turn.speaker,
+            isNaming: Binding(
+                get: { namingTurn == turn.id },
+                set: { namingTurn = $0 ? turn.id : (namingTurn == turn.id ? nil : namingTurn) }
+            ),
+            choices: { choices(turn.speaker) },
+            commit: { commit(turn.speaker, $0) }
+        )
+        .opacity(namingTurn == nil || namingTurn == turn.id ? 1 : 0.28)
+    }
+}
+
+// MARK: - A phone note in the review (#309)
+
+enum PhoneNoteReview {
+    /// `Paused by a call · 07:10–09:05`: the reason when the phone knew it,
+    /// then the gap on the recording's clock, in the stamps' clock form.
+    static func line(_ gap: PhoneNoteGap) -> String {
+        let reason = switch gap.reason {
+        case .alarm: "Paused by the alarm"
+        case .call: "Paused by a call"
+        case .audio: "Paused by music"
+        case .cover: "Cover closed"
+        case .micOff: "Microphone off"
+        case .unknown, nil: "Paused"
+        }
+        return "\(reason) \u{00B7} \(ElapsedStamp.label(gap.start))\u{2013}\(ElapsedStamp.label(gap.end))"
+    }
+
+    /// Each gap after the last paragraph that starts before it, by that
+    /// paragraph's id; a gap before every paragraph leads the transcript.
+    /// `gaps` come by start (`PhoneNotes.gaps`).
+    static func place(
+        _ gaps: [PhoneNoteGap], in turns: [TranscriptTurn], anchor: Date?
+    ) -> (leading: [PhoneNoteGap], after: [Int: [PhoneNoteGap]]) {
+        let paragraphs = turns.flatMap(\.paragraphs)
+        var leading: [PhoneNoteGap] = []
+        var after: [Int: [PhoneNoteGap]] = [:]
+        for gap in gaps {
+            let before = paragraphs.last { $0.time.timeIntervalSince(anchor ?? $0.time) < gap.start }
+            if let before {
+                after[before.id, default: []].append(gap)
+            } else {
+                leading.append(gap)
+            }
+        }
+        return (leading, after)
+    }
+
+    /// The name line is left out while a phone note has one speaker nobody
+    /// named — the phone's `them`, which would read as someone else. Names
+    /// appear once Who spoke? has found speakers.
+    static func showsSpeakerNames(source: String?, labels: SpeakerLabels) -> Bool {
+        guard source == PhoneNotes.source else { return true }
+        let speakers = labels.speakers
+        return !(speakers.count == 1 && !speakers[0].isNameable)
+    }
+}
+
+/// The gap's one quiet line (board §03): secondary text in the text column,
+/// a hairline after it. Not a control.
+struct PhoneNoteGapLine: View {
+    let gap: PhoneNoteGap
+
+    var body: some View {
+        HStack(spacing: 10) {
+            Text(PhoneNoteReview.line(gap))
+                .font(.system(size: 12))
+                .monospacedDigit()
+                .foregroundStyle(LoreTheme.TextColor.muted)
+                .lineLimit(1)
+                .fixedSize()
+            Rectangle()
+                .fill(LoreTheme.Surface.line)
+                .frame(height: 1)
+        }
+        .padding(.leading, timestampColumnWidth)
     }
 }
 

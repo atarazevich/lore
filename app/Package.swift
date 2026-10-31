@@ -4,8 +4,14 @@ import PackageDescription
 
 let package = Package(
     name: "Lore",
-    platforms: [.macOS(.v15)],
+    // LoreFormat and LoreCore also build for iOS (#305); everything else only ever builds for the Mac.
+    platforms: [.macOS(.v15), .iOS(.v18)],
     products: [
+        // The shared core the iOS app links (#305).
+        .library(
+            name: "LoreCore",
+            targets: ["LoreFormat", "LoreCore"]
+        ),
         .library(
             name: "LoreKit",
             targets: ["LoreKit"]
@@ -38,16 +44,35 @@ let package = Package(
             path: "Sources/ObjCExceptionCatcher",
             publicHeadersPath: "include"
         ),
-        // What the `lore` command and the app share: the wire and the words.
-        // Foundation only — the command links it.
+        // lore's files on disk and the command's wire: what the Mac app, the
+        // iOS app and the `lore` command all read. Foundation only (#305).
+        .target(
+            name: "LoreFormat",
+            path: "Sources/LoreFormat"
+        ),
+        // Transcription, speakers, storage and diagnostics, shared by the Mac
+        // and iOS apps (#305). No AppKit, no CoreAudio HAL.
+        .target(
+            name: "LoreCore",
+            dependencies: [
+                "LoreFormat",
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
+            path: "Sources/LoreCore"
+        ),
+        // The `lore` command's Mac-only pieces: processes, the socket, herdr.
+        // Foundation only — the command links it, never FluidAudio.
         .target(
             name: "LoreCLIKit",
+            dependencies: ["LoreFormat"],
             path: "Sources/LoreCLIKit"
         ),
         .target(
             name: "LoreKit",
             dependencies: [
                 "ObjCExceptionCatcher",
+                "LoreFormat",
+                "LoreCore",
                 "LoreCLIKit",
                 .product(name: "FluidAudio", package: "FluidAudio"),
                 .product(name: "Sparkle", package: "Sparkle"),
@@ -55,7 +80,7 @@ let package = Package(
                 .product(name: "DynamicNotchKit", package: "DynamicNotchKit"),
             ],
             path: "Sources/Lore",
-            exclude: ["Info.plist", "Lore.entitlements", "Assets", "Resources"],
+            exclude: ["Info.plist", "Lore.entitlements", "Assets"],
         ),
         .executableTarget(
             name: "LoreAppExecutable",
@@ -64,12 +89,15 @@ let package = Package(
         ),
         .executableTarget(
             name: "LoreCLI",
-            dependencies: ["LoreCLIKit"],
-            path: "Sources/LoreCLI"
+            dependencies: ["LoreCLIKit", "LoreFormat"],
+            path: "Sources/LoreCLI",
+            // `lore skill` prints it (#301). A link to skills/lore/SKILL.md at
+            // the repo root, where `bunx skills add` finds the same file.
+            resources: [.embedInCode("SKILL.md")]
         ),
         .testTarget(
             name: "LoreTests",
-            dependencies: ["LoreKit", "LoreCLIKit"],
+            dependencies: ["LoreKit", "LoreCore", "LoreFormat", "LoreCLIKit"],
             path: "Tests/LoreTests"
         ),
     ]

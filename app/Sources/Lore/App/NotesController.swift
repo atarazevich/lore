@@ -1,6 +1,8 @@
 import AppKit
 import AVFoundation
 import Foundation
+import LoreCore
+import LoreFormat
 import Observation
 import os
 
@@ -19,6 +21,9 @@ struct NotesState {
     /// (#166): the pane renders none of its three faces until the load
     /// lands — an empty array must mean "no text", never "not read yet".
     var transcriptLoaded = false
+    /// Where a phone note's recording stopped (#309): one quiet line each in
+    /// the transcript. Empty for every other meeting.
+    var gaps: [PhoneNoteGap] = []
     var loadedNotes: EnhancedNotes?
     /// Ask Lore exchanges persisted with the session (#60); empty for
     /// legacy sessions (no chat.json).
@@ -32,6 +37,9 @@ struct NotesState {
     var audioFileURL: URL?
     /// Whether audio is currently playing.
     var isPlayingAudio: Bool = false
+    /// Bumped by the × after a failed speaker pass (#308), whose mark is on
+    /// disk: the meta line draws again and reads it.
+    var speakerFailureDismissals = 0
 }
 
 // MARK: - Controller
@@ -90,6 +98,7 @@ final class NotesController {
             state.loadedNotes = nil
             state.transcript = .empty
             state.transcriptLoaded = false
+            state.gaps = []
             state.loadedChat = []
             state.selectedSessionDirectory = nil
             state.audioFileURL = nil
@@ -99,10 +108,12 @@ final class NotesController {
         state.loadedNotes = nil
         state.transcript = .empty
         state.transcriptLoaded = false
+        state.gaps = []
         state.loadedChat = []
         state.audioFileURL = nil
-        state.selectedSessionDirectory = coordinator.sessionRepository.sessionsDirectoryURL
+        let sessionDirectory = coordinator.sessionRepository.sessionsDirectoryURL
             .appendingPathComponent(sessionID, isDirectory: true)
+        state.selectedSessionDirectory = sessionDirectory
         state.showingOriginal = false
 
         let token = nextTranscriptToken()
@@ -112,11 +123,13 @@ final class NotesController {
             let meeting = await coordinator.sessionRepository.meetingTranscript(sessionID: sessionID)
             let audioURL = await coordinator.sessionRepository.audioFileURL(for: sessionID)
             let chat = await coordinator.sessionRepository.loadChat(sessionID: sessionID)
+            let gaps = await Task.detached { PhoneNotes.gaps(inNote: sessionDirectory) }.value
 
             guard state.selectedSessionID == sessionID else { return }
 
             state.loadedNotes = notes
             if token == transcriptToken { state.transcript = meeting }
+            state.gaps = gaps
             state.transcriptLoaded = true
             state.loadedChat = chat
             if audioToken == self.audioToken { state.audioFileURL = audioURL }
@@ -150,6 +163,30 @@ final class NotesController {
     var isFindingSpeakers: Bool {
         guard let id = state.selectedSessionID else { return false }
         return coordinator.transcriptHealer?.isFindingSpeakers(id) ?? false
+    }
+
+    /// The end of the open meeting's meta line (#308): read from the healer's
+    /// queue and the meeting's files each time the line draws.
+    var speakerSlot: TranscriptHealer.SpeakerSlot {
+        _ = state.speakerFailureDismissals
+        guard let id = state.selectedSessionID, let healer = coordinator.transcriptHealer else { return .none }
+        return healer.speakerSlot(id, disk: coordinator.sessionRepository.speakerPassState(sessionID: id))
+    }
+
+    /// Who spoke?: the speaker pass on the open meeting.
+    func findSpeakers() {
+        guard let id = state.selectedSessionID else { return }
+        coordinator.transcriptHealer?.findSpeakers(sessionID: id)
+    }
+
+    /// The × after "couldn't finish finding who spoke": the line goes back
+    /// to Who spoke?. Traced once the dismissal is on disk.
+    func dismissSpeakerFailure() {
+        guard let id = state.selectedSessionID else { return }
+        if coordinator.sessionRepository.dismissSpeakerFailure(sessionID: id) {
+            DiagStore.record(.speakerFailureDismissed)
+        }
+        state.speakerFailureDismissals += 1
     }
 
     /// Reads the open meeting's transcript again, as it is on disk — after a

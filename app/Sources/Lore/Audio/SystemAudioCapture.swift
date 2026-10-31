@@ -3,6 +3,7 @@ import AudioToolbox
 import CoreAudio
 import Dispatch
 import Foundation
+import LoreCore
 import os
 
 /// Captures system output audio via a Core Audio process tap.
@@ -399,13 +400,13 @@ final class SystemAudioCapture: @unchecked Sendable {
         var errorDescription: String? {
             switch self {
             case .givenUp:
-                return "System audio capture failed and stopped retrying. Enable \(LoreTheme.wordmark) in System Settings > Privacy & Security > Screen & System Audio Recording, then start the meeting again."
+                return "System audio capture failed and stopped retrying. Enable \(LoreBrand.wordmark) in System Settings > Privacy & Security > Screen & System Audio Recording, then start the meeting again."
             case .noOutputDevice:
                 return "No audio output device is currently available."
             case .outputDeviceUIDUnavailable(let status):
                 return "Unable to inspect the system output device (OSStatus \(status))."
             case .tapCreationFailed(let status):
-                return "System audio capture could not start. Enable \(LoreTheme.wordmark) in System Settings > Privacy & Security > Screen & System Audio Recording (OSStatus \(status))."
+                return "System audio capture could not start. Enable \(LoreBrand.wordmark) in System Settings > Privacy & Security > Screen & System Audio Recording (OSStatus \(status))."
             case .aggregateDeviceCreationFailed(let status):
                 return "Unable to create the Core Audio aggregate device (OSStatus \(status))."
             case .tapFormatUnavailable(let status):

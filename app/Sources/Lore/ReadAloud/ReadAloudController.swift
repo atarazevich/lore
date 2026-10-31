@@ -1,5 +1,6 @@
 import AVFoundation
 import Foundation
+import LoreCore
 import NaturalLanguage
 import os
 

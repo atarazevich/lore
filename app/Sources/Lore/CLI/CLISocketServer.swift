@@ -1,6 +1,7 @@
 import Darwin
 import Foundation
 import LoreCLIKit
+import LoreCore
 import os
 
 private let serverLog = Logger(subsystem: "com.lore.app", category: "CLI")

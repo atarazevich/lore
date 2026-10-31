@@ -15,10 +15,8 @@ public struct ClaudeSessionFile: Decodable, Equatable, Sendable {
     public var sessionId: String?
     /// The chat's name, as the chat itself says it.
     public var name: String?
-    /// Where that name came from: `user` when it was typed by hand, `derived`
-    /// when Claude Code made one up from the folder (`folder-4e`). Only a name
-    /// the owner typed is a name to read aloud (#267) — a derived one is the
-    /// folder with a suffix, which the folder says better.
+    /// Where that name came from: `user` (typed by hand), `derived` (made up
+    /// from the folder), `auto` (a title Claude Code wrote). What counts: `shownName`.
     public var nameSource: String?
     public var kind: Kind?
     /// When the process wrote the file, in milliseconds since 1970: never
@@ -52,10 +50,22 @@ public struct ClaudeSessionFile: Decodable, Equatable, Sendable {
     /// The value of `nameSource` that means the owner typed it.
     public static let userNamed = "user"
 
-    /// The name only when it was given by hand; nil otherwise, including a file
-    /// old enough not to say where its name came from — lore never guesses.
-    public var handGivenName: String? {
-        nameSource == Self.userNamed ? name : nil
+    /// The name the owner sees for this chat, and nil when what he sees is its
+    /// folder — lore never guesses.
+    ///
+    /// A chat in a terminal (#267): only a name typed by hand. A derived one is
+    /// the folder with a suffix, which the folder says better, and a file that
+    /// does not say where its name came from is no evidence the owner typed it.
+    ///
+    /// A background chat (#296) has no tab: its agents view row, which shows
+    /// this `name` whether typed or made up (a fork's `name ⑂`), is its only
+    /// label, and its file often says no `nameSource`. A name that is the job
+    /// id, or the session id's first segment, is a placeholder, not a name.
+    public var shownName: String? {
+        guard kind == .background else { return nameSource == Self.userNamed ? name : nil }
+        let placeholders = [jobId, sessionId?.split(separator: "-").first.map(String.init)]
+        guard let name, !placeholders.contains(name) else { return nil }
+        return name
     }
 
     public init(

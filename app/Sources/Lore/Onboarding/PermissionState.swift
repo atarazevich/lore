@@ -3,6 +3,7 @@ import CoreGraphics
 import Foundation
 import IOKit
 import IOKit.hid
+import LoreCore
 
 /// The three grants the required set of onboarding collects, in the order the
 /// board reveals them.
@@ -13,10 +14,15 @@ enum RequiredGrant: String, CaseIterable, Identifiable, Sendable {
 
     var id: String { rawValue }
 
+    /// The pane's own name, so the card names what Settings will show: macOS 27
+    /// renamed Accessibility's list (#300 board, copy table).
     var title: String {
         switch self {
         case .microphone: return "Microphone"
-        case .accessibility: return "Accessibility"
+        case .accessibility:
+            return ProcessInfo.processInfo.isOperatingSystemAtLeast(
+                OperatingSystemVersion(majorVersion: 27, minorVersion: 0, patchVersion: 0)
+            ) ? "Device Control and Data Access" : "Accessibility"
         case .inputMonitoring: return "Input Monitoring"
         }
     }
@@ -30,17 +36,17 @@ enum RequiredGrant: String, CaseIterable, Identifiable, Sendable {
         }
     }
 
-    /// The two concrete promises under "lore needs this to:" — what the grant
-    /// buys the user, not what the API is called.
+    /// What the open card says the grant buys the user, not what the API is
+    /// called. The microphone keeps its two promises under "lore needs this
+    /// to:"; a list grant's single entry is one sentence on its own (#300 board).
     var reasons: [String] {
         switch self {
         case .microphone:
             return ["Hear you when you hold the key.", "Nothing is recorded until you do."]
         case .accessibility:
-            return ["Type your words at the cursor, in any app.", "Read the key you hold."]
+            return ["Lets \(LoreBrand.wordmark) type at your cursor and read the key you hold."]
         case .inputMonitoring:
-            return ["Feel the Fn key even when \(LoreTheme.wordmark) is in the background.",
-                    "Keep hold-to-talk alive while another app has focus."]
+            return ["Lets \(LoreBrand.wordmark) hear your talk key while another app is in front."]
         }
     }
 
@@ -51,7 +57,8 @@ enum RequiredGrant: String, CaseIterable, Identifiable, Sendable {
     var diagPermission: DiagEvent.Permission { DiagEvent.Permission(rawValue: rawValue)! }
 
     /// Board 2a: the microphone card carries the one caption that has to tell
-    /// the truth about a button whose label never changes.
+    /// the truth about a button whose label never changes. The list grants
+    /// carry none: the drag card in Settings explains itself (#300).
     var caption: String? {
         switch self {
         case .microphone:

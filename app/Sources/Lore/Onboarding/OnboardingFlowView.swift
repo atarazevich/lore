@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 import SwiftUI
 
 /// The first-run flow (#150). Design authority:
@@ -52,7 +53,7 @@ struct OnboardingFlowView: View {
                 .frame(width: 56, height: 56)
                 .accessibilityHidden(true)
             Spacer().frame(height: 22)
-            Text("Welcome to \(LoreTheme.wordmark)")
+            Text("Welcome to \(LoreBrand.wordmark)")
                 .font(.system(size: 26, weight: .semibold))
                 .foregroundStyle(.white)
             Spacer().frame(height: 10)
@@ -64,13 +65,13 @@ struct OnboardingFlowView: View {
         .frame(maxWidth: .infinity)
     }
 
-    /// 2 · Permissions — revealed in sequence. Grant one, the next expands;
-    /// there is no Next to click.
+    /// 2 · Permissions — revealed in sequence. Grant one, the next expands by
+    /// itself; Continue finishes the step once all three are in.
     private var permissionsStep: some View {
         VStack(alignment: .leading, spacing: 0) {
             stepHeading(
-                "Set up \(LoreTheme.wordmark)'s access",
-                "Grant each one. \(LoreTheme.wordmark) reacts the moment you do \u{2014} there is no Next to click."
+                "Set up \(LoreBrand.wordmark)'s access",
+                "Grant each one. \(LoreBrand.wordmark) moves to the next the moment you do."
             )
             Spacer().frame(height: 20)
             VStack(spacing: 10) {
@@ -95,7 +96,7 @@ struct OnboardingFlowView: View {
         VStack(alignment: .leading, spacing: 0) {
             stepHeading(
                 "Pick the key you'll hold to talk",
-                "macOS is using Fn for its own features, so \(LoreTheme.wordmark) never sees your hold."
+                "macOS is using Fn for its own features, so \(LoreBrand.wordmark) never sees your hold."
             )
             Spacer()
             FnKeyCard(
@@ -117,7 +118,7 @@ struct OnboardingFlowView: View {
         VStack(alignment: .leading, spacing: 0) {
             if model.tryIt == .tapDead {
                 stepHeading("Nothing arrived",
-                            "You held \(talkKey.shortName), but no keystroke reached \(LoreTheme.wordmark).")
+                            "You held \(talkKey.shortName), but no keystroke reached \(LoreBrand.wordmark).")
                 Spacer()
                 TapRecoveryCard(onRelaunch: { model.relaunchForDeadTap() })
                 Spacer()
@@ -234,7 +235,7 @@ struct OnboardingFlowView: View {
                 .font(.system(size: 24, weight: .semibold))
                 .foregroundStyle(.white)
             Spacer().frame(height: 8)
-            Text("\(LoreTheme.wordmark) waits in the menu bar. Hold \(talkKey.shortName) wherever you type.")
+            Text("\(LoreBrand.wordmark) waits in the menu bar. Hold \(talkKey.shortName) wherever you type.")
                 .font(.system(size: 13))
                 .foregroundStyle(LoreTheme.TextColor.muted)
             Spacer().frame(height: 18)
@@ -280,7 +281,7 @@ struct OnboardingFlowView: View {
     /// the old flow set the same flag without ever showing the text.
     private var consentLine: some View {
         Toggle(isOn: $model.acceptedRecordingObligations) {
-            Text("Recording a conversation is on you: many places require everyone's consent first, and \(LoreTheme.wordmark) leaves that (and the law) in your hands.")
+            Text("Recording a conversation is on you: many places require everyone's consent first, and \(LoreBrand.wordmark) leaves that (and the law) in your hands.")
                 .font(LoreTheme.Typography.meta)
                 .foregroundStyle(LoreTheme.TextColor.muted)
                 .fixedSize(horizontal: false, vertical: true)
@@ -377,7 +378,7 @@ struct OnboardingFlowView: View {
                           ? LoreTheme.TextColor.faint : LoreTheme.Accent.green)
                     .frame(width: 6, height: 6)
                 Text(model.fnStepNeeded
-                     ? "\(LoreTheme.wordmark) continues the moment you choose."
+                     ? "\(LoreBrand.wordmark) continues the moment you choose."
                      : "Got it \u{2014} continuing\u{2026}")
                     .font(LoreTheme.Typography.meta)
                     .foregroundStyle(model.fnStepNeeded
@@ -399,7 +400,7 @@ struct OnboardingFlowView: View {
 
         case .ready:
             LorePrimaryButton(
-                title: "Start using \(LoreTheme.wordmark)",
+                title: "Start using \(LoreBrand.wordmark)",
                 enabled: model.acceptedRecordingObligations
             ) {
                 model.advanceFromButton()
@@ -497,9 +498,10 @@ private struct OnboardingDots: View {
 
 // MARK: - Permission card
 
-/// Board card anatomy: icon tile, name, "lore needs this to:" + two concrete
-/// bullets, one button, live status. Granted turns the tile and the chip green
-/// and the button drops out of hit-testing in place.
+/// Board card anatomy (#300 drag-card board, F1/F5b): icon tile, name, one
+/// trailing control. The open card says why — one sentence for the list
+/// grants, the microphone's two promises and caption for it. A granted card
+/// folds to its header with one signal, the Granted chip.
 private struct PermissionCard: View {
     let grant: RequiredGrant
     let granted: Bool
@@ -510,17 +512,26 @@ private struct PermissionCard: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             header
-            if expanded || granted {
-                Spacer().frame(height: 12)
-                VStack(alignment: .leading, spacing: 5) {
-                    Text("\(LoreTheme.wordmark) needs this to:")
-                        .font(LoreTheme.Typography.meta)
-                        .foregroundStyle(LoreTheme.TextColor.faint)
-                    ForEach(grant.reasons, id: \.self) { reason in
-                        onboardingBullet(reason)
+            if expanded, !granted {
+                if let sentence = grant.reasons.first, grant.reasons.count == 1 {
+                    Text(sentence)
+                        .font(LoreTheme.Typography.secondary)
+                        .foregroundStyle(LoreTheme.TextColor.muted)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .padding(.top, 10)
+                        .padding(.leading, 40)
+                } else {
+                    Spacer().frame(height: 12)
+                    VStack(alignment: .leading, spacing: 5) {
+                        Text("\(LoreBrand.wordmark) needs this to:")
+                            .font(LoreTheme.Typography.meta)
+                            .foregroundStyle(LoreTheme.TextColor.faint)
+                        ForEach(grant.reasons, id: \.self) { reason in
+                            onboardingBullet(reason)
+                        }
                     }
                 }
-                if expanded, !granted, let caption = grant.caption {
+                if let caption = grant.caption {
                     Spacer().frame(height: 12)
                     HStack(alignment: .firstTextBaseline, spacing: 7) {
                         Image(systemName: "info.circle")
@@ -539,8 +550,8 @@ private struct PermissionCard: View {
             }
         }
         .onboardingCardChrome(
-            fill: granted ? LoreTheme.Accent.green.opacity(0.06) : LoreTheme.Surface.card2,
-            stroke: granted ? LoreTheme.Accent.green.opacity(0.28) : LoreTheme.Surface.line,
+            fill: LoreTheme.Surface.card2,
+            stroke: LoreTheme.Surface.line,
             padding: 14
         )
         // Unreached cards are collapsed stubs at half opacity: scope is visible,
@@ -553,12 +564,7 @@ private struct PermissionCard: View {
 
     private var header: some View {
         HStack(spacing: 12) {
-            OnboardingCardBadge(
-                systemName: granted ? "checkmark" : grant.icon,
-                tint: granted ? LoreTheme.Accent.green : LoreTheme.TextColor.muted,
-                fill: granted ? LoreTheme.Accent.green.opacity(0.16) : LoreTheme.Surface.card3,
-                weight: granted ? .semibold : .regular
-            )
+            OnboardingCardBadge(systemName: grant.icon)
             Text(grant.title)
                 .font(LoreTheme.Typography.control)
                 .foregroundStyle(revealed ? LoreTheme.TextColor.primary
@@ -573,17 +579,9 @@ private struct PermissionCard: View {
         if granted {
             GrantedChip(title: "Granted")
         } else if expanded {
-            // The microphone's label stays "Allow" whichever tier it fires; the
-            // caption underneath is what tells the truth.
-            LorePrimaryButton(
-                title: grant == .microphone ? "Allow" : "Open Settings",
-                size: .compact,
-                action: action
-            )
-        } else {
-            Image(systemName: "lock")
-                .font(.system(size: 11))
-                .foregroundStyle(LoreTheme.TextColor.faint)
+            // One action, one name: "Allow" on all three cards (#300). For the
+            // microphone the caption underneath tells which tier it fires.
+            LorePrimaryButton(title: "Allow", size: .compact, action: action)
         }
     }
 }
@@ -645,7 +643,7 @@ private struct FnKeyCard: View {
             }
 
             VStack(alignment: .leading, spacing: 5) {
-                Text("Change this so \(LoreTheme.wordmark) can:")
+                Text("Change this so \(LoreBrand.wordmark) can:")
                     .font(LoreTheme.Typography.meta)
                     .foregroundStyle(LoreTheme.TextColor.faint)
                 onboardingBullet("Start recording the instant you press Fn.")
@@ -678,7 +676,7 @@ private struct FnKeyCard: View {
                     in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
                 )
             Spacer(minLength: 12)
-            Text("\(LoreTheme.wordmark) sees: \(action.label)")
+            Text("\(LoreBrand.wordmark) sees: \(action.label)")
                 .font(.system(size: 11, weight: .semibold))
                 .foregroundStyle(resolved ? LoreTheme.Accent.green : LoreTheme.Accent.amber)
         }
@@ -764,12 +762,12 @@ private struct TapRecoveryCard: View {
                         .foregroundStyle(LoreTheme.TextColor.primary)
                     Spacer(minLength: 12)
                     LorePrimaryButton(
-                        title: "Relaunch \(LoreTheme.wordmark)",
+                        title: "Relaunch \(LoreBrand.wordmark)",
                         size: .compact,
                         action: onRelaunch
                     )
                 }
-                Text("\(LoreTheme.wordmark) holds every permission it asked for, but its event tap is not receiving keys. Relaunching rebuilds the tap. Nothing you granted is lost and nothing is asked for twice.")
+                Text("\(LoreBrand.wordmark) holds every permission it asked for, but its event tap is not receiving keys. Relaunching rebuilds the tap. Nothing you granted is lost and nothing is asked for twice.")
                     .font(LoreTheme.Typography.secondary)
                     .foregroundStyle(LoreTheme.TextColor.muted)
                     .fixedSize(horizontal: false, vertical: true)

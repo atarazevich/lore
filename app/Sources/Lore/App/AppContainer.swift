@@ -1,4 +1,6 @@
 import Foundation
+import LoreCore
+import LoreFormat
 import Observation
 
 @MainActor
@@ -140,6 +142,7 @@ final class AppContainer {
                 transcriptStore: coordinator.transcriptStore,
                 settings: settings,
                 sharedBackendCache: coordinator.sharedBackendCache,
+                speechModelCaches: coordinator.speechModelCaches,
                 audioBus: audioBus
             )
             // Tracks stay for the speaker pass, the healer's own job (#269).
@@ -224,6 +227,35 @@ final class AppContainer {
             cancelRun: { await batchEngine.cancel() },
             runSpeakers: { [repository = coordinator.sessionRepository] sessionID in
                 await speakers.run(sessionID: sessionID, repository: repository)
+            },
+            separateSpeakers: { settings.separateSpeakers }
+        )
+        // Notes from the iPhone (#309): created here, started with the other
+        // subsystems; it reads nothing while its switch or Meetings is off.
+        // `LORE_PHONE_OUTBOX` points it at another folder, for exercising a
+        // build without writing into iCloud Drive.
+        let outbox = ProcessInfo.processInfo.environment["LORE_PHONE_OUTBOX"]
+            .map { URL(fileURLWithPath: $0, isDirectory: true) } ?? PhoneNotes.macOutbox()
+        coordinator.phoneNoteImporter = PhoneNoteImporter(
+            outbox: outbox,
+            sessionsDirectory: coordinator.sessionRepository.sessionsDirectoryURL,
+            defaults: defaults,
+            isEnabled: { settings.meetingsEnabled && settings.showPhoneNotes },
+            onImported: { [weak coordinator] sessionID, hasTranscript in
+                guard let coordinator else { return }
+                await coordinator.sessionRepository.markSessionUnviewed(sessionID: sessionID)
+                await coordinator.loadHistory()
+                // Audio only: the repair queue transcribes it, as any meeting
+                // with audio and no transcript ("preparing…" meanwhile).
+                if hasTranscript {
+                    // Its Markdown in the notes folder, as any meeting's; the
+                    // repair queue writes it for an audio-only note.
+                    await coordinator.sessionRepository.mirrorNotesArtifacts(sessionID: sessionID)
+                    // Not awaited: the next note need not wait on the summary.
+                    Task { await coordinator.enrichmentEngine?.enrichIfNeeded(sessionID: sessionID) }
+                } else {
+                    coordinator.transcriptHealer?.ensure(sessionID: sessionID)
+                }
             }
         )
     }

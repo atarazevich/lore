@@ -1,3 +1,5 @@
+import LoreCLIKit
+import LoreCore
 import SwiftUI
 import AppKit
 import AVFoundation
@@ -80,7 +82,7 @@ public struct LoreRootApp: App {
     }
 
     public var body: some Scene {
-        Window(LoreTheme.wordmark, id: "main") {
+        Window(LoreBrand.wordmark, id: "main") {
             // The #150 gate at its sharpest point: before setup completes the
             // shell is not mounted, so no destination's `.task` runs — that is
             // what started meeting detection from a window nobody had opened.
@@ -403,7 +405,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         registerGlobalHotkey()
         setupCommandLine(coordinator: coordinator)
         updaterController?.start()
+        coordinator.phoneNoteImporter?.start()
+        Task { await upgradeSpeechModel(coordinator: coordinator) }
         return true
+    }
+
+    /// Parakeet v3 → Ultra on a Mac that updated (#299); nothing on any other
+    /// Mac. v3's folders are removed at the next launch, in
+    /// `applicationDidFinishLaunching`, not here. After the warm-up, never
+    /// beside it: the first dictation of the launch loads the model that is
+    /// already on disk, and the next one waits on nothing.
+    private func upgradeSpeechModel(coordinator: AppCoordinator) async {
+        await coordinator.dictationCoordinator.prewarm()
+        await SpeechModelUpgrade(
+            files: .shared,
+            caches: coordinator.speechModelCaches,
+            isQuiet: { [weak coordinator] in
+                guard let coordinator else { return false }
+                return !coordinator.isMeetingWorkActive
+                    && coordinator.dictationCoordinator.isQuiet
+                    && coordinator.commandTranscription?.isIdle != false
+            },
+            didSwap: { [weak coordinator] in coordinator?.transcriptionEngine?.invalidateBackendCache() }
+        ).run()
     }
 
     /// The `lore` command's door (#254): the socket it talks to and the PATH
@@ -426,8 +450,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         let replies = coordinator.agentReplies
         commandServer = CLISocketServer { request in
             switch request {
-            case .transcribe(let path):
-                return await service.respond(toFileAt: path)
+            case .transcribe(let path, let speakers):
+                return await service.respond(toFileAt: path, speakers: speakers ?? false)
             case .say(let said):
                 return await CLISayReceiver.respond(to: said, replies: replies)
             }
@@ -495,30 +519,33 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     /// never reach this delegate at all (`RuntimeEnvironment.isRunningUnitTests`
     /// guard is defensive, not load-bearing, for that reason).
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // A launch refused elsewhere records into *this* process's ring — the
+        // refused one never flushes its own (`applicationWillTerminate`).
+        // Listening before taking the lock means any launch that finds it held
+        // posts after the holder already listens. The ring is loaded by now
+        // (`AppContainer.bootstrap` → `DiagStore.prepare`).
+        launchRefusedObserver = DistributedNotificationCenter.default().addObserver(
+            forName: Self.launchRefusedNotification,
+            object: nil,
+            queue: .main
+        ) { notification in
+            let build = notification.userInfo?[Self.launchRefusedBuildKey] as? Int ?? 0
+            DiagStore.record(.appLaunchRefused(build: build))
+        }
         guard !RuntimeEnvironment.isRunningUnitTests, !isUITest else { return }
 
-        let bundleID = Bundle.main.bundleIdentifier ?? "com.lore.app"
-        let me = NSRunningApplication.current
-        let myPID = me.processIdentifier
+        let folder = LoreRootApp.sharedContext.container.appSupportDirectory
+        try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+        // An acquired lock's descriptor is never closed: the kernel releases
+        // it when this process exits.
+        guard SingleInstanceGuard.acquire(at: folder.appendingPathComponent("instance.lock"))
+            == .heldElsewhere else { return }
 
-        // Keyed by pid so `me` — which may or may not already appear in
-        // AppKit's own lookup at this earliest hook — contributes exactly one
-        // entry, with its own `launchDate` rather than a possibly-absent one.
-        var byPID: [Int32: SingleInstanceGuard.Candidate] = [:]
-        for app in NSRunningApplication.runningApplications(withBundleIdentifier: bundleID) {
-            byPID[app.processIdentifier] = SingleInstanceGuard.Candidate(
-                pid: app.processIdentifier,
-                launchDate: app.launchDate ?? .distantPast
-            )
-        }
-        byPID[myPID] = SingleInstanceGuard.Candidate(pid: myPID, launchDate: me.launchDate ?? .distantPast)
-
-        guard let winner = SingleInstanceGuard.processToDeferTo(
-            candidates: Array(byPID.values),
-            myPID: myPID
-        ) else { return }
-
-        NSRunningApplication(processIdentifier: winner.pid)?.activate()
+        // Host LaunchServices lists no Simulator process, so this is a Mac copy.
+        let myPID = ProcessInfo.processInfo.processIdentifier
+        NSRunningApplication.runningApplications(withBundleIdentifier: Bundle.main.bundleIdentifier ?? "com.lore.app")
+            .first { $0.processIdentifier != myPID }?
+            .activate()
         // The trace has to be recorded by the survivor: this process's own
         // `flush()` (below) never runs, and even if it did, its ring never
         // held the event a later flush from the survivor would overwrite it
@@ -550,6 +577,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         guard !isRefusedLaunch else { return }
         // A quit mid-export is not a failed export (#290).
         coordinator?.transcriptHealer?.willTerminate()
+        AppRelauncher.startIfRequested()
         DiagStore.shared.flush()
     }
 
@@ -566,6 +594,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         terminationSignal = Self.installTerminationSource(
             signal: SIGTERM,
             lastSteps: { [weak self] in
+                // A restart the user never confirmed — its quit alert still up,
+                // or a recording still stopping — must not come back from a
+                // `pkill`, a logout or an install (#336).
+                AppRelauncher.cancel()
                 self?.finishBeforeExit()
                 exit(0)
             },
@@ -594,24 +626,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
-        // First event of every run: the persisted ring is loaded here, so the
-        // timeline shows where one launch ends and the next begins — which is
-        // exactly the question "did they restart after granting the permission?".
+        // Where one launch begins in the timeline — exactly the question "did
+        // they restart after granting the permission?". Nearly always the run's
+        // first event; a launch refused in the moments before this (#193) can
+        // be recorded just ahead of it.
         DiagStore.record(.appLaunched(build: Self.currentBuildNumber))
         handleTerminationSignal()
         // Before anything can download a model: each from a fixed commit (#269).
         ModelBundle.pinAll()
-
-        // A launch refused elsewhere (#193) records into *this* process's ring
-        // — the refused one never flushes its own (`applicationWillTerminate`).
-        launchRefusedObserver = DistributedNotificationCenter.default().addObserver(
-            forName: Self.launchRefusedNotification,
-            object: nil,
-            queue: .main
-        ) { notification in
-            let build = notification.userInfo?[Self.launchRefusedBuildKey] as? Int ?? 0
-            DiagStore.record(.appLaunchRefused(build: build))
-        }
+        // Before anything can load one: v3's folders, once Ultra replaced it (#299).
+        SpeechModelFiles.shared.removeSuperseded()
 
         if !isUITest {
             NSApp.setActivationPolicy(.regular)
@@ -703,6 +727,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         model.onHotkeyRecorderListening = { coordinator.hotkeyManager.isSuspended = $0 }
         model.onClosableChanged = { [weak window] in window?.setClosable($0) }
         model.onWantsFront = { [weak window] in window?.front() }
+        model.grantCard = GrantCardPresenter()
         model.onFinish = { [weak self] in self?.completeSetup() }
         // Closing before "Start using lore" leaves no surface at all, so it is a
         // quit; the next launch resumes the flow from the same reading.
@@ -829,6 +854,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
 
         let response = alert.runModal()
         guard response == .alertFirstButtonReturn else {
+            AppRelauncher.cancel()
             return .terminateCancel
         }
 
@@ -990,7 +1016,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             readTapLiveness: { hotkeyManager.tapLiveness },
             hasOpenAIKey: { !settings.openaiApiKey.isEmpty },
             signingLedger: signingLedger,
-            readNotesLeftover: { NotesFolderMigration.pendingLeftover(defaults: defaults) }
+            readNotesLeftover: { NotesFolderMigration.pendingLeftover(defaults: defaults) },
+            readTalkKey: { settings.hotkeyKey.shortName }
         )
         let monitor = HealthMonitor(prober: prober)
         monitor.verifyNotesLeftover = { NotesFolderMigration.verifyLeftover(defaults: defaults) }
@@ -1018,6 +1045,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hotkeyManager?.refillTapRepairBudget()
         }
 
+        // macOS blocking lore (#338): the reads that confirm and clear it, the
+        // fresh-process read the wait uses, and the fix itself.
+        monitor.readTrust = { [weak hotkeyManager] in
+            TrustReading(
+                accessibility: PermissionReader.accessibilityGranted(),
+                inputMonitoring: PermissionReader.inputMonitoringGranted(),
+                tapAlive: hotkeyManager?.isEventTapAlive ?? false
+            )
+        }
+        monitor.readFreshGrants = {
+            await Task.detached(priority: .userInitiated) {
+                guard case .success(let reading) = GrantCheck.readFresh() else { return nil }
+                return reading.accessibility && reading.inputMonitoring
+            }.value
+        }
+        let reset = PermissionReset(runner: SystemCommandRunner())
+        monitor.resetPermissions = { await reset.run() }
+        monitor.requestPermissions = { PermissionReset.requestBoth() }
+        coordinator.dictationIndicator.onFixPermissions = { [weak monitor] in
+            Task { await monitor?.fixPermissions() }
+        }
+
         coordinator.healthMonitor = monitor
 
         // The failure door (#140): a health claim moves only when a user action
@@ -1027,17 +1076,28 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // failure and the recovery behind it must not race each other onto the
         // mark, which two independent Tasks would allow.
         DiagStore.shared.setObserver { [weak monitor] event in
-            if let signal = HealthMonitor.healthSignal(for: event) {
-                Task { @MainActor in monitor?.note(signal) }
-            } else if HealthMonitor.refreshesPanel(for: event) {
-                Task { @MainActor in monitor?.refresh() }
+            // The blocked condition's own table sits beside the signal table: a
+            // trusted paste is evidence for both (#338), and both ride the one hop.
+            let signal = HealthMonitor.healthSignal(for: event)
+            let evidence = HealthMonitor.blockEvidence(for: event)
+            let refreshes = signal == nil && HealthMonitor.refreshesPanel(for: event)
+            guard signal != nil || evidence != nil || refreshes else { return }
+            Task { @MainActor in
+                if let signal { monitor?.note(signal) } else if refreshes { monitor?.refresh() }
+                if let evidence { monitor?.note(evidence) }
             }
         }
+
+        // The launch's own tap attempt ran before this observer existed, so
+        // its outcome is read once here — the same evidence the event carries.
+        if hotkeyManager.lastTapCreateFailed { monitor.note(.tapRefused) }
 
         // The #135 acknowledge rode the deleted 5 s cycle; now it rides its own
         // event — the first real key-down reaching the tap runs one refresh,
         // whose ack path closes a pending migration (#140).
         hotkeyManager.onFirstRealKeyDown = { [weak monitor] in monitor?.refresh() }
+        // An open panel follows secure input: flag, holder and lock (#341).
+        hotkeyManager.onSecureInputChanged = { [weak monitor] in monitor?.refresh() }
 
         // Self-clear (#144): a keystroke reaching the tap acknowledges the
         // ledger (`HealthMonitor.refresh`), and the migration's clock stops the

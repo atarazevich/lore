@@ -1,6 +1,7 @@
 import AppKit
 @preconcurrency import AVFoundation
 import CoreAudio
+import LoreCore
 import Observation
 import os
 
@@ -11,7 +12,7 @@ enum UpgradeAction: Sendable {
 
 /// How a dictation's words leave: posted by the call, answered by the task
 /// (#195, #211). `TextInserter.paste` is the only one the app ever builds.
-typealias DictationDelivery = @MainActor ([RichInput.DeliveryStep]) -> Task<Bool, Never>
+typealias DictationDelivery = @MainActor ([RichInput.DeliveryStep]) -> Task<PasteResult, Never>
 
 @Observable
 @MainActor
@@ -22,7 +23,11 @@ final class DictationCoordinator {
     /// The failure face the bubble is showing, if any (#209) — the sentence
     /// and its one action as one value, never a string a button has to be
     /// guessed from.
-    private(set) var lastError: DictationFace?
+    private(set) var lastError: DictationFace? {
+        // Any other face replacing the "not in history" one ends what that
+        // face spoke for (#265).
+        didSet { if lastError?.isPastedNotInHistory != true { unsavedFaceEntryID = nil } }
+    }
     /// Pre-paste cleanup mode set during recording via Fn+V/Fn+T.
     private(set) var pendingCleanupMode: UpgradeAction?
     /// Which LLM call is running once transcription itself is done (2026-08-31,
@@ -32,10 +37,19 @@ final class DictationCoordinator {
     /// which is cleared the moment the pipeline captures it — before
     /// transcription starts — so it cannot name the LLM step that comes after.
     private(set) var llmStage: UpgradeAction?
-    /// Fn+K "send to operator" (#122): armed during recording, lands on the
-    /// entry as `operatorAddressed` so the dispatcher's dictation door
-    /// picks it up. The indicator shows a K badge while armed.
-    private(set) var pendingOperatorAddressed = false
+    /// The speech model has been loading for longer than `preparingFaceDelay`
+    /// for a transcription that speaks for the bubble (#265). The bubble then
+    /// names the wait instead of a "Transcribing" that looks hung: a Core ML
+    /// recompile cannot be predicted, so the time already spent is the signal.
+    private(set) var modelPreparing = false
+    /// How long a model load may take before the bubble says it is preparing.
+    static let preparingFaceDelay: Duration = .seconds(10)
+    /// The entry the "Pasted, not in history" face speaks for (#265).
+    @ObservationIgnored private var unsavedFaceEntryID: UUID?
+    /// Fn+K "mark for later" (#324, the key #122 gave the operator): armed
+    /// during recording, lands on the entry as `markedAt` in its write at
+    /// `add`. The bubble's K stands lit while armed.
+    private(set) var pendingMark = false
     /// True while audio is being buffered before hold is confirmed (pre-buffer phase).
     private(set) var isPreBuffering = false
     /// True when a wireless default input was detected and capture redirected to built-in mic.
@@ -149,9 +163,15 @@ final class DictationCoordinator {
 
     /// Dictation's own prepared instance — a second cache, not a second dedup:
     /// the launch prewarm and a real first dictation join one build here, on
-    /// the same terms as `backendCache`. Why dictation holds an instance of its
-    /// own at all, and for how long: `docs/decisions.md` 2026-08-15 (#169), #185.
-    private let ownCache: SharedBackendCache
+    /// the same terms as `backendCache`. Dictation keeps an instance of its own
+    /// for isolation from meetings: it costs about 16 MB after short clips, about
+    /// 36 MB after 30 s ones (scratch buffers grow with audio length), because
+    /// Core ML shares the ~600 MB of Neural Engine weights per process (measured
+    /// 2026-10-26, `experiments/model-memory`; `docs/decisions.md` 2026-10-26,
+    /// #185).
+    /// Readable so the speech-model swap (#299) can install its successor, and
+    /// a failed meeting load that deletes the model can evict it (#186).
+    let ownCache: SharedBackendCache
 
     /// The current history entry being processed (needed for upgrades).
     private var currentEntryID: UUID?
@@ -178,6 +198,15 @@ final class DictationCoordinator {
     /// neither, so a live take's discard cannot cancel it.
     private var chainEnd: Task<Void, Never>?
 
+    /// Links enqueued and not yet ended.
+    private var linksInFlight = 0
+
+    /// Nothing recording and nothing in the transcription chain: the moment
+    /// the speech model may be swapped (#299).
+    var isQuiet: Bool {
+        !isPreBuffering && state != .recording && linksInFlight == 0
+    }
+
     /// The 300ms audio-tail sleep of the in-flight pipeline, separate from
     /// the pipeline Task so a new Fn press can cut the tail short without
     /// cancelling the pipeline itself (#104): `startPreBuffer` cancels it,
@@ -198,7 +227,9 @@ final class DictationCoordinator {
     ) -> Task<Void, Never> {
         let epoch = sessionEpoch
         let previous = chainEnd
+        linksInFlight += 1
         let task = Task {
+            defer { linksInFlight -= 1 }
             await work(epoch, previous)
             // A link ends only after the one before it, on every path. A
             // pipeline that stops before its own wait — a hold too short, no
@@ -274,6 +305,25 @@ final class DictationCoordinator {
         self.microphoneStatus = microphoneStatus
         self.ownCache = backend.map { stub in SharedBackendCache(makeBackend: { stub }) }
             ?? SharedBackendCache()
+        history.onUnsavedChange = { [weak self] in self?.followUnsavedFace() }
+    }
+
+    /// The "Pasted, not in history" face says what the row says, for as long
+    /// as it is up (#265, `no-false-positives.md` 2): a new refusal's reason
+    /// replaces the old one, and a save that lands takes the bubble down
+    /// quietly — the paste was long ago, so no checkmark claims it now.
+    private func followUnsavedFace() {
+        guard lastError?.isPastedNotInHistory == true, let id = unsavedFaceEntryID else { return }
+        if let reason = history.unsaved[id] {
+            lastError = .pastedNotInHistory(reason)
+            return
+        }
+        if state == .done {
+            autoHideTask?.cancel()
+            autoHideTask = nil
+            state = .idle
+        }
+        lastError = nil
     }
 
     /// Start capturing audio silently before hold is confirmed (pre-buffer phase).
@@ -439,8 +489,9 @@ final class DictationCoordinator {
         // belongs to the dictation that was cancelled, and this is a new one.
         cancelled = false
         pendingCleanupMode = nil
-        pendingOperatorAddressed = false
+        pendingMark = false
         llmStage = nil
+        modelPreparing = false
         lastError = nil
         state = .recording
         // Only past the tap threshold does the audio start reaching disk (#182):
@@ -724,14 +775,17 @@ final class DictationCoordinator {
             ?? DictationHistoryEntry(
                 durationSeconds: durationSeconds, audioFilename: history.saveAudio(samples)
             )
-        // Fn+K (#122): the flag belongs to this session — a stale pipeline
+        // Fn+K (#324): the mark belongs to this session — a stale pipeline
         // must not steal a newer session's arming (same rule as `pending`
-        // below). Set before `add` so the entry's FIRST write carries it;
-        // the indicator's K badge survives the consumption because
-        // `operatorAddressedDisplayed` follows the entry from here on.
+        // below). Set before `add` so the write that puts the entry in history
+        // carries it, and `lore marks` lists it from that moment; the bubble's
+        // K stays lit because `markedDisplayed` follows the entry from here on.
         if isCurrentSession(epoch) {
-            if pendingOperatorAddressed { entry.operatorAddressed = true }
-            pendingOperatorAddressed = false
+            if pendingMark {
+                entry.markedAt = Date()
+                DiagStore.record(.dictationMarked(source: .bubble, marked: true))
+            }
+            pendingMark = false
         }
         // Rich input (#192): the clipboard images become files beside the entry
         // they belong to, so the prompt can name a path a CLI agent can open.
@@ -739,6 +793,10 @@ final class DictationCoordinator {
         // and so a retry re-composes the same text from the same items.
         entry.items = Self.materialize(collected, entryID: entry.id)
         history.add(entry)
+        // No delete may take the take while it is being worked on (#243).
+        let entryID = entry.id
+        history.beginWork(on: entryID)
+        defer { history.endWork(on: entryID) }
         if isCurrentSession(epoch) { currentEntryID = entry.id }
         log.debug("audio saved: \(entry.audioFilename ?? "FAILED", privacy: .private)")
 
@@ -838,7 +896,7 @@ final class DictationCoordinator {
         // the words to be kept and not inserted (#219), which is the whole of
         // what a cancel does differently: no delivery, and so no paste
         // events and no mark either.
-        var delivery: Task<Bool, Never>?
+        var delivery: Task<PasteResult, Never>?
         if let text = entry.cleanedText ?? entry.rawText {
             lastTranscript = text
             if pasting {
@@ -880,6 +938,15 @@ final class DictationCoordinator {
         // dictation that was going to be pasted, since a cancel put the
         // leaving face up when the entry was saved (#219, #233).
         guard pasting, isCurrentSession(epoch) else { return }
+        // The words went, and the take did not reach disk (#265): said the
+        // moment it happens, from the write's own refusal — never from a guess
+        // about free space. A cleanup or translation failure's face, already
+        // up, keeps the bubble: it is about the words just pasted, and the
+        // row carries the save problem.
+        if delivery != nil, lastError == nil, let reason = history.unsaved[entry.id] {
+            lastError = .pastedNotInHistory(reason)
+            unsavedFaceEntryID = entry.id
+        }
         // Whether the keystrokes could be created is the one thing this side
         // can observe — `CGEvent.post` returns no receipt — and the answer
         // arrives after the shape has already gone, which is the honest order:
@@ -889,9 +956,11 @@ final class DictationCoordinator {
         // text" is not true of a paste that never happened.
         if let delivery {
             Task { @MainActor [weak self] in
-                let posted = await delivery.value
-                guard !posted, let self, self.isCurrentSession(epoch) else { return }
-                self.surfaceFace(.pasteFailed, hide: .grace)
+                let result = await delivery.value
+                guard result != .posted, let self, self.isCurrentSession(epoch) else { return }
+                // macOS dropped it (#338): the words come back first, the fix
+                // second. A paste that failed any other way keeps its own face.
+                self.surfaceFace(result == .blocked ? .pasteBlocked : .pasteFailed, hide: .grace)
             }
         }
         guard lastError == nil else {
@@ -988,8 +1057,9 @@ final class DictationCoordinator {
         // things that were copied during a recording that never happened.
         items.removeAll()
         pendingCleanupMode = nil
-        pendingOperatorAddressed = false
+        pendingMark = false
         llmStage = nil
+        modelPreparing = false
         // A discarded dictation has no leaving face to show: there is no entry
         // for one to point at (#233).
         cancelled = false
@@ -1192,28 +1262,23 @@ final class DictationCoordinator {
         log.debug("pending mode: \(self.pendingCleanupMode.map { "\($0)" } ?? "none", privacy: .public)")
     }
 
-    /// Toggle the operator-addressed flag during recording (Fn+K, #122).
-    /// Same toggle idiom as `setPendingMode`: pressed twice → off.
-    ///
-    /// The one chokepoint the master switch (#223) sits on: the key paths and
-    /// the bubble's own click both arrive here, so with the switch off no
-    /// dictation can be armed by any route. A coordinator with no settings
-    /// cannot read the switch, and a switch that is off on every fresh install
-    /// must read as off when it cannot be read at all.
-    func toggleOperatorAddressed() {
-        guard state == .recording, settings?.operatorSendEnabled == true else { return }
-        pendingOperatorAddressed.toggle()
-        log.debug("operator addressed: \(self.pendingOperatorAddressed, privacy: .public)")
+    /// Mark this dictation for later, or take the mark off (Fn+K, #324).
+    /// Same toggle idiom as `setPendingMode`: pressed twice → off. The key
+    /// paths and the bubble's own click both arrive here.
+    func toggleMark() {
+        guard state == .recording else { return }
+        pendingMark.toggle()
+        log.debug("marked for later: \(self.pendingMark, privacy: .public)")
     }
 
-    /// The K letter's state in the rail (#122): armed while recording
-    /// (`pendingOperatorAddressed`), then — after the pipeline consumes the
-    /// arming into the entry's first write — the entry's own flag. Keeps the
-    /// letter from going dark at entry write, mid-dictation.
-    var operatorAddressedDisplayed: Bool {
-        if pendingOperatorAddressed { return true }
+    /// The K letter's state in the rail (#324): armed while recording
+    /// (`pendingMark`), then — after the pipeline consumes the arming into
+    /// the entry's write at `add` — the entry's own mark. Keeps the letter
+    /// from going dark at the entry write, mid-dictation.
+    var markedDisplayed: Bool {
+        if pendingMark { return true }
         guard let entryID = currentEntryID else { return false }
-        return history.entries.first(where: { $0.id == entryID })?.operatorAddressed == true
+        return history.entries.first(where: { $0.id == entryID })?.markedAt != nil
     }
 
     func pasteLastTranscript() {
@@ -1236,12 +1301,24 @@ final class DictationCoordinator {
     }
 
     private func performRetry(entryID: UUID, epoch: Int) async {
+        // A delete still moving this take's files has it out of history for a
+        // moment; it is either gone or back once the move is done (#243).
+        await history.deletionsSettled()
         guard var entry = history.entries.first(where: { $0.id == entryID }),
               let filename = entry.audioFilename,
               let samples = history.loadAudio(filename: filename) else {
             log.error("retry failed: no audio for entry")
+            // Audio the entry names but the disk no longer has (a quit in the
+            // middle of a delete, Finder): the row stops offering a Retry.
+            if var named = history.entries.first(where: { $0.id == entryID }),
+               named.audioFilename != nil, !history.hasAudio(named) {
+                named.audioFilename = nil
+                history.update(named)
+            }
             return
         }
+        history.beginWork(on: entryID)
+        defer { history.endWork(on: entryID) }
 
         // A retry must not carry a stale face into a success (#50, #209): the
         // last dictation's failure is still parked here until a new recording
@@ -1372,14 +1449,17 @@ final class DictationCoordinator {
     }
 
     private func isStranded(_ entry: DictationHistoryEntry) -> Bool {
-        entry.status == .audioSaved && entry.hasAudio
+        entry.status == .audioSaved && history.hasAudio(entry)
             && RetryBudget(limit: Self.automaticAttemptLimit, failures: entry.automaticAttempts ?? 0).allowsAttempt
     }
 
     /// One automatic attempt, read again at its turn in the chain: a Retry
     /// clicked meanwhile may have settled the take, or a delete removed it.
     private func transcribeStrandedTake(id: UUID, epoch: Int) async {
+        await history.deletionsSettled()
         guard var entry = history.entries.first(where: { $0.id == id }), isStranded(entry) else { return }
+        history.beginWork(on: id)
+        defer { history.endWork(on: id) }
         let attempt = (entry.automaticAttempts ?? 0) + 1
         entry.automaticAttempts = attempt
         // On disk before the model is entered, or no attempt at all: a count
@@ -1439,6 +1519,41 @@ final class DictationCoordinator {
         }
     }
 
+    /// Both instances dictation needs, ready: the shared cache first, where the
+    /// model files are downloaded (fast no-op once cached), then dictation's
+    /// own. While they load for a transcription that speaks for the bubble, the
+    /// download face goes up only for files that are really missing, and past
+    /// `preparingFaceDelay` the bubble says the model is being prepared (#265).
+    private func loadModels(epoch: Int, showsProgress: Bool) async throws -> any TranscriptionBackend {
+        let preparing: Task<Void, Never>? = showsProgress ? Task { [weak self] in
+            try? await Task.sleep(for: Self.preparingFaceDelay)
+            // A real download keeps its own face and its clock.
+            guard !Task.isCancelled, let self, self.isCurrentSession(epoch),
+                  self.state != .loadingModel else { return }
+            self.modelPreparing = true
+            // A history retry has no bubble up yet; this wait is one to show.
+            if self.state == .idle { self.state = .processing }
+        } : nil
+        defer {
+            preparing?.cancel()
+            if isCurrentSession(epoch) { modelPreparing = false }
+        }
+        if let cache = backendCache {
+            // The status callback fires for every load, files on disk or not;
+            // only a load that has to fetch them is a download.
+            let downloading = !cache.isReady && ParakeetBackend().checkStatus() == .needsDownload
+            try await cache.prepare { [weak self] _ in
+                guard downloading, showsProgress, let self, self.isCurrentSession(epoch) else { return }
+                self.state = .loadingModel
+            }
+        } else {
+            log.error("backendCache nil — dictation setup may not have run")
+        }
+        // Dictation's own instance (see `ownCache`), already warm if the launch
+        // prewarm finished — and joined, not rebuilt, if it is still running.
+        return try await ownCache.prepare()
+    }
+
     /// - Parameter showsProgress: whether this transcription may speak for the
     ///   bubble — the model-download face, the `Transcribing` face, and the
     ///   failure that replaces them. False for a cancel (#219, #233), whose
@@ -1459,44 +1574,19 @@ final class DictationCoordinator {
             return
         }
 
-        // Ensure the shared cache has downloaded model files (fast no-op if already cached)
-        if let cache = backendCache {
-            do {
-                try await cache.prepare { [weak self] _ in
-                    guard showsProgress, let self, self.isCurrentSession(epoch) else { return }
-                    self.state = .loadingModel
-                }
-            } catch is CancellationError {
-                // Deliberate discard (#104): quiet stop, entry stays
-                // retryable (.audioSaved) — same as the chunk loop, not a
-                // scary "Model loading failed: cancelled".
-                return
-            } catch {
-                // One plain sentence for both this and the private instance
-                // below (#209, F4) — the two raw NSError descriptions were the
-                // same event to whoever read them. The description itself goes
-                // to the log, where detail belongs.
-                log.error("model download failed: \(error.localizedDescription, privacy: .private)")
-                entry.status = .failed
-                entry.errorMessage = DictationFace.modelDownloadFailed.sentence
-                if showsProgress, isCurrentSession(epoch) { lastError = .modelDownloadFailed }
-                history.update(entry)
-                return
-            }
-        } else {
-            log.error("backendCache nil — dictation setup may not have run")
-        }
-
-        // Dictation's own instance (see `ownCache`), already warm if the launch
-        // prewarm finished — and joined, not rebuilt, if it is still running.
         let backend: any TranscriptionBackend
         do {
-            backend = try await ownCache.prepare()
+            backend = try await loadModels(epoch: epoch, showsProgress: showsProgress)
         } catch is CancellationError {
-            // Deliberate discard (#104): quiet stop, entry stays retryable.
+            // Deliberate discard (#104): quiet stop, entry stays
+            // retryable (.audioSaved) — same as the chunk loop, not a
+            // scary "Model loading failed: cancelled".
             return
         } catch {
-            log.error("backend prepare failed: \(error.localizedDescription, privacy: .private)")
+            // One plain sentence for both instances (#209, F4) — the two raw
+            // NSError descriptions were the same event to whoever read them.
+            // The description itself goes to the log, where detail belongs.
+            log.error("model load failed: \(error.localizedDescription, privacy: .private)")
             entry.status = .failed
             entry.errorMessage = DictationFace.modelDownloadFailed.sentence
             if showsProgress, isCurrentSession(epoch) { lastError = .modelDownloadFailed }
@@ -1607,8 +1697,9 @@ final class DictationCoordinator {
 
     /// Single source of truth mapping an UpgradeAction to its prompt, meta
     /// labels, and failure wording, shared by the paste-time defaults and the
-    /// Fn+V/Fn+T chords. Meta is written only on success (DIC-37/48).
-    private func runCleanupAction(
+    /// Fn+V/Fn+T chords. Meta is written only on success (DIC-37/48). Internal
+    /// so `CleanupOutputCheckTests` drives the paste-time path itself (#321).
+    func runCleanupAction(
         _ action: UpgradeAction,
         on entry: inout DictationHistoryEntry,
         rawText: String,
@@ -1617,34 +1708,34 @@ final class DictationCoordinator {
         let basePrompt = settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
         let prompt: String
         let modeName: String
-        let translatedTo: String?
+        let target: TranslationLanguage?
         let failureMessage: DictationFace
         let endpoint: DiagEvent.Endpoint
         switch action {
         case .cleanup:
             prompt = basePrompt
             modeName = "Cleanup"
-            translatedTo = nil
+            target = nil
             failureMessage = .cleanupFailed
             endpoint = .cleanup
         case .translate:
             prompt = basePrompt + CleanupMode.translateSuffix()
             modeName = "Translate"
-            translatedTo = TranslationLanguage.english.key
+            target = .english
             failureMessage = .translateFailed
             endpoint = .translate
         }
 
         let succeeded = await cleanupEntry(
             &entry, rawText: rawText, prompt: prompt, failureMessage: failureMessage,
-            endpoint: endpoint, epoch: epoch
+            endpoint: endpoint, translatingTo: target, epoch: epoch
         )
         DiagStore.record(.dictationUpgrade(endpoint: endpoint, outcome: .init(success: succeeded)))
         guard succeeded else { return false }
 
         entry.cleanupModeName = modeName
         entry.cleanupMethodName = nil
-        entry.translatedToLanguage = translatedTo
+        entry.translatedToLanguage = target?.key
         return true
     }
 
@@ -1657,6 +1748,11 @@ final class DictationCoordinator {
     /// instead of a fake success (#50). Paths with their own failure UI (row
     /// transforms) pass nil. Internal (not private) so tests can drive the
     /// failure path directly with a stubbed client.
+    ///
+    /// `translatingTo` names the language a translation must come back in
+    /// (#321): an answer confidently in another one is asked for once more, and
+    /// a second such answer fails like any other failure — never stored as the
+    /// translation.
     @discardableResult
     func cleanupEntry(
         _ entry: inout DictationHistoryEntry,
@@ -1664,6 +1760,7 @@ final class DictationCoordinator {
         prompt: String? = nil,
         failureMessage: DictationFace? = nil,
         endpoint: DiagEvent.Endpoint,
+        translatingTo language: TranslationLanguage? = nil,
         epoch: Int? = nil
     ) async -> Bool {
         guard let settings, !settings.openaiApiKey.isEmpty else { return false }
@@ -1692,11 +1789,11 @@ final class DictationCoordinator {
             let cleaned: String
             if split.isWhole {
                 cleaned = try await cleanupCall(
-                    rawText, prompt: effectivePrompt, apiKey: apiKey, endpoint: endpoint
+                    rawText, prompt: effectivePrompt, apiKey: apiKey, endpoint: endpoint, language: language
                 )
             } else {
                 cleaned = try await cleanupSegments(
-                    split, prompt: effectivePrompt, apiKey: apiKey, endpoint: endpoint
+                    split, prompt: effectivePrompt, apiKey: apiKey, endpoint: endpoint, language: language
                 )
             }
             entry.cleanedText = cleaned
@@ -1716,10 +1813,29 @@ final class DictationCoordinator {
         }
     }
 
+    /// One cleanup, checked: when `language` is set, an answer confidently not
+    /// in it is turned down and asked for once more (#321). Each turned-down
+    /// answer leaves an `apiOutputRejected`; the second throws `wrongLanguage`,
+    /// which no retry predicate accepts, so the caller's failure path runs.
+    private func cleanupCall(
+        _ text: String, prompt: String, apiKey: String, endpoint: DiagEvent.Endpoint,
+        language: TranslationLanguage?
+    ) async throws -> String {
+        for _ in 1...2 {
+            let output = try await cleanupCallWithRetries(
+                text, prompt: prompt, apiKey: apiKey, endpoint: endpoint
+            )
+            guard let language, language.isConfidentlyNotIn(output) else { return output }
+            log.error("translation came back not in \(language.key, privacy: .public)")
+            DiagStore.record(.apiOutputRejected(endpoint: endpoint, reason: .wrongLanguage))
+        }
+        throw CleanupClient.CleanupError.wrongLanguage
+    }
+
     /// One cleanup call, with the retries and the `apiCall` event that wrap it —
     /// one event per attempt, so retries show in the stream as failed→ok
     /// sequences (#103).
-    private func cleanupCall(
+    private func cleanupCallWithRetries(
         _ text: String, prompt: String, apiKey: String, endpoint: DiagEvent.Endpoint
     ) async throws -> String {
         try await Self.withRetries(
@@ -1748,6 +1864,11 @@ final class DictationCoordinator {
                     httpStatus: Self.httpStatus(from: error),
                     ms: Int(Date().timeIntervalSince(startedAt) * 1000)
                 ))
+                // An unfinished answer is not retried: the same text would stop
+                // at the same place. The caller's failure path pastes the raw words.
+                if let rejection = (error as? CleanupClient.CleanupError)?.rejection {
+                    DiagStore.record(.apiOutputRejected(endpoint: endpoint, reason: rejection))
+                }
                 throw error
             }
         }
@@ -1759,14 +1880,15 @@ final class DictationCoordinator {
     /// failing after its retries fails the whole cleanup, exactly as the single
     /// call does: the raw text is what gets pasted, items and all.
     private func cleanupSegments(
-        _ split: RichInput.Split, prompt: String, apiKey: String, endpoint: DiagEvent.Endpoint
+        _ split: RichInput.Split, prompt: String, apiKey: String, endpoint: DiagEvent.Endpoint,
+        language: TranslationLanguage?
     ) async throws -> String {
         let spoken = split.segments.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
         let cleaned = try await withThrowingTaskGroup(of: (Int, String).self) { group in
             for (index, segment) in spoken.enumerated() where !segment.isEmpty {
                 group.addTask {
                     (index, try await self.cleanupCall(
-                        segment, prompt: prompt, apiKey: apiKey, endpoint: endpoint
+                        segment, prompt: prompt, apiKey: apiKey, endpoint: endpoint, language: language
                     ))
                 }
             }
@@ -1848,7 +1970,7 @@ final class DictationCoordinator {
             activePresetPrompt: settings?.activeCleanupPrompt ?? CleanupMode.cleanPrompt
         )
         return await applyRowTransform(
-            entryID: entryID, prompt: prompt, methodKey: method.key, languageKey: nil
+            entryID: entryID, prompt: prompt, methodKey: method.key, language: nil
         )
     }
 
@@ -1862,7 +1984,7 @@ final class DictationCoordinator {
             entryID: entryID,
             prompt: basePrompt + CleanupMode.translateSuffix(to: language),
             methodKey: nil,
-            languageKey: language.key
+            language: language
         )
     }
 
@@ -1874,22 +1996,27 @@ final class DictationCoordinator {
         entryID: UUID,
         prompt: String,
         methodKey: String?,
-        languageKey: String?
+        language: TranslationLanguage?
     ) async -> Bool {
+        await history.deletionsSettled()
         guard var entry = history.entries.first(where: { $0.id == entryID }),
               let text = entry.rawText else {
             log.error("retroactive cleanup: no raw text for entry")
             return false
         }
+        history.beginWork(on: entryID)
+        defer { history.endWork(on: entryID) }
         guard !prompt.isEmpty else { return false }
 
         // A row transform with a target language is a translation, not a cleanup —
         // the default argument this used to take silently mislabelled every
         // retroactive translate as `apiCall(endpoint: .cleanup)`.
-        let endpoint: DiagEvent.Endpoint = languageKey == nil ? .cleanup : .translate
-        guard await cleanupEntry(&entry, rawText: text, prompt: prompt, endpoint: endpoint) else { return false }
+        let endpoint: DiagEvent.Endpoint = language == nil ? .cleanup : .translate
+        guard await cleanupEntry(
+            &entry, rawText: text, prompt: prompt, endpoint: endpoint, translatingTo: language
+        ) else { return false }
         entry.cleanupMethodName = methodKey
-        entry.translatedToLanguage = languageKey
+        entry.translatedToLanguage = language?.key
         history.update(entry)
         return true
     }

@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 
 /// Prompt assembly + transport for the "Ask Lore" chat — live rail (MREC-30/31)
 /// and review Chat tab (#62). Transport goes through the shared
@@ -53,7 +54,7 @@ struct AskLoreClient: Sendable {
         }
 
         var system = """
-        You are \(LoreTheme.wordmark), assisting \
+        You are \(LoreBrand.wordmark), assisting \
         \(isLive ? "during a meeting that is still in progress" : "after a meeting that has ended"). \
         Answer the user's questions using ONLY the \
         \(isLive ? "live transcript" : "meeting transcript") below. \

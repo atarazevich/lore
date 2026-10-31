@@ -7,10 +7,6 @@ import SwiftUI
 /// CSS exactly; comments cite the corresponding CSS variable.
 enum LoreTheme {
 
-    /// Brand wordmark. Single constant — every screen must reference this
-    /// instead of hardcoding the name.
-    static let wordmark = "lore"
-
     // MARK: - Surfaces
 
     enum Surface {

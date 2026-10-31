@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 
 /// One probe's verdict. Three-valued on purpose: `warning` is "works but
 /// degraded" (low disk, an expensive probe never tested), distinct from
@@ -27,7 +28,7 @@ enum HealthSection: String, Codable, Sendable, CaseIterable {
         case .input: return "Input"
         case .audio: return "Audio"
         case .transcription: return "Transcription"
-        case .cleanup: return "Cleanup & Ask \(LoreTheme.wordmark)"
+        case .cleanup: return "Cleanup & Ask \(LoreBrand.wordmark)"
         case .meetings: return "Meetings"
         }
     }
@@ -36,7 +37,7 @@ enum HealthSection: String, Codable, Sendable, CaseIterable {
 /// Cost of running a probe (design §6). `cheap` probes are pure OS queries with
 /// no side effect — run at launch, on panel open, and after a failed user
 /// action (#140; the 5 s cycle is gone). `expensive` probes open the mic, load
-/// ~1 GB, or hit the network, so they run only on an explicit "Test now";
+/// ~630 MB, or hit the network, so they run only on an explicit "Test now";
 /// between presses the panel shows the last real outcome pulled from the
 /// `DiagEvent` stream.
 enum HealthCost: String, Codable, Sendable {
@@ -110,11 +111,11 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
     /// (`HealthMonitor.noteFailure`) — it drives the footer's red-vs-amber dot
     /// via `HealthSnapshot.criticalFailures`.
     ///
-    /// #83 excluded `.secureInput` as a curiosity; report 8763HGZT showed a
-    /// system-wide outage, so it joined the set (#94).
+    /// `.secureInput` joined the set in #94 and left it in #341: while another
+    /// app holds secure input only the shortcuts stop, so it is a warning.
     var isCritical: Bool {
         switch self {
-        case .accessibility, .inputMonitoring, .tap, .secureInput, .microphone: return true
+        case .accessibility, .inputMonitoring, .tap, .microphone: return true
         default: return false
         }
     }
@@ -136,7 +137,9 @@ enum HealthProbeID: String, Codable, Sendable, CaseIterable {
         case .inputMonitoring: return "Input Monitoring"
         case .tap: return "Keyboard shortcuts"
         case .paste: return "Paste"
-        case .secureInput: return "Secure input"
+        // The condition is shown on the Keyboard shortcuts row (#341), and the
+        // header names what the person noticed.
+        case .secureInput: return "Keyboard shortcuts"
         case .microphone: return "Microphone"
         case .micCapture: return "Mic capture"
         case .asrModel: return "Model"
@@ -197,6 +200,23 @@ struct HealthResult: Codable, Sendable, Equatable {
     /// can re-derive the conclusion instead of trusting it (#97). Bools and counts,
     /// so the guarantee above holds unchanged.
     var tapLiveness: TapLiveness? = nil
+    /// The blocked condition stands (#338) — an effect proved macOS is ignoring
+    /// lore's switches. On `.accessibility` the row carries the fix; on the
+    /// rows it explains (`explainedByTheBlock`) they point at it. Rides only
+    /// when true.
+    var blockedByMacOS: Bool? = nil
+    /// `.paste` only: what the row says beyond its last attempt (#338).
+    var pasteNote: PasteNote? = nil
+}
+
+/// What the paste row knows beyond its last attempt (#338). A closed enum, so
+/// the snapshot stays PII-free.
+enum PasteNote: String, Codable, Sendable, CaseIterable {
+    /// The last paste was posted while macOS reported lore untrusted, so macOS
+    /// dropped it.
+    case blocked
+    /// The blocked condition cleared, and nothing has been pasted since.
+    case nothingSinceFix
 }
 
 /// The whole chain plus the machine's identity. This is exactly what #84's
@@ -222,6 +242,10 @@ struct HealthSnapshot: Codable, Sendable, Equatable {
 }
 
 extension HealthProbeID {
+    /// The rows the blocked condition explains (#338): while it stands they go
+    /// neutral and point at the Accessibility row, which carries the fix.
+    static let explainedByTheBlock: Set<HealthProbeID> = [.inputMonitoring, .tap, .paste]
+
     /// Chain position, from declaration order. Used to name the most upstream
     /// issue and to sort critical failures.
     static func order(_ id: HealthProbeID) -> Int {
@@ -238,14 +262,24 @@ struct HealthSummary: Equatable {
     let firstIssueShortName: String?
 
     init(_ snapshot: HealthSnapshot) {
+        // One cause counts once (#338): while macOS blocks lore, the rows the
+        // Accessibility row explains are not issues of their own.
+        let blocked = snapshot.results.contains { $0.blockedByMacOS == true }
         let issues = snapshot.results
             .filter(Self.countsInFooter)
+            .filter { !blocked || !HealthProbeID.explainedByTheBlock.contains($0.id) }
             .sorted { HealthProbeID.order($0.id) < HealthProbeID.order($1.id) }
         issueCount = issues.count
         // One definition of "critical failure", shared with the panel's rows.
         hasCriticalFailure = !snapshot.criticalFailures.isEmpty
-        firstIssueShortName = issues.first?.id.shortName
+        firstIssueShortName = issues.first.map {
+            $0.blockedByMacOS == true ? Self.blockedName : $0.id.shortName
+        }
     }
+
+    /// The header's name for the blocked condition (#338): what stopped
+    /// working, not the grant behind it.
+    static let blockedName = "shortcuts and paste"
 
     /// A footer issue is any `.failed`, plus a `.warning` that means real
     /// degradation (low disk, an ad-hoc signature). A `.warning` meaning "no
@@ -257,10 +291,12 @@ struct HealthSummary: Equatable {
     ///   System audio and OpenAI liveness are never exercised, could never reach
     ///   "All systems ready" (the cry-wolf inversion).
     /// - `.tap`: `tapStatus()` returns `.warning` for the two silence-shaped
-    ///   states — unmeasurable under secure input (#94), and a measured
-    ///   starvation, demoted from `.failed` in #140 because it is inferred from
-    ///   keyboard silence, not from a failed action. Neither is footer material:
-    ///   the always-visible footer would cry wolf on every idle machine.
+    ///   states — unmeasurable under secure input (#94; the `.secureInput` row
+    ///   is shown and counted instead, and the tap row is hidden, #341), and a
+    ///   measured starvation, demoted from `.failed` in #140 because it is
+    ///   inferred from keyboard silence, not from a failed action. Neither is
+    ///   footer material: the always-visible footer would cry wolf on every
+    ///   idle machine.
     ///
     /// - `.microphone`: `.warning` is `.notDetermined` — macOS was never asked
     ///   (#140). A fresh install is not an issue; the first recording prompts.

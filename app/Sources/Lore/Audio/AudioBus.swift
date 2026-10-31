@@ -2,6 +2,7 @@
 import Accelerate
 import CoreAudio
 import Foundation
+import LoreCore
 import os
 
 private let busLog = Logger(subsystem: "com.lore", category: "AudioBus")

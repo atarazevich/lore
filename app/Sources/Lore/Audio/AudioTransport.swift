@@ -1,4 +1,5 @@
 import CoreAudio
+import LoreCore
 
 /// CoreAudio transport classification — the single table behind both the recording
 /// allowlist (#39) and the diagnostic `DeviceKind` (#82).

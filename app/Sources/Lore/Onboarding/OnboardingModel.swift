@@ -1,5 +1,7 @@
 import AppKit
+import AVFoundation
 import Foundation
+import LoreCore
 import Observation
 
 /// The state behind the first-run flow (#150). Nothing here is a stored verdict:
@@ -110,6 +112,11 @@ final class OnboardingModel {
     /// Fronts the window after a System Settings round trip.
     @ObservationIgnored var onWantsFront: (() -> Void)?
 
+    /// The drag card docked by System Settings for the two list grants (#300).
+    /// The model decides when it shows and when it goes; it never decides a
+    /// grant from anything the card saw.
+    @ObservationIgnored var grantCard: GrantCardControl?
+
     // MARK: - Polling
 
     /// Serialized, off the main actor: these reads block, and on a main-RunLoop
@@ -119,6 +126,11 @@ final class OnboardingModel {
         qos: .userInitiated
     )
     @ObservationIgnored private var pollTimer: DispatchSourceTimer?
+    @ObservationIgnored private let freshCheckQueue = DispatchQueue(
+        label: "com.lore.app.onboarding.grant-check",
+        qos: .userInitiated
+    )
+    @ObservationIgnored private var freshCheckInFlight = false
 
     /// The board's two pauses: a card flips green and *then* the next expands,
     /// and the Fn step says "Detected — continuing…" before it hands off.
@@ -131,10 +143,10 @@ final class OnboardingModel {
     /// already there — and the first reading is the baseline, not a transition.
     @ObservationIgnored private var lastPermissions = PermissionSnapshot()
     @ObservationIgnored private var didReadPermissions = false
-    /// macOS shows the Accessibility prompt at most once per install; after that
-    /// the button is the deep link.
-    @ObservationIgnored private var didPromptAccessibility = false
     @ObservationIgnored private var didRegisterInputMonitoring = false
+    /// The last fresh-reading failure, so the event stream gets its edge rather
+    /// than one event per tick.
+    @ObservationIgnored private var lastGrantCheckFailure: GrantCheckFailure?
     @ObservationIgnored private var didArmDictation = false
     /// The poll saw a capture during Try it: the half of the success claim that
     /// typing into the box cannot fake.
@@ -176,11 +188,60 @@ final class OnboardingModel {
     /// it: driving `apply` from a test actor is already main.
     private nonisolated func makePollTick() -> @Sendable () -> Void {
         { [weak self] in
-            let snapshot = PermissionReader.snapshot()
+            let mic = MicrophonePermission.status
             let fn = FnKeySetting.current()
             Task { @MainActor [weak self] in
-                self?.apply(permissions: snapshot, fn: fn)
+                self?.applyTick(microphone: mic, fn: fn)
             }
+        }
+    }
+
+    /// The poll's own reading: the microphone and the Fn setting, read here.
+    /// Accessibility and Input Monitoring are carried over from the last fresh
+    /// reading (#300) — a green for them comes from nowhere else.
+    private func applyTick(microphone: AVAuthorizationStatus, fn: FnKeyAction) {
+        var snapshot = lastPermissions
+        snapshot.microphone = microphone == .authorized
+        snapshot.microphoneUndetermined = microphone == .notDetermined
+        apply(permissions: snapshot, fn: fn)
+        startFreshCheckIfWanted()
+    }
+
+    /// The two list grants from a process that did not exist a moment ago
+    /// (#300), only while the Permissions step waits on one of them. On its own
+    /// queue and one at a time, so a hung child holds neither the microphone
+    /// and Fn readings nor a queue of children behind it.
+    private func startFreshCheckIfWanted() {
+        guard !freshCheckInFlight, step == .permissions,
+              permissions.current == .accessibility || permissions.current == .inputMonitoring
+        else { return }
+        freshCheckInFlight = true
+        freshCheckQueue.async { [weak self] in
+            let result = GrantCheck.readFresh()
+            Task { @MainActor [weak self] in
+                self?.freshCheckInFlight = false
+                self?.applyFresh(result)
+            }
+        }
+    }
+
+    /// A fresh reading lands; a failed one keeps the reading there was and is
+    /// traced on its edge.
+    func applyFresh(_ result: Result<GrantCheck.Reading, GrantCheckFailure>) {
+        let failure: GrantCheckFailure?
+        switch result {
+        case .success(let reading):
+            failure = nil
+            var snapshot = lastPermissions
+            snapshot.accessibility = reading.accessibility
+            snapshot.inputMonitoring = reading.inputMonitoring
+            apply(permissions: snapshot, fn: fnAction)
+        case .failure(let reason):
+            failure = reason
+        }
+        if failure != lastGrantCheckFailure {
+            lastGrantCheckFailure = failure
+            if let failure { DiagStore.record(.grantCheckFailed(reason: failure)) }
         }
     }
 
@@ -191,6 +252,7 @@ final class OnboardingModel {
         pollTimer = nil
         revealDwell.cancel()
         handoffDwell.cancel()
+        grantCard?.close(.onboardingMoved)
     }
 
     // MARK: - Reading → state
@@ -204,6 +266,11 @@ final class OnboardingModel {
         lastPermissions = snapshot
         permissions = snapshot
         fnAction = fn
+
+        // The card's one claim waits on this reading, never on a drop.
+        if let shown = grantCard?.shownGrant, snapshot[shown] {
+            grantCard?.allowed()
+        }
 
         if !isBaseline {
             for grant in RequiredGrant.allCases where snapshot[grant] != previous[grant] {
@@ -327,6 +394,7 @@ final class OnboardingModel {
         revealDwell.cancel()
         handoffDwell.cancel()
         step = next
+        if next != .permissions { grantCard?.close(.onboardingMoved) }
         DiagStore.record(.onboardingStepShown(step: next.diagStep))
         if next == .tryIt { armDictation() }
     }
@@ -340,8 +408,9 @@ final class OnboardingModel {
 
     // MARK: - Permission actions
 
-    /// The one two-tier button in the flow. Its label stays "Allow"; the caption
-    /// under it is what tells the truth about which of the two it will do.
+    /// "Allow" on all three cards. The microphone is the one two-tier button —
+    /// the caption under it tells which of the two it will do. The two list
+    /// grants open their pane and dock the drag card under it (#300).
     func requestGrant(_ grant: RequiredGrant) {
         switch grant {
         case .microphone:
@@ -352,33 +421,28 @@ final class OnboardingModel {
             Task { _ = await MicrophonePermission.request() }
 
         case .accessibility:
-            // The prompting variant registers lore in the Accessibility list.
-            if didPromptAccessibility {
-                openPane(.accessibility)
-            } else {
-                didPromptAccessibility = true
-                // Blocks while its dialog is up, so it runs off the main actor.
-                pollQueue.async { TextInserter.requestAccessibilityIfNeeded() }
-            }
+            // Straight to the pane: Apple's prompt is no longer fired, the card
+            // carries lore into the list (#300 board, §06).
+            openPane(.accessibility)
+            grantCard?.show(.accessibility)
 
         case .inputMonitoring:
-            // Always the pane, per the board. The request is made once purely so
-            // lore has a row in it — nothing here depends on it presenting
-            // anything, which is why the AX-prompt ordering bug cannot bite (doc).
+            // The request is made once purely so lore has a row in the pane —
+            // nothing here depends on it presenting anything (doc).
             if !didRegisterInputMonitoring {
                 didRegisterInputMonitoring = true
                 pollQueue.async { _ = CGRequestListenEventAccess() }
             }
             openPane(.inputMonitoring)
+            grantCard?.show(.inputMonitoring)
         }
     }
 
     /// Deep-link into System Settings. The Fn step's button opens `.keyboard`;
-    /// the permission cards route here through `requestGrant`.
-    func openPane(_ pane: SettingsPane) {
-        guard let url = pane.settingsURL else { return }
-        NSWorkspace.shared.open(url)
-    }
+    /// the permission cards route here through `requestGrant`. The same deep
+    /// link the health panel's remedies use; a seam so tests can press Allow
+    /// without System Settings opening.
+    @ObservationIgnored var openPane: (SettingsPane) -> Void = { $0.open() }
 
     // MARK: - Try it
 

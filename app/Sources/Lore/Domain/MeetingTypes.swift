@@ -1,4 +1,9 @@
 import Foundation
+import LoreFormat
+
+/// The transcript's speaker (#301), named in this module for the same reason
+/// LoreCore names it: FluidAudio exports a `Speaker` too.
+typealias Speaker = LoreFormat.Speaker
 
 // MARK: - Meeting App Detection
 

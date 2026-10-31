@@ -1,4 +1,5 @@
 import Foundation
+import NaturalLanguage
 
 // MARK: - Cleanup Preset
 
@@ -117,3 +118,32 @@ enum TranslationLanguage: String, CaseIterable, Identifiable {
     var displayName: String { rawValue.capitalized }
 }
 
+
+// MARK: - Did the translation come back in the target language? (#321)
+
+extension TranslationLanguage {
+    /// Fewer letters than this and the recognizer is guessing: "Listen." reads
+    /// as Danish, a ten-letter "<name> check." as Indonesian. The shortest
+    /// translation that came back in Russian in #319 had 197.
+    private static let minimumCheckedLetters = 20
+    /// Below this probability of the target, the text is not in it. In #319's
+    /// 230 real RU→EN takes every English output of 20+ letters scored 0.827 or
+    /// more, and every Russian or half-Russian one 0.056 or less.
+    private static let minimumTargetProbability = 0.5
+
+    /// True only when this is English, `text` is long enough to judge, and it
+    /// is confidently not English. A short take, or English full of Russian
+    /// names, is not accused: when in doubt the translation stands.
+    ///
+    /// The other targets are deliberately left unchecked: the thresholds were
+    /// measured on English output only, and short Spanish and Portuguese are
+    /// often read as each other.
+    func isConfidentlyNotIn(_ text: String) -> Bool {
+        guard self == .english else { return false }
+        guard text.filter(\.isLetter).count >= Self.minimumCheckedLetters else { return false }
+        let recognizer = NLLanguageRecognizer()
+        recognizer.processString(text)
+        let hypotheses = recognizer.languageHypotheses(withMaximum: 10)
+        return (hypotheses[.english] ?? 0) < Self.minimumTargetProbability
+    }
+}

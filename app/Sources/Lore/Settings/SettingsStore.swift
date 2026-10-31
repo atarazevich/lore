@@ -46,6 +46,9 @@ final class SettingsStore {
         }
     }
 
+    /// What "Save audio recording" is when the owner never set it (#330).
+    static let saveAudioRecordingDefault = true
+
     @ObservationIgnored nonisolated(unsafe) private var _saveAudioRecording: Bool
     var saveAudioRecording: Bool {
         get { access(keyPath: \.saveAudioRecording); return _saveAudioRecording }
@@ -68,6 +71,20 @@ final class SettingsStore {
         }
     }
 
+    /// "Separate speakers" (#308): after a meeting, the speaker pass runs by
+    /// itself. Off, it runs only from Who spoke?, and the meeting's two
+    /// tracks are kept compressed for it instead of deleted.
+    @ObservationIgnored nonisolated(unsafe) private var _separateSpeakers: Bool
+    var separateSpeakers: Bool {
+        get { access(keyPath: \.separateSpeakers); return _separateSpeakers }
+        set {
+            withMutation(keyPath: \.separateSpeakers) {
+                _separateSpeakers = newValue
+                defaults.set(newValue, forKey: "separateSpeakers")
+            }
+        }
+    }
+
     // MARK: - Meetings (#221)
 
     /// The master switch. Off, Meetings is on no surface and no meeting
@@ -85,19 +102,16 @@ final class SettingsStore {
         }
     }
 
-    // MARK: - Send to the operator (#223)
-
-    /// The master switch behind Fn+K. Off, the `K` letter is on no surface —
-    /// not armed, not as a hint — the key marks nothing and the bubble offers
-    /// nothing to click. Dictations already marked keep their flag: it lives in
-    /// each entry's own file, which this switch never reads in either position.
-    @ObservationIgnored nonisolated(unsafe) private var _operatorSendEnabled: Bool
-    var operatorSendEnabled: Bool {
-        get { access(keyPath: \.operatorSendEnabled); return _operatorSendEnabled }
+    /// "Show notes from iPhone" (#309), off by default. While off, nothing
+    /// reads the iCloud folder the phone sends its notes through; turning it
+    /// on is the first use, and the moment macOS may ask.
+    @ObservationIgnored nonisolated(unsafe) private var _showPhoneNotes: Bool
+    var showPhoneNotes: Bool {
+        get { access(keyPath: \.showPhoneNotes); return _showPhoneNotes }
         set {
-            withMutation(keyPath: \.operatorSendEnabled) {
-                _operatorSendEnabled = newValue
-                defaults.set(newValue, forKey: "operatorSendEnabled")
+            withMutation(keyPath: \.showPhoneNotes) {
+                _showPhoneNotes = newValue
+                defaults.set(newValue, forKey: "showPhoneNotes")
             }
         }
     }
@@ -633,13 +647,13 @@ final class SettingsStore {
 
         let defaults = storage.defaults
 
-        // The two master switches (#221, #223), stamped before anything else
+        // The Meetings master switch (#221), stamped before anything else
         // for the same reason the notes move decides first: the bundle
         // migrations below write two of the keys their "has this Mac run lore
         // before?" evidence reads, so after them every install looks like an
         // old one.
         self._meetingsEnabled = Self.resolveMasterSwitch("meetingsEnabled", defaults: defaults)
-        self._operatorSendEnabled = Self.resolveOperatorSendEnabled(defaults: defaults)
+        self._showPhoneNotes = defaults.bool(forKey: "showPhoneNotes")
 
         // One-time migrations from previous bundle IDs. The notes move (#148)
         // *decides* FIRST, load-bearing: it reads a fresh install off the
@@ -671,7 +685,9 @@ final class SettingsStore {
         // Capture Settings
         self._inputDeviceID = AudioDeviceID(defaults.integer(forKey: "inputDeviceID"))
         self._transcriptionLocale = defaults.string(forKey: "transcriptionLocale") ?? "en-US"
-        self._saveAudioRecording = defaults.bool(forKey: "saveAudioRecording")
+        // Default ON (#330): only an explicit off skips the export; the toggle reads this value.
+        self._saveAudioRecording = defaults.object(forKey: "saveAudioRecording") as? Bool
+            ?? Self.saveAudioRecordingDefault
 
         // Default ON (#109): the live transcript is chunk-assembled and rough;
         // the whole-file batch rebuild after every meeting is what makes it
@@ -682,6 +698,8 @@ final class SettingsStore {
         } else {
             self._enableBatchRefinement = defaults.bool(forKey: "enableBatchRefinement")
         }
+        // Default ON (#308): every meeting's speakers are found, as before the switch.
+        self._separateSpeakers = defaults.object(forKey: "separateSpeakers") as? Bool ?? true
 
         // Detection Settings — default ON so the app is useful out of the box (#91).
         // Only affects installs where the key was never set; an explicit prior
@@ -833,8 +851,8 @@ final class SettingsStore {
 // MARK: - Migration
 
 extension SettingsStore {
-    /// A master switch's position at launch — Meetings (#221) and Fn+K (#223)
-    /// are decided by the same rule. An explicit stored choice — either
+    /// A master switch's position at launch — Meetings (#221). An explicit
+    /// stored choice — either
     /// position — always wins. With the key absent the verdict comes from
     /// prior-install evidence: a Mac that has run lore before keeps the feature
     /// where it was, a fresh install starts without it.
@@ -848,26 +866,6 @@ extension SettingsStore {
         let enabled = NotesFolderMigration.hasPriorInstall(defaults: defaults)
         defaults.set(enabled, forKey: key)
         return enabled
-    }
-
-    /// The Fn+K switch at launch (#223): the rule above, with one migration
-    /// ahead of it. Until this release the chord was gated by the MODIFIERS
-    /// "Extra keys" toggle, so a stored `false` there is a user who already said
-    /// no to Fn+K — that choice carries over, ahead of the prior-install
-    /// evidence that would otherwise turn the new switch on, and is stamped
-    /// under the new key so the retired one is read exactly once (the #150 flag
-    /// migration reads its three the same way). A stored `true`, or no key at
-    /// all, says nothing about Fn+K in particular — it was the default and it
-    /// also meant Fn+S — so those fall through to the evidence rule. An explicit
-    /// choice already stored under the new key outranks all of it.
-    private static func resolveOperatorSendEnabled(defaults: UserDefaults) -> Bool {
-        let key = "operatorSendEnabled"
-        if defaults.object(forKey: key) == nil,
-           defaults.object(forKey: "modifierUpgradeKeysEnabled") as? Bool == false {
-            defaults.set(false, forKey: key)
-            return false
-        }
-        return resolveMasterSwitch(key, defaults: defaults)
     }
 
     /// Migrate settings from the old "On The Spot" (com.onthespot.app) bundle.

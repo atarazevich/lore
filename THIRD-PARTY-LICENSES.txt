@@ -39,19 +39,26 @@ reproduced as its author wrote it rather than merged into a single text.
 
 
 ==============================================================================
-NVIDIA Parakeet TDT 0.6B v3 - speech recognition model
+Parakeet Ultra - speech recognition model
 ==============================================================================
-Speech recognition: NVIDIA Parakeet TDT 0.6B v3, licensed CC BY 4.0
+Speech recognition: Parakeet Ultra by moondream, a post-training of NVIDIA
+Parakeet TDT 0.6B v3, licensed CC BY 4.0
 (https://creativecommons.org/licenses/by/4.0/), converted to Core ML by
-FluidInference (https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml).
+FluidInference (https://huggingface.co/FluidInference/parakeet-ultra-coreml).
 
-  Creator:      NVIDIA
-  Model:        https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
+  Creator:      moondream (Parakeet Ultra), derived from NVIDIA Parakeet TDT
+                0.6B v3 (NVIDIA)
+  Model:        https://huggingface.co/moondream/parakeet-ultra
+  Base model:   https://huggingface.co/nvidia/parakeet-tdt-0.6b-v3
   Licence:      Creative Commons Attribution 4.0 International (CC BY 4.0)
   Licence text: https://creativecommons.org/licenses/by/4.0/legalcode
-  Modification: converted to Core ML by FluidInference and redistributed at
-                https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml
+  Modification: moondream post-trained NVIDIA's model; FluidInference
+                converted it to Core ML and redistributes it at
+                https://huggingface.co/FluidInference/parakeet-ultra-coreml
                 under the same licence. lore downloads and runs that conversion.
+                A Mac that ran an earlier lore keeps NVIDIA Parakeet TDT 0.6B v3
+                (https://huggingface.co/FluidInference/parakeet-tdt-0.6b-v3-coreml,
+                same licence) until Parakeet Ultra has downloaded.
 
 CC BY 4.0 section 3(a)(1) makes this notice - creator, copyright notice,
 licence name and link, and an indication that the work was modified - a

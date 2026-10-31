@@ -1,4 +1,5 @@
 @preconcurrency import AVFoundation
+import LoreCore
 import os
 
 private let rateLog = Logger(subsystem: "com.lore.app", category: "DeliveredRate")

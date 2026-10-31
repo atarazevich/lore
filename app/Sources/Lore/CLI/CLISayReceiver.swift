@@ -1,5 +1,6 @@
 import Foundation
 import LoreCLIKit
+import LoreCore
 
 /// `lore say` inside the app (#257): one request off the wire becomes one reply
 /// in the queue, or nothing at all.

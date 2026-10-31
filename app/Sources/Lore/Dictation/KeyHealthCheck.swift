@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 
 /// Verdict of the OpenAI key liveness probe (#50).
 enum KeyHealthStatus: Equatable, Sendable {

@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import DynamicNotchKit
+import LoreCore
 import os
 import SwiftUI
 

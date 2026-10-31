@@ -1,3 +1,5 @@
+import LoreCore
+import LoreFormat
 import SwiftUI
 
 /// Stage 1 shared primitives (D-031: additive only, not yet wired into
@@ -120,6 +122,10 @@ struct LoreIconButton: View {
     /// Fill override — default `rgba(255,255,255,.07)`; the dictation rows use
     /// amber `.16` while a popover is open and red `.12` for the retry button.
     var background: Color = Color.white.opacity(0.07)
+    /// The button's side and its glyph's point size: 30 and 12, or the 16 pt
+    /// dismiss at the end of a meta line (#308).
+    var size: CGFloat = 30
+    var glyphSize: CGFloat = 12
     let action: () -> Void
 
     /// Explicit colors defeat SwiftUI's automatic dimming, so a disabled
@@ -130,9 +136,9 @@ struct LoreIconButton: View {
     var body: some View {
         Button(action: action) {
             Image(systemName: systemName)
-                .font(.system(size: 12, weight: .medium))
+                .font(.system(size: glyphSize, weight: .medium))
                 .foregroundStyle(tint)
-                .frame(width: 30, height: 30)
+                .frame(width: size, height: size)
                 .background(
                     background,
                     in: RoundedRectangle(cornerRadius: LoreTheme.Radius.button)
@@ -404,18 +410,16 @@ extension View {
     }
 }
 
-/// The keycap run the boards print, on the bubble's own keycap plate — so a
-/// keycap in the player cannot drift from a keycap on the rail (#235).
+/// The keycap run the boards print beside a line — a tooltip's, the waiting
+/// capsule's — on the bubble's own keycap plate at the rail's size, so a
+/// keycap there cannot drift from a keycap on the rail (#235).
 struct LoreKeycapRun: View {
     let caps: [String]
-    /// Which line the caps stand in — the rail's own size everywhere but the
-    /// replies player's one-line key strip, which is a step smaller (#263).
-    var line: DictationIndicatorView.BubblePill.KeycapLine = .rail
 
     var body: some View {
         HStack(spacing: 3) {
             ForEach(caps, id: \.self) { cap in
-                DictationIndicatorView.BubblePill.keycap(bright: false, line).label(cap)
+                DictationIndicatorView.BubblePill.keycap(bright: false).label(cap)
             }
         }
     }

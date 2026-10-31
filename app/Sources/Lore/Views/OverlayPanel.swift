@@ -5,7 +5,7 @@ import SwiftUI
 /// draws all of itself — that is invisible to screen sharing when the setting
 /// says so. Used by the dictation indicator and the Read Aloud player (#105),
 /// via `TopCenteredPanel`, and by the replies player's help card (#289).
-final class OverlayPanel: NSPanel {
+class OverlayPanel: NSPanel {
     init(contentRect: NSRect, defaults: UserDefaults = .standard) {
         super.init(
             contentRect: contentRect,

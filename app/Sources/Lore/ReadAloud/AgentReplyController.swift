@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import LoreCore
 import Observation
 
 /// Agent replies (#236, core #256): one queue with a position, read aloud one
@@ -56,6 +57,9 @@ final class AgentReplyController {
     private(set) var quietSince: Date?
 
     var currentReply: AgentReply? { queue.current }
+    /// The reply open as the player's card, which fn R and fn J act on: the
+    /// current one, or past the end the last one read (#264).
+    var openReply: AgentReply? { queue.openIndex.map { queue.replies[$0] } }
     /// What is still to be read: the queue's waiting replies, and the current
     /// one while it is paused — a reply stopped mid-word is one to come back
     /// to, and the cue, the capsule and the trace all have to say so together.
@@ -74,10 +78,11 @@ final class AgentReplyController {
     /// under it, and a key with nothing to act on must not cost the recording
     /// (#259).
 
-    /// Fn+R plays or pauses the reply at the position (#278): any reply there
-    /// is enough. Past the last one there is nothing to play, and the key stays
-    /// a dead one so it cannot cost a dictation.
-    var canPlayOrPause: Bool { isEnabled && queue.current != nil }
+    /// Fn+R plays or pauses the card's reply (#278, #264): any reply in the
+    /// list is enough — past the last one it is the last one, played again.
+    /// With the list empty the key stays a dead one so it cannot cost a
+    /// dictation.
+    var canPlayOrPause: Bool { isEnabled && openReply != nil }
     /// Previous plays the reply before the current one, or the current one
     /// again when it is the first — so any reply at all is enough.
     var canPlayPrevious: Bool { isEnabled && !queue.replies.isEmpty }
@@ -137,6 +142,10 @@ final class AgentReplyController {
     nonisolated static let escapeRepeatWindow: TimeInterval = 2.0
     /// How long the player stays up after the last reply ended.
     nonisolated static let lingerWindow: TimeInterval = 10.0
+    /// While another app holds the microphone, how often that is read again
+    /// (#327): the per-process input property sends no notification, so a
+    /// stale reading at the end of lore's own capture would otherwise stand.
+    nonisolated static let holdRecheckInterval: TimeInterval = 2.0
 
     @ObservationIgnored private let makeSpeaker: () -> any AgentReplySpeaker
     @ObservationIgnored private let store: AgentReplyStore
@@ -144,6 +153,7 @@ final class AgentReplyController {
     @ObservationIgnored private let playCue: @MainActor () -> Void
     @ObservationIgnored private let recordEvent: (DiagEvent) -> Void
     @ObservationIgnored private let now: () -> Date
+    @ObservationIgnored private let sleep: @MainActor (TimeInterval) async -> Void
     @ObservationIgnored private let installedVoices: () -> [ReadAloudVoiceChoice]
 
     @ObservationIgnored private var builtSpeaker: (any AgentReplySpeaker)?
@@ -151,6 +161,7 @@ final class AgentReplyController {
     @ObservationIgnored private var microphoneTask: Task<Void, Never>?
     @ObservationIgnored private var settingsTask: Task<Void, Never>?
     @ObservationIgnored private var recordingTask: Task<Void, Never>?
+    @ObservationIgnored private var holdRecheckTask: Task<Void, Never>?
     @ObservationIgnored private var escapeStopAt: Date?
     /// The two things that hold reading, kept apart so each edge can be told
     /// from the other; `isHeldByMicrophone` is their sum.
@@ -169,6 +180,7 @@ final class AgentReplyController {
         playCue: @escaping @MainActor () -> Void = { AgentReplyController.playSystemCue() },
         recordEvent: @escaping (DiagEvent) -> Void = { DiagStore.record($0) },
         now: @escaping () -> Date = Date.init,
+        sleep: @escaping @MainActor (TimeInterval) async -> Void = { try? await Task.sleep(for: .seconds($0)) },
         installedVoices: @escaping () -> [ReadAloudVoiceChoice] = ReadAloudVoices.allSystemVoices
     ) {
         self.makeSpeaker = makeSpeaker
@@ -177,6 +189,7 @@ final class AgentReplyController {
         self.playCue = playCue
         self.recordEvent = recordEvent
         self.now = now
+        self.sleep = sleep
         self.installedVoices = installedVoices
     }
 
@@ -226,6 +239,7 @@ final class AgentReplyController {
             microphoneTask = Task { [weak self] in
                 for await running in source.signals {
                     self?.anotherAppHoldsMicrophone = running
+                    self?.recheckWhileAnotherAppHolds()
                     self?.holdChanged()
                 }
             }
@@ -238,7 +252,7 @@ final class AgentReplyController {
                         }
                         if recording != self.loreRecording {
                             self.loreRecording = recording
-                            self.refreshOtherApps()
+                            self.microphone?.refresh()
                         }
                         self.holdChanged()
                     }
@@ -251,6 +265,8 @@ final class AgentReplyController {
             microphoneTask = nil
             recordingTask?.cancel()
             recordingTask = nil
+            holdRecheckTask?.cancel()
+            holdRecheckTask = nil
             microphone?.shutdown()
             microphone = nil
             queue = AgentReplyQueue()
@@ -315,10 +331,10 @@ final class AgentReplyController {
 
     /// Fn+R (#278): the play key again, as #259 had it. A reply speaking pauses;
     /// a paused one carries on from where it stopped; with nothing speaking, the
-    /// reply at the position starts.
+    /// card's reply starts — past the end, the last one again (#264).
     func playOrPause() {
-        guard isEnabled, let current = queue.current else { return }
-        playOrPause(replyID: current.id, pause: .key, play: .key)
+        guard isEnabled, let open = openReply else { return }
+        playOrPause(replyID: open.id, pause: .key, play: .key)
     }
 
     /// Brings the player back as it was, on the same reply. With nothing in the
@@ -529,7 +545,7 @@ final class AgentReplyController {
     /// no edge, so the other apps are read again now.
     func loreCaptureEnded() {
         guard isEnabled else { return }
-        refreshOtherApps()
+        microphone?.refresh()
     }
 
     /// A chord took the talk key's press from a confirmed dictation (#279):
@@ -545,8 +561,20 @@ final class AgentReplyController {
         holdChanged()
     }
 
-    private func refreshOtherApps() {
-        (microphone as? CoreAudioSignalSource)?.refresh()
+    /// While another app holds the microphone, read it again until it lets go (#327).
+    private func recheckWhileAnotherAppHolds() {
+        guard anotherAppHoldsMicrophone, holdRecheckTask == nil else { return }
+        holdRecheckTask = Task { [weak self, sleep] in
+            while true {
+                await sleep(Self.holdRecheckInterval)
+                guard let self, !Task.isCancelled else { return }
+                guard self.anotherAppHoldsMicrophone else {
+                    self.holdRecheckTask = nil
+                    return
+                }
+                self.microphone?.refresh()
+            }
+        }
     }
 
     /// Whether the cue has anything to announce — the same count the capsule

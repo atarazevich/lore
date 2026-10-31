@@ -1,39 +1,35 @@
 import Foundation
 
-/// Whether this launch should defer to another process already answering to
-/// the same bundle id (#193). Two `com.lore.app` processes each hold their
-/// own Fn event tap, mic subscription and menu-bar mark, so a hold-to-talk
-/// is heard twice.
+/// One Mac lore at a time (#193). Two `com.lore.app` processes each hold
+/// their own Fn event tap, mic subscription and menu-bar mark, so a
+/// hold-to-talk is heard twice.
 ///
-/// A pure decision over process ids and launch dates, so the launch-time
-/// check is testable without any AppKit/XCTest scaffolding —
-/// `NSRunningApplication` is the only caller that has to touch real process
-/// state.
+/// The one that holds an exclusive `flock` on a file in lore's Application
+/// Support folder is the one. The kernel grants it to exactly one open file,
+/// so two launches can't both win, and drops it when the holder exits or
+/// crashes, so it is never stale. The iPhone lore in the Simulator has its own
+/// home under CoreSimulator and never opens this file.
 enum SingleInstanceGuard {
-    /// One process's identity for the decision below: a pid and the moment it
-    /// started answering to the bundle id. `NSRunningApplication.launchDate`
-    /// supplies the latter for every instance, including
-    /// `NSRunningApplication.current`.
-    struct Candidate: Equatable {
-        let pid: Int32
-        let launchDate: Date
+    enum Lock: Equatable {
+        /// This process holds the lock as long as `fd` stays open.
+        case acquired(fd: Int32)
+        /// Another Mac lore holds it: this launch defers.
+        case heldElsewhere
+        /// The file can't be opened or locked. Run anyway: two copies beat none.
+        case unavailable
     }
 
-    /// The pid this launch must defer to — activate it and exit — or `nil` if
-    /// `myPID` is the one that keeps running. `candidates` is every process
-    /// currently answering to the bundle id, including this one.
-    ///
-    /// No lock file: the older process (by `launchDate`) wins. Two direct-exec
-    /// launches landing in the same instant — the gap a snapshot with no
-    /// tie-break leaves open, where each would see the other, each would
-    /// defer, and zero processes would survive — break toward the lower pid
-    /// instead, so every candidate computes this same winner independently.
-    static func processToDeferTo(candidates: [Candidate], myPID: Int32) -> Candidate? {
-        guard let winner = candidates.min(by: ranksBefore) else { return nil }
-        return winner.pid == myPID ? nil : winner
-    }
-
-    private static func ranksBefore(_ a: Candidate, _ b: Candidate) -> Bool {
-        (a.launchDate, a.pid) < (b.launchDate, b.pid)
+    static func acquire(at url: URL) -> Lock {
+        // O_CLOEXEC: a child process lore starts must not inherit the lock.
+        let fd = open(url.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o644)
+        guard fd >= 0 else { return .unavailable }
+        guard flock(fd, LOCK_EX | LOCK_NB) == 0 else {
+            // Only "already locked" is another lore; a home whose file system
+            // can't lock (network, FUSE) must not quit lore at every launch.
+            let held = errno == EWOULDBLOCK
+            close(fd)
+            return held ? .heldElsewhere : .unavailable
+        }
+        return .acquired(fd: fd)
     }
 }

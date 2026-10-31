@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 
 /// The exact artifact a "Report a problem" upload sends (#84, design §7): the
 /// user's own message plus the diagnostic payload — a fresh `HealthSnapshot`,
@@ -149,20 +150,20 @@ extension HealthResult {
         case .signing:
             // The migration warning (#135) is about the *change*, not the cert.
             return signingIdentityChanged == true
-                ? "\(LoreTheme.wordmark)'s signature changed since the last launch — the permission grants may be stale until re-granted."
+                ? "\(LoreBrand.wordmark)'s signature changed since the last launch — the permission grants may be stale until re-granted."
                 : "The app isn't signed with a recognized certificate."
         case .diskSpace: return "Free disk space is low."
         case .accessibility: return "Accessibility permission isn't granted — the Fn key can't insert text."
         case .inputMonitoring: return "Input Monitoring permission isn't granted — the hotkey can't be seen."
-        case .tap: return "\(LoreTheme.wordmark)'s shortcuts aren't reaching it while other apps are focused (the event tap is dead or starved)."
+        case .tap: return "\(LoreBrand.wordmark)'s shortcuts aren't reaching it while other apps are focused (the event tap is dead or starved)."
         case .paste: return "The last paste posted no keystrokes — the dictated text stayed on the clipboard."
-        case .secureInput: return "Secure input is active, blocking the hotkey."
+        case .secureInput: return "Another app holds secure input, so \(LoreBrand.wordmark)'s keyboard shortcuts are off."
         case .microphone: return "Microphone permission isn't granted."
         case .micCapture: return "The last microphone capture failed."
         case .asrModel: return "The transcription model isn't installed."
         case .vadModel: return "The voice-activity model couldn't be loaded."
         case .modelWarmup: return "The last model warm-up failed."
-        case .openAIKey: return "No OpenAI key is set — cleanup, translation and Ask \(LoreTheme.wordmark) are off."
+        case .openAIKey: return "No OpenAI key is set — cleanup, translation and Ask \(LoreBrand.wordmark) are off."
         case .openAILiveness: return "The last OpenAI check failed."
         case .systemAudio: return "The last system-audio capture failed."
         case .notesFolder: return "Some meeting files couldn't be moved out of the Documents folder — both copies were kept."

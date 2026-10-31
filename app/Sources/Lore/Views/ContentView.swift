@@ -1,3 +1,5 @@
+import LoreCore
+import LoreFormat
 import SwiftUI
 
 struct ContentView: View {

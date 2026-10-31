@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 import os
 import Observation
 import CoreAudio
@@ -492,6 +493,7 @@ final class LiveSessionController {
         if let recording {
             let meta = await recording.close()
             releaseFromEngine(recording)
+            var savedTo: URL?
             if let settings, settings.saveAudioRecording {
                 if await coordinator.sessionRepository.markExportPending(
                     sessionID: sessionID, name: recording.exportName, meta: meta
@@ -501,13 +503,25 @@ final class LiveSessionController {
                     // No marker, so nothing would keep the tracks for the
                     // healer's export: the recording is saved here, now,
                     // before anything can remove them. Rare, and awaited.
-                    await recording.exportNow(meta, into: URL(fileURLWithPath: settings.notesFolderPath))
+                    savedTo = await recording.exportNow(meta, into: URL(fileURLWithPath: settings.notesFolderPath))
+                    // The tracks go against this file only once the session
+                    // holds its name, which the player finds it by (#330).
+                    if let saved = savedTo, await !coordinator.sessionRepository.recordSavedRecording(
+                        sessionID: sessionID, name: saved.lastPathComponent) {
+                        savedTo = nil
+                    }
                 }
+            } else if settings != nil {
+                // The owner turned saving off: the one thing besides a saved
+                // recording that lets the tracks go (#330). A missing key reads
+                // as on, and a meeting stopped without settings keeps them.
+                await coordinator.sessionRepository.markSavingDeclined(sessionID: sessionID)
             }
             if let settings, !settings.enableBatchRefinement {
                 // No batch pass, so nothing will read the tracks again but the
-                // export, which removes them when it is done.
-                await coordinator.sessionRepository.cleanupBatchAudio(sessionID: sessionID)
+                // export, which removes them when it is done — and only once
+                // the merged recording holds them (#330).
+                await coordinator.sessionRepository.cleanupBatchAudio(sessionID: sessionID, savedTo: savedTo)
             }
         }
 
@@ -559,7 +573,7 @@ final class LiveSessionController {
             releaseFromEngine(recording)
         }
         if let discardedSessionID {
-            await coordinator.sessionRepository.cleanupBatchAudio(sessionID: discardedSessionID)
+            await coordinator.sessionRepository.discardBatchAudio(sessionID: discardedSessionID)
         }
         await coordinator.sessionRepository.endSession()
 

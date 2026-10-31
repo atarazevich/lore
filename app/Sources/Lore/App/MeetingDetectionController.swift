@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import LoreCore
 import Observation
 import os
 

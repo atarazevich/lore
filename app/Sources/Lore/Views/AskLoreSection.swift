@@ -1,3 +1,5 @@
+import LoreCore
+import LoreFormat
 import SwiftUI
 
 // MARK: - Chat model
@@ -244,7 +246,7 @@ struct AskLoreSection: View {
                     .font(.system(size: 13))
                     .foregroundStyle(LoreTheme.Accent.amber)
                     .accessibilityHidden(true)
-                Text("Ask \(LoreTheme.wordmark)")
+                Text("Ask \(LoreBrand.wordmark)")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(LoreTheme.TextColor.primary)
             }
@@ -281,8 +283,8 @@ struct AskLoreSection: View {
     private var emptyState: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text(isLive
-                 ? "Ask anything about what\u{2019}s being said \u{2014} \(LoreTheme.wordmark) answers from the live transcript."
-                 : "Ask anything about this meeting \u{2014} \(LoreTheme.wordmark) answers from its transcript.")
+                 ? "Ask anything about what\u{2019}s being said \u{2014} \(LoreBrand.wordmark) answers from the live transcript."
+                 : "Ask anything about this meeting \u{2014} \(LoreBrand.wordmark) answers from its transcript.")
                 .font(.system(size: 12.5))
                 .foregroundStyle(LoreTheme.TextColor.muted)
                 .lineSpacing(3)
@@ -380,7 +382,7 @@ struct AskLoreSection: View {
                 Color.white.opacity(0.05),
                 in: RoundedRectangle(cornerRadius: 8)
             )
-            .accessibilityLabel("\(LoreTheme.wordmark) is thinking")
+            .accessibilityLabel("\(LoreBrand.wordmark) is thinking")
     }
 
     // MARK: Input

@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 import os
 
 /// The clipboard door (#192): while a dictation records, anything the user

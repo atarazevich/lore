@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 
 /// Refines utterances by cleaning up filler words and fixing punctuation via LLM.
 /// Runs as a background actor with bounded concurrency.

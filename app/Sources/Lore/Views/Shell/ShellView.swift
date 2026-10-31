@@ -1,3 +1,4 @@
+import LoreCore
 import SwiftUI
 import Sparkle
 
@@ -230,7 +231,7 @@ private struct ShellSidebar: View {
         HStack(spacing: 10) {
             Image(nsImage: LoreMark.chip)
                 .accessibilityHidden(true)
-            Text(LoreTheme.wordmark)
+            Text(LoreBrand.wordmark)
                 .font(LoreTheme.Typography.control)
                 .kerning(-0.13) // CSS `.brand .name` letter-spacing -.01em at 13px
                 .foregroundStyle(LoreTheme.TextColor.primary)

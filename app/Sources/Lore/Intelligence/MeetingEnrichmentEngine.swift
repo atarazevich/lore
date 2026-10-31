@@ -1,39 +1,9 @@
 import Foundation
+import LoreCore
+import LoreFormat
 import os
 
-#if canImport(FoundationModels)
-import FoundationModels
-#endif
-
 private let enrichLog = Logger(subsystem: "com.lore.app", category: "Enrichment")
-
-#if canImport(FoundationModels)
-/// Guided-generation schema (#107). Prompt and guide texts were validated on
-/// real transcripts in `experiments/enrichment` — keep their substance. The
-/// type definitions matter: an earlier, looser wording misclassified
-/// personal conversations as work.
-@available(macOS 26.0, *)
-@Generable
-private enum MeetingType: String {
-    case work
-    case personal
-}
-
-@available(macOS 26.0, *)
-@Generable
-private struct GeneratedEnrichment {
-    @Guide(description: "Short specific title naming the concrete conversation topic, max 6 words, in the transcript's dominant language. Name the actual subject, not a generic category.")
-    var title: String
-    @Guide(description: "personal = family, friends, relationships, health, errands, leisure, everyday life. work = job tasks, business deals, clients, colleagues, contracts, projects. If the conversation is mostly everyday life, it is personal even if a job is mentioned in passing.")
-    var type: MeetingType
-    @Guide(description: "Personal names of people mentioned in the conversation (people talked about or addressed). Proper names only — never pronouns, no roles, no companies, no invented names. Empty list if none.")
-    var people: [String]
-    @Guide(description: "Names of companies, organizations, or clients mentioned in the conversation. Real organization names only — no people, no roles, no invented names. Empty list if none.")
-    var organizations: [String]
-    @Guide(description: "1-2 short factual sentences: what was discussed and what was decided or planned, in the transcript's dominant language. Concrete facts only — never describe the tone, emotions, or the conversation itself.")
-    var summary: String
-}
-#endif
 
 /// Meeting auto-enrichment (#107): after a meeting ends — and once per
 /// existing meeting via the launch sweep — Apple Foundation Models generate,
@@ -48,19 +18,9 @@ private struct GeneratedEnrichment {
 /// Manual titles are never overwritten: only a nil title or the untouched
 /// derived default (#58) is replaced.
 actor MeetingEnrichmentEngine {
-    /// What one run produced, whatever made it.
-    struct Enrichment: Sendable {
-        var title: String
-        /// "work" or "personal".
-        var type: String
-        var people: [String]
-        var organizations: [String]
-        var summary: String
-    }
-
-    /// Prompt → enrichment. Production uses the on-device model; tests hand
-    /// in their own.
-    typealias Summarize = @Sendable (_ prompt: String) async throws -> Enrichment
+    /// Transcript lines → enrichment. Production uses the on-device model;
+    /// tests hand in their own.
+    typealias Summarize = @Sendable (_ lines: [String]) async throws -> MeetingEnrichment.Result
 
     private let repository: SessionRepository
     /// UI refresh hook, called after a session's enrichment writes land.
@@ -84,14 +44,7 @@ actor MeetingEnrichmentEngine {
     /// ready, or a summarizer handed in. Without it, a summary that exists is
     /// kept (#269).
     nonisolated var canSummarize: Bool {
-        summarize != nil || Self.isAvailable
-    }
-
-    static var isAvailable: Bool {
-        #if canImport(FoundationModels)
-        if #available(macOS 26.0, *), case .available = SystemLanguageModel.default.availability { return true }
-        #endif
-        return false
+        summarize != nil || MeetingEnrichment.isAvailable
     }
 
     /// Enrich one session if it has a transcript and no summary yet. Actor
@@ -120,12 +73,14 @@ actor MeetingEnrichmentEngine {
         guard !lines.isEmpty else { return false }
 
         do {
-            let prompt = "Transcript:\n\(Self.clipped(lines))\n\nProduce the title, type, people, organizations, and summary."
-            let result: Enrichment
+            let result: MeetingEnrichment.Result
             if let summarize {
-                result = try await summarize(prompt)
+                result = try await summarize(lines)
+            } else if let generated = try await MeetingEnrichment.generate(forTranscript: lines) {
+                result = generated
             } else {
-                result = try await Self.onDevice(prompt)
+                enrichLog.debug("enrichment failed for \(sessionID, privacy: .private): on-device model unavailable")
+                return false
             }
             guard await apply(result, sessionID: sessionID, lines: lines) else { return true }
             enrichLog.debug("enriched \(sessionID, privacy: .private)")
@@ -136,21 +91,6 @@ actor MeetingEnrichmentEngine {
             enrichLog.debug("enrichment failed for \(sessionID, privacy: .private): \(error.localizedDescription, privacy: .private)")
         }
         return false
-    }
-
-    private struct Unavailable: Error {}
-
-    private static func onDevice(_ prompt: String) async throws -> Enrichment {
-        #if canImport(FoundationModels)
-        guard #available(macOS 26.0, *) else { throw Unavailable() }
-        let session = LanguageModelSession(model: SystemLanguageModel.default, instructions: instructions)
-        let result = try await session.respond(to: prompt, generating: GeneratedEnrichment.self).content
-        return Enrichment(
-            title: result.title, type: result.type.rawValue, people: result.people,
-            organizations: result.organizations, summary: result.summary)
-        #else
-        throw Unavailable()
-        #endif
     }
 
     /// Launch backfill: every session with a transcript and no summary,
@@ -169,7 +109,7 @@ actor MeetingEnrichmentEngine {
 
     /// False, writing nothing, when the lines the result was made from are no
     /// longer what the meeting reads.
-    private func apply(_ result: Enrichment, sessionID: String, lines: [String]) async -> Bool {
+    private func apply(_ result: MeetingEnrichment.Result, sessionID: String, lines: [String]) async -> Bool {
         // The model call takes seconds — re-load the index right before
         // writing so a rename or tag edit made during inference wins.
         let index = await repository.sessionIndex(sessionID: sessionID)
@@ -193,7 +133,7 @@ actor MeetingEnrichmentEngine {
         // from the user's, so a name the owner corrected can stay as a tag.
         let existing = index.tags ?? []
         let appended = Self.filteredTags(
-            [result.type] + result.people + result.organizations
+            [result.type.rawValue] + result.people + result.organizations
         )
         await repository.updateSessionTags(sessionID: index.id, tags: existing + appended)
 
@@ -243,24 +183,5 @@ actor MeetingEnrichmentEngine {
                   !pronounStoplist.contains(trimmed.lowercased()) else { return nil }
             return trimmed
         }
-    }
-
-    // MARK: - Prompt assembly (validated in experiments/enrichment)
-
-    private static let instructions = """
-    You label voice-meeting transcripts. Each line starts with its speaker: "You" (the device owner), or another participant — "Them", "Speaker N" or their name. Speech-to-text noise and misrecognized words are expected — infer the intended meaning. Always answer in the dominant language of the transcript itself.
-    """
-
-    /// Character budget fitting the ~4k-token on-device context window.
-    private static let promptBudget = 5000
-
-    /// Head+tail truncation: keeps the opening and the close of the meeting,
-    /// where the topic and the decisions live. Mid-line cuts are fine — the
-    /// instructions already tell the model to tolerate STT noise.
-    private static func clipped(_ lines: [String]) -> String {
-        let full = lines.joined(separator: "\n")
-        if full.count <= promptBudget { return full }
-        let half = promptBudget / 2
-        return String(full.prefix(half)) + "\n[...]\n" + String(full.suffix(half))
     }
 }

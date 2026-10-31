@@ -1,4 +1,5 @@
 import AVFoundation
+import LoreCore
 import SwiftUI
 import CoreAudio
 import LaunchAtLogin
@@ -89,6 +90,7 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 20) {
                     generalSection.id(SettingsSection.general)
                     talkSection.id(SettingsSection.talk)
+                    historySection
                     copyingSection.id(SettingsSection.copying)
                     agentRepliesSection
                     readAloudSection.id(SettingsSection.readAloud)
@@ -109,6 +111,15 @@ struct SettingsView: View {
             }
         }
         .accessibilityIdentifier("settings.form")
+        // iPhone notes (#309): read on turning on; off, the last reading goes,
+        // so turning on again shows nothing stale.
+        .onChange(of: settings.meetingsEnabled && settings.showPhoneNotes) { _, on in
+            if on {
+                coordinator.phoneNoteImporter?.refresh()
+            } else {
+                coordinator.phoneNoteImporter?.switchedOff()
+            }
+        }
         .sheet(isPresented: $showAutoDetectExplanation) {
             autoDetectExplanationSheet
         }
@@ -146,7 +157,7 @@ struct SettingsView: View {
         SettingsSectionCard(label: "General") {
             SettingsRow(
                 name: "Launch at login",
-                sub: "Start \(LoreTheme.wordmark) when your Mac starts"
+                sub: "Start \(LoreBrand.wordmark) when your Mac starts"
             ) {
                 // Existing SMAppService wrapper — semantics and default unchanged.
                 LaunchAtLogin.Toggle("Launch at login")
@@ -276,7 +287,7 @@ struct SettingsView: View {
     }
 
     private var fnTakenNote: String {
-        "macOS is using Fn for \(FnKeySetting.current().label) \u{2014} \(LoreTheme.wordmark) won't see your hold."
+        "macOS is using Fn for \(FnKeySetting.current().label) \u{2014} \(LoreBrand.wordmark) won't see your hold."
     }
 
     /// DSET-21: cleanup/translate need a key; warn while either default is on
@@ -290,7 +301,7 @@ struct SettingsView: View {
     /// liveness verdict — checking… / rejected (red) / OK (muted). An
     /// inconclusive probe (offline) falls back to the neutral description.
     private var openAIKeySub: String {
-        let powers = "cleanup, translation, refinement, Ask \(LoreTheme.wordmark)"
+        let powers = "cleanup, translation, refinement, Ask \(LoreBrand.wordmark)"
         if openAIKeyWarningActive { return "OpenAI API key required" }
         guard !settings.openaiApiKey.isEmpty else { return "Powers \(powers)" }
         switch keyHealth {
@@ -897,6 +908,40 @@ struct SettingsView: View {
         }
     }
 
+    // MARK: - History (#243, dictation-delete.html §03)
+
+    /// The one action on what lore has kept. The count is read live from
+    /// history, like the strip's, so the two never disagree.
+    private var historySection: some View {
+        let history = coordinator.dictationCoordinator.history
+        let count = history.entries.count
+        return SettingsSectionCard(label: "History") {
+            SettingsRow(name: "Dictation history", sub: DictationDeleteCopy.historyLine(count)) {
+                Button {
+                    DictationDeleteConfirmation.ask(
+                        DictationDeleteRequest(Set(history.entries.map(\.id)), all: true, in: history),
+                        history: history
+                    )
+                } label: {
+                    Text("Delete All")
+                        .font(.system(size: 12.5, weight: .semibold))
+                        .foregroundStyle(LoreTheme.TextColor.primary)
+                        .padding(.vertical, 5)
+                        .padding(.horizontal, 12)
+                        .background(LoreTheme.Surface.card3, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip))
+                }
+                .buttonStyle(LorePressButtonStyle())
+                .disabled(count == 0)
+                .opacity(count == 0 ? 0.4 : 1)
+            }
+            .accessibilityIdentifier("settings.dictationHistory")
+        }
+        // What Keep audio says is on disk follows a delete.
+        .onChange(of: count) {
+            if isActiveInShell { refreshAudioDiskUsage() }
+        }
+    }
+
     // MARK: - Keep audio (#52)
 
     /// Cycle order for the retention value button; 0 is the unlimited sentinel.
@@ -1032,30 +1077,7 @@ struct SettingsView: View {
                 sub: "Translate to English before inserting",
                 isOn: $settings.modifierTranslateEnabled
             )
-            LoreDivider()
-            operatorRow
         }
-    }
-
-    /// The Fn+K master switch (#223), in the shape the Meetings switch (#221)
-    /// established: one row that names the feature, whose second line says what
-    /// the key does while on and what is gone while off. The two never stand
-    /// together — a row promising the key marks a dictation, above a line
-    /// saying the key does nothing, would contradict itself on screen.
-    ///
-    /// No disabled state while a dictation records, unlike the Meetings row:
-    /// arming is per recording, so flipping the switch mid-dictation strands
-    /// nothing — the letter leaves the bubble and the next press does nothing.
-    private var operatorRow: some View {
-        modifierRow(
-            key: "K",
-            name: "Send to the operator",
-            sub: settings.operatorSendEnabled
-                ? "K while recording marks the dictation for your operator."
-                : "K is gone from the bubble and the key does nothing. "
-                    + "Dictations already marked keep their mark.",
-            isOn: $settings.operatorSendEnabled
-        )
     }
 
     /// Modifier row: 64px static key chip (the shared `.keybtn` spec, not
@@ -1188,6 +1210,31 @@ struct SettingsView: View {
             sub: "Re-transcribes the recording with full context in the background",
             isOn: $settings.enableBatchRefinement
         )
+        // Depends on the row above (#308, meeting-speakers-switch.html §01):
+        // indented as System Settings indents a dependent row, its divider
+        // starting at the indent, and gone while Enhance is off.
+        if settings.enableBatchRefinement {
+            LoreDivider()
+                .padding(.leading, 36)
+            toggleRow(
+                "Separate speakers",
+                sub: "Works out who said what after each meeting",
+                isOn: $settings.separateSpeakers
+            )
+            .padding(.leading, 20)
+            .help("When off, lore keeps both sides' audio (about 35 MB per hour) so you can find who spoke later.")
+        }
+        LoreDivider()
+        // Notes from the iPhone (#309, phone-notes-on-mac.html §01): off by
+        // default; turning it on is the first read of the iCloud folder.
+        toggleRow(
+            "Show notes from iPhone",
+            sub: "They arrive through iCloud Drive",
+            isOn: $settings.showPhoneNotes
+        )
+        if settings.showPhoneNotes, let importer = coordinator.phoneNoteImporter {
+            PhoneNotesLines(importer: importer)
+        }
     }
 
     private struct MicOption: Identifiable {
@@ -1249,7 +1296,7 @@ struct SettingsView: View {
                 .font(.headline)
 
             VStack(alignment: .leading, spacing: 10) {
-                Label("\(LoreTheme.wordmark) watches for microphone activation by meeting apps (Zoom, Teams, FaceTime, etc.)", systemImage: "mic")
+                Label("\(LoreBrand.wordmark) watches for microphone activation by meeting apps (Zoom, Teams, FaceTime, etc.)", systemImage: "mic")
                 Label("Only activation status is checked. No audio is captured or recorded until you accept.", systemImage: "lock.shield")
                 Label("When a meeting is detected, you get a macOS notification to start transcribing.", systemImage: "bell")
                 Label("You can always dismiss the notification or mark it as \"not a meeting\".", systemImage: "hand.raised")
@@ -1453,7 +1500,7 @@ struct SettingsView: View {
             LoreDivider()
             SettingsRow(
                 name: "Locale",
-                sub: "Parakeet TDT v3 auto-detects speech language. Use this field to set your expected meeting language for metadata and export."
+                sub: "The spoken language is detected automatically. Use this field to set your expected meeting language for metadata and export."
             ) {
                 chipField("e.g. en-US", text: $settings.transcriptionLocale, width: 120)
             }
@@ -1594,6 +1641,8 @@ struct SettingsView: View {
         scheduleKeyProbe(debounce: false)
         refreshAudioDiskUsage()
         refreshSpeechifyVoices()
+        // The iCloud Drive line is checked when Settings opens, never cached (#309).
+        coordinator.phoneNoteImporter?.refresh()
         Task { @MainActor in
             automaticallyChecksForUpdates = updater.automaticallyChecksForUpdates
             templates = coordinator.templateStore.templates

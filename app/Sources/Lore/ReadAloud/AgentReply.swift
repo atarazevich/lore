@@ -10,6 +10,7 @@ import os
 /// ones that shell could not answer.
 struct AgentReply: Codable, Sendable, Equatable, Identifiable {
     var id = UUID()
+    /// When lore took it in: what its row's time is drawn from (#264).
     var receivedAt = Date()
     /// What was said and where from: the text, the voice, the chat's name, the
     /// host terminal, the herdr pane, tab and workspace, the Claude Code
@@ -22,59 +23,41 @@ struct AgentReply: Codable, Sendable, Equatable, Identifiable {
     var said: CLISayRequest
 }
 
-/// Which chat a reply came from, in the two lines the player prints and the
-/// words it says before reading (#267).
+/// Which chat a reply came from: the name its row prints and the words said
+/// before reading (#267, the row since #264).
 ///
 /// The owner reads three different names for one chat: the workspace and tab he
 /// typed in herdr, the topic Claude Code writes into the terminal title, and the
-/// folder. Only the first is what he is looking at, so it is the first line; the
-/// rest is the second. Nothing here is guessed: a herdr that cannot be asked, or
-/// a reply stored before this existed, falls back to the name the sending shell
-/// recorded.
+/// folder. Only the first is what he is looking at, so a row is named by the
+/// tab, and the workspace follows only where two chats in the list share a tab's
+/// name (`workspacesShown`). Nothing here is guessed: a herdr that cannot be
+/// asked, or a reply stored before this existed, falls back to the name the
+/// sending shell recorded.
 struct AgentChatName: Equatable, Sendable {
-    /// Between the workspace and its tab, as the board prints it.
-    static let inHerdr = " \u{203A} "
-    /// Between the parts of the second line.
-    static let between = " \u{00B7} "
-
-    /// The labels in herdr's own bar, both or neither: a dangling `›` is not a
-    /// name, and a workspace alone says less than the folder the reply carries.
+    /// The labels in herdr's own bar, both or neither: a workspace with no tab
+    /// is not a name, and a workspace alone says less than the name the reply
+    /// carries.
     let workspace: String?
     let tab: String?
     /// The name the sending shell gave its own chat — the session's hand-given
     /// name, else its folder. What stands when herdr names no labels at all.
     let stored: String
-    /// `Invoice totals are off by a cent · ledger-api · herdr`: the topic,
-    /// the folder, and the app the chat runs in. Each part is left out when it
-    /// says nothing, the topic goes when it is the tab's own label, and the
-    /// folder goes when the first line is already the folder.
-    let meta: String
 
-    /// `ledger › invoices + api` in herdr; the chat's own stored name outside it.
-    var line: String {
-        guard let workspace, let tab else { return stored }
-        return workspace + Self.inHerdr + tab
-    }
+    /// What the row calls the chat (board v4.0 §02): the tab as he typed it;
+    /// outside a workspace, the session's own name.
+    var title: String { tab ?? stored }
 
-    /// The announcement, read on its own before the reply: the same two names,
-    /// with the separator spoken as a pause.
+    /// The announcement, read on its own before the reply: the workspace and
+    /// the tab, with the separator spoken as a pause.
     var spoken: String {
         guard let workspace, let tab else { return stored }
         return "\(workspace), \(tab)"
     }
 
-    /// What the row says on hover: both lines whole, because both of them cut
-    /// (board §05).
-    var tooltip: String {
-        meta.isEmpty ? line : line + "\n" + meta
-    }
-
-    /// - Parameters:
-    ///   - herdr: the last live reading, whose labels win over the ones stored
-    ///     with the reply — so a tab renamed since it arrived shows its new name.
-    ///   - app: the host app as this Mac names it ("Ghostty"), for a chat
-    ///     outside herdr; inside herdr the app that matters is herdr itself.
-    init(reply: AgentReply, herdr: HerdrReading?, app: String? = nil) {
+    /// - Parameter herdr: the last live reading, whose labels win over the ones
+    ///   stored with the reply — so a tab renamed since it arrived shows its
+    ///   new name.
+    init(reply: AgentReply, herdr: HerdrReading?) {
         let live = { (id: String?, labels: [String: String]?) -> String? in
             id.flatMap { labels?[$0] }.flatMap { $0.isEmpty ? nil : $0 }
         }
@@ -89,25 +72,15 @@ struct AgentChatName: Equatable, Sendable {
             self.tab = nil
         }
         stored = reply.said.name
+    }
 
-        let topic = reply.said.topic.flatMap { written -> String? in
-            guard !written.isEmpty else { return nil }
-            // A topic that is the tab's own label says it twice.
-            return written.caseInsensitiveCompare(tab ?? "") == .orderedSame ? nil : written
-        }
-        let folder = reply.said.cwd.flatMap {
-            $0.isEmpty ? nil : URL(fileURLWithPath: $0).lastPathComponent
-        }
-        // …and neither does the folder, when the first line is already it.
-        let inHerdr = AgentChatNavigator.isInHerdr(reply)
-        let first = self.workspace == nil ? stored : ""
-        meta = [
-            topic,
-            folder.flatMap { $0.caseInsensitiveCompare(first) == .orderedSame ? nil : $0 },
-            inHerdr ? "herdr" : app
-        ]
-            .compactMap { $0 }
-            .joined(separator: Self.between)
+    /// The workspace each of these rows carries after its name (board v4.0
+    /// §02), in their order: a row's own workspace when another row in the list
+    /// has the same title in another workspace — or in none — and nil for every
+    /// other row. Computed from the list as it is drawn, never stored.
+    static func workspacesShown(for names: [AgentChatName]) -> [String?] {
+        let places = Dictionary(grouping: names, by: \.title).mapValues { Set($0.map(\.workspace)) }
+        return names.map { (places[$0.title]?.count ?? 0) > 1 ? $0.workspace : nil }
     }
 }
 
@@ -128,8 +101,8 @@ struct AgentReplyQueue: Codable, Sendable, Equatable {
     /// Index of the current reply; `replies.count` means past the end.
     private(set) var position: Int
     /// The replies reading has begun on, or Next skipped past — the one fact
-    /// the waiting count, the capsule, the faded rows and `moveToFirstWaiting`
-    /// all read (#266). A reply waits until it is one of these and never after:
+    /// the waiting count, the capsule, the rows' "not heard yet" dot and
+    /// `moveToFirstWaiting` all read (#266). A reply waits until it is one of these and never after:
     /// reading only moves forward, so nothing returns to one left half-way, and
     /// a quit in the middle of a reply leaves it read rather than counted for
     /// ever as something the player will never speak.
@@ -153,12 +126,20 @@ struct AgentReplyQueue: Codable, Sendable, Equatable {
         current == nil ? nil : position
     }
 
+    /// The reply the player has open as its card (#264): the current one, and
+    /// past the last reply — reading has run out — the last one, so the chat
+    /// that just spoke can still be answered. Nil only for an empty queue.
+    var openIndex: Int? {
+        replies.isEmpty ? nil : min(position, replies.count - 1)
+    }
+
     /// How many replies are still waiting. A mark is only ever kept for a reply
     /// the queue holds — the init intersects, `append` removes — so the two
     /// counts differ by exactly them.
     var waitingCount: Int { replies.count - startedIDs.count }
 
-    /// The same set as rows — what the player draws faded.
+    /// The same set as rows — the ones the player draws without the dot that
+    /// marks a reply not heard yet (#264).
     var startedIndices: Set<Int> {
         Set(replies.indices.filter { startedIDs.contains(replies[$0].id) })
     }

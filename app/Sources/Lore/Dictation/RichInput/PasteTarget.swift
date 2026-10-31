@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 
 /// Which form a dictation's items take in the app that is about to receive the
 /// paste (#195). Two forms, because there are two kinds of reader: an agent
@@ -7,16 +8,8 @@ import AppKit
 ///
 /// A `String` raw value so the choice can ride in a `DiagEvent` without opening
 /// a free-form field (#82).
-enum PasteTarget: String, Codable, Sendable, CaseIterable {
-    /// A terminal, or an editor that hosts a command-line agent: an item is its
-    /// absolute path in the text, and the whole dictation is one paste — the
-    /// form #192 ships.
-    case path
-    /// Everything else — a web chat composer, a native chat app: a picture or a
-    /// file travels on the pasteboard as a file, and the text names it by the
-    /// filename the composer will show.
-    case web
-
+// The cases are declared in LoreCore beside `DiagEvent`, which carries them (#305).
+extension PasteTarget {
     /// The apps whose reader opens files by path. Deliberately a list of bundle
     /// ids rather than a heuristic: "can this app read a path" is not a question
     /// that can be asked of a running process, and a wrong guess costs the user

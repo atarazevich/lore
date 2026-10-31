@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 import os
 
 /// Step 0 of #192, and nothing else: macOS 26.4 shipped an alert on

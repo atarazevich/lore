@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 import Observation
 
 /// The state and logic behind `ProblemReportView`, extracted so the honesty

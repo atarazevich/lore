@@ -1,4 +1,5 @@
 import Foundation
+import LoreCore
 
 enum UITestScenario: String {
     case launchSmoke

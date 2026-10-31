@@ -1,14 +1,18 @@
-// The `lore` command. Two things, neither of them done here: `lore transcribe
-// <audio file>` prints the file's transcript (#254) and `lore say "<text>"`
-// hands an agent's reply to lore to read aloud (#257). The running app does the
-// work — under its own permissions, so a file only lore may read (Full Disk
-// Access) works from a terminal that has no such grant — and this process only
-// carries the request there and the answer back.
+// The `lore` command. `lore transcribe <audio file>` prints the file's
+// transcript (#254) and `lore say "<text>"` hands an agent's reply to lore to
+// read aloud (#257): the running app does that work — under its own
+// permissions, so a file only lore may read (Full Disk Access) works from a
+// terminal that has no such grant — and this process only carries the request
+// there and the answer back. `lore search` and `lore show` (#301) read lore's
+// own files here, with the app open or not, and write nothing. `lore skill`
+// prints the agent skill.
 //
-// Design: docs/features/cli-transcribe.md, docs/features/agents-speak-through-lore.md.
+// Design: docs/features/cli-transcribe.md, docs/features/agents-speak-through-lore.md,
+// docs/features/cli.md.
 import AppKit
 import Darwin
 import LoreCLIKit
+import LoreFormat
 
 /// The app's bundle identifier — also the defaults domain its setup flag lives in.
 let appBundleID = "com.lore.app"
@@ -58,7 +62,7 @@ func runningAppLaunchDate() -> Date? {
 /// Opens lore without asking to bring it forward: the bundle this command lives
 /// in when there is one, whichever copy LaunchServices knows otherwise.
 func launchApp() -> Bool {
-    // ~/.local/bin/lore → …/Lore.app/Contents/Helpers/lore
+    // <a bin directory>/lore → …/Lore.app/Contents/Helpers/lore
     let executable = URL(fileURLWithPath: Bundle.main.executablePath ?? CommandLine.arguments[0])
         .resolvingSymlinksInPath()
     let bundle = executable.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()
@@ -102,11 +106,15 @@ func connectLaunchingIfNeeded(socketPath: String) -> Int32 {
 
 /// Prints what lore heard in the file, and opens lore when it is closed: a
 /// transcript is the whole point of the call, so it is worth a launch.
-func transcribe(typedPath: String) -> Never {
+/// With `speakers`, the transcript comes as speaker turns (#276).
+func transcribe(typedPath: String, speakers: Bool) -> Never {
     let noAnswer = "lore stopped before the transcript was ready — try again."
 
     // Resolved here: the app does not share this process's working directory.
-    let request = CLIRequest.transcribe(path: URL(fileURLWithPath: typedPath).standardizedFileURL.path)
+    let request = CLIRequest.transcribe(
+        path: URL(fileURLWithPath: typedPath).standardizedFileURL.path,
+        speakers: speakers ? true : nil
+    )
 
     // The connection stays open until the answer: closing it (Ctrl-C ends this
     // process) is what tells lore to stop.
@@ -115,9 +123,17 @@ func transcribe(typedPath: String) -> Never {
     let answer = CLISocket.readToEnd(fd)
     close(fd)
 
-    switch try? CLIWire.decode(CLIResponse.self, from: answer) {
-    case .transcript(let text, let complete):
+    let response = try? CLIWire.decode(CLIResponse.self, from: answer)
+    switch response {
+    case .transcript where speakers:
+        // A lore from before `--speakers` ignores the flag and answers plain
+        // text, which would pass for turns that were never told apart.
+        fail("This lore can't tell speakers apart — update lore, then try again.")
+    case .transcript(let text, let complete), .speakerTurns(let text, let complete, _):
         print(text)
+        if case .speakerTurns(_, _, found: false) = response {
+            warn("lore couldn't tell the speakers apart, so this is the plain transcript.")
+        }
         if !complete { warn(CLIResponse.incompleteMessage(file: typedPath)) }
         exit(0)
     case .failed(let reason, let complete):
@@ -207,10 +223,8 @@ func standardInputText() -> String {
 }
 
 /// Where this chat is, when it is shown in a herdr pane and herdr answers in
-/// time: the workspace and tab labels the owner typed, and the terminal title
-/// Claude Code writes for itself (#267). The labels are the player's fallback
-/// and what the very first reply of a launch is announced by; the title is the
-/// second line's topic.
+/// time: the workspace and tab labels the owner typed (#267) — the player's
+/// fallback, and what the very first reply of a launch is announced by.
 func herdrFacts(_ place: ChatPlace) -> HerdrPaneFacts? {
     guard let pane = place.herdrPaneID,
           let binary = Herdr.resolveBinary(),
@@ -235,20 +249,112 @@ func claudeSession(environment: [String: String]) -> ClaudeSessionFile? {
     return try? JSONDecoder().decode(ClaudeSessionFile.self, from: data)
 }
 
+// MARK: - search, show, skill (#301)
+
+/// Hits newest first, one a line, or as JSON. Reads only.
+func search(arguments: [String]) -> Never {
+    guard let search = ArchiveCommand.parseSearch(arguments) else { fail(ArchiveCommand.searchUsage, code: 64) }
+    let hits = LoreArchive().search(search.query)
+    if search.json {
+        guard let data = try? ArchiveCommand.json(hits) else { fail("lore couldn't write the results.") }
+        FileHandle.standardOutput.write(data)
+    } else if hits.isEmpty {
+        warn("Nothing found.")
+    } else {
+        for hit in hits { print(ArchiveCommand.line(hit)) }
+    }
+    exit(0)
+}
+
+/// One dictation's text, or one meeting's transcript. Reads only.
+func show(arguments: [String]) -> Never {
+    guard let show = ArchiveCommand.parseShow(arguments) else { fail(ArchiveCommand.showUsage, code: 64) }
+    let archive = LoreArchive()
+    guard let item = archive.item(show.id) else {
+        fail(show.id == "latest" ? "There are no dictations or meetings yet." : "There's no dictation or meeting \(show.id).")
+    }
+    let text = archive.render(item, notes: show.notes, raw: show.raw)
+    FileHandle.standardOutput.write(Data(text.utf8))
+    exit(0)
+}
+
+// MARK: - marks (#324)
+
+/// The marks no agent has taken, newest first, or one signed for.
+func marks(arguments: [String]) -> Never {
+    guard let command = ArchiveCommand.parseMarks(arguments) else { fail(ArchiveCommand.marksUsage, code: 64) }
+    let archive = LoreArchive()
+    switch command {
+    case .list(let json):
+        var query = LoreArchive.Query()
+        query.marked = true
+        query.limit = 0
+        let hits = archive.search(query)
+        if json {
+            guard let data = try? ArchiveCommand.json(hits) else { fail("lore couldn't write the results.") }
+            FileHandle.standardOutput.write(data)
+        } else if hits.isEmpty {
+            warn("No marks waiting.")
+        } else {
+            for hit in hits { print(ArchiveCommand.line(hit)) }
+        }
+        exit(0)
+    case .take(let id, let agent):
+        let result: LoreArchive.TakeResult
+        do {
+            result = try archive.take(id, by: agent)
+        } catch {
+            fail("lore couldn't record the take: \(error.localizedDescription)")
+        }
+        switch result {
+        case .taken:
+            print("Taken by \(agent).")
+        case .alreadyTaken(let first):
+            let when = first.at.formatted(date: .abbreviated, time: .shortened)
+            print("Taken by \(agent). It was already taken by \(first.by) on \(when); both takes are recorded.")
+        case .unknown:
+            fail("There's no dictation \(id).")
+        case .notMarked:
+            fail("Dictation \(id) isn't marked for later.")
+        case .transcribing:
+            // EX_TEMPFAIL: the same command works once its words are in.
+            fail("Dictation \(id) is still being transcribed. Nothing was recorded; take it once its words are in.", code: 75)
+        }
+        exit(0)
+    }
+}
+
 // MARK: - The command line
 
 let usage = """
-usage: lore transcribe <audio file>
+usage: lore transcribe [--speakers] <audio file>
        lore say [-v <voice>] [--dry-run] <text>
+       lore search <words> [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--dictations|--meetings] [--marked] [--limit N] [--json]
+       lore show <id|latest> [--notes] [--raw]
+       lore marks [--json]
+       lore marks take <id> --by <agent>
+       lore skill
 """
 
 let arguments = Array(CommandLine.arguments.dropFirst())
 switch arguments.first {
 case "transcribe":
-    guard arguments.count == 2 else { fail(usage, code: 64) }
-    transcribe(typedPath: arguments[1])
+    switch arguments.count {
+    case 2: transcribe(typedPath: arguments[1], speakers: false)
+    case 3 where arguments[1] == "--speakers": transcribe(typedPath: arguments[2], speakers: true)
+    default: fail(usage, code: 64)
+    }
 case "say":
     say(arguments: Array(arguments.dropFirst()))
+case "search":
+    search(arguments: Array(arguments.dropFirst()))
+case "show":
+    show(arguments: Array(arguments.dropFirst()))
+case "marks":
+    marks(arguments: Array(arguments.dropFirst()))
+case "skill":
+    guard arguments.count == 1 else { fail(usage, code: 64) }
+    FileHandle.standardOutput.write(Data(PackageResources.SKILL_md))
 default:
     fail(usage, code: 64)
 }

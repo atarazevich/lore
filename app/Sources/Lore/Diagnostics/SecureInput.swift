@@ -4,8 +4,8 @@ import IOKit
 
 /// Secure-input state, read one way by everyone who asks.
 ///
-/// While secure input is on, no app receives keystrokes and every CGEvent tap is
-/// starved — the prime suspect for "permissions granted, Fn dead".
+/// While secure input is on, every CGEvent tap is starved, so lore's keyboard
+/// shortcuts (Space, Esc, the letter chords) stop (#341).
 /// `IsSecureEventInputEnabled()` answers that for *our* session and is the only
 /// thing `active` rests on. The holding pid is a separate, weaker signal, and it
 /// is nested: `IOConsoleUsers` is a property of the IORegistry **root**, while
@@ -17,17 +17,18 @@ import IOKit
 /// The pid is a **hint, not an identification**: per rdar://48953777 the
 /// registry records whichever app was frontmost when secure input went on,
 /// which may not be the caller. Copy that names the holder must hedge
-/// accordingly — and for the two processes most likely to be frontmost at grab
-/// time, must not name them at all (`Attribution.misattributed`).
+/// accordingly ("Probably caused by …") — and the two system processes most
+/// likely to be frontmost at grab time, loginwindow and SecurityAgent, are
+/// never named (`lockScreen`, `nobody`).
 enum SecureInput {
     /// One reading. `active` may be true with no pid — the flag is set but no
     /// on-console session dict attributes it to a live process. That is a real,
     /// reportable state, not one to drop.
-    struct State {
+    struct State: Equatable {
         let active: Bool
 
         /// The pid the registry attributes secure input to, reported verbatim.
-        /// Suppression of a misattributed holder is a *display* rule: the raw
+        /// Not naming loginwindow or SecurityAgent is a *display* rule: the raw
         /// pid still reaches the report, where the operator needs the truth.
         let pid: Int32?
 
@@ -46,24 +47,38 @@ enum SecureInput {
         /// diagnosed). Every user-facing surface renders `attribution` instead;
         /// never a snapshot.
         let name: String?
+
+        /// The flag is up and the console is unlocked: lore's shortcuts are off
+        /// and the panel says so (#341). Behind a locked console the flag is
+        /// the lock screen protecting its password field — by design (#98).
+        var isProblem: Bool { active && !consoleLocked }
     }
 
     /// What the user-facing surfaces may say about the holder (#98).
     enum Attribution: Equatable, Sendable {
         /// A real app to point at — as a hedged hint, per rdar://48953777.
         case app(String)
+        /// Terminal or iTerm2: an app with its own Secure Keyboard Entry menu
+        /// item, which is the step the panel names (#341). Matched by bundle
+        /// id; the name is the app's own, so it matches the menu the user sees.
+        case terminal(String)
         /// No app owns the pid (a CLI or daemon holder has no
         /// `NSRunningApplication`) — the pid itself is the hint, and the case
         /// where the user most needs one (#92).
         case process(Int32)
-        /// loginwindow or SecurityAgent: the registry blames whichever process
-        /// was frontmost at grab time, and these two are what is frontmost when
-        /// a background process grabs the flag — so neither name nor pid is
-        /// shown (#98; canonical account in design §6).
-        case misattributed
-        /// The registry named nobody.
+        /// loginwindow: on an unlocked console, secure input left on by the
+        /// lock screen — seen live, a restart cleared it, and locking and
+        /// unlocking usually does (#341). Never named on screen (#98).
+        case lockScreen
+        /// Nobody to point at: the registry named nobody, or named SecurityAgent,
+        /// which is frontmost when a background process grabs the flag and so
+        /// says nothing about who holds it — no name, no pid (#98).
         case nobody
     }
+
+    /// Just the flag, for a caller that polls fast (the hint arbiter's 50 ms
+    /// tick, #341): no registry walk.
+    static var isOn: Bool { isEnabled() }
 
     /// The single reading both consumers use (#93), so the panel and the event
     /// stream cannot disagree about whether input is withheld.
@@ -130,21 +145,21 @@ enum SecureInput {
     /// doctrine as `holderPIDs(in:)`.
     static func attribution(pid: Int32?, identity: Identity?) -> Attribution {
         guard let pid else { return .nobody }
-        if isMisattributionSink(bundleID: identity?.bundleID, path: identity?.path) {
-            return .misattributed
+        let bundleID = identity?.bundleID
+        // loginwindow may lack an `NSRunningApplication` (the field holder was
+        // from boot, ppid 1), so the executable path is the fallback identity.
+        if bundleID == "com.apple.loginwindow"
+            || identity?.path == "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow" {
+            return .lockScreen
         }
-        if let name = identity?.name ?? identity?.bundleID { return .app(name) }
-        return .process(pid)
+        if bundleID == "com.apple.SecurityAgent" { return .nobody }
+        guard let name = identity?.name ?? bundleID else { return .process(pid) }
+        if let bundleID, terminalBundleIDs.contains(bundleID) { return .terminal(name) }
+        return .app(name)
     }
 
-    /// loginwindow may lack an `NSRunningApplication` (the field holder was from
-    /// boot, ppid 1), so the executable path is the fallback identity.
-    private static func isMisattributionSink(bundleID: String?, path: String?) -> Bool {
-        if bundleID == "com.apple.loginwindow" || bundleID == "com.apple.SecurityAgent" {
-            return true
-        }
-        return path == "/System/Library/CoreServices/loginwindow.app/Contents/MacOS/loginwindow"
-    }
+    /// The apps whose app menu carries a Secure Keyboard Entry item.
+    private static let terminalBundleIDs: Set<String> = ["com.apple.Terminal", "com.googlecode.iterm2"]
 
     private static func executablePath(_ pid: Int32) -> String? {
         var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))

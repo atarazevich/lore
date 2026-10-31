@@ -1,4 +1,5 @@
 import AppKit
+import LoreCore
 import SwiftUI
 
 // MARK: - View
@@ -83,7 +84,8 @@ private func elapsedWidth(_ seconds: Int, size: CGFloat) -> CGFloat {
 enum BubbleRailLetter: String, CaseIterable, Sendable {
     case cleanup = "V"
     case translate = "T"
-    case operatorSend = "K"
+    /// Mark for later (#324).
+    case mark = "K"
 }
 
 /// What order the letters stand in (#204).
@@ -98,7 +100,7 @@ enum BubbleRailLetter: String, CaseIterable, Sendable {
 /// and hint orderings were two byte-identical array literals kept in sync by
 /// hand, `armedOrder` and `restOrder`, and the hint one fell out of step: a
 /// holdover from the C era that #224 renamed but did not correct against
-/// `docs/design/prototypes/operator-switch.html`, which always drew `V T K`.
+/// the board, which always drew `V T K`.
 /// One array now, read for both purposes below — the desync that caused the
 /// bug is no longer a shape the code can hold.
 ///
@@ -110,24 +112,14 @@ enum BubbleRailLetter: String, CaseIterable, Sendable {
 enum BubbleRail {
     /// `V T K` — the rail's one reading order: what stands first when armed,
     /// and what opening appends for whatever is not armed yet.
-    static let readingOrder: [BubbleRailLetter] = [.cleanup, .translate, .operatorSend]
+    static let readingOrder: [BubbleRailLetter] = [.cleanup, .translate, .mark]
 
     /// - Parameter open: the bubble is widened. Closed, only the armed letters
     ///   are drawn at all.
-    /// - Parameter operatorSend: the Fn+K master switch (#223). Off, `K` is not
-    ///   a letter the rail has — the filter is here rather than at either
-    ///   caller because this is the one place that decides which letters exist,
-    ///   and armed and hint have to disappear together.
-    static func letters(
-        armed: Set<BubbleRailLetter>, open: Bool, operatorSend: Bool
-    ) -> [BubbleRailLetter] {
-        let standing = readingOrder.filter {
-            armed.contains($0) && ($0 != .operatorSend || operatorSend)
-        }
+    static func letters(armed: Set<BubbleRailLetter>, open: Bool) -> [BubbleRailLetter] {
+        let standing = readingOrder.filter { armed.contains($0) }
         guard open else { return standing }
-        return standing + readingOrder.filter {
-            !armed.contains($0) && ($0 != .operatorSend || operatorSend)
-        }
+        return standing + readingOrder.filter { !armed.contains($0) }
     }
 }
 
@@ -144,6 +136,9 @@ enum BubbleRail {
 /// stop meaning the dot.
 enum BubbleTipOwner: Hashable, Sendable {
     case dot, lock, waveform, timer, clip, count, gear
+    /// A failure face's sentence, for the one face with a line to add on hover
+    /// (#338).
+    case face
     case letter(BubbleRailLetter)
     case row(UUID)
 }
@@ -167,6 +162,20 @@ extension View {
         loreTipReport(
             owner, text, in: bubbleTipSpace, tip: hovered, pointer: { pointer.x = $0 }
         )
+    }
+
+    /// The same, for an element that has a line only sometimes — a failure
+    /// face's sentence (#338). No line, no report.
+    @ViewBuilder
+    fileprivate func bubbleTip(
+        _ owner: BubbleTipOwner, _ text: String?,
+        hovered: Binding<BubbleTip?>, pointer: BubblePointer
+    ) -> some View {
+        if let text {
+            bubbleTip(owner, text, hovered: hovered, pointer: pointer)
+        } else {
+            self
+        }
     }
 
     /// Where this element stands, for the hint that speaks from it (#235). A
@@ -565,14 +574,13 @@ struct DictationIndicatorView: View {
     /// cleared the moment the pipeline captures it, before transcription even
     /// starts (`DictationCoordinator.stopRecording`).
     var llmStage: UpgradeAction?
-    /// Fn+K armed or entry flagged (#122): the K letter stands lit in the rail
-    /// while the dictation carries it.
-    var operatorAddressed = false
+    /// The speech model has been loading past the coordinator's threshold
+    /// (#265): the working sentence names the wait, and the timer leaves.
+    var modelPreparing = false
+    /// Fn+K armed or entry marked (#324): the K letter stands lit in the rail
+    /// while the dictation carries the mark.
+    var marked = false
     var recordingSeconds: Int = 0
-    /// The Fn+K master switch (#223). Off, the K letter is on no surface —
-    /// neither armed nor as a hint. The poll is the authority; the default here
-    /// is what an unpolled model draws with, which the app never renders.
-    var operatorSendEnabled = true
     /// DSET-05: with Space-lock turned off there is no lock to offer, so the
     /// glyph is not drawn at all rather than standing there inert (#201).
     var lockEnabled = true
@@ -697,7 +705,7 @@ struct DictationIndicatorView: View {
     /// (#201).
     var onArmCleanup: (() -> Void)?
     var onArmTranslate: (() -> Void)?
-    var onArmOperator: (() -> Void)?
+    var onToggleMark: (() -> Void)?
     /// The gear opens Settings → Copying (#201).
     var onOpenSettings: (() -> Void)?
     /// A failure face's one action (#209) — which one it is, never what it does.
@@ -1091,6 +1099,13 @@ struct DictationIndicatorView: View {
         state == .recording && error == nil && !cancelled
     }
 
+    /// Whether a hover line may show: on the recording's elements, or on the
+    /// one failure face that has a line to add (#338) — which hangs in the
+    /// canvas the recording measured, tooltip room included.
+    private var tipsLive: Bool {
+        canExpand || (lastError?.pasteBlockedExtras != nil && canvas != nil)
+    }
+
     /// There is something collected, and a recording to show it for. With
     /// collecting off nothing is in the prompt, so there is no list either —
     /// turning it back on brings both back.
@@ -1102,7 +1117,7 @@ struct DictationIndicatorView: View {
     /// arrives at an element, and — while one is already up — the next element
     /// swaps in with none. It goes the moment the pointer leaves, or clicks.
     private func followTip() async {
-        guard let hovered = hoveredTip, canExpand else {
+        guard let hovered = hoveredTip, tipsLive else {
             // The elements are separated by real gaps — the row's 6, 9 and 10
             // point spacings and its dividers — and crossing one reports the
             // departure before the arrival. So a line already up is held for a
@@ -1110,7 +1125,7 @@ struct DictationIndicatorView: View {
             // swaps straight into it, which is the board's "no delay between
             // neighbours". Leaving the shape is not a gap — `pointerOnBubble`
             // is already false by the time this runs — and hides at once.
-            if shownTip != nil, pointerOnBubble, canExpand {
+            if shownTip != nil, pointerOnBubble, tipsLive {
                 try? await Task.sleep(for: .milliseconds(150))
                 guard !Task.isCancelled else { return }
             }
@@ -1152,8 +1167,11 @@ struct DictationIndicatorView: View {
         guard canExpand else {
             pointerExpanded = false
             railFadedIn = false
-            hoveredTip = nil
-            tipWarm = false
+            // A face with a line of its own keeps the pointer's (#338).
+            if !tipsLive {
+                hoveredTip = nil
+                tipWarm = false
+            }
             return
         }
         guard !pointerOnBubble else {
@@ -1290,7 +1308,9 @@ struct DictationIndicatorView: View {
             // from nowhere").
             liveRow(
                 open: open, measuring: measuring, paused: paused,
-                working: Self.workingLabel(for: state, llmStage: llmStage)
+                working: Self.workingLabel(
+                    for: state, llmStage: llmStage, modelPreparing: modelPreparing
+                )
             )
         }
     }
@@ -1304,10 +1324,16 @@ struct DictationIndicatorView: View {
     /// translate/cleanup call that follows it, which finishes quickly but was
     /// unnamed. `.processing` still reads "Transcribing" while `llmStage` is
     /// nil — the ASR call itself, or a raw dictation with no LLM step at all.
-    static func workingLabel(for state: DictationState, llmStage: UpgradeAction?) -> String? {
+    ///
+    /// `modelPreparing` (#265) replaces "Transcribing" while a load that has run
+    /// past ten seconds lasts; a real download keeps its own sentence.
+    static func workingLabel(
+        for state: DictationState, llmStage: UpgradeAction?, modelPreparing: Bool = false
+    ) -> String? {
         switch state {
         case .recording, .idle: nil
         case .loadingModel: "Downloading model\u{2026}"
+        case .processing where modelPreparing: preparingLine
         case .processing, .done:
             switch llmStage {
             case .cleanup: "Cleaning up\u{2026}"
@@ -1316,6 +1342,9 @@ struct DictationIndicatorView: View {
             }
         }
     }
+
+    /// The bubble's line during a long model load (`dictation-full-disk.html` §03).
+    static let preparingLine = "Preparing the speech model \u{2014} about a minute"
 
     // MARK: - Recording
 
@@ -1389,7 +1418,7 @@ struct DictationIndicatorView: View {
 
     /// One cap on the bubble's rail (#201, and Space's since #233). `armed` is
     /// what a letter reports about this dictation — cleanup or translate on
-    /// paste, the operator — and it is also why the letter stands in the
+    /// paste, the mark for later — and it is also why the letter stands in the
     /// resting bubble.
     private struct RailKey: Identifiable {
         /// What the key reads: its own letter on the keyboard.
@@ -1424,24 +1453,25 @@ struct DictationIndicatorView: View {
         )
     }
 
-    private var operatorKey: RailKey {
+    /// The copy is the board's (`dictation-mark.html` B1, B3): the outcome and
+    /// the key unlit, the state alone lit, as the row in history says it.
+    private var markKey: RailKey {
         RailKey(
-            label: BubbleRailLetter.operatorSend.rawValue, bright: operatorAddressed,
-            help: operatorAddressed ? "Going to the operator" : "Send to the operator (Fn+K)",
-            action: onArmOperator, armed: operatorAddressed, tip: .letter(.operatorSend)
+            label: BubbleRailLetter.mark.rawValue, bright: marked,
+            help: marked ? DictationMarkCopy.marked : DictationMarkCopy.markWithKey,
+            action: onToggleMark, armed: marked, tip: .letter(.mark)
         )
     }
 
     /// What this dictation already carries — the letters the resting bubble
     /// stands with, and what `BubbleRail` orders the open rail around. A plain
-    /// report of the dictation: whether a letter is *offered* at all is
-    /// `BubbleRail.letters`' decision, so an entry flagged before the operator
-    /// switch was turned off still reads as armed here and still draws nothing.
+    /// report of the dictation; what order they stand in is `BubbleRail.letters`'
+    /// decision.
     private var armedLetters: Set<BubbleRailLetter> {
         var armed: Set<BubbleRailLetter> = []
         if pendingMode == .cleanup { armed.insert(.cleanup) }
         if pendingMode == .translate { armed.insert(.translate) }
-        if operatorAddressed { armed.insert(.operatorSend) }
+        if marked { armed.insert(.mark) }
         return armed
     }
 
@@ -1456,7 +1486,7 @@ struct DictationIndicatorView: View {
     /// chord is untouched: `SpaceAction.decide` still locks, pauses and resumes.
     private func railKeys(open: Bool) -> [RailKey] {
         BubbleRail
-            .letters(armed: armedLetters, open: open, operatorSend: operatorSendEnabled)
+            .letters(armed: armedLetters, open: open)
             .map { key(for: $0) }
     }
 
@@ -1464,7 +1494,7 @@ struct DictationIndicatorView: View {
         switch letter {
         case .cleanup: cleanupKey
         case .translate: translateKey
-        case .operatorSend: operatorKey
+        case .mark: markKey
         }
     }
 
@@ -1711,9 +1741,9 @@ struct DictationIndicatorView: View {
 
         /// Which line a keycap stands in: the rail's own 11 pt row (the board's
         /// `.kb`), the 10.5 pt of a hint card's sentence (`.kc`, #235), or the
-        /// 9 pt of the replies player's one-line key strip (#263). Three sizes
-        /// of one plate, so a keycap in a strip cannot drift from a keycap on
-        /// the rail.
+        /// 10 pt of the replies player's key strip (`.pl-cap`, #264). Three
+        /// sizes of one plate, so a keycap in a strip cannot drift from a
+        /// keycap on the rail.
         enum KeycapLine { case rail, card, strip }
 
         /// The rail's keycap, P1's inline action wearing it (`.kb`/`.kb.on`),
@@ -1723,19 +1753,22 @@ struct DictationIndicatorView: View {
         ///
         /// One width per line now the Space cap is gone (#235): every plate on
         /// the rail is a single letter on the board's own `.kb` floor.
-        static func keycap(bright: Bool, _ line: KeycapLine = .rail) -> BubblePill {
+        ///
+        /// `plate` overrides the fill's white for a keycap standing on a ground
+        /// of its own — the replies strip's esc, on the plate rather than in
+        /// its group (#264).
+        static func keycap(bright: Bool, _ line: KeycapLine = .rail, plate: Double? = nil) -> BubblePill {
             let size: CGFloat = switch line {
             case .rail: 11
             case .card: 10.5
-            case .strip: 9
+            case .strip: 10
             }
-            let inset: CGFloat = line == .strip ? 3 : 4
             return BubblePill(
                 font: LoreTheme.Typography.mono(size, weight: .semibold),
-                insets: EdgeInsets(top: 0, leading: inset, bottom: 0, trailing: inset),
-                minWidth: line == .rail ? 18 : (line == .card ? 16 : 14),
-                minHeight: line == .rail ? 17 : (line == .card ? 15 : 14),
-                plate: bright ? 0.12 : 0.04,
+                insets: EdgeInsets(top: 0, leading: 4, bottom: 0, trailing: 4),
+                minWidth: line == .rail ? 18 : 16,
+                minHeight: line == .rail ? 17 : (line == .card ? 15 : 16),
+                plate: plate ?? (bright ? 0.12 : 0.04),
                 ink: bright ? LoreTheme.TextColor.primary : LoreTheme.TextColor.muted
             )
         }
@@ -1941,7 +1974,8 @@ struct DictationIndicatorView: View {
             // After the release it is the same view in a quieter tone, stopped
             // where it stopped (#209 T1) — and drawn at all only when this run
             // had a length of its own, which a history retry does not.
-            if working == nil || recordingSeconds > 0 {
+            // A long model load names its wait in place of the clock (#265).
+            if working == nil || (recordingSeconds > 0 && !modelPreparing) {
                 timerText(
                     recordingSeconds,
                     color: working == nil ? LoreTheme.TextColor.muted : LoreTheme.TextColor.faint
@@ -2337,28 +2371,33 @@ struct DictationIndicatorView: View {
     /// at unbounded width (one line), that 1-line height is locked in, and the
     /// later wrap clips vertically.
     private func failureFace(_ face: DictationFace) -> some View {
-        let wraps = Self.wraps(face.sentence)
+        // A face with its action in the row stays one row: the board draws it
+        // on one line, keycap past the hairline (#209 P1, #338 §03).
+        let wraps = !face.actionIsInline && Self.wraps(face.sentence)
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .firstTextBaseline, spacing: 10) {
-                Image(systemName: "xmark.circle.fill")
+                Image(systemName: face.isPastedNotInHistory
+                    ? "exclamationmark.circle.fill" : "xmark.circle.fill")
                     .font(.system(size: Self.faceGlyphSize))
-                    // Silence is not a bug the app caused, so it reads in the
+                    // Silence is not a bug the app caused, and a paste whose
+                    // take missed history worked (#265), so both read in the
                     // row's own muted tone; every other face reports a failure
                     // and reads red. Decoration either way — the sentence is
                     // the message (ui-language.md rule 4).
                     .foregroundStyle(
-                        face == .nothingCameThrough
+                        face == .nothingCameThrough || face.isPastedNotInHistory
                             ? LoreTheme.TextColor.muted : LoreTheme.Accent.red
                     )
                     .frame(width: Self.faceIconSide, height: Self.faceIconSide)
                     .onTextBaseline()
-                Text(face.sentence)
+                Text(Self.sentenceText(face))
                     .font(LoreTheme.Typography.body)
                     .foregroundStyle(LoreTheme.TextColor.primary)
                     .lineLimit(wraps ? nil : 1)
                     .multilineTextAlignment(.leading)
                     .frame(width: wraps ? Self.faceWrapWidth : nil, alignment: .leading)
                     .fixedSize(horizontal: false, vertical: true)
+                    .bubbleTip(.face, face.pasteBlockedExtras?.hoverLine, hovered: $hoveredTip, pointer: pointer)
                 if let action = face.action, face.actionIsInline {
                     groupDivider.onTextBaseline()
                     faceAction(action, .keycap(bright: true)).onTextBaseline()
@@ -2375,6 +2414,17 @@ struct DictationIndicatorView: View {
         // load-bearing on the row (ui-language.md rule 3), and the shape draws
         // its own hover cards only over the recording canvas (#207).
         .accessibilityHint(face.detail ?? "")
+    }
+
+    /// The sentence, with the keys it names set as a keycap in the run
+    /// (#338): mono, on the keycap plate, as the board draws `Cmd+V`.
+    static func sentenceText(_ face: DictationFace) -> AttributedString {
+        var text = AttributedString(face.sentence)
+        if let keys = face.pasteBlockedExtras?.keycap, let range = text.range(of: keys) {
+            text[range].font = .system(size: 11, weight: .semibold, design: .monospaced)
+            text[range].backgroundColor = LoreTheme.Surface.card3
+        }
+        return text
     }
 
     /// A face's one action on the plate the board gives it: P1's inline keycap,
@@ -2431,10 +2481,11 @@ final class DictationIndicatorModel {
     /// The LLM stage once transcription is done (2026-08-31) — nil during the
     /// ASR call and during a raw dictation with no LLM step.
     var llmStage: UpgradeAction?
-    var operatorAddressed = false
+    /// The speech model has been loading past ten seconds (#265).
+    var modelPreparing = false
+    /// Fn+K armed or entry marked (#324).
+    var marked = false
     var recordingSeconds: Int = 0
-    /// The Fn+K master switch (#223).
-    var operatorSendEnabled = true
     var lockEnabled = true
     /// The chosen talk key's keycap, for the lock tooltip (#226).
     var talkKeyName = HotkeyKey.fn.shortName
@@ -2461,7 +2512,7 @@ final class DictationIndicatorModel {
     var onToggleCollecting: (() -> Void)?
     var onArmCleanup: (() -> Void)?
     var onArmTranslate: (() -> Void)?
-    var onArmOperator: (() -> Void)?
+    var onToggleMark: (() -> Void)?
     var onOpenSettings: (() -> Void)?
     var onFaceAction: ((DictationFaceAction) -> Void)?
     /// Where the user drags the bubble (#213).
@@ -2491,9 +2542,9 @@ struct DictationIndicatorHost: View {
             isLocked: model.isLocked,
             pendingMode: model.pendingMode,
             llmStage: model.llmStage,
-            operatorAddressed: model.operatorAddressed,
+            modelPreparing: model.modelPreparing,
+            marked: model.marked,
             recordingSeconds: model.recordingSeconds,
-            operatorSendEnabled: model.operatorSendEnabled,
             lockEnabled: model.lockEnabled,
             talkKeyName: model.talkKeyName,
             lastError: model.lastError,
@@ -2513,7 +2564,7 @@ struct DictationIndicatorHost: View {
             onToggleCollecting: model.onToggleCollecting,
             onArmCleanup: model.onArmCleanup,
             onArmTranslate: model.onArmTranslate,
-            onArmOperator: model.onArmOperator,
+            onToggleMark: model.onToggleMark,
             onOpenSettings: model.onOpenSettings,
             onFaceAction: model.onFaceAction,
             onDrag: model.onDrag,
@@ -2555,6 +2606,9 @@ final class DictationIndicatorManager {
     /// The chosen hint's card is really on screen — reported by the shape, which
     /// is the only thing that knows where the element it points at stands.
     private var hintDrawn = false
+    /// The blocked-paste face's "Fix permissions" (#338). Installed by the
+    /// health monitor's setup, which owns the fix; nil before it.
+    var onFixPermissions: (() -> Void)?
     func start(coordinator: DictationCoordinator, hotkeyManager: HotkeyManager) {
         guard let panel = TopCenteredPanel(
             content: DictationIndicatorHost(model: model), topInset: 8
@@ -2599,9 +2653,9 @@ final class DictationIndicatorManager {
                 coordinator?.setPendingMode(.translate)
             }
         }
-        model.onArmOperator = { [weak coordinator] in
+        model.onToggleMark = { [weak coordinator] in
             Task { @MainActor in
-                coordinator?.toggleOperatorAddressed()
+                coordinator?.toggleMark()
             }
         }
         // The paperclip and Settings → Copying are one switch with two faces
@@ -2621,7 +2675,7 @@ final class DictationIndicatorManager {
         // already governs dictation's own capture — no section was built for
         // them; `Try again` runs the download the next dictation would run
         // anyway; the paste face opens the pane the grant lives in.
-        model.onFaceAction = { [weak coordinator] action in
+        model.onFaceAction = { [weak coordinator, weak self] action in
             switch action {
             case .openLoreSettings:
                 SettingsSection.open(.meetings)
@@ -2629,6 +2683,8 @@ final class DictationIndicatorManager {
                 pane.open()
             case .tryAgain:
                 Task { @MainActor in await coordinator?.retryModelDownload() }
+            case .fixPermissions:
+                self?.onFixPermissions?()
             }
         }
         // Where the bubble is dragged to is where it stays (#213). The pointer
@@ -2690,14 +2746,11 @@ final class DictationIndicatorManager {
                 self.model.isLocked = hotkeyManager?.isLocked ?? false
                 self.model.pendingMode = coordinator.pendingCleanupMode
                 self.model.llmStage = coordinator.llmStage
-                self.model.operatorAddressed = coordinator.operatorAddressedDisplayed
+                self.model.modelPreparing = coordinator.modelPreparing
+                self.model.marked = coordinator.markedDisplayed
                 if newSeconds != self.model.recordingSeconds {
                     self.model.recordingSeconds = newSeconds
                 }
-                // The letter follows the switch live (#223): flipped mid-recording
-                // the K leaves the rail at the next poll, armed or not.
-                self.model.operatorSendEnabled =
-                    coordinator.settings?.operatorSendEnabled ?? false
                 self.model.lockEnabled = coordinator.settings?.modifierLockEnabled ?? true
                 // The lock tooltip names the key the user holds (#226); the
                 // setting can change between recordings, so it is polled.
@@ -2724,8 +2777,8 @@ final class DictationIndicatorManager {
                 if chips != self.model.items { self.model.items = chips }
 
                 // The arbiter rides this poll (#235): every fact it reads is
-                // already on the line above, so no hint needs a sensor, a timer
-                // or a window of its own.
+                // already on the line above, except the secure-input flag, read
+                // fresh here (#341) — no hint needs a timer or a window of its own.
                 let hint = self.hints?.tick(DictationHintSignals(
                     capturing: newState == .recording && !coordinator.cancelled,
                     canSpeak: DictationIndicatorView.canExpand(
@@ -2739,7 +2792,8 @@ final class DictationIndicatorManager {
                     hoverTipShowing: self.hoverTipShowing,
                     noSignal: coordinator.noSignal,
                     level: coordinator.audioLevel,
-                    cleanupArmed: coordinator.pendingCleanupMode == .cleanup
+                    cleanupArmed: coordinator.pendingCleanupMode == .cleanup,
+                    secureInput: SecureInput.isOn
                 ))
                 if hint != self.model.hint { self.model.hint = hint }
 

@@ -2,7 +2,7 @@ import AppKit
 import SwiftUI
 
 /// The player's title and the ?'s card (#289), in the words of the board's
-/// copy table (`agent-replies-player.html` v3.9 §06) — the contract for every
+/// copy table (`agent-replies-player.html` v4.0 §07) — the contract for every
 /// string here.
 ///
 /// The command is spelled once. The title prints it, and the line the card
@@ -152,7 +152,7 @@ final class AgentReplyHelp {
 
 // MARK: - The card
 
-/// The ?'s card (board §01 b, §07): lore's popover fill with no rim, opaque, a
+/// The ?'s card (board v4.0 §04 c, §07): lore's popover fill with no rim, opaque, a
 /// caret of the same fill rising to just under the ?, two sentences and the
 /// well with the line to take and Copy at its trailing edge.
 ///
@@ -166,18 +166,21 @@ struct AgentReplyHelpCard: View {
     /// The pointer arriving on the card or leaving it.
     var onPointer: (Bool) -> Void = { _ in }
 
-    /// Where the head's and the strip's rules end, 6 in from each side of the
-    /// plate: the card's edges. The line and Copy need that width.
-    static let inset = AgentReplyPlayerView.ruleInset
+    /// The list's edges, 6 in from each side of the plate: the card's edges
+    /// (board v4.0 Notes). The line and Copy need that width.
+    static let inset = AgentReplyPlayerView.listInset.leading
     static let width: CGFloat = AgentReplyPlayerView.plateWidth - 2 * inset
     /// The caret: 11 tall, 18 across its base, its tip 2 under the ?'s circle.
     static let caretHeight: CGFloat = 11
     static let caretWidth: CGFloat = 18
     static let caretGap: CGFloat = 2
 
-    /// 12 at the sides puts the words on the strip's content edge; 14 above
+    /// The rows' slot before the words, so they start on the rows' edge; the
+    /// rows' trailing 10, so Copy ends on the rail the times end on; 14 above
     /// and below.
-    private static let padding = EdgeInsets(top: 14, leading: 12, bottom: 14, trailing: 12)
+    private static let padding = EdgeInsets(
+        top: 14, leading: AgentReplyRowView.slot, bottom: 14, trailing: AgentReplyRowView.trailing
+    )
     /// Popover type, a step under the list: 11 on a 1.4 line.
     private static let textSize: CGFloat = 11
     /// The well's line: mono 10.5 on the same 1.4.
