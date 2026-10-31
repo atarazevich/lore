@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.10.0 — 2026-10-31
+
+**3.9.1 (#343) Holding Right Option to talk records again**
+- On some Macs, holding Right Option turned the microphone on but never showed the bubble or pasted: lore took every press for a tap. A held talk key now always records, whatever the system's key state says
+
 ## v3.9.0 — 2026-10-31
 
 **3.8.46 (#341) The health panel says which app turned lore's shortcuts off**

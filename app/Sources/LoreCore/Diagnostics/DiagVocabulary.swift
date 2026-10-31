@@ -46,6 +46,22 @@ public enum DictationHint: String, Codable, Sendable, CaseIterable {
     case cleanup
 }
 
+/// Which key is held to talk (#343) — the setting's kind, never a keycode.
+public enum TalkKey: String, Codable, Sendable, CaseIterable {
+    case fn
+    case rightOption
+    /// A key the user recorded (#226).
+    case recorded
+    /// A key a newer build knows and this one does not.
+    case unknown
+
+    /// A key this version does not know reads as `.unknown`.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = TalkKey(rawValue: raw) ?? .unknown
+    }
+}
+
 /// Which form a dictation's items take in the app receiving the paste (#195).
 public enum PasteTarget: String, Codable, Sendable, CaseIterable {
     /// A terminal, or an editor that hosts a command-line agent: an item is its

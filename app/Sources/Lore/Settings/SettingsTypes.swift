@@ -1,5 +1,6 @@
 import AppKit
 import Foundation
+import LoreCore
 
 /// The key held to talk. Fn and Right Option are the two the app shipped with;
 /// `custom` is any other key the user recorded by pressing it (#226) — the exit
@@ -35,21 +36,84 @@ enum HotkeyKey: Hashable, Identifiable {
         }
     }
 
-    /// Check if this key matches the given flags-changed event.
-    func matchesPress(_ event: NSEvent) -> Bool {
+    /// Whether the talk key is down after this flags-changed event, given
+    /// whether it was down before. A press is only ever the key's own
+    /// transition; once down, it stays down until the flags say it is up, so
+    /// Shift or Left Option pressed or let go mid-hold does not end it (#343).
+    func isDown(after event: NSEvent, wasDown: Bool) -> Bool {
+        let flags = event.modifierFlags
         switch self {
         case .fn:
-            return event.modifierFlags.contains(.function)
+            return flags.contains(.function)
         case .rightOption:
-            return event.modifierFlags.contains(.option) && event.keyCode == Self.rightOptionKeyCode
+            return Self.sideKeyIsDown(Self.rightOptionKeyCode, after: event, wasDown: wasDown)
         case .custom(let keyCode):
-            guard let flag = Self.modifierFlags[keyCode] else { return false }
-            return event.modifierFlags.contains(flag) && event.keyCode == keyCode
+            guard Self.sideBits[keyCode] != nil else {
+                guard let flag = Self.modifierFlags[keyCode] else { return false }
+                return flags.contains(flag) && event.keyCode == keyCode
+            }
+            return Self.sideKeyIsDown(keyCode, after: event, wasDown: wasDown)
+        }
+    }
+
+    /// A two-sided modifier, from an event. The side bit decides when the
+    /// event carries one for this modifier; an event that carries neither side
+    /// (a synthetic one, a remapper's) falls back to the shared mask and the
+    /// keycode: its own key changing is its press, or, once down, its release.
+    private static func sideKeyIsDown(_ keyCode: UInt16, after event: NSEvent, wasDown: Bool) -> Bool {
+        if !wasDown, event.keyCode != keyCode { return false }
+        if let held = sideBitHeld(keyCode, in: event.modifierFlags) { return held }
+        guard let flag = modifierFlags[keyCode], event.modifierFlags.contains(flag) else { return false }
+        // Without side bits, the key's own code again while down cannot be told
+        // from "let go while its twin is down"; it is read as the release.
+        return !wasDown || event.keyCode != keyCode
+    }
+
+    /// Whether modifier flags — the system's own, read when the hold window
+    /// closes — say this key is down (#343). Never `CGEventSource.keyState`,
+    /// which on a user's Mac read a held Right Option as up, so every press
+    /// became a tap. A two-sided modifier is read by its side bit when the
+    /// flags carry one for it, else by the shared mask. `nil` when flags
+    /// cannot say: a recorded key that is not a modifier.
+    func isHeld(in flags: NSEvent.ModifierFlags) -> Bool? {
+        let keyCode: UInt16
+        switch self {
+        case .fn: return flags.contains(.function)
+        case .rightOption: keyCode = Self.rightOptionKeyCode
+        case .custom(let code): keyCode = code
+        }
+        guard let flag = Self.modifierFlags[keyCode] else { return nil }
+        return Self.sideBitHeld(keyCode, in: flags) ?? flags.contains(flag)
+    }
+
+    /// The key's own side bit, when the flags carry either side's bit for its
+    /// modifier; `nil` when they carry neither (or the key has no side).
+    private static func sideBitHeld(_ keyCode: UInt16, in flags: NSEvent.ModifierFlags) -> Bool? {
+        guard let side = sideBits[keyCode], flags.rawValue & (side.own | side.twin) != 0 else { return nil }
+        return flags.rawValue & side.own != 0
+    }
+
+    /// Each two-sided modifier a talk key can be: its side bit and its twin's
+    /// on the other side, beside the mask they share (IOKit's
+    /// `NX_DEVICE*KEYMASK`).
+    private static let sideBits: [UInt16: (own: UInt, twin: UInt)] = [
+        rightOptionKeyCode: (0x40, 0x20), 58: (0x20, 0x40),
+        54: (0x10, 0x08), 55: (0x08, 0x10),
+        60: (0x04, 0x02), 56: (0x02, 0x04),
+        62: (0x2000, 0x01), 59: (0x01, 0x2000),
+    ]
+
+    /// The kind of talk key, as the event stream names it (#343).
+    var diagTalkKey: TalkKey {
+        switch self {
+        case .fn: .fn
+        case .rightOption: .rightOption
+        case .custom: .recorded
         }
     }
 
     /// True while this key arrives as a modifier — i.e. through `flagsChanged`,
-    /// where `matchesPress` is the whole of the decision.
+    /// where `isDown(after:wasDown:)` is the whole of the decision.
     var isModifier: Bool {
         switch self {
         case .fn, .rightOption: true

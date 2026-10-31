@@ -58,6 +58,15 @@ final class HotkeyManager {
     /// shortest take that ever pasted (501 ms of audio, the 300 ms tail in it)
     /// was a hold of about 270 ms.
     static let holdToRecordThreshold: Duration = .milliseconds(200)
+    /// The longest a release the system has seen, and lore has not read yet,
+    /// is waited for before the press counts as held after all (#343). The
+    /// wait starts once the main thread is free again, so a queued release is
+    /// read in milliseconds; the ceiling is three times the worst stall
+    /// measured (330 ms, #279) and only matters if lore never gets that event.
+    static let unreadReleaseCeiling: Duration = .seconds(1)
+    /// Slack between the system's clock for its last modifier change and an
+    /// event's timestamp. A real release follows its press by tens of ms.
+    private static let clockSlack: TimeInterval = 0.01
     /// How long it must be held *inside a locked recording* to open the bubble
     /// (#205). Its own number, deliberately longer than the one above: that one
     /// decides whether a recording begins, this one decides what an already
@@ -391,8 +400,7 @@ final class HotkeyManager {
 
         teardownEventTap()
 
-        fnTimer?.cancel()
-        fnTimer = nil
+        cancelHoldWindow()
         cancelRelease()
         lockedHoldStart = nil
         coordinator?.onRecordingEnding = nil
@@ -420,20 +428,24 @@ final class HotkeyManager {
     /// flags-changed event through the one function that decides what a press
     /// means (#205). The NSEvent monitors are its only other callers.
     func handleFlagsChanged(_ event: NSEvent) {
+        // A synthetic event may carry no timestamp: it was read now, and must
+        // not leave the window believing a change is still unread (#343).
+        let time = event.timestamp > 0 ? event.timestamp : ProcessInfo.processInfo.systemUptime
+        lastFlagsChangeRead = max(lastFlagsChangeRead, time)
         let hotkeyKey = settings?.hotkeyKey ?? .fn
         // A recorded talk key that is not a modifier never appears here: it
         // arrives as a key-down and a key-up through the tap (#226), and asking
-        // `matchesPress` about it would answer no on every flag change.
+        // `isDown` about it would answer no on every flag change.
         guard hotkeyKey.isModifier else { return }
-        let hotkeyPressed = hotkeyKey.matchesPress(event)
+        let hotkeyPressed = hotkeyKey.isDown(after: event, wasDown: fnDown)
 
         let flags = event.modifierFlags.rawValue
         HotkeyManager.hkLog.info("[HK] flags=\(String(flags, radix: 16)) pressed=\(hotkeyPressed) fnDown=\(self.fnDown) locked=\(self.isLocked) hold=\(self.isHoldMode)")
 
         if hotkeyPressed && !fnDown {
-            beginHotkeyPress(at: event.timestamp)
+            beginHotkeyPress(at: time)
         } else if !hotkeyPressed && fnDown {
-            endHotkeyPress(at: event.timestamp)
+            endHotkeyPress(at: time)
         }
     }
 
@@ -469,6 +481,8 @@ final class HotkeyManager {
             settleRelease()
         }
         if fnReleaseDebounce == nil { pressCarriedKey = false }
+        pressedAt = time
+        awaitingUnreadRelease = false
         fnDown = true
         cancelRelease()
 
@@ -498,39 +512,65 @@ final class HotkeyManager {
         fnTimer = Task { [weak self] in
             try? await Task.sleep(for: Self.holdToRecordThreshold)
             guard !Task.isCancelled, let self else { return }
-            // Let go inside the window, its release not read yet: that
-            // release decides, and it is a tap.
-            if self.talkKeyWasLetGo(self.settings?.hotkeyKey ?? .fn, time) { return }
+            // The system's keyboard runs ahead of the events lore has read
+            // (#279). It saying "up" is believed only when it has also seen a
+            // modifier change lore has not read yet: that release is on its way,
+            // and it decides. With nothing unread, no release happened — the
+            // reading is wrong (#343: a held Right Option read as up) — and the
+            // press is the hold it is.
+            let key = self.settings?.hotkeyKey ?? .fn
+            if case .keyUp(let lastChange) = self.systemRelease(key) {
+                if lastChange > self.lastFlagsChangeRead + Self.clockSlack {
+                    // Its own timestamp decides when it lands (`endHotkeyPress`).
+                    self.awaitingUnreadRelease = true
+                    try? await Task.sleep(for: Self.unreadReleaseCeiling)
+                    if Task.isCancelled { return }
+                    self.awaitingUnreadRelease = false
+                }
+                DiagStore.record(.talkKeyReleasedInWindow(key: key.diagTalkKey, confirmed: false))
+            }
             self.decideTalkKeyPress(heldThroughWindow: true)
         }
     }
 
-    /// Whether the talk key pressed at `pressTime` (the event's clock) has
-    /// been let go with its release not yet read (#279). The main thread reads
-    /// events late while a cold microphone opens — 330 ms was measured on the
-    /// first tap after a launch — and the window's clock must not outrun a
-    /// release it has not seen. Injected only by tests, which have no keyboard.
-    private let talkKeyWasLetGo: @MainActor (HotkeyKey, TimeInterval) -> Bool
-
-    init(talkKeyWasLetGo: @escaping @MainActor (HotkeyKey, TimeInterval) -> Bool = HotkeyManager.systemSaysLetGo) {
-        self.talkKeyWasLetGo = talkKeyWasLetGo
+    /// What the system's keyboard says about the talk key when the window
+    /// closes. Injected only by tests, which have no keyboard.
+    enum SystemRelease: Equatable {
+        /// Down, or a key flags cannot read (its key-up is the only witness).
+        case noClaim
+        /// Up, the system's last modifier change at `lastFlagsChange`, on the
+        /// clock event timestamps use.
+        case keyUp(lastFlagsChange: TimeInterval)
     }
 
-    /// The system's own keyboard state, which is ahead of the events lore has
-    /// read, says a modifier talk key is up. Asked only when the system saw
-    /// this press at all (its last flags change is no older than the press); a
-    /// recorded key that is not a modifier leaves its key-up as the only witness.
-    private static func systemSaysLetGo(_ key: HotkeyKey, pressedAt pressTime: TimeInterval) -> Bool {
-        let isDown: Bool
-        switch key {
-        case .fn: isDown = CGEventSource.flagsState(.combinedSessionState).contains(.maskSecondaryFn)
-        case .rightOption: isDown = CGEventSource.keyState(.combinedSessionState, key: HotkeyKey.rightOptionKeyCode)
-        case .custom(let keyCode):
-            guard key.isModifier else { return false }
-            isDown = CGEventSource.keyState(.combinedSessionState, key: keyCode)
-        }
-        let sinceChange = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .flagsChanged)
-        return !isDown && sinceChange <= ProcessInfo.processInfo.systemUptime - pressTime
+    private let systemRelease: @MainActor (HotkeyKey) -> SystemRelease
+
+    /// The timestamp of the last flags-changed event lore has read.
+    private var lastFlagsChangeRead: TimeInterval = 0
+    /// The hold window ends undecided — a release, Esc, a lock, a chord, a
+    /// teardown — and nothing it was waiting for may outlive it.
+    private func cancelHoldWindow() {
+        fnTimer?.cancel()
+        fnTimer = nil
+        awaitingUnreadRelease = false
+    }
+
+    /// The current press's timestamp, by the event's clock.
+    private var pressedAt: TimeInterval = 0
+    /// The window closed on a release the system had seen and lore had not
+    /// read (#343): when it lands, its timestamp says whether the key was held
+    /// through the window, not the moment lore got to it.
+    private var awaitingUnreadRelease = false
+
+    init(systemRelease: @escaping @MainActor (HotkeyKey) -> SystemRelease = HotkeyManager.liveSystemRelease) {
+        self.systemRelease = systemRelease
+    }
+
+    private static func liveSystemRelease(_ key: HotkeyKey) -> SystemRelease {
+        let flags = NSEvent.ModifierFlags(rawValue: UInt(CGEventSource.flagsState(.combinedSessionState).rawValue))
+        guard key.isHeld(in: flags) == false else { return .noClaim }
+        let since = CGEventSource.secondsSinceLastEventType(.combinedSessionState, eventType: .flagsChanged)
+        return .keyUp(lastFlagsChange: ProcessInfo.processInfo.systemUptime - since)
     }
 
     /// What a press of the talk key is, decided here alone (#279): held when
@@ -560,8 +600,8 @@ final class HotkeyManager {
     private func endHotkeyPress(at time: TimeInterval) {
         fnDown = false
         releasedAt = time
-        fnTimer?.cancel()
-        fnTimer = nil
+        let releaseWasAwaited = awaitingUnreadRelease
+        cancelHoldWindow()
         // A press that lasted past the threshold was a hold: it opened the
         // bubble, so letting go closes the bubble and does nothing else —
         // swallowed by the latch every chord already uses (#205). Read
@@ -596,6 +636,17 @@ final class HotkeyManager {
                 manager.coordinator?.stopRecording()
             }
             return
+        }
+
+        if releaseWasAwaited {
+            // The release the window waited for (#343), decided by its own
+            // timestamp: held through the window, the press records and this
+            // release ends it like any hold's; let go inside it, a tap.
+            let heldThroughWindow = time - pressedAt >= Self.holdToRecordThreshold / .seconds(1)
+            DiagStore.record(.talkKeyReleasedInWindow(
+                key: (settings?.hotkeyKey ?? .fn).diagTalkKey, confirmed: !heldThroughWindow
+            ))
+            if heldThroughWindow { decideTalkKeyPress(heldThroughWindow: true) }
         }
 
         if isHoldMode {
@@ -848,8 +899,7 @@ final class HotkeyManager {
                 // a dictation at 200 ms, so Esc cancels it now — no recording,
                 // and its release is no tap.
                 HotkeyManager.hkLog.debug("[HOTKEY] Esc → pending dictation cancelled")
-                fnTimer?.cancel()
-                fnTimer = nil
+                cancelHoldWindow()
                 isPreBufferingFlag = false
                 pressCarriedKey = true
                 coordinator.cancelPreBuffer()
@@ -962,7 +1012,7 @@ final class HotkeyManager {
     /// `.option` is Left Option's too — so a mask cannot tell whose press this
     /// is, and answering off one would swallow Left Option+Space, or Cmd+Space
     /// with a recorded Right Command. Those read the tracked press, which
-    /// `matchesPress` sets by keycode exactly as `handleFlagsChanged` does, and
+    /// `isDown(after:wasDown:)` sets from the key's own transition, and
     /// which is also the only fact about a recorded key that raises no flag at
     /// all (#226).
     func talkKeyHeld(_ flags: NSEvent.ModifierFlags) -> Bool {
@@ -976,8 +1026,7 @@ final class HotkeyManager {
     /// Confirm and lock — the Space key's own steps, shared with the recording
     /// bubble's lock glyph so there is one lock and not two.
     private func lockRecording(_ coordinator: DictationCoordinator) {
-        fnTimer?.cancel()
-        fnTimer = nil
+        cancelHoldWindow()
         isHoldMode = false
         isPreBufferingFlag = false
         fnHeldAtLock = fnDown  // Track: if Fn held at lock, first release should continue
@@ -1186,8 +1235,7 @@ final class HotkeyManager {
     /// here) — and is not a tap for the player, because the letter marked the
     /// press as a chord (`noteKeyDown`, #278).
     private func endGestureForChord() {
-        fnTimer?.cancel()
-        fnTimer = nil
+        cancelHoldWindow()
         cancelRelease()
         isHoldMode = false
         fnHeldAtLock = false
@@ -1502,8 +1550,7 @@ final class HotkeyManager {
             isLockedFlag = false
             isRecordingFlag = false
             isPreBufferingFlag = false
-            fnTimer?.cancel()
-            fnTimer = nil
+            cancelHoldWindow()
             coordinator?.stopRecording()
         }
 
@@ -1630,3 +1677,4 @@ final class HotkeyManager {
         observeTapLiveness(secureInputActive: secureInput.active)
     }
 }
+

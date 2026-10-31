@@ -792,6 +792,13 @@ public enum DiagEvent: Codable, Sendable, Equatable {
     /// otherwise a retry run's end is indistinguishable from the app being quit.
     case tapGaveUp(attempts: Int)
     case secureInputChanged(active: Bool, holderPID: Int32?)
+    /// When the hold window closed, the system's keyboard said the talk key
+    /// was up before lore had read its release (#343). `confirmed`: it was —
+    /// the release, by its own timestamp, came inside the window, and the
+    /// press was a tap. Not confirmed: the key was held through the window
+    /// after all (no release came, or it came later), and the press recorded.
+    /// A key whose state the system misreads leaves a run of unconfirmed ones.
+    case talkKeyReleasedInWindow(key: TalkKey, confirmed: Bool)
     /// "Fix permissions" removed lore's own entry for one grant (#338):
     /// `tccutil reset <service> com.lore.app`, run as the user. `exitStatus` is
     /// tccutil's; nil when it could not be started or did not finish.
@@ -1260,7 +1267,7 @@ extension DiagEvent {
 
         case .permissionTransition, .tapCreate, .tapReinstall, .tapDisabledByOS,
              .tapDiedDuringRecording, .tapEventsStalled, .tapEventsResumed,
-             .tapGaveUp, .secureInputChanged, .pasteAttempt, .permissionReset, .permissionFixStage:
+             .tapGaveUp, .secureInputChanged, .talkKeyReleasedInWindow, .pasteAttempt, .permissionReset, .permissionFixStage:
             return .input
 
         case .captureStart, .captureFailed, .captureStopped, .captureRetryScheduled,
@@ -1364,6 +1371,7 @@ extension DiagEvent {
         case .tapEventsResumed: return "tapEventsResumed"
         case .tapGaveUp: return "tapGaveUp"
         case .secureInputChanged: return "secureInputChanged"
+        case .talkKeyReleasedInWindow: return "talkKeyReleasedInWindow"
         case .pasteAttempt: return "pasteAttempt"
         case .permissionReset: return "permissionReset"
         case .permissionFixStage: return "permissionFixStage"
