@@ -38,7 +38,7 @@ public enum SileroVAD {
     /// Downloads the model when it is missing or incomplete, then loads it with
     /// the settings FluidAudio's own loader uses. Records the `modelLoad` event,
     /// so every caller's success or failure reaches the health panel. The
-    /// revision is pinned at launch (`ModelBundle.pinAll`).
+    /// revision is pinned before the load (`ModelBundle.pinAll`).
     public static func load() async throws -> VadManager {
         try await bundle.load(.vad) {
             try await ModelHub.download(.vad, subdirectory: fileName, to: bundle.repoDirectory)

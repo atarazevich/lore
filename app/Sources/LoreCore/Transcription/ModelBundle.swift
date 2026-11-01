@@ -35,14 +35,24 @@ public struct ModelBundle: Sendable {
         let underlying: any Error
     }
 
-    /// Once, at launch, before anything can download: FluidAudio's override
-    /// table is a plain process-wide dictionary, so no background task writes it.
-    @MainActor
+    /// Before anything loads or downloads a model, in every process (#345: a
+    /// test process loading the speech model unpinned asked for `main`, and
+    /// FluidAudio replaced the app's folder): every load calls it, launch too.
+    /// FluidAudio's override table is a plain process-wide dictionary, so it
+    /// is written once, under the `static let`'s one-time initialisation.
     public static func pinAll() {
+        _ = pinned
+    }
+
+    private static let pinned: Void = {
         for (repo, revision) in pins {
             ModelRegistry.revisionOverrides[repo.remotePath] = revision
         }
-    }
+        // A test loads only what is already whole on disk: never a download
+        // into the user's model folder, never the removal a revision change
+        // or a failed load would make there.
+        if RuntimeEnvironment.isRunningUnitTests { ModelHub.offlineMode = true }
+    }()
 
     /// Every repo the app pins, with its commit.
     static var pins: [Repo: String] {
@@ -82,6 +92,7 @@ public struct ModelBundle: Sendable {
         download: () async throws -> Void,
         load: () async throws -> sending Model
     ) async throws -> sending Model {
+        Self.pinAll()
         try await Self.line.enter(repo.folderName)
         defer { Self.line.leave(repo.folderName) }
         let startedAt = Date()
@@ -104,8 +115,9 @@ public struct ModelBundle: Sendable {
             return model
         } catch {
             // A complete model that failed to load (memory pressure, a compile
-            // failure) stays; only a visibly incomplete one goes.
-            if !isComplete { try? FileManager.default.removeItem(at: directory) }
+            // failure) stays; only a visibly incomplete one goes, and never
+            // offline (a test), when nothing could fetch it back.
+            if !isComplete && !ModelHub.offlineMode { try? FileManager.default.removeItem(at: directory) }
             throw error
         }
     }

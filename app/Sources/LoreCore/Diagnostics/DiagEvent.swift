@@ -799,6 +799,15 @@ public enum DiagEvent: Codable, Sendable, Equatable {
     /// after all (no release came, or it came later), and the press recorded.
     /// A key whose state the system misreads leaves a run of unconfirmed ones.
     case talkKeyReleasedInWindow(key: TalkKey, confirmed: Bool)
+    /// The system refused one of a recording's control keys as a hot key
+    /// (#342) — usually another app holds the same key. `osStatus` is
+    /// `RegisterEventHotKey`'s. That key then reaches lore only through the
+    /// event tap, so it stops working while secure input is on.
+    case hotKeyRegisterFailed(key: ControlKey, osStatus: Int32)
+    /// One of a recording's control keys arrived as a hot key (#342) — the
+    /// path that works while secure input is on — and what came of it.
+    /// Auto-repeat is not counted.
+    case hotKeyPressed(key: ControlKey, outcome: HotKeyOutcome)
     /// "Fix permissions" removed lore's own entry for one grant (#338):
     /// `tccutil reset <service> com.lore.app`, run as the user. `exitStatus` is
     /// tccutil's; nil when it could not be started or did not finish.
@@ -889,6 +898,10 @@ public enum DiagEvent: Codable, Sendable, Equatable {
     /// The launch after the swap removed v3's folders before anything loaded
     /// (#299); `.failed` when one could not go. Recorded only when one was there.
     case speechModelRemoved(outcome: Outcome)
+    /// A speech model load that had to fetch the model from the network first
+    /// (#345), with the seconds the download and compile took together.
+    /// Beside the load's own `modelLoad`, it tells a download from a load.
+    case speechModelDownloaded(model: SpeechModel, seconds: Double)
     /// Launch removed half-finished compiles of the speech model from lore's
     /// own Neural Engine cache (#294): `*.tmp.<pid>_*.bundle` folders whose
     /// process is gone. Recorded only when any went.
@@ -1267,7 +1280,8 @@ extension DiagEvent {
 
         case .permissionTransition, .tapCreate, .tapReinstall, .tapDisabledByOS,
              .tapDiedDuringRecording, .tapEventsStalled, .tapEventsResumed,
-             .tapGaveUp, .secureInputChanged, .talkKeyReleasedInWindow, .pasteAttempt, .permissionReset, .permissionFixStage:
+             .tapGaveUp, .secureInputChanged, .talkKeyReleasedInWindow, .hotKeyRegisterFailed, .hotKeyPressed, .pasteAttempt,
+             .permissionReset, .permissionFixStage:
             return .input
 
         case .captureStart, .captureFailed, .captureStopped, .captureRetryScheduled,
@@ -1279,7 +1293,7 @@ extension DiagEvent {
             return .audio
 
         case .modelLoad, .modelCacheCleared, .modelCacheOrphansRemoved, .transcribed, .echoSuppressed,
-             .speechModelPrepared, .speechModelSwapped, .speechModelRemoved,
+             .speechModelPrepared, .speechModelSwapped, .speechModelRemoved, .speechModelDownloaded,
              .transcriptRepairQueued, .transcriptRepairSettled,
              .speakerMapSaved, .speakerMapFailed, .speakerMapGaveUp, .ownerVoiceprint, .transcriptSaveFailed,
              .speakerPassRequested, .speakerFailureDismissed, .speakerTracksKept, .stashCountNotSaved,
@@ -1372,6 +1386,8 @@ extension DiagEvent {
         case .tapGaveUp: return "tapGaveUp"
         case .secureInputChanged: return "secureInputChanged"
         case .talkKeyReleasedInWindow: return "talkKeyReleasedInWindow"
+        case .hotKeyRegisterFailed: return "hotKeyRegisterFailed"
+        case .hotKeyPressed: return "hotKeyPressed"
         case .pasteAttempt: return "pasteAttempt"
         case .permissionReset: return "permissionReset"
         case .permissionFixStage: return "permissionFixStage"
@@ -1402,6 +1418,7 @@ extension DiagEvent {
         case .speechModelPrepared: return "speechModelPrepared"
         case .speechModelSwapped: return "speechModelSwapped"
         case .speechModelRemoved: return "speechModelRemoved"
+        case .speechModelDownloaded: return "speechModelDownloaded"
         case .transcribed: return "transcribed"
         case .echoSuppressed: return "echoSuppressed"
         case .transcriptRepairQueued: return "transcriptRepairQueued"

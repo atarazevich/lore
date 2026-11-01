@@ -125,6 +125,20 @@ struct HealthItem: Identifiable, Equatable {
     var section: HealthSection { result.id.section }
 }
 
+/// The lore keys that cannot work while another app holds secure input
+/// (#346): everything else arrives as a system hot key then. Machine-local,
+/// never serialized.
+struct DeadShortcuts: Equatable, Sendable {
+    /// The talk key is a recorded key that is not a modifier: only the tap
+    /// reads it, so hold-to-talk is dead.
+    var talkKey = false
+    /// Hot keys lore wanted and the system refused (another app holds the
+    /// same combination), as Settings prints them.
+    var keys: [String] = []
+
+    var isEmpty: Bool { !talkKey && keys.isEmpty }
+}
+
 /// The pure mapping from a probe result to what the panel shows. This is the
 /// heart the tests pin down: every failing probe carries a specific remedy, and
 /// the critical ones carry actionable buttons.
@@ -152,15 +166,21 @@ enum HealthCatalog {
     static let pasteBlockedSeeAccessibility = "Last paste was blocked \u{2014} see Accessibility."
     static let nothingPastedSinceFix = "Nothing pasted since the fix."
 
-    // MARK: Keyboard shortcuts under secure input (#341)
+    // MARK: Keyboard shortcuts under secure input (#341, #342)
 
-    /// The row's detail while another app holds secure input — the one place
-    /// this sentence lives (board `secure-input.html`, copy table).
-    static func shortcutsOffDetail(talkKey: String) -> String {
-        "Off \u{2014} holding \(talkKey) still records and pastes."
+    /// The row's detail while another app holds secure input and a lore key
+    /// truly cannot work (#346, board `secure-input.html` v5): the talk key,
+    /// and the keys named as Settings prints them. The one place it lives.
+    static func shortcutsOffDetail(_ dead: DeadShortcuts) -> String {
+        let subjects = (dead.talkKey ? ["Your talk key"] : []) + dead.keys
+        let list = subjects.count <= 1
+            ? subjects.joined()
+            : subjects.dropLast().joined(separator: ", ") + " and " + subjects.last!
+        return list + (subjects.count == 1 ? " doesn't work right now." : " don't work right now.")
     }
 
-    static let unknownHolderStep = "Close any password field or password manager, or turn off Secure Keyboard Entry in Terminal or iTerm2."
+    static let unknownHolderStep = "Close the password field or password manager. Still not working? Turn off Secure Keyboard Entry in Terminal or iTerm2."
+    static let unknownHolderCause = "Probably caused by a password field or password manager."
 
     /// What the row says about who probably holds secure input and how to turn
     /// it off. The holder is a hint (rdar://48953777), so every cause is
@@ -173,41 +193,36 @@ enum HealthCatalog {
         case .app(let name):
             return Remedy(instruction: "Click out of the password field in \(name), or quit \(name).",
                           cause: "Probably caused by \(name).")
-        case .process(let pid):
-            return Remedy(instruction: unknownHolderStep, cause: "Probably caused by process \(pid).")
+        case .process:
+            return Remedy(instruction: unknownHolderStep, cause: "Probably caused by a background process.")
         case .lockScreen:
-            return Remedy(instruction: "Lock the screen (Control-Command-Q), then unlock. If shortcuts are still off, restart the Mac.",
-                          cause: "Probably left on by the lock screen.")
+            return Remedy(instruction: "Lock and unlock the Mac (Control-Command-Q). Still not working? Restart the Mac.",
+                          cause: "Probably caused by the lock screen.")
         case .nobody, nil:
-            return Remedy(instruction: unknownHolderStep)
+            return Remedy(instruction: unknownHolderStep, cause: unknownHolderCause)
         }
     }
 
     /// - Parameters:
     ///   - result: the PII-free probe result.
     ///   - secureInputHolder: who the panel may say holds secure input —
-    ///     machine-local, shown in the detail line, never serialized (#98).
+    ///     machine-local, shown in the cause line, never serialized (#98).
     ///   - teamID: signing team identifier, shown in the detail line only.
-    ///   - secureInputActive: the raw flag, for the `.secureInput` row, whose ok
-    ///     copy must not read "Inactive" while the flag is up (benign locked
-    ///     console, #98).
     ///   - notesLeftover: the folder the #148 move could not empty and why —
     ///     named in the detail line, revealed by the remedy's button, and the
     ///     cause picks the remedy. Machine-local, never serialized.
-    ///   - talkKey: the keycap of the key held to talk (#341), named in the
-    ///     row that carries secure input.
+    ///   - deadShortcuts: the lore keys secure input stops (#346), which the
+    ///     row that carries secure input names.
     static func describe(
         _ result: HealthResult,
         secureInputHolder: SecureInput.Attribution? = nil,
         teamID: String? = nil,
-        secureInputActive: Bool = false,
         notesLeftover: NotesLeftover? = nil,
-        talkKey: String = HotkeyKey.fn.shortName
+        deadShortcuts: DeadShortcuts = DeadShortcuts()
     ) -> HealthItem {
         let (title, detail, remedy) = copy(
             for: result, holder: secureInputHolder, teamID: teamID,
-            secureInputActive: secureInputActive, notesLeftover: notesLeftover,
-            talkKey: talkKey
+            notesLeftover: notesLeftover, deadShortcuts: deadShortcuts
         )
         // The block explains this row (#338): neutral, pointing at Accessibility,
         // so one cause reads as one issue.
@@ -222,9 +237,8 @@ enum HealthCatalog {
         for result: HealthResult,
         holder: SecureInput.Attribution?,
         teamID: String?,
-        secureInputActive: Bool,
         notesLeftover: NotesLeftover?,
-        talkKey: String
+        deadShortcuts: DeadShortcuts
     ) -> (title: String, detail: String, remedy: Remedy?) {
         // Expensive probes share one card shape (last outcome + Test now),
         // dispatched by `cost` so a new expensive probe can't land in the cheap
@@ -317,21 +331,14 @@ enum HealthCatalog {
                            actions: [.restartApp, .openSettings(.inputMonitoring)]))
 
         case .secureInput:
-            if ok {
-                // `.ok` while the flag is up is the benign locked-console case
-                // (#98, `SecureInput.State.isProblem`); "Inactive" would be
-                // untrue there, so the row says whose it is.
-                return secureInputActive
-                    ? ("Secure input", "Active, held by the lock screen — normal while the console is locked.", nil)
-                    : ("Secure input", "Inactive — the Fn key isn't being starved.", nil)
-            }
-            // A problem: this row takes the name of what stopped and carries the
-            // whole condition — what stopped, who probably caused it, how to turn
-            // it off (#341). The tap row is not shown then (`HealthProber.probe`):
-            // its verdict cannot be measured under secure input (#97), and one
-            // condition is one row and one count. No restart is offered; it
-            // cannot help while secure input is on.
-            return ("Keyboard shortcuts", shortcutsOffDetail(talkKey: talkKey), secureInputRemedy(holder))
+            // Shown only as a problem (#346, `HealthProber.probe`): while another
+            // app holds secure input and a lore key truly cannot work. The row
+            // takes the name of what stopped and carries the whole condition —
+            // which keys, who probably caused it, how to turn it off (#341). The
+            // tap row is not shown then: its verdict cannot be measured under
+            // secure input (#97). No restart is offered; it cannot help.
+            if ok { return ("Keyboard shortcuts", "", nil) }
+            return ("Keyboard shortcuts", shortcutsOffDetail(deadShortcuts), secureInputRemedy(holder))
 
         // MARK: Audio
 

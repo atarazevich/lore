@@ -1,5 +1,24 @@
 # Changelog
 
+## v3.11.0 — 2026-11-01
+
+**3.10.5 (#346) Paste again pastes your last words**
+- Control-Command-V now pastes your most recent words, skipping a take that came back empty, and waits until you let go of Control so terminals like Ghostty read it as a paste
+
+**3.10.4 (#347) Tests never read an earlier run's diagnostics**
+- The test run's diagnostic store now starts empty and sweeps the folders of finished runs, so a reused process id can no longer make a trace-counting test see an earlier run's events and fail.
+
+**3.10.3 (#346) lore's shortcuts work while another app holds secure input**
+- Control-Command-V, Read aloud's fn R and fn Q, and the agent reply keys now work while a password field, Terminal's Secure Keyboard Entry or the lock screen holds secure input; when it is off, they work exactly as before
+- The health panel's Keyboard shortcuts row now shows only for a key that still can't work then: a recorded talk key like F13, or a shortcut another app already uses
+
+**3.10.2 (#345) A relaunch no longer downloads the speech model again**
+- Some relaunches waited 35–48 s before dictation worked: another process loading the speech model had asked for a different version of it and replaced the copy on disk, so the next launch downloaded and compiled it again. Every load now asks for the same model version, and a relaunch loads the model already on disk in about a second
+
+**3.10.1 (#342) Recording shortcuts work while another app holds secure input**
+- During a recording, Space, the talk key + Space, Esc and the fn letters are registered as system shortcuts, only the ones the recording uses at that moment, and released when it ends. A password field, Terminal's Secure Keyboard Entry or the lock screen no longer stops them
+- The health panel's Keyboard shortcuts row now names only what still stops under secure input: the Read aloud shortcuts, or the agent reply shortcuts with agent replies on. The bubble's lock, pause and cleanup tips show as usual again
+
 ## v3.10.0 — 2026-10-31
 
 **3.9.1 (#343) Holding Right Option to talk records again**

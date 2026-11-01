@@ -43,9 +43,9 @@ struct HealthProber {
     /// Whether the voice-activity model is complete on disk; injected so the
     /// row's rule is testable without this machine's model folder.
     var vadModelPresent: () -> Bool
-    /// The keycap of the key held to talk, named in the Keyboard shortcuts row
-    /// while secure input is on (#341).
-    var readTalkKey: () -> String
+    /// The lore keys secure input would stop, as the hotkeys read them
+    /// (#346): the Keyboard shortcuts row shows only while there are some.
+    var readDeadShortcuts: () -> DeadShortcuts
 
     init(
         readTapLiveness: @escaping () -> TapLiveness,
@@ -56,7 +56,7 @@ struct HealthProber {
         store: DiagStore = .shared,
         now: @escaping () -> Date = Date.init,
         vadModelPresent: @escaping () -> Bool = { SileroVAD.isPresent },
-        readTalkKey: @escaping () -> String = { HotkeyKey.fn.shortName }
+        readDeadShortcuts: @escaping () -> DeadShortcuts = { DeadShortcuts() }
     ) {
         self.readTapLiveness = readTapLiveness
         self.readSecureInput = readSecureInput
@@ -66,7 +66,7 @@ struct HealthProber {
         self.store = store
         self.now = now
         self.vadModelPresent = vadModelPresent
-        self.readTalkKey = readTalkKey
+        self.readDeadShortcuts = readDeadShortcuts
     }
 
     /// A probe result plus the machine-local notes (holder attribution, signing
@@ -92,30 +92,27 @@ struct HealthProber {
         // the hiding of the tap row are views of the same fact and must never
         // disagree (#93).
         let secureInput = readSecureInput()
-        let readings = readings(secureInput, permissionsBlocked: permissionsBlocked)
+        let dead = readDeadShortcuts()
+        let readings = readings(secureInput, dead: dead, permissionsBlocked: permissionsBlocked)
         let snapshot = HealthSnapshot(
             marketingVersion: Self.marketingVersion,
             build: Self.build,
             results: readings.map(\.result)
         )
-        // The `.secureInput` row can read `.ok` while the flag is up (benign
-        // behind a locked console, #98), and its ok copy must not claim
-        // "Inactive" then.
-        let talkKey = readTalkKey()
         let items = readings
-            // While secure input stands, its row carries the condition under the
-            // name "Keyboard shortcuts" (#341) and a live tap's row, whose verdict
-            // it makes unmeasurable, is not shown: the header counts exactly the
+            // The `.secureInput` row shows only as a problem (#346): no ok state.
+            // While secure input stands a live tap's row, whose verdict it makes
+            // unmeasurable, is not shown either: the header counts exactly the
             // rows shown (the tap's `.warning` never counts). A dead tap stays.
+            .filter { !($0.result.id == .secureInput && $0.result.status == .ok) }
             .filter { !(secureInput.isProblem && $0.result.id == .tap && $0.result.status != .failed) }
             .map { reading in
                 HealthCatalog.describe(
                     reading.result,
                     secureInputHolder: reading.holder,
                     teamID: reading.teamID,
-                    secureInputActive: reading.result.id == .secureInput && secureInput.active,
                     notesLeftover: reading.notesLeftover,
-                    talkKey: talkKey
+                    deadShortcuts: dead
                 )
             }
         return (snapshot, items)
@@ -127,12 +124,14 @@ struct HealthProber {
     /// expensive split. `countsInFooter` reads the same property, so a probe's
     /// auto-run-at-open verdict and its footer-cry-wolf exclusion cannot drift.
     /// `allCases` is declared in chain order, so this preserves the panel order.
-    private func readings(_ secureInput: SecureInput.State, permissionsBlocked: Bool) -> [Reading] {
+    private func readings(
+        _ secureInput: SecureInput.State, dead: DeadShortcuts, permissionsBlocked: Bool
+    ) -> [Reading] {
         HealthProbeID.allCases.map { id in
             var reading = switch id {
             case .accessibility: accessibilityReading(blocked: permissionsBlocked)
             case .paste: pasteReading()
-            default: id.cost == .expensive ? expensiveReading(id) : cheapReading(id, secureInput)
+            default: id.cost == .expensive ? expensiveReading(id) : cheapReading(id, secureInput, dead: dead)
             }
             // The rows the block explains carry it too, so they point at the
             // one row with the fix (#338).
@@ -184,7 +183,7 @@ struct HealthProber {
     /// not compile until it is placed here or, if `cost == .expensive`, given an
     /// extractor in `expensiveOutcome` (the `preconditionFailure` arm is
     /// unreachable because `readings()` routes expensive ids away by cost).
-    private func cheapReading(_ id: HealthProbeID, _ secureInput: SecureInput.State) -> Reading {
+    private func cheapReading(_ id: HealthProbeID, _ secureInput: SecureInput.State, dead: DeadShortcuts) -> Reading {
         switch id {
         case .signing: return signingReading()
         case .diskSpace: return diskReading()
@@ -193,7 +192,7 @@ struct HealthProber {
         // not disagree with the flow that collected the grant.
         case .inputMonitoring: return plain(id, PermissionReader.inputMonitoringGranted() ? .ok : .failed)
         case .tap: return tapReading(secureInput)
-        case .secureInput: return secureInputReading(secureInput)
+        case .secureInput: return secureInputReading(secureInput, dead: dead)
         case .microphone: return plain(id, Self.microphoneStatus())
         case .asrModel: return plain(id, ParakeetBackend().checkStatus() == .ready ? .ok : .failed)
         case .vadModel: return plain(id, vadStatus())
@@ -282,18 +281,20 @@ struct HealthProber {
     }
 
     /// The state is read once per cycle in `probe()` and passed in.
-    private func secureInputReading(_ state: SecureInput.State) -> Reading {
+    private func secureInputReading(_ state: SecureInput.State, dead: DeadShortcuts) -> Reading {
         // Secure input behind a locked console is the lock screen doing its job —
         // working as designed whoever the registry credits (an attribution
         // rdar://48953777 makes unreliable anyway), and the panel is unreadable
         // there, so nothing is surfaced at every lock screen (#98).
         // A genuinely stuck flag resurfaces on the first tick
         // after unlock: the lock state is re-read every cycle.
-        let problem = state.isProblem
+        // Since #346 lore's keys arrive as hot keys under secure input, so it is
+        // a problem only while a key truly cannot work (`DeadShortcuts`).
+        let problem = state.isProblem && !dead.isEmpty
         return Reading(
             result: HealthResult(
                 id: .secureInput,
-                // A warning, not a failure (#341): only the shortcuts stop. It
+                // A warning, not a failure (#341): only those keys stop. It
                 // counts once in the header, as "Keyboard shortcuts" (`shortName`).
                 status: problem ? .warning : .ok,
                 // The pid rides iff the row is a problem, so a report's reader can

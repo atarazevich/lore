@@ -62,6 +62,40 @@ public enum TalkKey: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// Which of a recording's control keys (#342) — its kind, never a keycode.
+public enum ControlKey: String, Codable, Sendable, CaseIterable {
+    case space
+    case escape
+    /// One of the letters on the talk key (V, T, S, K, the player's keys).
+    case letter
+    /// A key a newer build knows and this one does not.
+    case unknown
+
+    /// A key this version does not know reads as `.unknown`.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = ControlKey(rawValue: raw) ?? .unknown
+    }
+}
+
+/// What came of a hot key press (#342).
+public enum HotKeyOutcome: String, Codable, Sendable, CaseIterable {
+    /// Lore acted on it.
+    case acted
+    /// Another channel (the tap) already acted on the same press.
+    case duplicate
+    /// Not lore's at that moment; swallowed.
+    case notOurs
+    /// An outcome a newer build knows and this one does not.
+    case unknown
+
+    /// An outcome this version does not know reads as `.unknown`.
+    public init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = HotKeyOutcome(rawValue: raw) ?? .unknown
+    }
+}
+
 /// Which form a dictation's items take in the app receiving the paste (#195).
 public enum PasteTarget: String, Codable, Sendable, CaseIterable {
     /// A terminal, or an editor that hosts a command-line agent: an item is its

@@ -291,8 +291,9 @@ struct HealthSummary: Equatable {
     ///   System audio and OpenAI liveness are never exercised, could never reach
     ///   "All systems ready" (the cry-wolf inversion).
     /// - `.tap`: `tapStatus()` returns `.warning` for the two silence-shaped
-    ///   states — unmeasurable under secure input (#94; the `.secureInput` row
-    ///   is shown and counted instead, and the tap row is hidden, #341), and a
+    ///   states — unmeasurable under secure input (#94; the tap row is hidden
+    ///   then, and the `.secureInput` row is shown and counted only while a lore
+    ///   key truly cannot work, #341, #346), and a
     ///   measured starvation, demoted from `.failed` in #140 because it is
     ///   inferred from keyboard silence, not from a failed action. Neither is
     ///   footer material: the always-visible footer would cry wolf on every

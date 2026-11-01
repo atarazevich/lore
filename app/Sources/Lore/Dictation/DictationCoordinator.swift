@@ -1282,12 +1282,25 @@ final class DictationCoordinator {
     }
 
     func pasteLastTranscript() {
-        // Respect activeVersion of the most recent entry
-        let text = history.entries.first?.displayText ?? lastTranscript
-        guard let text else { return }
+        // History alone: every take is in it, in memory even when the disk
+        // refused it (#265), and a deleted take is gone from it.
+        guard let text = Self.repasteText(in: history.entries) else { return }
         // Nothing here reads the answer: this is the menu's own re-paste, and
-        // it has no face to put a failure on.
-        Task { @MainActor in await TextInserter.paste(text) }
+        // it has no face to put a failure on. It waits for the chord's Control
+        // to come up first (#346), so the Cmd+V is not read as Ctrl+Cmd+V.
+        Task { @MainActor in
+            await TextInserter.waitForControlRelease()
+            await TextInserter.paste(text)
+        }
+    }
+
+    /// What paste-again hands over (#346): the active version of the newest
+    /// take that has words. A take still recording, a take that came back
+    /// empty, or a cancelled one with nothing in it has no text and is passed
+    /// over, so paste-again never pastes nothing over the clipboard.
+    static func repasteText(in entries: [DictationHistoryEntry]) -> String? {
+        entries.lazy.compactMap(\.displayText)
+            .first { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
     }
 
     /// Retry transcription for a failed or audio-only entry. Registered in

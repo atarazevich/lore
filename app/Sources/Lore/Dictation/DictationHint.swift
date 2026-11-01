@@ -17,16 +17,6 @@ import LoreCore
 /// ordering lives in one place and cannot be restated somewhere else and drift.
 // The cases are declared in LoreCore beside `DiagEvent`, which carries them (#305).
 extension DictationHint {
-    /// Teaches a key lore never receives while secure input is on, so it is
-    /// held back then (#341, board `secure-input.html`). Held back is not shown:
-    /// it waits for a recording without secure input and spends no day.
-    var needsShortcuts: Bool { [.lock, .pause, .cleanup].contains(self) }
-
-    /// Held back at this moment: it teaches a shortcut and secure input is on.
-    func isHeldBack(_ signals: DictationHintSignals) -> Bool {
-        signals.secureInput && needsShortcuts
-    }
-
     /// A report states a fact about the world rather than about the app: it is
     /// never counted against the three-showings ceiling, carries no ×, and is
     /// withdrawn the moment its condition ends.
@@ -221,10 +211,6 @@ struct DictationHintSignals: Equatable, Sendable {
     /// Cleanup is armed for this dictation (Fn+V, or the `V` keycap). The
     /// standing setting behind it is the arbiter's own to read.
     var cleanupArmed = false
-    /// Another app holds secure input, read fresh on this tick (the flag alone,
-    /// no registry walk). The shortcuts are off then, so the hints that teach
-    /// one are held back (#341).
-    var secureInput = false
 }
 
 // MARK: - The arbiter
@@ -344,13 +330,6 @@ final class DictationHintArbiter {
         // same breath would let a card the shape cannot draw be re-chosen
         // forever inside one tick's worth of state.
         if let hint = chosen {
-            // Secure input came on: the key the card teaches stopped reaching
-            // lore (#341). Checked before the card can begin showing, so a
-            // held-back hint never spends a day.
-            if hint.isHeldBack(signals) {
-                withdraw(hint, .displaced)
-                return nil
-            }
             // The shape reports when the card is really on screen; only then
             // does it cost a day, leave a trace and start its six seconds.
             if showing == nil, signals.cardDrawn { beginShowing(hint, now: now) }
@@ -449,7 +428,6 @@ final class DictationHintArbiter {
     ) -> DictationHint? {
         DictationHint.allCases.first { hint in
             (hint.isReport || !lessonShown)
-                && !hint.isHeldBack(signals)
                 && record.isEligible(hint, now: now)
                 && triggered(hint, signals, now: now)
         }

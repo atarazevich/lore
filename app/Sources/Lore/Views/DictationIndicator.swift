@@ -2777,8 +2777,8 @@ final class DictationIndicatorManager {
                 if chips != self.model.items { self.model.items = chips }
 
                 // The arbiter rides this poll (#235): every fact it reads is
-                // already on the line above, except the secure-input flag, read
-                // fresh here (#341) — no hint needs a timer or a window of its own.
+                // already on the line above, so no hint needs a sensor, a timer
+                // or a window of its own.
                 let hint = self.hints?.tick(DictationHintSignals(
                     capturing: newState == .recording && !coordinator.cancelled,
                     canSpeak: DictationIndicatorView.canExpand(
@@ -2792,8 +2792,7 @@ final class DictationIndicatorManager {
                     hoverTipShowing: self.hoverTipShowing,
                     noSignal: coordinator.noSignal,
                     level: coordinator.audioLevel,
-                    cleanupArmed: coordinator.pendingCleanupMode == .cleanup,
-                    secureInput: SecureInput.isOn
+                    cleanupArmed: coordinator.pendingCleanupMode == .cleanup
                 ))
                 if hint != self.model.hint { self.model.hint = hint }
 

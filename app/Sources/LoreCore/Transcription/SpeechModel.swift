@@ -20,7 +20,7 @@ public enum SpeechModel: String, Codable, Sendable, CaseIterable {
     }
 
     /// `FluidInference/parakeet-ultra-coreml` as the owner measured it
-    /// (2026-09-24), pinned at launch with the other models (`ModelBundle.pinAll`).
+    /// (2026-09-24), pinned with the other models before any load (`ModelBundle.pinAll`).
     static let ultraRevision = "95eaa59a39d4394f047a4dc5cce480388a60d1b6"
 }
 

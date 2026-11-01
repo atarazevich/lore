@@ -1,4 +1,5 @@
 import AppKit
+import Carbon.HIToolbox
 import LoreCore
 import os
 
@@ -15,14 +16,20 @@ final class HotkeyManager {
     ///
     /// Both keys are the selection's only while agent replies are off, which is
     /// the default — see `fnChord`.
-    weak var readAloudController: ReadAloudController?
+    weak var readAloudController: ReadAloudController? {
+        didSet { observeClaimInputs(); syncHotKeys() }
+    }
     /// Agent replies (#259): with the switch on, the letters on the talk key
     /// are the player's — R play/pause, [ previous, ] next, J the reply's chat,
     /// M mute — a tap of the talk key alone shows or hides the player (#278),
     /// and Esc stops a reply that is being read aloud. Set by the dictation
     /// setup alongside `install`; nil, or the switch off, leaves every key
     /// exactly what it was.
-    weak var agentReplies: AgentReplyController?
+    weak var agentReplies: AgentReplyController? {
+        // Assigned after `install`: the observation starts again so its
+        // switch is tracked (#342), and the set re-derived (#346).
+        didSet { observeClaimInputs(); syncHotKeys() }
+    }
     /// Where Fn+J goes (#258). Nil leaves that one key inert, the way a nil
     /// `readAloudController` leaves the selection's keys inert.
     weak var agentChats: AgentChatNavigator?
@@ -32,10 +39,20 @@ final class HotkeyManager {
     private var localFlagsMonitor: Any?
     private var localKeyMonitor: Any?
 
-    private var fnDown = false
+    private var fnDown = false {
+        didSet { if fnDown != oldValue { syncHotKeys() } }
+    }
+    /// The Fn key's own flag, from the last flags-changed event (#342) — what
+    /// the letters on Fn ride when the talk key is another key. Flags-changed
+    /// survives secure input, so this does too.
+    private var fnFlagDown = false {
+        didSet { if fnFlagDown != oldValue { syncHotKeys() } }
+    }
     private var fnTimer: Task<Void, Never>?
     /// Debounce timer for Fn release — Fn modifier flag flickers when other keys pressed
-    private var fnReleaseDebounce: Task<Void, Never>?
+    private var fnReleaseDebounce: Task<Void, Never>? {
+        didSet { if (fnReleaseDebounce == nil) != (oldValue == nil) { syncHotKeys() } }
+    }
     /// What the debounced release does once it stands.
     private var pendingRelease: (@MainActor (HotkeyManager) -> Void)?
     /// When the talk key last came up, by the event's own clock
@@ -127,7 +144,9 @@ final class HotkeyManager {
 
     /// Locked = recording continues after the talk key's release; the key ends
     /// it, the key with Space pauses it, and Esc cancels it (#206, #233).
-    private(set) var isLocked = false
+    private(set) var isLocked = false {
+        didSet { if isLocked != oldValue { syncHotKeys() } }
+    }
     /// Set synchronously so the local monitor closure can check it without main actor hop
     nonisolated(unsafe) private var isRecordingFlag = false
     /// Synchronous mirror of isLocked for CGEvent tap callback
@@ -158,8 +177,9 @@ final class HotkeyManager {
     /// The last secure-input reading of the 5 s health cycle, to record the
     /// flag's edges and to notice any change in what the panel would say.
     private var lastSecureInput: SecureInput.State?
-    /// The secure-input reading changed — the flag, the holder or the lock — so
-    /// an open health panel re-reads and its row never states a stale holder
+    /// The secure-input reading changed — the flag, the holder or the lock —
+    /// or the keys it would stop did (`deadShortcuts`, #346), so an open
+    /// health panel re-reads and its row never states a stale holder or key
     /// (#341). The launch path wires this to one `HealthMonitor.refresh()`.
     var onSecureInputChanged: (() -> Void)?
 
@@ -266,7 +286,7 @@ final class HotkeyManager {
         globalKeyMonitor = NSEvent.addGlobalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard HotkeyManager.isRepasteChord(event) else { return }
             Task { @MainActor in
-                self?.handleKeyDown(event)
+                self?.handleKeyDown(event, on: .globalMonitor)
             }
         }
 
@@ -285,74 +305,38 @@ final class HotkeyManager {
             // so the tap and this both marking one key is one mark.
             self.noteKeyDown(keyCode: event.keyCode)
 
-            // A letter on Fn → consume (#105, #259): the player's keys while
-            // agent replies are on, Fn+R / Fn+Q reading the selection while they
-            // are off. Mirror of the CGEvent tap branch for when the tap is dead
-            // and Lore itself is focused; when both are live the tap consumes
-            // first. A letter that is nobody's is fully inert — not even consumed.
-            if event.modifierFlags.contains(.function),
-               let chord = self.fnChord(keyCode: event.keyCode) {
-                Task { @MainActor in
-                    self.handleFnChord(chord)
-                }
+            // Lore's controls — the Fn letters, Space, Esc — through the one
+            // decision the tap and the hot keys take (`controlPress`), for when
+            // the tap is dead and lore is in front; when both are live the tap
+            // consumes first. Only lore's keys are swallowed: a bare Space
+            // inside a locked recording is a space, and while the screenshot
+            // crosshair is up Esc is the crosshair's.
+            if self.isDuplicatePress(event.keyCode, on: .localMonitor) { return nil }
+            if let press = self.controlPress(
+                keyCode: event.keyCode, fnHeld: event.modifierFlags.contains(.function),
+                talkKeyHeld: self.talkKeyHeld(event.modifierFlags)
+            ) {
+                // Auto-repeat is the same press still down: swallowed with the
+                // press it belongs to, acted on once (#233).
+                let isRepeat = event.isARepeat
+                self.noteActed(event.keyCode, on: .localMonitor)
+                Task { @MainActor in self.perform(press, isRepeat: isRepeat) }
                 return nil
             }
-
-            // Fn+V/T/K/S while recording → consume (use event's own Fn flag, not tracked flag)
-            if event.modifierFlags.contains(.function) && self.isRecordingFlag {
-                if (event.keyCode == 9 && self.modifierOn({ $0.modifierCleanupEnabled }))
-                    || (event.keyCode == 17 && self.modifierOn({ $0.modifierTranslateEnabled }))
-                    || event.keyCode == 40 // V, T, or K (#324: always on)
-                    || (event.keyCode == 1 && RichInputSettings.screenshotsEnabled) { // S (#192)
-                    Task { @MainActor in
-                        self.handleKeyDown(event)
-                    }
-                    return nil
-                }
-            }
-
-            // Space inside a recording → lock it, or pause and resume a locked
-            // one with the talk key held (#233). Consumed only when it is
-            // lore's: a bare Space inside a locked recording is a space.
-            if event.keyCode == HotkeyKey.spaceKeyCode {
-                let action = self.spaceAction(talkKeyHeld: self.talkKeyHeld(event.modifierFlags))
-                if action != .passThrough {
-                    // Auto-repeat is the same press still down: swallowed with
-                    // the press it belongs to, acted on once (#233).
-                    let isRepeat = event.isARepeat
-                    Task { @MainActor in
-                        self.handleSpace(action, isRepeat: isRepeat)
-                    }
-                    return nil // swallow the Space
-                }
-            }
-
-            // Esc → a dictation's cancel, an agent reply's pause, the player
-            // going away, or the app in front's own key (#206, #233, #259,
-            // #263). The decision is taken here rather than in the Task, so
-            // consuming and acting cannot disagree: only lore's Esc is
-            // swallowed, and while the system screenshot crosshair is up the
-            // key belongs to the crosshair.
+            // An Esc that is not lore's reaches the handler only when it has
+            // something to record: a reply an earlier Esc stopped, still
+            // inside the window (#259).
             if event.keyCode == DictationEscape.keyCode {
-                let action = self.escapeAction
-                // A pass-through reaches the handler only when it has something
-                // to record — a reply an earlier Esc stopped, still inside the
-                // window. Esc is pressed all day long with nothing of lore's
-                // happening, and it used to cost a main-actor hop and a log line
-                // every time (#259).
-                if action != .passThrough
-                    || self.agentReplies?.escapeRepeatIsWorthRecording == true {
+                if self.agentReplies?.escapeRepeatIsWorthRecording == true {
                     let isRepeat = event.isARepeat
-                    Task { @MainActor in
-                        self.handleEscape(action, isRepeat: isRepeat)
-                    }
+                    Task { @MainActor in self.handleEscape(.passThrough, isRepeat: isRepeat) }
                 }
-                return action == .passThrough ? event : nil
+                return event
             }
 
             // All other keys pass through normally
             Task { @MainActor in
-                self.handleKeyDown(event)
+                self.handleKeyDown(event, on: .localMonitor)
             }
             return event
         }
@@ -360,6 +344,14 @@ final class HotkeyManager {
         // A fresh install is a fresh signal (#149).
         tapRepairs.reset()
         installEventTap()
+
+        // The recording's control keys as hot keys (#342): delivered while
+        // another app holds secure input, when the tap above gets nothing.
+        // The system releases them when the process exits or crashes.
+        hotKeys.registrar.onEvent = { [weak self] key, pressed in
+            self?.handleHotKey(key, pressed: pressed)
+        }
+        observeClaimInputs()
 
         // Wake is the other genuine signal (#149): the tap can be refused while
         // WindowServer is still coming back, and nothing else would try again.
@@ -406,6 +398,11 @@ final class HotkeyManager {
         coordinator?.onRecordingEnding = nil
         coordinator = nil
         settings = nil
+        screenshotUIPending = false
+        pollTask?.cancel()
+        pollTask = nil
+        hotKeys.apply([])
+        hotKeys.registrar.onEvent = nil
         HotkeyManager.hkLog.info("Hotkey manager uninstalled")
     }
 
@@ -432,6 +429,7 @@ final class HotkeyManager {
         // not leave the window believing a change is still unread (#343).
         let time = event.timestamp > 0 ? event.timestamp : ProcessInfo.processInfo.systemUptime
         lastFlagsChangeRead = max(lastFlagsChangeRead, time)
+        fnFlagDown = event.modifierFlags.contains(.function)
         let hotkeyKey = settings?.hotkeyKey ?? .fn
         // A recorded talk key that is not a modifier never appears here: it
         // arrives as a key-down and a key-up through the tap (#226), and asking
@@ -507,6 +505,9 @@ final class HotkeyManager {
         // decided in `decideTalkKeyPress`.
         isPreBufferingFlag = true
         coordinator?.startPreBuffer()
+        // Now, not on the observation's next turn: a Space right after the
+        // talk key must find its hot key registered (#342).
+        syncHotKeys()
 
         isHoldMode = false
         fnTimer = Task { [weak self] in
@@ -562,8 +563,14 @@ final class HotkeyManager {
     /// through the window, not the moment lore got to it.
     private var awaitingUnreadRelease = false
 
-    init(systemRelease: @escaping @MainActor (HotkeyKey) -> SystemRelease = HotkeyManager.liveSystemRelease) {
+    /// The system registrar is passed in by the app alone (`AppCoordinator`):
+    /// the default registers nothing, so no test can take the owner's Space.
+    init(
+        systemRelease: @escaping @MainActor (HotkeyKey) -> SystemRelease = HotkeyManager.liveSystemRelease,
+        hotKeys registrar: HotKeyRegistering = InertHotKeys()
+    ) {
         self.systemRelease = systemRelease
+        self.hotKeys = RecordingHotKeys(registrar: registrar)
     }
 
     private static func liveSystemRelease(_ key: HotkeyKey) -> SystemRelease {
@@ -584,6 +591,8 @@ final class HotkeyManager {
             HotkeyManager.hkLog.debug("[HOTKEY] held through the window → dictation")
             readAloudController?.pauseForDictation()
             coordinator?.confirmRecording()
+            // The letters inside a recording are claimed from now (#342).
+            syncHotKeys()
             return
         }
         coordinator?.cancelPreBuffer()
@@ -717,7 +726,7 @@ final class HotkeyManager {
     /// keystroke lands in Lore's own field while the branch below still applies
     /// the mode. Space is not here at all: `spaceAction` is the whole decision,
     /// taken at the monitor itself (#233).
-    private func handleKeyDown(_ event: NSEvent) {
+    private func handleKeyDown(_ event: NSEvent, on channel: PressChannel) {
         guard let coordinator else {
             HotkeyManager.hkLog.error("[HK] coordinator is nil in handleKeyDown — events being dropped")
             return
@@ -725,38 +734,20 @@ final class HotkeyManager {
 
         // Fn+V/T while recording → set pre-paste cleanup mode
         // Use event's own .function flag (reliable even when Fn modifier flickers)
-        if event.modifierFlags.contains(.function) && (coordinator.state == .recording || coordinator.isPreBuffering) {
-            if event.keyCode == 9, modifierOn({ $0.modifierCleanupEnabled }) { // V
-                coordinator.setPendingMode(.cleanup)
-                if isLocked { fnHeldAtLock = true }
-                HotkeyManager.hkLog.debug("[HOTKEY] Fn+V → pending cleanup")
-                return
-            } else if event.keyCode == 17, modifierOn({ $0.modifierTranslateEnabled }) { // T
-                coordinator.setPendingMode(.translate)
-                if isLocked { fnHeldAtLock = true }
-                HotkeyManager.hkLog.debug("[HOTKEY] Fn+T → pending translate")
-                return
-            } else if event.keyCode == 40 { // K (#324: mark for later, always on)
-                coordinator.toggleMark()
-                if isLocked { fnHeldAtLock = true }
-                HotkeyManager.hkLog.debug("[HOTKEY] Fn+K → mark for later")
-                return
-            } else if event.keyCode == 1, RichInputSettings.screenshotsEnabled { // S (#192/#198)
-                // Still consumed while paused, and deliberately does nothing:
-                // the clipboard door is shut (#206), so a screenshot taken here
-                // would land on the user's clipboard and join no prompt.
-                if !coordinator.isPaused { TextInserter.postScreenshotToClipboard() }
-                if isLocked { fnHeldAtLock = true }
-                HotkeyManager.hkLog.debug("[HOTKEY] Fn+S → screenshot to clipboard")
-                return
-            }
+        if event.modifierFlags.contains(.function) && (coordinator.state == .recording || coordinator.isPreBuffering),
+           let chord = recordingChord(keyCode: Int64(event.keyCode)) {
+            handleRecordingChord(chord)
+            return
         }
 
         // Esc is not here: both event paths decide it where they consume it
         // (#233, #259), so this function is never reached for one.
 
-        // Ctrl+Cmd+V to re-paste last transcript
-        if HotkeyManager.isRepasteChord(event) {
+        // Ctrl+Cmd+V to re-paste last transcript. Under secure input the hot
+        // key has it too (#346): one press, one paste.
+        if HotkeyManager.isRepasteChord(event),
+           !isDuplicatePress(Self.repasteHotKey.keyCode, on: channel) {
+            noteActed(Self.repasteHotKey.keyCode, on: channel)
             coordinator.pasteLastTranscript()
         }
     }
@@ -852,12 +843,19 @@ final class HotkeyManager {
     /// The switch needs no reading of its own: with it off the controller holds
     /// no reply, speaks none and draws nothing.
     var escapeAction: EscapeAction {
+        escapeAction(dictating: isDictating, screenshotUIIsUp: readScreenshotUI())
+    }
+
+    /// The same reading with the two inputs the hot key set states itself
+    /// (#346): no dictation, and the crosshair lore knows of instead of the
+    /// window walk.
+    func escapeAction(dictating: Bool, screenshotUIIsUp: @autoclosure () -> Bool) -> EscapeAction {
         EscapeAction.decide(
-            dictating: coordinator?.state == .recording || coordinator?.isPreBuffering == true,
+            dictating: dictating,
             helpPinned: agentReplies?.isHelpPinned == true,
             replySpeaking: agentReplies?.canStopSpeech == true,
             playerShowing: agentReplies?.isPlayerShowing == true,
-            screenshotUIIsUp: DictationEscape.screenshotUIIsUp
+            screenshotUIIsUp: screenshotUIIsUp()
         )
     }
 
@@ -1137,6 +1135,10 @@ final class HotkeyManager {
     /// one of the player's keys above.
     private static let queueSelectionKey: UInt16 = 12
 
+    /// Every key `fnChord` can claim, in one list: read there and by the hot
+    /// keys (#342), so the two cannot name different letters.
+    static let fnChordKeys: [UInt16] = AgentReplyChord.allCases.map(\.rawValue) + [queueSelectionKey]
+
     /// Whose this letter is, with Fn held, or nil when it is nobody's — nil
     /// being the common case, and the answer for every key the chord table
     /// does not name.
@@ -1150,6 +1152,7 @@ final class HotkeyManager {
     ///
     /// Internal so tests walk the table without a keyboard.
     func fnChord(keyCode: UInt16) -> FnChord? {
+        guard Self.fnChordKeys.contains(keyCode) else { return nil }
         if agentReplies?.isEnabled == true {
             if let key = AgentReplyChord(rawValue: keyCode) { return .reply(key) }
             return keyCode == Self.queueSelectionKey ? .retired : nil
@@ -1257,8 +1260,417 @@ final class HotkeyManager {
     /// shortcut. The one chord the global keyDown monitor may handle (see the
     /// invariant at its installation, #95).
     private static func isRepasteChord(_ event: NSEvent) -> Bool {
-        event.keyCode == 9
+        event.keyCode == repasteHotKey.keyCode
             && event.modifierFlags.intersection([.command, .control, .option, .shift]) == [.control, .command]
+    }
+
+    /// Control-Command-V as a hot key (#346), registered only while secure
+    /// input is held: otherwise the chord reaches the app in front as well.
+    static let repasteHotKey = ControlHotKey(keyCode: 9, modifiers: UInt32(controlKey | cmdKey))
+
+    // MARK: - The letters inside a recording (Fn+V/T/S/K)
+
+    /// A letter on Fn that acts on the recording itself. The raw value is the
+    /// keycode, so the key and what it does are one fact.
+    enum RecordingChord: UInt16, Equatable, Sendable, CaseIterable {
+        case cleanup = 9      // V
+        case translate = 17   // T
+        case screenshot = 1   // S (#192/#198)
+        case mark = 40        // K (#324: always on)
+    }
+
+    /// Whose this letter is inside a recording, Fn held: the one reading the
+    /// tap, the local monitor and the hot keys (#342) take. Nil when the key is
+    /// none of them or its switch is off.
+    func recordingChord(keyCode: Int64) -> RecordingChord? {
+        guard let code = UInt16(exactly: keyCode), let chord = RecordingChord(rawValue: code) else {
+            return nil
+        }
+        switch chord {
+        case .cleanup: return modifierOn({ $0.modifierCleanupEnabled }) ? chord : nil
+        case .translate: return modifierOn({ $0.modifierTranslateEnabled }) ? chord : nil
+        case .screenshot: return RichInputSettings.screenshotsEnabled ? chord : nil
+        case .mark: return chord
+        }
+    }
+
+    /// A recording chord taken.
+    func handleRecordingChord(_ chord: RecordingChord) {
+        guard let coordinator else { return }
+        switch chord {
+        case .cleanup: coordinator.setPendingMode(.cleanup)
+        case .translate: coordinator.setPendingMode(.translate)
+        case .mark: coordinator.toggleMark()
+        case .screenshot:
+            // The system's own crosshair, pressed for the user — the image
+            // lands on the clipboard and the door collects it. Still consumed
+            // while paused, and does nothing: that door is shut (#206).
+            if !coordinator.isPaused {
+                TextInserter.postScreenshotToClipboard()
+                noteScreenshotPosted()
+            }
+        }
+        // The talk key's next release ends the chord, not the dictation.
+        if isLocked { fnHeldAtLock = true }
+        HotkeyManager.hkLog.debug("[HOTKEY] Fn chord \(String(describing: chord), privacy: .public) inside a recording")
+    }
+
+    // MARK: - One decision for a control key
+
+    /// What a key-down is to lore right now: the one decision the tap, the
+    /// local monitor and the hot keys take, so none of them can claim a key
+    /// another passes, or act in another order. Nil: not lore's — the key is
+    /// passed on (or, arriving as a hot key, swallowed: see `handleHotKey`).
+    enum ControlPress: Equatable {
+        case recordingChord(RecordingChord)
+        case fnChord(FnChord)
+        case space(SpaceAction)
+        case escape(EscapeAction)
+        /// Control-Command-V: paste the last transcript again. Reaches
+        /// `perform` only as a hot key (#346); the monitors take it in
+        /// `handleKeyDown`.
+        case repaste
+    }
+
+    /// `fnHeld` and `talkKeyHeld` are the event's own readings; the keycodes
+    /// of the four kinds do not overlap, so the order only states precedence.
+    func controlPress(keyCode: UInt16, fnHeld: Bool, talkKeyHeld: Bool) -> ControlPress? {
+        if fnHeld, isRecordingFlag, let chord = recordingChord(keyCode: Int64(keyCode)) {
+            return .recordingChord(chord)
+        }
+        if fnHeld, let chord = fnChord(keyCode: keyCode) { return .fnChord(chord) }
+        if keyCode == HotkeyKey.spaceKeyCode {
+            let action = spaceAction(talkKeyHeld: talkKeyHeld)
+            return action == .passThrough ? nil : .space(action)
+        }
+        if keyCode == DictationEscape.keyCode {
+            let action = escapeAction
+            return action == .passThrough ? nil : .escape(action)
+        }
+        return nil
+    }
+
+    /// A control key taken, whichever path saw it.
+    func perform(_ press: ControlPress, isRepeat: Bool) {
+        switch press {
+        case .recordingChord(let chord): handleRecordingChord(chord)
+        case .fnChord(let chord): handleFnChord(chord)
+        case .space(let action): handleSpace(action, isRepeat: isRepeat)
+        case .escape(let action): handleEscape(action, isRepeat: isRepeat)
+        case .repaste: coordinator?.pasteLastTranscript()
+        }
+    }
+
+    // MARK: - The recording's keys as hot keys (#342)
+
+    /// The registered hot keys, kept equal to `claimedHotKeys`.
+    private let hotKeys: RecordingHotKeys
+
+    /// A screenshot crosshair owns Esc, so Esc leaves the hot key set while
+    /// one is up: from the moment lore posts the shortcut, or from an Esc hot
+    /// key pressed while one is up (one the user raised, or lore's taking
+    /// longer than `screenshotAppearWindow`) — that one press is the
+    /// documented loss, and the next Esc reaches the crosshair. Cleared by the
+    /// poll (`pollTick`) once the crosshair is gone, and by every recording's
+    /// end (`syncHotKeys`).
+    private var screenshotUIPending = false
+    /// Before this the crosshair is given time to appear and is not read.
+    private var screenshotUIDeadline = ContinuousClock.now
+    /// How long the crosshair is given to appear after lore posts it.
+    static let screenshotAppearWindow: Duration = .seconds(1)
+    /// The crosshair reading. Injected only by tests, which have no screen.
+    var readScreenshotUI: @MainActor () -> Bool = { DictationEscape.screenshotUIIsUp }
+    /// The secure-input flag alone, cheap enough for every poll tick (#346).
+    /// Injected only by tests, which never hold secure input for real.
+    var readSecureInputFlag: @MainActor () -> Bool = { IsSecureEventInputEnabled() }
+
+    /// Called right after lore posts a screenshot shortcut (Fn+S, the
+    /// Cmd+Shift+3/4 redirect). Internal so tests drive it without raising a
+    /// real crosshair.
+    func noteScreenshotPosted() { watchScreenshotUI(appearing: Self.screenshotAppearWindow) }
+
+    /// Esc out of the set until no crosshair is up, `appearing` given first.
+    private func watchScreenshotUI(appearing: Duration) {
+        screenshotUIPending = true
+        screenshotUIDeadline = ContinuousClock.now + appearing
+        syncHotKeys()
+    }
+
+    /// A recording is live: the talk key's window or the recording itself.
+    private var isDictating: Bool {
+        guard let coordinator else { return false }
+        return coordinator.state == .recording || coordinator.isPreBuffering
+    }
+
+    /// The talk key counts as held for registration until its release settles
+    /// — the Fn flag flickers under other keys, and a Space pressed inside a
+    /// flicker must still find its hot key — except in a locked recording,
+    /// where a Space in that window is the user's typing to the tap too.
+    private var talkKeyEngaged: Bool { fnDown || (!isLocked && fnReleaseDebounce != nil) }
+
+    /// Every key the tap would claim right now, as hot keys — derived from the
+    /// tap's own decisions (`spaceAction`, `escapeAction`'s dictation line,
+    /// `recordingChord`, `fnChord`), never a list of its own. Empty outside a
+    /// recording unless secure input is held. Inside a locked recording with
+    /// the talk key up, Space and the letters are the user's typing and are
+    /// not here; Esc is, except while lore's own screenshot crosshair is up.
+    ///
+    /// A Carbon hot key matches its modifiers exactly, Fn included (measured
+    /// live: with Fn held only a registration carrying the Fn bit fires). So
+    /// each key is registered in the shape the press will have. Space and Esc,
+    /// which the tap claims with any modifiers: bare, and while the talk key
+    /// is held also with its modifier (Fn's bit, Option for Right Option).
+    /// The letters, which the tap claims only with the Fn flag: with Fn's bit,
+    /// plus the talk key's modifier while it is held.
+    /// Keys the tap claims that are no control of a recording (Fn+P's probe,
+    /// the Cmd+Shift+3/4 redirect) are left to the tap.
+    ///
+    /// While secure input is held (#346), what the tap and the monitors act on
+    /// outside a recording joins the set, under the conditions they act on
+    /// it: Control-Command-V; the letters on fn that `fnChord` claims now
+    /// (Read aloud's R and Q, or the player's keys with agent replies on);
+    /// and bare Esc while `escapeAction` makes it lore's with no dictation —
+    /// a reply speaking, the player or its pinned help on screen — unless a
+    /// crosshair lore knows of owns it. Never a bare letter: typing stays
+    /// typing.
+    var claimedHotKeys: Set<ControlHotKey> {
+        var keys: Set<ControlHotKey> = []
+        if secureInputHeld, coordinator != nil {
+            keys.insert(Self.repasteHotKey)
+            // Fn's shape only, narrower than `controlPress` (which takes the
+            // letter with any other modifier too), on purpose: no typing
+            // combination is taken system-wide.
+            keys.formUnion(Self.hotKeys(Self.fnChordKeys.filter { fnChord(keyCode: $0) != nil },
+                                        in: [HotkeyKey.fn.carbonModifier]))
+            if escapeAction(dictating: false, screenshotUIIsUp: screenshotUIPending) != .passThrough {
+                keys.insert(ControlHotKey(keyCode: DictationEscape.keyCode, modifiers: 0))
+            }
+        }
+        guard isDictating else { return keys }
+        let talkKey = settings?.hotkeyKey ?? .fn
+        let talkHeld = talkKeyEngaged
+        var codes: [UInt16] = []
+        if spaceAction(talkKeyHeld: talkHeld) != .passThrough { codes.append(HotkeyKey.spaceKeyCode) }
+        // `EscapeAction.decide`'s first claim: a dictation takes Esc — and its
+        // one exception, a screenshot crosshair (`screenshotUIPending`).
+        if !screenshotUIPending { codes.append(DictationEscape.keyCode) }
+        let held: UInt32 = talkHeld ? talkKey.carbonModifier : 0
+        let fn = HotkeyKey.fn.carbonModifier
+        let fnHeld = talkKey == .fn ? talkHeld : fnFlagDown
+        let fnShape: Set<UInt32> = [fn, fn | held]
+        // Space and Esc gain Fn's shape whenever Fn is down, whatever the talk
+        // key (Right Option+Fn+Space).
+        let anyShape: Set<UInt32> = fnHeld ? fnShape.union([0, held]) : [0, held]
+        keys.formUnion(Self.hotKeys(codes, in: anyShape))
+        if fnHeld {
+            let letters = (RecordingChord.allCases.map(\.rawValue) + Self.fnChordKeys).filter {
+                (isRecordingFlag && recordingChord(keyCode: Int64($0)) != nil) || fnChord(keyCode: $0) != nil
+            }
+            keys.formUnion(Self.hotKeys(letters, in: fnShape))
+        }
+        return keys
+    }
+
+    /// The last secure-input reading says another app holds it on an unlocked
+    /// console: the tap and the monitors receive no key-down. Behind a locked
+    /// console nothing is claimed and nothing polls.
+    private var secureInputHeld: Bool { lastSecureInput?.isProblem == true }
+
+    /// The one poll: re-derives the set every 250 ms while a crosshair may be
+    /// up or secure input is held. It watches the crosshair; under secure
+    /// input it re-reads the flag, so the set drops within a tick of the flag
+    /// clearing rather than at the next 5 s health reading, and it catches
+    /// what makes Esc the player's but nothing observes (the linger running
+    /// out on the clock, the speaker becoming pausable).
+    private var pollTask: Task<Void, Never>?
+
+    /// Each key in each shape. Carbon's registry counts a Caps Lock twin as
+    /// the base key (-9868, measured 2026-10-31), so no twin is registered.
+    /// Shift is not added — a Shift-modified press under secure input is a
+    /// documented gap (`docs/features/fn-hotkey.md`).
+    private static func hotKeys(_ codes: [UInt16], in shapes: Set<UInt32>) -> Set<ControlHotKey> {
+        Set(codes.flatMap { code in shapes.map { ControlHotKey(keyCode: code, modifiers: $0) } })
+    }
+
+    /// What is registered now — read by tests.
+    var registeredHotKeys: Set<ControlHotKey> { hotKeys.registered }
+
+    /// Register what the tap claims now and unregister the rest. Called on
+    /// every change of what the set reads: the talk key, its release, the
+    /// lock, the Fn flag, the crosshair, the secure-input reading, and —
+    /// through `observeClaimInputs` — the dictation's state, the settings and
+    /// the reply state behind the decisions. Outside a recording, with secure
+    /// input off, the set is empty, so every way a recording ends — finish,
+    /// cancel, discard, failure — unregisters everything.
+    private func syncHotKeys() {
+        // Every recording's end, in one place: no crosshair watch outlives it —
+        // unless secure input keeps the player's Esc in play (#346), where
+        // the poll clears it once the crosshair is gone.
+        if !isDictating, !secureInputHeld { screenshotUIPending = false }
+        hotKeys.apply(claimedHotKeys)
+        let dead = deadShortcuts
+        if dead != lastDeadShortcuts {
+            lastDeadShortcuts = dead
+            onSecureInputChanged?()
+        }
+        guard pollTask == nil, screenshotUIPending || secureInputHeld else { return }
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(250))
+                guard !Task.isCancelled, let self else { return }
+                guard self.pollTick() else { self.pollTask = nil; return }
+            }
+        }
+    }
+
+    /// One tick of the poll; false once there is nothing left to watch.
+    private func pollTick() -> Bool {
+        if screenshotUIPending, ContinuousClock.now >= screenshotUIDeadline, !readScreenshotUI() {
+            screenshotUIPending = false
+        }
+        if secureInputHeld, !readSecureInputFlag() {
+            // The 5 s health reading fills in the rest; the flag is what the
+            // set follows.
+            noteSecureInput(SecureInput.State(
+                active: false, pid: nil, consoleLocked: lastSecureInput?.consoleLocked ?? false,
+                attribution: .nobody, name: nil
+            ))
+        }
+        syncHotKeys()
+        return screenshotUIPending || secureInputHeld
+    }
+
+    /// The lore keys that cannot work while another app holds secure input
+    /// (#346): a talk key that is a recorded non-modifier key, which only the
+    /// tap reads, and every hot key lore wants and the system refused. Read by
+    /// the health panel, which shows them only while secure input stands.
+    var deadShortcuts: DeadShortcuts {
+        // The board's order: Control-Command-V, the fn letters, esc.
+        func rank(_ key: ControlHotKey) -> (Int, Int, String) {
+            if key == Self.repasteHotKey { return (0, 0, key.displayName) }
+            switch key.keyCode {
+            case DictationEscape.keyCode: return (3, 0, key.displayName)
+            case HotkeyKey.spaceKeyCode: return (2, 0, key.displayName)
+            default: return (1, Self.letterOrder.firstIndex(of: key.keyCode) ?? .max, key.displayName)
+            }
+        }
+        var names: [String] = []
+        for key in hotKeys.refused.sorted(by: { rank($0) < rank($1) }) where !names.contains(key.displayName) {
+            names.append(key.displayName)
+        }
+        return DeadShortcuts(talkKey: settings.map { !$0.hotkeyKey.isModifier } ?? false, keys: names)
+    }
+    private var lastDeadShortcuts = DeadShortcuts()
+    /// The fn letters in the order Settings lists them, then the recording's.
+    private static let letterOrder: [UInt16] = AgentReplyChord.allCases.map(\.rawValue) + [queueSelectionKey]
+        + RecordingChord.allCases.map(\.rawValue)
+
+    /// One secure-input reading (#341, #346): its edges are traced, an open
+    /// health panel re-reads, and the hot keys follow. Called by the 5 s
+    /// health cycle; internal so tests hand it a reading.
+    func noteSecureInput(_ secureInput: SecureInput.State) {
+        let wasActive = lastSecureInput?.active ?? false
+        if secureInput.active, !wasActive {
+            DiagStore.record(.secureInputChanged(active: true, holderPID: secureInput.pid))
+            // The holder's *name* identifies software the user runs — os.Logger only.
+            HotkeyManager.hkLog.error("[HK] Health: SecureInput active — associated with \(secureInput.name ?? "an unnamed process", privacy: .private) (pid \(secureInput.pid.map(String.init) ?? "none", privacy: .public))")
+        } else if !secureInput.active, wasActive {
+            DiagStore.record(.secureInputChanged(active: false, holderPID: nil))
+            HotkeyManager.hkLog.info("[HK] Health: SecureInput cleared")
+        }
+        guard secureInput != lastSecureInput else { return }
+        lastSecureInput = secureInput
+        onSecureInputChanged?()
+        syncHotKeys()
+    }
+
+    /// The one observation point for every input of `claimedHotKeys` that is
+    /// not this manager's own: the dictation's state, the talk key setting,
+    /// the lock and chord switches, the screenshot switch, and the agent
+    /// replies switch. Re-armed on every change, so an ending this manager did
+    /// not start (an error, a model failure) or a setting flipped mid-recording
+    /// reaches the registration.
+    private func observeClaimInputs() {
+        // One chain at a time: a second install or a late `agentReplies`
+        // starts a new one, and the old one stops at its next change.
+        observationGeneration &+= 1
+        let generation = observationGeneration
+        guard let coordinator else { return }
+        withObservationTracking {
+            _ = coordinator.state
+            _ = coordinator.isPreBuffering
+            _ = settings?.hotkeyKey
+            _ = settings?.modifierLockEnabled
+            _ = settings?.modifierCleanupEnabled
+            _ = settings?.modifierTranslateEnabled
+            _ = settings?.richInputSwitches
+            _ = agentReplies?.isEnabled
+            // What makes Esc the player's outside a recording (#346).
+            _ = agentReplies?.isHelpPinned
+            _ = agentReplies?.canStopSpeech
+            _ = agentReplies?.isPlayerShowing
+        } onChange: { [weak self] in
+            Task { @MainActor in
+                guard let self, self.observationGeneration == generation else { return }
+                self.syncHotKeys()
+                self.observeClaimInputs()
+            }
+        }
+    }
+
+    private var observationGeneration = 0
+
+    /// This key-down is a press another channel already acted on (#342):
+    /// every channel asks first, before deciding, and swallows it.
+    func isDuplicatePress(_ keyCode: UInt16, on channel: PressChannel) -> Bool {
+        hotKeys.isDuplicate(keyCode, on: channel, now: ProcessInfo.processInfo.systemUptime)
+    }
+
+    /// A channel acts on this key-down.
+    func noteActed(_ keyCode: UInt16, on channel: PressChannel) {
+        hotKeys.noteActed(keyCode, on: channel, now: ProcessInfo.processInfo.systemUptime)
+    }
+
+    /// A registered key went down or up. A fresh press acts through the same
+    /// decision the tap takes (`controlPress`), read live.
+    ///
+    /// A press that decision passes on is swallowed, not handed back: posting
+    /// a synthetic key into the app in front could land out of order, unpaired
+    /// or in a password field. The set follows every input of the decision, so
+    /// such a press needs a change the set has not caught up with yet; the
+    /// chosen trade is that a residual miss costs at most one press during a
+    /// recording. Outside a recording, under secure input, the one such press
+    /// is the player's Esc after a reading nothing observes has changed (the
+    /// linger running out): swallowed, at most for one 250 ms poll tick.
+    ///
+    /// Internal so tests can press a hot key without a keyboard.
+    func handleHotKey(_ key: ControlHotKey, pressed: Bool) {
+        guard hotKeys.takePress(key, pressed: pressed) else { return }
+        var outcome = HotKeyOutcome.notOurs
+        // Every fresh press, whatever came of it, so a live test reads from events.json.
+        defer { DiagStore.record(.hotKeyPressed(key: key.diagKey, outcome: outcome)) }
+        guard !isDuplicatePress(key.keyCode, on: .hotKey) else { outcome = .duplicate; return }
+        noteKeyDown(keyCode: key.keyCode)
+        let flags = NSEvent.ModifierFlags(
+            rawValue: UInt(CGEventSource.flagsState(.combinedSessionState).rawValue)
+        )
+        // Control-Command-V is matched by its exact shape, which only it has.
+        guard let press = key == Self.repasteHotKey ? .repaste : controlPress(
+            keyCode: key.keyCode, fnHeld: flags.contains(.function) || fnFlagDown,
+            talkKeyHeld: talkKeyHeld(flags)
+        ) else {
+            HotkeyManager.hkLog.debug("[HOTKEY] hot key \(key.keyCode, privacy: .public) not ours now → swallowed")
+            // A crosshair is up and owns Esc: Esc steps aside until it goes,
+            // so the next press reaches it.
+            if key.keyCode == DictationEscape.keyCode, readScreenshotUI() {
+                watchScreenshotUI(appearing: .zero)
+            }
+            return
+        }
+        noteActed(key.keyCode, on: .hotKey)
+        outcome = .acted
+        HotkeyManager.hkLog.debug("[HOTKEY] hot key \(key.keyCode, privacy: .public) pressed")
+        perform(press, isRepeat: false)
     }
 
     // MARK: - Event Tap Lifecycle
@@ -1354,60 +1766,41 @@ final class HotkeyManager {
                     MainActor.assumeIsolated { manager.noteKeyDown(keyCode: code) }
                 }
 
-                // Fn+V/T while recording → set pre-paste mode
-                // Use the EVENT's own Fn flag (reliable) instead of tracked fnDown (flickers)
+                // Lore's controls — the Fn letters inside a recording, the Fn
+                // letters of Read aloud and the player, Space, Esc — through the
+                // one decision the local monitor and the hot keys take
+                // (`controlPress`), read here rather than in the Task so
+                // consuming and acting cannot disagree. The event's own Fn flag
+                // is read, not the tracked press, which flickers.
+                // `CGEventFlags` and `NSEvent.ModifierFlags` are the same bits.
+                // The tap source is on CFRunLoopGetMain, so assumeIsolated is
+                // valid here.
                 let fnHeld = flags.contains(.maskSecondaryFn)
-                if fnHeld && manager.isRecordingFlag {
-                    if keyCode == 9, manager.modifierOn({ $0.modifierCleanupEnabled }) { // V
-                        Task { @MainActor in
-                            manager.coordinator?.setPendingMode(.cleanup)
-                            if manager.isLocked { manager.fnHeldAtLock = true }
-                            HotkeyManager.hkLog.debug("[HOTKEY] Fn+V (CGEvent) → pending cleanup")
-                        }
-                        return nil
-                    } else if keyCode == 17, manager.modifierOn({ $0.modifierTranslateEnabled }) { // T
-                        Task { @MainActor in
-                            manager.coordinator?.setPendingMode(.translate)
-                            if manager.isLocked { manager.fnHeldAtLock = true }
-                            HotkeyManager.hkLog.debug("[HOTKEY] Fn+T (CGEvent) → pending translate")
-                        }
-                        return nil
-                    } else if keyCode == 1, RichInputSettings.screenshotsEnabled { // S (#192/#198)
-                        Task { @MainActor in
-                            // The system's own crosshair, pressed for the user —
-                            // the image lands on the clipboard and the door
-                            // collects it at the second it happened. Not while
-                            // paused: that door is shut (#206).
-                            if manager.coordinator?.isPaused != true {
-                                TextInserter.postScreenshotToClipboard()
-                            }
-                            if manager.isLocked { manager.fnHeldAtLock = true }
-                            HotkeyManager.hkLog.debug("[HOTKEY] Fn+S (CGEvent) → screenshot to clipboard")
-                        }
-                        return nil
-                    } else if keyCode == 40 { // K (#324: mark for later, always on)
-                        Task { @MainActor in
-                            manager.coordinator?.toggleMark()
-                            if manager.isLocked { manager.fnHeldAtLock = true }
-                            HotkeyManager.hkLog.debug("[HOTKEY] Fn+K (CGEvent) → mark for later")
-                        }
-                        return nil
-                    }
+                // A hot key already acted on this press (#342): swallowed —
+                // neither acted on twice nor passed on to the app in front.
+                if let code = UInt16(exactly: keyCode),
+                   MainActor.assumeIsolated({ manager.isDuplicatePress(code, on: .tap) }) {
+                    return nil
                 }
-
-                // A letter on Fn → consume (#105, #259): the player's keys while
-                // agent replies are on, the selection's two while they are off.
-                // Unlike Fn+V/T these fire regardless of recording state — the
-                // chord handler ends the dictation gesture itself, and only for a
-                // key that turns out to have something to act on, so the flags
-                // are not cleared here. A letter that is nobody's passes through
-                // untouched. The tap source is on CFRunLoopGetMain (see
-                // `lastTapKeyDown` above), so assumeIsolated is valid here.
-                if fnHeld, let code = UInt16(exactly: keyCode),
-                   let chord = MainActor.assumeIsolated({ manager.fnChord(keyCode: code) }) {
-                    Task { @MainActor in
-                        manager.handleFnChord(chord)
+                if let code = UInt16(exactly: keyCode),
+                   let press = MainActor.assumeIsolated({
+                       manager.controlPress(
+                           keyCode: code, fnHeld: fnHeld,
+                           talkKeyHeld: manager.talkKeyHeld(NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue)))
+                       )
+                   }) {
+                    MainActor.assumeIsolated { manager.noteActed(code, on: .tap) }
+                    // Auto-repeat is the same press still down: swallowed with
+                    // the press it belongs to; Space and Esc refuse to act on it.
+                    let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
+                    // The sync mirrors, before the Task: the next event in this
+                    // same turn has to see the lock the user just took.
+                    if case .space(.lock) = press, !isRepeat {
+                        manager.isLockedFlag = true
+                        manager.isPreBufferingFlag = false
+                        manager.isRecordingFlag = true
                     }
+                    Task { @MainActor in manager.perform(press, isRepeat: isRepeat) }
                     return nil
                 }
 
@@ -1442,6 +1835,7 @@ final class HotkeyManager {
                     DiagStore.record(.dictationScreenshotRedirected(fullScreen: fullScreen))
                     Task { @MainActor in
                         TextInserter.postScreenshotToClipboard(fullScreen: fullScreen)
+                        manager.noteScreenshotPosted()
                         HotkeyManager.hkLog.debug(
                             "[HOTKEY] Cmd+Shift+3/4 (CGEvent) → screenshot to clipboard"
                         )
@@ -1449,57 +1843,14 @@ final class HotkeyManager {
                     return nil
                 }
 
-                // Space inside a recording → consume, and lock it or — with the
-                // talk key held — pause and resume a locked one (#233). The
-                // decision is taken here rather than in the Task, so consuming
-                // and acting cannot disagree; the tap source is on
-                // CFRunLoopGetMain, so the callback runs on the main thread and
-                // assumeIsolated is valid. `CGEventFlags` and
-                // `NSEvent.ModifierFlags` are the same bits (both are the CG
-                // constants), which is what lets one predicate read either.
-                if keyCode == Int64(HotkeyKey.spaceKeyCode) {
-                    let action = MainActor.assumeIsolated {
-                        manager.spaceAction(talkKeyHeld: manager.talkKeyHeld(
-                            NSEvent.ModifierFlags(rawValue: UInt(flags.rawValue))
-                        ))
-                    }
-                    guard action != .passThrough else {
-                        return Unmanaged.passRetained(event)
-                    }
-                    // Auto-repeat is the same press still down: swallowed with
-                    // the press it belongs to, acted on once — `handleSpace`
-                    // refuses it, so both event paths refuse it alike (#233).
+                // An Esc that is not lore's is passed on, and reaches the
+                // handler only when it has something to record: a second Esc
+                // right after one that stopped a reply (#259). Every other one —
+                // nearly all of them — returns here, off the main actor's back.
+                if keyCode == DictationEscape.keyCode,
+                   MainActor.assumeIsolated({ manager.agentReplies?.escapeRepeatIsWorthRecording == true }) {
                     let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-                    // The sync mirrors, before the Task: the next event in this
-                    // same turn has to see the lock the user just took.
-                    if action == .lock, !isRepeat {
-                        manager.isLockedFlag = true
-                        manager.isPreBufferingFlag = false
-                        manager.isRecordingFlag = true
-                    }
-                    Task { @MainActor in manager.handleSpace(action, isRepeat: isRepeat) }
-                    return nil
-                }
-
-                // Esc → cancel a dictation into history (#206, #233), pause a
-                // reply being read aloud (#259), put the player away (#263), or
-                // nothing at all. Read here for the same reason Space is; while
-                // the screenshot crosshair is up the key is not lore's and falls
-                // through to it untouched.
-                // An Esc that is not lore's is passed on either way, and reaches
-                // the handler only when it has something to record: a second Esc
-                // right after one that stopped a reply. Every other one — which
-                // is nearly all of them — returns here, off the main actor's back.
-                if keyCode == DictationEscape.keyCode {
-                    let action = MainActor.assumeIsolated { manager.escapeAction }
-                    if action != .passThrough
-                        || MainActor.assumeIsolated({
-                            manager.agentReplies?.escapeRepeatIsWorthRecording == true
-                        }) {
-                        let isRepeat = event.getIntegerValueField(.keyboardEventAutorepeat) != 0
-                        Task { @MainActor in manager.handleEscape(action, isRepeat: isRepeat) }
-                    }
-                    return action == .passThrough ? Unmanaged.passRetained(event) : nil
+                    Task { @MainActor in manager.handleEscape(.passThrough, isRepeat: isRepeat) }
                 }
 
                 return Unmanaged.passRetained(event)
@@ -1645,19 +1996,7 @@ final class HotkeyManager {
         //    often cannot supply, and gating on it is what kept this event from
         //    ever firing (#93).
         let secureInput = SecureInput.read()
-        let wasActive = lastSecureInput?.active ?? false
-        if secureInput.active, !wasActive {
-            DiagStore.record(.secureInputChanged(active: true, holderPID: secureInput.pid))
-            // The holder's *name* identifies software the user runs — os.Logger only.
-            HotkeyManager.hkLog.error("[HK] Health: SecureInput active — associated with \(secureInput.name ?? "an unnamed process", privacy: .private) (pid \(secureInput.pid.map(String.init) ?? "none", privacy: .public))")
-        } else if !secureInput.active, wasActive {
-            DiagStore.record(.secureInputChanged(active: false, holderPID: nil))
-            HotkeyManager.hkLog.info("[HK] Health: SecureInput cleared")
-        }
-        if secureInput != lastSecureInput {
-            lastSecureInput = secureInput
-            onSecureInputChanged?()
-        }
+        noteSecureInput(secureInput)
 
         // 4. Tap liveness. "We saw no key events for 30s" is not a fault — the user
         //    was reading. The fault is "the session received key-downs and our tap

@@ -124,7 +124,7 @@ final class AppCoordinator {
     /// Every cache serving the speech model: the one list the model upgrade
     /// installs into (#299) and a deleting load failure evicts (#186).
     var speechModelCaches: [SharedBackendCache] { [sharedBackendCache, dictationCoordinator.ownCache] }
-    let hotkeyManager = HotkeyManager()
+    let hotkeyManager = HotkeyManager(hotKeys: CarbonHotKeys())
     let dictationIndicator = DictationIndicatorManager()
 
     // MARK: - Read Aloud (#105)

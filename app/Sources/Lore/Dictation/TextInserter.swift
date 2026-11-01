@@ -79,6 +79,28 @@ enum TextInserter {
         AXIsProcessTrusted()
     }
 
+    /// Paste-again fires on the key-down of Ctrl+Cmd+V (#346), while Control
+    /// is still physically held. A Cmd+V posted then reaches the front app as
+    /// Ctrl+Cmd+V, which Ghostty does not read as paste. So paste-again waits
+    /// here until Control is up, for at most `bound`, and posts anyway after
+    /// it. Answers whether Control was released in time.
+    @MainActor
+    @discardableResult
+    static func waitForControlRelease(
+        bound: Duration = .seconds(1),
+        step: Duration = .milliseconds(10),
+        controlHeld: () -> Bool = { CGEventSource.flagsState(.hidSystemState).contains(.maskControl) },
+        sleep: (Duration) async -> Void = { try? await Task.sleep(for: $0) }
+    ) async -> Bool {
+        var waited = Duration.zero
+        while controlHeld() {
+            guard waited < bound else { return false }
+            await sleep(step)
+            waited += step
+        }
+        return true
+    }
+
     @MainActor
     @discardableResult
     static func paste(_ text: String) async -> PasteResult {

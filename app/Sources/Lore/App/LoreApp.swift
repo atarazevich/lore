@@ -632,8 +632,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // be recorded just ahead of it.
         DiagStore.record(.appLaunched(build: Self.currentBuildNumber))
         handleTerminationSignal()
-        // Before anything can download a model: each from a fixed commit (#269).
-        ModelBundle.pinAll()
         // Before anything can load one: v3's folders, once Ultra replaced it (#299).
         SpeechModelFiles.shared.removeSuperseded()
 
@@ -1017,7 +1015,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             hasOpenAIKey: { !settings.openaiApiKey.isEmpty },
             signingLedger: signingLedger,
             readNotesLeftover: { NotesFolderMigration.pendingLeftover(defaults: defaults) },
-            readTalkKey: { settings.hotkeyKey.shortName }
+            readDeadShortcuts: { [weak hotkeyManager] in hotkeyManager?.deadShortcuts ?? DeadShortcuts() }
         )
         let monitor = HealthMonitor(prober: prober)
         monitor.verifyNotesLeftover = { NotesFolderMigration.verifyLeftover(defaults: defaults) }

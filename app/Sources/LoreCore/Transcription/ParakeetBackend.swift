@@ -1,5 +1,6 @@
 import FluidAudio
 import Foundation
+import os
 
 /// The Parakeet transcription backend — Parakeet Ultra, or v3 on a Mac that
 /// has not switched yet (#299, `SpeechModelFiles`). One model family since #53
@@ -31,11 +32,21 @@ public final class ParakeetBackend: TranscriptionBackend, @unchecked Sendable {
     }
 
     public func prepare(onStatus: @Sendable (String) -> Void, onProgress: @escaping @Sendable (Double) -> Void) async throws {
+        ModelBundle.pinAll()
         let model = speechModel ?? files.working
         speechModel = model
         onStatus("Downloading speech model...")
+        let startedAt = Date()
+        // A folder missing any file is fetched (the vocabulary alone comes by
+        // a plain fetch); a whole one at another revision is downloaded anew,
+        // which FluidAudio opens with `.listing`, never sent on a load from disk.
+        let downloaded = OSAllocatedUnfairLock(initialState: !files.isOnDisk(model))
         let models = try await AsrModels.downloadAndLoad(to: files.folder(model), version: model.version) { progress in
+            if case .listing = progress.phase { downloaded.withLock { $0 = true } }
             onProgress(progress.fractionCompleted)
+        }
+        if downloaded.withLock({ $0 }) {
+            DiagStore.record(.speechModelDownloaded(model: model, seconds: Date().timeIntervalSince(startedAt)))
         }
         onStatus("Initializing speech model...")
         // Two of FluidAudio 0.15.7's long-form defaults, reverted (docs/decisions.md, #269).

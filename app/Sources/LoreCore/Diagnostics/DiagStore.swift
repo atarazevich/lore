@@ -150,14 +150,19 @@ public final class DiagStore: @unchecked Sendable {
     }
 
     /// Under XCTest the store writes to a per-process temp directory, so a test run
-    /// never touches the user's real `events.json`.
+    /// never touches the user's real `events.json`. It starts empty: a reused pid
+    /// must not hand a run an earlier run's events (#347). Folders of processes
+    /// that are gone are swept, so they do not pile up.
     private static var defaultDirectory: URL {
         if RuntimeEnvironment.isRunningUnitTests {
-            return URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
-                .appendingPathComponent(
-                    "LoreDiagStore-\(ProcessInfo.processInfo.processIdentifier)",
-                    isDirectory: true
-                )
+            let temp = URL(fileURLWithPath: NSTemporaryDirectory(), isDirectory: true)
+            let fm = FileManager.default
+            for name in (try? fm.contentsOfDirectory(atPath: temp.path)) ?? [] {
+                guard name.hasPrefix("LoreDiagStore-"), let pid = pid_t(name.dropFirst(14)),
+                      pid == getpid() || (kill(pid, 0) != 0 && errno == ESRCH) else { continue }
+                try? fm.removeItem(at: temp.appendingPathComponent(name))
+            }
+            return temp.appendingPathComponent("LoreDiagStore-\(getpid())", isDirectory: true)
         }
         return FileManager.default
             .urls(for: .applicationSupportDirectory, in: .userDomainMask).first!

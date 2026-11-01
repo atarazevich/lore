@@ -4,8 +4,8 @@ import IOKit
 
 /// Secure-input state, read one way by everyone who asks.
 ///
-/// While secure input is on, every CGEvent tap is starved, so lore's keyboard
-/// shortcuts (Space, Esc, the letter chords) stop (#341).
+/// While secure input is on, every CGEvent tap and NSEvent monitor is starved
+/// of key-downs, so lore's keys arrive as system hot keys instead (#342, #346).
 /// `IsSecureEventInputEnabled()` answers that for *our* session and is the only
 /// thing `active` rests on. The holding pid is a separate, weaker signal, and it
 /// is nested: `IOConsoleUsers` is a property of the IORegistry **root**, while
@@ -48,8 +48,9 @@ enum SecureInput {
         /// never a snapshot.
         let name: String?
 
-        /// The flag is up and the console is unlocked: lore's shortcuts are off
-        /// and the panel says so (#341). Behind a locked console the flag is
+        /// The flag is up and the console is unlocked: lore registers its keys
+        /// as hot keys, and the panel names any that still can't work (#346).
+        /// Behind a locked console the flag is
         /// the lock screen protecting its password field — by design (#98).
         var isProblem: Bool { active && !consoleLocked }
     }
@@ -63,9 +64,9 @@ enum SecureInput {
         /// id; the name is the app's own, so it matches the menu the user sees.
         case terminal(String)
         /// No app owns the pid (a CLI or daemon holder has no
-        /// `NSRunningApplication`) — the pid itself is the hint, and the case
-        /// where the user most needs one (#92).
-        case process(Int32)
+        /// `NSRunningApplication`): the panel says "a background process"
+        /// (#342); the raw pid stays in the report (#92).
+        case process
         /// loginwindow: on an unlocked console, secure input left on by the
         /// lock screen — seen live, a restart cleared it, and locking and
         /// unlocking usually does (#341). Never named on screen (#98).
@@ -75,10 +76,6 @@ enum SecureInput {
         /// says nothing about who holds it — no name, no pid (#98).
         case nobody
     }
-
-    /// Just the flag, for a caller that polls fast (the hint arbiter's 50 ms
-    /// tick, #341): no registry walk.
-    static var isOn: Bool { isEnabled() }
 
     /// The single reading both consumers use (#93), so the panel and the event
     /// stream cannot disagree about whether input is withheld.
@@ -153,7 +150,7 @@ enum SecureInput {
             return .lockScreen
         }
         if bundleID == "com.apple.SecurityAgent" { return .nobody }
-        guard let name = identity?.name ?? bundleID else { return .process(pid) }
+        guard let name = identity?.name ?? bundleID else { return .process }
         if let bundleID, terminalBundleIDs.contains(bundleID) { return .terminal(name) }
         return .app(name)
     }

@@ -157,7 +157,7 @@ extension HealthResult {
         case .inputMonitoring: return "Input Monitoring permission isn't granted — the hotkey can't be seen."
         case .tap: return "\(LoreBrand.wordmark)'s shortcuts aren't reaching it while other apps are focused (the event tap is dead or starved)."
         case .paste: return "The last paste posted no keystrokes — the dictated text stayed on the clipboard."
-        case .secureInput: return "Another app holds secure input, so \(LoreBrand.wordmark)'s keyboard shortcuts are off."
+        case .secureInput: return "Another app holds secure input, and some of \(LoreBrand.wordmark)'s keys can't reach \(LoreBrand.wordmark): the talk key, or a shortcut another app also uses."
         case .microphone: return "Microphone permission isn't granted."
         case .micCapture: return "The last microphone capture failed."
         case .asrModel: return "The transcription model isn't installed."
