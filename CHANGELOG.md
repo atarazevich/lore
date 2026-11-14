@@ -1,5 +1,29 @@
 # Changelog
 
+## v3.12.0 — 2026-11-14
+
+**3.11.6 (#357) Updates and reports move to devkit.md**
+- lore now checks for updates at, and sends reports to, devkit.md; nothing changes for you.
+
+**3.11.5 (#356) A recording on the iPhone that another app's sound stopped resumes by itself**
+- When a video, music or another app's sound stops a recording on the iPhone, lore resumes it once that sound ends, or at the latest when you come back to lore; a pause you tapped stays paused, and a reset of iOS's audio no longer leaves the recorder dead. A new Settings switch, Keep recording while other apps play, off by default, lets the recording go on through their sound.
+
+**3.11.4 (#354) One reply key: click to play, twice for next, hold for the list**
+- Agent replies have one key, Right Option (Right Command when Right Option is your talk key), changeable in Settings and never the same as the talk key: click to play or pause, click twice for the next reply, hold to show or hide the list. It works in any app, under Secure Keyboard Entry too.
+- During a call, a game, another app's sound, your dictation or a meeting lore records, replies arrive silently and a small count says how many wait; nothing starts by itself afterwards, and a click while lore records starts no sound.
+- fn R, fn [, fn ], fn J, fn M and the fn tap no longer act on replies, and mute is gone; with agent replies off, fn R and fn Q still read selected text.
+
+**3.11.3 (#355) Recognized text never shows <unk>**
+- Where the speech model met a character it has no letter for, such as a dash, a quote or ё, it wrote `<unk>`; lore now leaves it out of dictations, meetings, phone notes and `lore transcribe`, without leaving an extra space. Dictations and meetings recorded before show, search and copy without it too, and their files stay as they were.
+
+**3.11.2 (#351) Agent replies speak in local voices: xenia for Russian, en_116 for English**
+- With the speech service installed (`tools/speech-service/install.sh`), `lore say` replies are read by local Silero voices instead of the system voice; the first sentence starts while the rest are still being made, and the service frees its memory after 10 idle minutes
+- `lore say --lang ru|en` names the reply's language; without it lore detects it as before, and `-v <voice>` still means that system voice
+- If the local voice can't speak (not installed, didn't start, stopped mid-reply, or a language other than Russian or English), the system voice reads the reply to the end
+
+**3.11.1 (#349) Lock and pause always work; a turned-off letter stays visible**
+- Space locks a dictation and Fn+Space pauses it on every Mac, so Settings no longer has a Lock switch, and a Mac where it was off gets the lock back. A letter turned off in Settings stays on the bubble, dimmed, and its tooltip says it was turned off there; the cleanup hint and the setup sheet no longer teach a key that is off.
+
 ## v3.11.0 — 2026-11-01
 
 **3.10.5 (#346) Paste again pastes your last words**

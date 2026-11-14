@@ -594,6 +594,11 @@ struct LorePickerPopover<Item: Identifiable, ItemLabel: View, Footer: View, Head
     /// The row Return acts on; none unless a consumer says so.
     var isHighlighted: (Item) -> Bool = { _ in false }
     let onSelect: (Item) -> Void
+    /// A short muted word at an item's trailing edge, saying what is special
+    /// about it (#354: "Talk key", "Reply key, moves to …").
+    var note: (Item) -> String? = { _ in nil }
+    /// An item drawn dimmed that does nothing on click.
+    var isDisabled: (Item) -> Bool = { _ in false }
     @ViewBuilder let itemLabel: (Item) -> ItemLabel
     /// An action under the list, past a divider — the hotkey picker's key
     /// recorder (#226). The inits below default it to nothing, and nothing
@@ -609,7 +614,14 @@ struct LorePickerPopover<Item: Identifiable, ItemLabel: View, Footer: View, Head
                 } label: {
                     HStack(spacing: 10) {
                         itemLabel(item)
+                            .opacity(isDisabled(item) ? 0.45 : 1)
                         Spacer(minLength: 0)
+                        if let note = note(item) {
+                            Text(note)
+                                .font(.system(size: 11))
+                                .foregroundStyle(LoreTheme.TextColor.muted)
+                                .lineLimit(1)
+                        }
                         if isActive(item) {
                             Text("\u{2713}")
                                 .font(.system(size: 12))
@@ -621,6 +633,7 @@ struct LorePickerPopover<Item: Identifiable, ItemLabel: View, Footer: View, Head
                     .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
+                .disabled(isDisabled(item))
                 .background(
                     isHighlighted(item) ? Color.white.opacity(0.12) : .clear,
                     in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
@@ -689,12 +702,14 @@ extension LorePickerPopover where ItemLabel == LorePickerItemLabel, Header == Lo
         width: CGFloat,
         isActive: @escaping (Item) -> Bool,
         onSelect: @escaping (Item) -> Void,
+        note: @escaping (Item) -> String? = { _ in nil },
+        isDisabled: @escaping (Item) -> Bool = { _ in false },
         title: @escaping (Item) -> String,
         @ViewBuilder footer: @escaping () -> Footer
     ) {
         self.init(
             header: { LorePickerHeader(text: header) }, items: items, width: width,
-            isActive: isActive, onSelect: onSelect,
+            isActive: isActive, onSelect: onSelect, note: note, isDisabled: isDisabled,
             itemLabel: { item in LorePickerItemLabel(title: title(item)) },
             footer: footer
         )
@@ -708,11 +723,13 @@ extension LorePickerPopover where ItemLabel == LorePickerItemLabel, Footer == Em
         width: CGFloat,
         isActive: @escaping (Item) -> Bool,
         onSelect: @escaping (Item) -> Void,
+        note: @escaping (Item) -> String? = { _ in nil },
+        isDisabled: @escaping (Item) -> Bool = { _ in false },
         title: @escaping (Item) -> String
     ) {
         self.init(
             header: header, items: items, width: width,
-            isActive: isActive, onSelect: onSelect,
+            isActive: isActive, onSelect: onSelect, note: note, isDisabled: isDisabled,
             title: title, footer: { EmptyView() }
         )
     }

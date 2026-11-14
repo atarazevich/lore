@@ -83,8 +83,13 @@ public struct SessionRecord: Codable, Equatable, Sendable {
         self.refinedText = refinedText
     }
 
-    /// Refined text when the batch pass produced one, else the live text.
-    public var displayText: String { refinedText ?? text }
+    /// Refined text when the batch pass produced one, else the live text —
+    /// without `<unk>` (#355), which lines written before the backend dropped it
+    /// still carry. Stored `text` stays verbatim: the speaker map joins on its hash.
+    public var displayText: String { UnknownToken.removed(from: refinedText ?? text) }
+
+    /// The live text as it is read: `text` without `<unk>` (#355).
+    public var originalText: String { UnknownToken.removed(from: text) }
 
     public func withRefinedText(_ text: String?) -> SessionRecord {
         SessionRecord(

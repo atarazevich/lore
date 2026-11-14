@@ -67,6 +67,7 @@ struct SettingsView: View {
     @State private var openVoicePicker: String?
     /// The talk-key picker (#226): two named keys and a recorder for any other.
     @State private var showHotkeyPicker = false
+    @State private var showReplyKeyPicker = false
 
     init(settings: AppSettings, updater: SPUUpdater, isActiveInShell: Bool = true) {
         self.settings = settings
@@ -252,11 +253,17 @@ struct SettingsView: View {
         LorePickerPopover(
             header: "Hold to talk",
             items: hotkeyChoices,
-            width: 244,
+            width: 320,
             isActive: { $0 == settings.hotkeyKey },
             onSelect: { key in
                 settings.hotkeyKey = key
                 showHotkeyPicker = false
+            },
+            // The other side of the reply key's rule (#354, board frame j): the
+            // reply key's item stays choosable and says where the reply key goes.
+            note: { key in
+                guard settings.agentRepliesEnabled, key == settings.agentReplyKey.hotkeyKey else { return nil }
+                return "Reply key, moves to \(AgentReplyKey.defaultKey(talkKey: key).displayName)"
             },
             title: \.displayName
         ) {
@@ -502,39 +509,84 @@ struct SettingsView: View {
         }
     }
 
-    // MARK: - AGENT REPLIES (#236, board §04)
+    // MARK: - AGENT REPLIES (#236, board §07)
 
-    /// The feature's own group, above Read aloud (board frames i and j). One
+    /// The feature's own group, above Read aloud (board frames g–i). One
     /// switch, off by default and marked experimental; while it is off the group
-    /// is only that switch, because nothing of the feature runs and there is
-    /// nothing to configure. The player's keys live in the Read aloud card,
-    /// where every reading key already is (#259).
+    /// is only that switch, because nothing of the feature runs and the reply
+    /// key is no key at all. On: the reply key, the two commands, and the
+    /// footnote under the card.
     private var agentRepliesSection: some View {
-        SettingsSectionCard(label: "Agent replies") {
-            toggleRow(
-                "Read agent replies aloud",
-                sub: "Agents' replies are read aloud one at a time and kept in a list",
-                isOn: $settings.agentRepliesEnabled,
-                badge: "Experimental"
-            )
+        VStack(alignment: .leading, spacing: 0) {
+            SettingsSectionCard(label: "Agent replies") {
+                toggleRow(
+                    "Read agent replies aloud",
+                    sub: "Replies are read aloud, or kept silent while a call, a game or another app's sound is on",
+                    isOn: $settings.agentRepliesEnabled,
+                    badge: "Experimental"
+                )
+                if settings.agentRepliesEnabled {
+                    LoreDivider()
+                    replyKeyRow
+                    LoreDivider()
+                    // Nothing to install: the app puts the command on the terminal
+                    // path at every start (#254), so the row states what to call.
+                    SettingsRow(
+                        name: "Terminal command",
+                        sub: "What a chat calls instead of say \u{2014} it comes with the app"
+                    ) {
+                        LoreMonoValueButton(title: "\(AgentReplyHelpCopy.command) \"\u{2026}\"")
+                    }
+                    LoreDivider()
+                    SettingsRow(
+                        name: "Command to reopen a closed chat",
+                        sub: "Runs in a new herdr tab, with the chat's session id filled in"
+                    ) {
+                        EmptyView()
+                    }
+                    resumeCommandField
+                }
+            }
             if settings.agentRepliesEnabled {
-                LoreDivider()
-                // Nothing to install: the app puts the command on the terminal
-                // path at every start (#254), so the row states what to call.
-                SettingsRow(
-                    name: "Terminal command",
-                    sub: "What a chat calls instead of say \u{2014} it comes with the app"
-                ) {
-                    LoreMonoValueButton(title: "\(AgentReplyHelpCopy.command) \"\u{2026}\"")
-                }
-                LoreDivider()
-                SettingsRow(
-                    name: "Command to reopen a closed chat",
-                    sub: "Runs in a new herdr tab, with the chat's session id filled in"
-                ) {
-                    EmptyView()
-                }
-                resumeCommandField
+                Text(Self.agentRepliesFootnote)
+                    .font(LoreTheme.Typography.meta)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
+                    .padding(EdgeInsets(top: 6, leading: 2, bottom: 0, trailing: 2))
+            }
+        }
+        .frame(maxWidth: 640, alignment: .leading)
+    }
+
+    private static let agentRepliesFootnote =
+        "Esc pauses a reply that is speaking, or hides the list. Click a reply in the list to play it."
+
+    /// The reply key (#354): never the talk key. Its picker keeps the talk key
+    /// in the list, dimmed, with its reason (board frame i).
+    private var replyKeyRow: some View {
+        let movedByTalkKey = settings.hotkeyKey == .rightOption && settings.agentReplyKey == .rightCommand
+        return SettingsRow(
+            name: "Reply key",
+            sub: movedByTalkKey
+                ? "Right Option is your talk key, so replies use Right Command"
+                : "Click to play or pause, twice for the next reply, hold to show or hide the list"
+        ) {
+            LoreMonoValueButton(title: settings.agentReplyKey.displayName) {
+                showReplyKeyPicker.toggle()
+            }
+            .popover(isPresented: $showReplyKeyPicker, arrowEdge: .bottom) {
+                LorePickerPopover(
+                    header: "Reply key",
+                    items: AgentReplyKey.allCases,
+                    width: 244,
+                    isActive: { $0 == settings.agentReplyKey },
+                    onSelect: { key in
+                        settings.agentReplyKey = key
+                        showReplyKeyPicker = false
+                    },
+                    note: { $0.hotkeyKey == settings.hotkeyKey ? "Talk key" : nil },
+                    isDisabled: { $0.hotkeyKey == settings.hotkeyKey },
+                    title: \.displayName
+                )
             }
         }
     }
@@ -570,18 +622,8 @@ struct SettingsView: View {
     private var hasSpeechifyKey: Bool { !settings.speechifyApiKey.isEmpty }
 
     private var readAloudSection: some View {
-        VStack(alignment: .leading, spacing: 0) {
-            readAloudCard
-            // Under the card, as System Settings sets a footnote: it belongs to
-            // the whole list of keys rather than to any one row (#263).
-            if settings.agentRepliesEnabled {
-                Text(Self.playerFootnote)
-                    .font(LoreTheme.Typography.meta)
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-                    .padding(EdgeInsets(top: 6, leading: 2, bottom: 0, trailing: 2))
-            }
-        }
-        .frame(maxWidth: 640, alignment: .leading)
+        readAloudCard
+            .frame(maxWidth: 640, alignment: .leading)
     }
 
     private var readAloudCard: some View {
@@ -672,8 +714,12 @@ struct SettingsView: View {
                 sub: "Continue playback when a dictation recording ends",
                 isOn: $settings.readAloudResumeAfterDictation
             )
-            LoreDivider()
-            shortcutRows
+            // The selection's two keys, while agent replies are off: on, fn R
+            // and fn Q do nothing and fn stays free (#354).
+            if !settings.agentRepliesEnabled {
+                LoreDivider()
+                shortcutRows
+            }
         }
     }
 
@@ -686,31 +732,8 @@ struct SettingsView: View {
         var id: String { key }
     }
 
-    /// The keys this card ends with, and they are not the same keys in both
-    /// states of the agent-replies switch (#259). On, the letters on the talk
-    /// key are the player's and the selection has no key left; off, Fn+R and
-    /// Fn+Q read the selection as they have since #105. The names, the order and
-    /// the subs are the board's key strip
-    /// (`docs/design/prototypes/agent-replies-player.html`, frame j), and fn
-    /// tapped alone is the player's visibility since #278.
-    private static let playerShortcuts = [
-        Shortcut(key: "fn [", name: "Previous"),
-        Shortcut(key: "fn ]", name: "Next"),
-        Shortcut(key: "fn J", name: "Go to / Open", sub: "The chat of the reply in the player"),
-        Shortcut(key: "fn M", name: "Mute / Unmute", sub: "Replies keep arriving, silently"),
-        Shortcut(key: "fn R", name: "Play / Pause", sub: "The reply in the player"),
-        Shortcut(
-            key: "fn", name: "Hide / Show",
-            sub: "Tap it alone \u{2014} a reply being read carries on"
-        ),
-        Shortcut(
-            key: "esc", name: "Pause, then hide",
-            sub: "The second press hides the player; with nothing speaking, the first one does"
-        ),
-    ]
-    /// The pointer plays and pauses too (#263), and says so under the card, as
-    /// System Settings sets a footnote: it belongs to the whole list of keys.
-    private static let playerFootnote = "Click a reply to play it; click the one playing to pause."
+    /// The keys this card ends with while agent replies are off: Fn+R and
+    /// Fn+Q read the selection as they have since #105.
     private static let selectionShortcuts = [
         Shortcut(key: "fn R", name: "Read selection aloud", sub: "Replaces the current reading"),
         Shortcut(key: "fn Q", name: "Add selection to queue", sub: "Reads after the current text"),
@@ -719,9 +742,7 @@ struct SettingsView: View {
     /// Static shortcut chip rows — same `.keybtn` idiom as the Modifiers rows,
     /// and the same divider-between-rows loop as the health panel's.
     private var shortcutRows: some View {
-        let shortcuts =
-            settings.agentRepliesEnabled ? Self.playerShortcuts : Self.selectionShortcuts
-        return ForEach(Array(shortcuts.enumerated()), id: \.element.id) { index, shortcut in
+        ForEach(Array(Self.selectionShortcuts.enumerated()), id: \.element.id) { index, shortcut in
             if index > 0 { LoreDivider() }
             SettingsRow(name: shortcut.name, sub: shortcut.sub) {
                 LoreMonoValueButton(title: shortcut.key, width: 64)
@@ -1047,22 +1068,32 @@ struct SettingsView: View {
 
     private var modifiersSection: some View {
         // Rows reflect the CURRENT hardcoded keymap truthfully (D-031): key
-        // chips are static — no remapping this stage. The enable toggles are
-        // new and gate HotkeyManager + the dictation footer kbd bar.
+        // chips are static — no remapping this stage. V and T have enable
+        // toggles that gate HotkeyManager + the dictation footer kbd bar;
+        // Space has none (#349): lock and pause always work, like Esc and K,
+        // so its row is information, not a control.
         //
-        // "Fn" here is literal and stays literal whatever the talk key is
-        // (#226): these four chords read the physical Fn flag off the event, so
-        // naming the chosen key would be a line the keyboard disagrees with.
+        // "Fn" is literal in the card label, V and T, whatever the talk key is
+        // (#226): those chords read the physical Fn flag off the event. Pause
+        // is the other way round (#233): the talk key with Space, so the Space
+        // row names the chosen key, as the dictation footer does.
         SettingsSectionCard(
             label: "Modifiers \u{2014} while holding Fn",
-            note: "Tap a key while talking to say where the words go. Remapping comes later."
+            note: "Tap a key while talking. Remapping comes later."
         ) {
-            modifierRow(
-                key: "Space",
-                name: "Lock",
-                sub: "Keep the mic open without holding",
-                isOn: $settings.modifierLockEnabled
-            )
+            // A plain mono label, not a chip, and no switch: it names the key
+            // and is never something to press (board core-controls.html S1).
+            SettingsRow(
+                name: "Lock and pause",
+                sub: Self.lockAndPauseSub(talkKey: settings.hotkeyKey)
+            ) {
+                Text("Space")
+                    .font(LoreTheme.Typography.monoControl)
+                    .foregroundStyle(LoreTheme.TextColor.muted)
+                    .frame(width: 64)
+            } trailing: {
+                EmptyView()
+            }
             LoreDivider()
             modifierRow(
                 key: "V",
@@ -1078,6 +1109,12 @@ struct SettingsView: View {
                 isOn: $settings.modifierTranslateEnabled
             )
         }
+    }
+
+    /// The Space row's line: pause is the talk key with Space, so it names the
+    /// chosen key's keycap, as the dictation footer does.
+    static func lockAndPauseSub(talkKey: HotkeyKey) -> String {
+        "Keep the mic open without holding. \(talkKey.shortName)+Space pauses."
     }
 
     /// Modifier row: 64px static key chip (the shared `.keybtn` spec, not

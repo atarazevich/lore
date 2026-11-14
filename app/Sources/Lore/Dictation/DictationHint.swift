@@ -440,15 +440,16 @@ final class DictationHintArbiter {
         case .silentMic:
             reportArmed && hasStood(silentSince, Self.silenceSeconds, now)
         case .lock:
-            // DSET-05: with Space-lock off there is no lock glyph to speak from.
-            settings.modifierLockEnabled && !signals.locked
+            !signals.locked
                 && signals.elapsedSeconds >= Self.lockSeconds
         case .howItEnds:
             pendingHowItEnds
         case .pause:
             signals.locked && hasStood(quietSince, Self.quietSeconds, now)
         case .cleanup:
-            signals.elapsedSeconds >= Self.cleanupSeconds && !cleanupOn(signals)
+            // Never teaches V while V is turned off in Settings (#349).
+            settings.modifierCleanupEnabled
+                && signals.elapsedSeconds >= Self.cleanupSeconds && !cleanupOn(signals)
         }
     }
 

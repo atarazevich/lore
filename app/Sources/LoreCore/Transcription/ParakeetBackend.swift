@@ -1,5 +1,6 @@
 import FluidAudio
 import Foundation
+import LoreFormat
 import os
 
 /// The Parakeet transcription backend — Parakeet Ultra, or v3 on a Mac that
@@ -73,10 +74,16 @@ public final class ParakeetBackend: TranscriptionBackend, @unchecked Sendable {
         // so we make a fresh state per call (matches upstream CLI / benchmark idiom).
         var decoderState = TdtDecoderState.make(decoderLayers: await asrManager.decoderLayerCount)
         let result = try await asrManager.transcribe(samples, decoderState: &decoderState)
+        // Every recognized word in lore leaves the model here, so this is where
+        // `<unk>` goes (#355): from the text, and from the tokens the word
+        // timings are spelled from, where a token of only `<unk>` is dropped.
         return TranscriptionResult(
-            text: result.text.trimmingCharacters(in: .whitespacesAndNewlines),
-            tokens: (result.tokenTimings ?? []).map {
-                TranscribedToken(text: $0.token, start: $0.startTime, end: $0.endTime)
+            text: UnknownToken.removed(from: result.text).trimmingCharacters(in: .whitespacesAndNewlines),
+            tokens: (result.tokenTimings ?? []).compactMap {
+                // Not `UnknownToken.removed`: a token's leading space is the word
+                // boundary, so " <unk>" must stay " " to keep the words apart.
+                let text = $0.token.replacingOccurrences(of: UnknownToken.literal, with: "")
+                return text.isEmpty ? nil : TranscribedToken(text: text, start: $0.startTime, end: $0.endTime)
             }
         )
     }

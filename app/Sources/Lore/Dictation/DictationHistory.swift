@@ -58,9 +58,10 @@ struct DictationHistoryEntry: Identifiable, Codable, Equatable, HistoryOrdered {
     /// attempt, so every other entry stays byte-identical on disk.
     var automaticAttempts: Int?
 
-    /// The text for the currently active version.
+    /// The text for the currently active version, without `<unk>` (#355) —
+    /// what history shows, copies and pastes again. The stored fields keep it.
     var displayText: String? {
-        activeVersion.text(raw: rawText, cleaned: cleanedText)
+        activeVersion.text(raw: rawText, cleaned: cleanedText).map(UnknownToken.removed)
     }
 
     /// Whether both raw and cleaned versions are available.

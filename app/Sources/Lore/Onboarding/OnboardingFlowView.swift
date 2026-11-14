@@ -249,16 +249,9 @@ struct OnboardingFlowView: View {
 
     private var cheatSheet: some View {
         VStack(alignment: .leading, spacing: 9) {
-            cheatRow(talkKey.shortName, "hold to talk")
-            cheatRow("Space", "lock it on, hands free")
-            // Fn literally, whatever the talk key is: these two read the
-            // event's own Fn flag, so "R⌥+V" would be a line the keyboard
-            // disagrees with. Present tense because they are pressed *during*
-            // the dictation — they arm the mode before the words are inserted,
-            // they do not repair words already pasted.
-            cheatRow("Fn+V", "clean up what you're saying")
-            cheatRow("Fn+T", "translate what you're saying")
-            cheatRow("\u{2303}\u{2318}V", "paste that take again")
+            ForEach(model.readyCheatRows, id: \.key) { row in
+                cheatRow(row.key, row.meaning)
+            }
         }
         .padding(.vertical, 14)
         .padding(.horizontal, 18)

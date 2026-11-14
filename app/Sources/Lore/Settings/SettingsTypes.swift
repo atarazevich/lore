@@ -319,3 +319,51 @@ enum HotkeyKey: Hashable, Identifiable {
         return (long: function, short: function)
     }
 }
+
+/// The one key agent replies answer to (#354): click to play or pause, twice
+/// for the next reply, hold to show or hide the list. Four right-hand
+/// modifiers — keys that type nothing alone and that macOS still reports under
+/// Secure Keyboard Entry. Fn is never one: it is left free.
+///
+/// It is never the talk key. `resolve` is the whole of that rule, so a stored
+/// choice that the talk key has since taken cannot come back as a clash.
+enum AgentReplyKey: String, CaseIterable, Identifiable, Sendable {
+    case rightOption
+    case rightCommand
+    case rightShift
+    case rightControl
+
+    var id: String { rawValue }
+
+    var keyCode: UInt16 {
+        switch self {
+        case .rightOption: HotkeyKey.rightOptionKeyCode
+        case .rightCommand: 54
+        case .rightShift: 60
+        case .rightControl: 62
+        }
+    }
+
+    /// The same key as a talk key would be: what its flags are read by, and
+    /// where its names come from, so the two pickers name a key alike.
+    var hotkeyKey: HotkeyKey {
+        self == .rightOption ? .rightOption : .custom(keyCode: keyCode)
+    }
+
+    /// "Right Option (⌥)" — the picker's and the row's name.
+    var displayName: String { hotkeyKey.displayName }
+    /// "R⌥" — the cap the strip, the capsule and the tooltips print.
+    var shortName: String { hotkeyKey.shortName }
+
+    /// The reply key when he has chosen none, or the talk key took his choice:
+    /// Right Option, or Right Command when Right Option is the talk key.
+    static func defaultKey(talkKey: HotkeyKey) -> AgentReplyKey {
+        talkKey == AgentReplyKey.rightOption.hotkeyKey ? .rightCommand : .rightOption
+    }
+
+    /// The reply key in effect: his choice unless the talk key is that key.
+    static func resolve(chosen: AgentReplyKey?, talkKey: HotkeyKey) -> AgentReplyKey {
+        if let chosen, chosen.hotkeyKey != talkKey { return chosen }
+        return defaultKey(talkKey: talkKey)
+    }
+}

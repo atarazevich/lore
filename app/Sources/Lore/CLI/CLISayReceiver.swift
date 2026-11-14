@@ -22,6 +22,10 @@ enum CLISayReceiver {
     /// controller turns itself on when the setting changes, a moment later;
     /// answering `.queued` from the setting alone would drop a reply into a
     /// queue that is not listening yet, with no `say` behind it.
+    ///
+    /// The reply takes its place in the queue at once, so concurrent replies
+    /// keep their arrival order; its mode follows when the outside has been
+    /// read (#354).
     static func respond(
         to said: CLISayRequest,
         replies: AgentReplyController,

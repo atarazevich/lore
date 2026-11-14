@@ -85,6 +85,15 @@ final class ReadAloudController {
         case russian
         case english
         case other(String?)
+
+        /// A language named by its code, as `lore say --lang` names it (#351).
+        init(code: String) {
+            switch code.lowercased() {
+            case "ru": self = .russian
+            case "en": self = .english
+            default: self = .other(code.lowercased())
+            }
+        }
     }
 
     private(set) var status: Status = .idle
@@ -636,9 +645,10 @@ final class ReadAloudController {
         en: ReadAloudVoiceChoice,
         other: ReadAloudVoiceChoice,
         single: ReadAloudVoiceChoice,
-        hasSpeechifyKey: Bool
+        hasSpeechifyKey: Bool,
+        language named: TextLanguage? = nil
     ) -> VoiceSelection {
-        let language = detectLanguage(text)
+        let language = named ?? detectLanguage(text)
         let configured: ReadAloudVoiceChoice
         switch mode {
         case .singleVoice:
@@ -791,6 +801,25 @@ final class ReadAloudController {
 
     // MARK: - Chunking (nonisolated for tests)
 
+    /// The text's sentences, trimmed (`enumerateSubstrings(.bySentences)`);
+    /// the whole trimmed text when it has no sentence break, none when it is
+    /// blank. Read Aloud packs them into chunks; agent replies in the local
+    /// voice make one WAV of each (#351).
+    nonisolated static func sentences(_ text: String) -> [String] {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty else { return [] }
+        var sentences: [String] = []
+        trimmed.enumerateSubstrings(
+            in: trimmed.startIndex..., options: .bySentences
+        ) { piece, _, _, _ in
+            if let piece = piece?.trimmingCharacters(in: .whitespacesAndNewlines),
+               !piece.isEmpty {
+                sentences.append(piece)
+            }
+        }
+        return sentences.isEmpty ? [trimmed] : sentences
+    }
+
     /// Split text into sentence-aligned chunks. The first chunk is small
     /// (~`firstTarget` chars ≈ 2.5 s to synthesize) so speech starts fast;
     /// later chunks are larger so the prefetch stays comfortably ahead of
@@ -801,19 +830,8 @@ final class ReadAloudController {
     nonisolated static func chunk(
         _ text: String, firstTarget: Int = 300, target: Int = 1500
     ) -> [String] {
-        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty else { return [] }
-
-        var sentences: [String] = []
-        trimmed.enumerateSubstrings(
-            in: trimmed.startIndex..., options: .bySentences
-        ) { piece, _, _, _ in
-            if let piece = piece?.trimmingCharacters(in: .whitespacesAndNewlines),
-               !piece.isEmpty {
-                sentences.append(piece)
-            }
-        }
-        if sentences.isEmpty { sentences = [trimmed] }
+        let sentences = sentences(text)
+        guard !sentences.isEmpty else { return [] }
 
         var chunks: [String] = []
         var current = ""

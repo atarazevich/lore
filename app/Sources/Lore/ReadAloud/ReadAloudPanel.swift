@@ -390,7 +390,7 @@ struct PlayerPanelView: View {
             case .hidden:
                 EmptyView()
             case .waiting(let capsule):
-                AgentReplyWaitingView(capsule: capsule, onDrag: onDrag)
+                AgentReplyWaitingView(capsule: capsule, replies: replies, onDrag: onDrag)
             case .player:
                 AgentReplyPlayerView(
                     replies: replies, chats: chats, mark: LoreMark.chip, onDrag: onDrag
@@ -500,9 +500,7 @@ final class ReadAloudPanelManager {
         if case .waiting(let capsule) = surface {
             guard !isCapsuleShown else { return }
             isCapsuleShown = true
-            DiagStore.record(
-                .agentReplyWaitingShown(muted: capsule.isMuted, waiting: capsule.waiting)
-            )
+            DiagStore.record(.agentReplyWaitingShown(muted: false, waiting: capsule.waiting))
         } else if isCapsuleShown {
             isCapsuleShown = false
             DiagStore.record(.agentReplyWaitingWithdrawn)

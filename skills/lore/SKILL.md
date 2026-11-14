@@ -96,13 +96,15 @@ it is closed.
 
 ```
 lore say "<text>"
+lore say --lang ru "<text>"
 echo "<text>" | lore say
 ```
 
 Reads the text aloud through lore, queued after other agents' replies and
 announced by this chat's name. Use it only when the user asked to hear
-replies, and keep it to a sentence or two. It always exits 0, and speaks with
-macOS `say` when lore is not running.
+replies, and keep it to a sentence or two. `--lang ru` or `--lang en` names
+the reply's language; without it lore detects the language from the text.
+It always exits 0, and speaks with macOS `say` when lore is not running.
 
 ## `lore` not found
 

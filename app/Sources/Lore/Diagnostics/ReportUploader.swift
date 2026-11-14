@@ -7,7 +7,7 @@ import Foundation
 /// report; it cannot read, list, or overwrite. See the receiver's README.
 enum ReportEndpoint {
     /// The receiver's `POST /report` route.
-    static let url = URL(string: "https://reports.dev.cognition.design/report")!
+    static let url = URL(string: "https://reports.dev.devkit.md/report")!
 
     /// PUBLIC bot-filter token, compiled into the client on purpose (design §8).
     /// Not a secret — do not treat it as one. The real value is injected by the

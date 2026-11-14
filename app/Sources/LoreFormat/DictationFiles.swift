@@ -88,8 +88,12 @@ public struct StoredDictation: Decodable, Sendable, Equatable, HistoryOrdered {
         markedAt = try c.decodeIfPresent(Date.self, forKey: .markedAt)
     }
 
-    /// The text history shows for it.
-    public var text: String? { activeVersion.text(raw: rawText, cleaned: cleanedText) }
+    /// The text history shows for it, without `<unk>` (#355): the stored
+    /// fields stay verbatim, so no write puts back text the user never changed.
+    public var text: String? { activeVersion.text(raw: rawText, cleaned: cleanedText).map(UnknownToken.removed) }
+
+    /// `rawText` as it is read: without `<unk>` (#355).
+    public var shownRawText: String? { rawText.map(UnknownToken.removed) }
 
     /// Whether its words are there to read, in the words an agent reads (#324).
     public enum Readiness: String, Codable, Sendable {

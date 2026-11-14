@@ -2,6 +2,7 @@ import AppKit
 @preconcurrency import AVFoundation
 import CoreAudio
 import LoreCore
+import LoreFormat
 import Observation
 import os
 
@@ -2013,7 +2014,7 @@ final class DictationCoordinator {
     ) async -> Bool {
         await history.deletionsSettled()
         guard var entry = history.entries.first(where: { $0.id == entryID }),
-              let text = entry.rawText else {
+              let text = entry.rawText.map(UnknownToken.removed) else {
             log.error("retroactive cleanup: no raw text for entry")
             return false
         }

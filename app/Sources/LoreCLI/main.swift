@@ -156,7 +156,7 @@ func transcribe(typedPath: String, speakers: Bool) -> Never {
 /// is what a terminal did before this feature. The exit status is always 0 —
 /// the output style that calls this must never see a failure of lore's.
 func say(arguments: [String]) -> Never {
-    guard case .send(let voice, let typed, let dryRun) = CLISay.parse(arguments) else {
+    guard case .send(let voice, let typed, let dryRun, let language) = CLISay.parse(arguments) else {
         // A flag this command does not know: `say` gets the line untouched.
         speakHere(arguments: arguments)
     }
@@ -173,6 +173,7 @@ func say(arguments: [String]) -> Never {
     let reply = CLISay.request(
         text: text,
         voice: voice,
+        language: language,
         environment: environment,
         cwd: FileManager.default.currentDirectoryPath,
         place: place,
@@ -328,7 +329,7 @@ func marks(arguments: [String]) -> Never {
 
 let usage = """
 usage: lore transcribe [--speakers] <audio file>
-       lore say [-v <voice>] [--dry-run] <text>
+       lore say [-v <voice>] [--lang ru|en] [--dry-run] <text>
        lore search <words> [--since YYYY-MM-DD] [--until YYYY-MM-DD] [--dictations|--meetings] [--marked] [--limit N] [--json]
        lore show <id|latest> [--notes] [--raw]
        lore marks [--json]

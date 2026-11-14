@@ -133,8 +133,9 @@ final class AppCoordinator {
     let readAloudPanel = ReadAloudPanelManager()
 
     /// Agent replies (#236): behind their own switch, off by default — nothing
-    /// runs until `agentRepliesEnabled` is turned on.
-    let agentReplies = AgentReplyController()
+    /// runs until `agentRepliesEnabled` is turned on. Read in the local Silero
+    /// voices when the speech service is installed, else the system voice (#351).
+    let agentReplies = AgentReplyController(makeSpeaker: { LocalAgentReplySpeaker() })
 
     /// From a reply to its chat (#258): the live state of every row's button
     /// and the action behind it. Reads nothing and runs nothing until asked.

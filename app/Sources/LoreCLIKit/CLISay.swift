@@ -11,6 +11,10 @@ public struct CLISayRequest: Codable, Sendable, Equatable {
     public var text: String
     /// The voice `lore say -v` asked for; nil leaves the choice to lore.
     public var voice: String?
+    /// The language `lore say --lang` named (#351), lowercased — `ru`, `en`,
+    /// or any other code, which the system voice reads. Nil leaves it to
+    /// lore's detection; optional so an app older than it still decodes.
+    public var language: String?
     /// The name this shell can give its own chat: the name the Claude Code
     /// session was given by hand, else the folder. What the player falls back
     /// to when herdr cannot be asked for the labels the owner typed (#267).
@@ -40,6 +44,7 @@ public struct CLISayRequest: Codable, Sendable, Equatable {
     public init(
         text: String,
         voice: String? = nil,
+        language: String? = nil,
         name: String,
         hostBundleID: String? = nil,
         herdrPaneID: String? = nil,
@@ -52,6 +57,7 @@ public struct CLISayRequest: Codable, Sendable, Equatable {
     ) {
         self.text = CLISay.capped(text, bytes: CLISay.maxTextBytes)
         self.voice = CLISay.capped(voice)
+        self.language = CLISay.capped(language)
         self.name = CLISay.capped(name, bytes: CLISay.maxNameBytes)
         self.hostBundleID = CLISay.capped(hostBundleID)
         self.herdrPaneID = CLISay.capped(herdrPaneID)
@@ -133,7 +139,8 @@ public enum CLISay {
         /// The voice when `-v` gave one, and the text as typed. A nil text
         /// means standard input, which is where `say` reads it from too.
         /// `--dry-run` prints the request instead of sending it (#288).
-        case send(voice: String?, text: String?, dryRun: Bool = false)
+        /// `language` is what `--lang` named (#351), lowercased.
+        case send(voice: String?, text: String?, dryRun: Bool = false, language: String? = nil)
         /// A flag this command does not know — `say` has a dozen more. The
         /// reply matters more than a usage message, so `/usr/bin/say` gets the
         /// arguments exactly as they were typed and behaves as it always did.
@@ -143,6 +150,7 @@ public enum CLISay {
     /// `arguments` is what followed `lore say`.
     public static func parse(_ arguments: [String]) -> Invocation {
         var voice: String?
+        var language: String?
         var dryRun = false
         var words: [String] = []
         var rest = arguments[...]
@@ -158,6 +166,24 @@ public enum CLISay {
                 voice = value
                 continue
             }
+            // lore's own flag (#351), `--lang xx` or `--lang=xx`: `say` has no
+            // `--lang`, so it never reaches `say` — the words do, in its own
+            // voice. A code is 2–3 ASCII letters; a malformed flag (no code
+            // after it) is dropped and the reply still sent, its language left
+            // to detection. What followed it stays what it was: a flag, or a
+            // word of the text.
+            if argument == "--lang" {
+                if let value = rest.first, value.isEmpty || isLanguageCode(value) {
+                    rest = rest.dropFirst()
+                    if !value.isEmpty { language = value.lowercased() }
+                }
+                continue
+            }
+            if argument.hasPrefix("--lang=") {
+                let value = argument.dropFirst("--lang=".count)
+                if isLanguageCode(value) { language = value.lowercased() }
+                continue
+            }
             // Everything after `--` is the text, dashes and all, as `say`
             // itself reads it.
             if argument == "--" {
@@ -171,7 +197,15 @@ public enum CLISay {
             words.append(argument)
         }
         // Several words are one sentence, as `say hello world` speaks one.
-        return .send(voice: voice, text: words.isEmpty ? nil : words.joined(separator: " "), dryRun: dryRun)
+        return .send(
+            voice: voice, text: words.isEmpty ? nil : words.joined(separator: " "),
+            dryRun: dryRun, language: language
+        )
+    }
+
+    /// `ru`, `en`, `deu`: what `--lang` takes as a language code.
+    static func isLanguageCode<S: StringProtocol>(_ value: S) -> Bool {
+        (2...3).contains(value.count) && value.allSatisfy { $0.isASCII && $0.isLetter }
     }
 
     // MARK: - Who is speaking
@@ -268,6 +302,7 @@ public enum CLISay {
     public static func request(
         text: String,
         voice: String?,
+        language: String? = nil,
         environment: [String: String],
         cwd: String,
         place: ChatPlace,
@@ -278,6 +313,7 @@ public enum CLISay {
         return CLISayRequest(
             text: text,
             voice: voice,
+            language: language,
             // The name the owner sees for the chat, else its folder (#267, #296).
             name: chatName(sessionName: session?.shownName, cwd: folder),
             hostBundleID: place.hostBundleID,
@@ -317,7 +353,7 @@ public enum CLISay {
     /// fit the one line the server reads, while `say` has no line to fit and
     /// the tail of a long reply is what a terminal would have spoken. They go
     /// behind `--`, so a reply beginning with a dash is spoken rather than read
-    /// as a flag.
+    /// as a flag. `--lang` is lore's alone and is not passed on (#351).
     public static func spokenHere(
         afterAnswer answer: CLIResponse?, sent: CLISayRequest, typed text: String
     ) -> [String]? {

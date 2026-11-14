@@ -144,7 +144,7 @@ public enum TranscriptTurns {
     /// Turns from the lines in time order. Lines with no text are left out.
     public static func group(_ records: [SessionRecord], labels: SpeakerLabels) -> [TranscriptTurn] {
         let order = records.indices
-            .filter { !records[$0].text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
+            .filter { !records[$0].originalText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
             .sorted { (records[$0].timestamp, $0) < (records[$1].timestamp, $1) }
         var turns: [TranscriptTurn] = []
         for (position, index) in order.enumerated() {
@@ -164,7 +164,7 @@ public enum TranscriptTurns {
                 paragraph.pieces.append(line)
                 turn.paragraphs.append(paragraph)
                 turns[turns.count - 1] = turn
-            } else if let turn = turns.last, isShort(record.text),
+            } else if let turn = turns.last, isShort(record.originalText),
                       let next = order.dropFirst(position + 1).first,
                       labels.byRecord[next].key == turn.speaker.key {
                 turns[turns.count - 1].paragraphs[turn.paragraphs.count - 1].pieces.append(.init(record: index, isReply: true))
@@ -289,7 +289,7 @@ public struct MeetingTranscript: Equatable, Sendable {
     /// are `text(of:)`.
     public func segments(of paragraph: TranscriptTurn.Paragraph, original: Bool = false) -> [TranscriptTurn.Segment] {
         func line(_ index: Int) -> String {
-            original ? records[index].text : records[index].displayText
+            original ? records[index].originalText : records[index].displayText
         }
         if paragraph.pieces.count == 1, let only = paragraph.pieces.first, !only.isReply {
             return [.init(text: line(only.record), isReply: false)]

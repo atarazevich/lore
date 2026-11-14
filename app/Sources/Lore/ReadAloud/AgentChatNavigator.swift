@@ -291,20 +291,6 @@ final class AgentChatNavigator {
 
     // MARK: - The action
 
-    /// Whether Fn+J has anywhere to go: a reply open in the player, and no go
-    /// of its own already running. The key asks before it ends the dictation
-    /// gesture it arrived under (#259).
-    var canOpenCurrent: Bool { isEnabled && !isOpening && replies?.openReply != nil }
-
-    /// Goes to the chat of the reply open in the player — the card's, past the
-    /// end the last one read (#264) — read off the player itself, so the key
-    /// that presses this holds no second reference to it (#259).
-    @discardableResult
-    func openCurrent() async -> DiagEvent.Outcome {
-        guard let reply = replies?.openReply else { return .failed }
-        return await open(reply)
-    }
-
     /// Goes to the reply's chat, on a reading of its own taken at the click:
     /// what the rows were drawn from may be seconds old. Never blocks the main
     /// thread — every command runs off it with a timeout, so a missing herdr

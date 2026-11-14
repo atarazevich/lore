@@ -349,6 +349,19 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
     /// 2 s while a reply hold stands (#327); the per-process property itself
     /// sends no notification a listener here receives.
     private static func anotherProcessRunsInput() -> Bool {
+        anotherProcessRuns(kAudioProcessPropertyIsRunningInput)
+    }
+
+    /// Whether a process other than this one has audio output running (#354):
+    /// another app plays sound — a video, music, a game. Lore's own process is
+    /// left out, as its input is above, so a reply lore is reading is never a
+    /// reason to keep the next one silent. HAL IPC: never call it on the main
+    /// thread (#64).
+    static func anotherProcessRunsOutput() -> Bool {
+        anotherProcessRuns(kAudioProcessPropertyIsRunningOutput)
+    }
+
+    private static func anotherProcessRuns(_ running: AudioObjectPropertySelector) -> Bool {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyProcessObjectList,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -364,7 +377,7 @@ final class CoreAudioSignalSource: AudioSignalSource, @unchecked Sendable {
         let own = UInt32(bitPattern: getpid())
         return processes.contains {
             readUInt32($0, kAudioProcessPropertyPID) != own
-                && readUInt32($0, kAudioProcessPropertyIsRunningInput) ?? 0 != 0
+                && readUInt32($0, running) ?? 0 != 0
         }
     }
 

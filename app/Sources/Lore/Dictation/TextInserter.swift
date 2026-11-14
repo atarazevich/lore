@@ -23,6 +23,18 @@ enum SyntheticKeyEvent {
 
     static func mark(_ event: CGEvent) {
         event.setIntegerValueField(.eventSourceUserData, value: marker)
+        lastMarked.withLock { $0 = ProcessInfo.processInfo.systemUptime }
+    }
+
+    /// When lore last marked a key it posts, on the uptime clock (#354): the
+    /// reply key's typing check leaves those key-downs out, since the system's
+    /// count of key-downs carries no marker.
+    private static let lastMarked = OSAllocatedUnfairLock<TimeInterval>(initialState: -.infinity)
+
+    /// A key-down at `time` is one lore posted: within 100 ms after a mark.
+    static func wasPosted(near time: TimeInterval) -> Bool {
+        let marked = lastMarked.withLock { $0 }
+        return time >= marked - 0.01 && time <= marked + 0.1
     }
 
     static func isOurs(_ event: CGEvent) -> Bool {

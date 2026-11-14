@@ -2,15 +2,14 @@ import AppKit
 import SwiftUI
 
 /// The agent replies in the floating player (#260, #263, #264), drawn to the
-/// approved board `docs/design/prototypes/agent-replies-player.html` (v4.0),
+/// approved board `docs/design/prototypes/agent-replies-player.html` (v5.2),
 /// whose copy table is the contract for every word here.
 ///
 /// Three surfaces, never two at once: the replies as one list with the open one
-/// as a card (board a, b), the quiet capsule that says how many replies wait
-/// while a microphone is in use or mute is on (d, e), and nothing at all.
-/// The decision is `AgentReplySurface`, and both the view and the panel's poll
-/// read it from the live controller — so the window and its content can never
-/// disagree (`no-false-positives.md`).
+/// as a card (board a, b), the capsule that says how many replies came in
+/// silently (d, e, f), and nothing at all. The decision is `AgentReplySurface`,
+/// and both the view and the panel's poll read it from the live controller —
+/// so the window and its content can never disagree (`no-false-positives.md`).
 ///
 /// Everything is behind the feature's switch (#256): off, `decide` answers
 /// `.hidden` and none of this is built.
@@ -24,45 +23,28 @@ enum AgentReplySurface: Equatable, Sendable {
 
     /// Pure, and derived at presentation time from nothing stored.
     ///
-    /// Speaking wins over every hold: an explicit play reads a reply even while
-    /// a microphone is in use (#256), and while lore reads, the player is
-    /// visible — speakers can be muted or quiet, so the words have to be
-    /// readable. A paused reply keeps the player up (it is what play resumes),
-    /// and the microphone freeing with replies waiting opens it stopped (h).
+    /// The player is up when he opened the list with a hold (`isListOpen`), or
+    /// while a reply is being read — speaking, paused, or the ten seconds after
+    /// the last one (`isLingering`, #260 review) — unless he put it away during
+    /// this very reply (`isHiddenUntilNextReply`, #285). A paused reply or the
+    /// linger under a microphone keeps it out of the way: a dictation or a call
+    /// is a moment he chose for something else. Speaking wins over that: a
+    /// click in Quiet plays, and the words have to be readable.
     ///
-    /// `isLingering` is the ten seconds after the last reply ended (#260
-    /// review): the player disappearing on the final word took with it the Go
-    /// to of the reply just read, which is how that chat is reached.
-    ///
-    /// `isHidden` is the owner putting it away himself (#263) — and then nothing
-    /// is drawn, the capsule included: the capsule explains a silence he did not
-    /// ask for, and this one he did.
-    ///
-    /// Except while a reply is read — speaking or paused, the reply he is on —
-    /// and for the linger after it (#285): he could not tell which chat was
-    /// talking to him. The player shows over his choice unless he put it away
-    /// during this very reply
-    /// (`isHiddenUntilNextReply`), and never while a microphone holds reading —
-    /// a dictation or a call keeps it out of the way as before. When the linger
-    /// runs out, his choice is what is drawn again.
+    /// Otherwise, replies that came in silently and are not heard yet show the
+    /// capsule (#354) — while he put the player away too, since he did not ask
+    /// for that silence.
     static func decide(
-        isEnabled: Bool, playback: AgentReplyController.Playback,
-        isHeldByMicrophone: Bool, isMuted: Bool, waiting: Int, isLingering: Bool = false,
-        isHidden: Bool = false, isHiddenUntilNextReply: Bool = false
+        isEnabled: Bool, playback: AgentReplyController.Playback, isHeldByMicrophone: Bool,
+        isListOpen: Bool = false, isLingering: Bool = false, isHiddenUntilNextReply: Bool = false,
+        capsule: AgentReplyWaitingCapsule? = nil
     ) -> AgentReplySurface {
-        let readingShows = !isHiddenUntilNextReply && !isHeldByMicrophone
-            && (playback != .idle || isLingering)
-        guard isEnabled, !isHidden || readingShows else { return .hidden }
-        if playback == .speaking { return .player }
-        if isHeldByMicrophone || isMuted, waiting > 0 {
-            return .waiting(AgentReplyWaitingCapsule(isMuted: isMuted, waiting: waiting))
-        }
-        // A microphone in use with nothing waiting: nothing to say. Mute with
-        // nothing waiting falls through to the linger (#278): a tap that brings
-        // the player back over replies already heard shows them, muted or not.
-        if isHeldByMicrophone { return .hidden }
-        if playback == .paused || waiting > 0 { return .player }
-        return isLingering ? .player : .hidden
+        guard isEnabled else { return .hidden }
+        let reading = playback == .speaking
+            || (!isHeldByMicrophone && (playback == .paused || isLingering))
+        if isListOpen || (reading && !isHiddenUntilNextReply) { return .player }
+        if let capsule, capsule.waiting > 0 { return .waiting(capsule) }
+        return .hidden
     }
 
     /// The same decision off the live controller — the one call both the view
@@ -71,155 +53,115 @@ enum AgentReplySurface: Equatable, Sendable {
     static func of(_ replies: AgentReplyController) -> AgentReplySurface {
         decide(
             isEnabled: replies.isEnabled, playback: replies.playback,
-            isHeldByMicrophone: replies.isHeldByMicrophone, isMuted: replies.isMuted,
-            waiting: replies.waitingCount, isLingering: replies.isLingering,
-            isHidden: replies.isPlayerHidden,
-            isHiddenUntilNextReply: replies.isHiddenUntilNextReply
+            isHeldByMicrophone: replies.isHeldByMicrophone, isListOpen: replies.isListOpen,
+            isLingering: replies.isLingering,
+            isHiddenUntilNextReply: replies.isHiddenUntilNextReply,
+            capsule: AgentReplyWaitingCapsule(replies: replies)
         )
     }
 }
 
-/// The capsule in the player's place (board f, g): how many replies wait, and —
-/// when mute is why nothing is read — mute's own key, because unmuting is what
-/// the reader wants next.
+/// The capsule in the list's place (board d, e, f): how many replies came in
+/// silently, the reply key's cap, and — on hover — why they were silent and
+/// the two gestures that act on them.
 struct AgentReplyWaitingCapsule: Equatable, Sendable {
-    let isMuted: Bool
     let waiting: Int
+    /// Why the newest of them was silent, and whether that still holds now.
+    let reason: ReplyQuietReason
+    let reasonHolds: Bool
+    /// The reply key's cap: R⌥, R⌘, R⇧, R⌃.
+    let keyCap: String
 
-    /// "3 replies waiting" / "1 reply waiting"; muted says so first.
-    var words: String {
-        let count = waiting == 1 ? "1 reply waiting" : "\(waiting) replies waiting"
-        return isMuted ? "Muted \u{2014} \(count)" : count
+    /// "3 replies waiting" / "1 reply waiting".
+    var words: String { waiting == 1 ? "1 reply waiting" : "\(waiting) replies waiting" }
+
+    /// The tooltip's first line: the reason, in the present while it holds and
+    /// in the past once it ended (board copy table, `quiet`).
+    var reasonLine: String {
+        switch (reason, reasonHolds) {
+        case (.microphone, false): "Another app was using the microphone, so these came in silently."
+        case (.game, false): "A game was in front, so these came in silently."
+        case (.sound, false): "Another app was playing sound, so these came in silently."
+        case (.dictation, false): "You were dictating, so these came in silently."
+        case (.meeting, false): "You were recording a meeting, so these came in silently."
+        case (.microphone, true): "Another app is using the microphone, so these come in silently."
+        case (.game, true): "A game is in front, so these come in silently."
+        case (.sound, true): "Another app is playing sound, so these come in silently."
+        case (.dictation, true): "You are dictating, so these come in silently."
+        case (.meeting, true): "You are recording a meeting, so these come in silently."
+        // Only a newer build's event decodes to this; lore never files by it.
+        case (.unknown, _): "These came in silently."
+        }
     }
 
-    var keys: [String] {
-        isMuted ? HotkeyManager.AgentReplyChord.mute.caps : []
+    /// The second line, always: the two gestures, with the key's cap in it.
+    var gestureLine: [DictationHintPiece] {
+        [
+            .words("Click "), .key(keyCap),
+            .words(waiting == 1 ? " to play it, hold it to show the list." : " to play them, hold it to show the list."),
+        ]
     }
 
-    /// While muted, the strip's own words — one action, one name.
-    var tooltip: String {
-        isMuted
-            ? HotkeyManager.AgentReplyChord.mute.name
-            : "Replies wait while the microphone is in use"
+    var tooltip: [[DictationHintPiece]] { [[.words(reasonLine)], gestureLine] }
+}
+
+extension AgentReplyWaitingCapsule {
+    /// The live capsule, or nil when nothing waits silently.
+    @MainActor
+    init?(replies: AgentReplyController) {
+        let waiting = replies.silentWaitingCount
+        guard waiting > 0, let silent = replies.silentReason else { return nil }
+        self.init(waiting: waiting, reason: silent.reason, reasonHolds: silent.holds, keyCap: replies.keyCap)
     }
 }
 
 // MARK: - The keys, as the strip prints them
 
-extension HotkeyManager.AgentReplyChord {
-    /// The letter on the talk key, as the keycap prints it.
-    var letter: String {
-        switch self {
-        case .playOrPause: "R"
-        case .previous: "["
-        case .next: "]"
-        case .goToChat: "J"
-        case .mute: "M"
-        }
-    }
-
-    /// The keycap run: `fn` is printed on every chord. The strip prints its own
-    /// `fn` once at the head (#263); everywhere a key stands alone — Settings,
-    /// the capsule, a tooltip — it carries the whole chord.
-    var caps: [String] { ["fn", letter] }
-
-    /// The board's copy table, one order for the two-word keys. The pair stays
-    /// the name wherever there is room for it — Settings, and the tooltip on the
-    /// strip; the strip's own word is the half that is true at that moment.
-    var name: String {
-        switch self {
-        case .playOrPause: "Play / Pause"
-        case .previous: "Previous"
-        case .next: "Next"
-        case .goToChat: "Go to / Open"
-        case .mute: "Mute / Unmute"
-        }
-    }
-
-    /// The chords the strip prints, in its reading order at the player's foot
-    /// (board §07): every one pressed with the `fn` at the head.
-    ///
-    /// R is not among them since #278: its word would have to be Pause while a
-    /// reply speaks — the same act as the Esc beside it. Settings lists it, and
-    /// the card's own button carries its name (board v4.0).
-    static let stripOrder: [Self] = [.previous, .next, .goToChat, .mute]
-}
-
-/// One entry of the key strip: the key as its cap prints it, the word that is
-/// true right now, and the line it says on hover.
-struct AgentReplyStripKey: Equatable, Sendable, Identifiable {
-    /// The whole chord, for the tooltip and for VoiceOver: neither of them has a
-    /// head to read the `fn` from.
-    let fullCaps: [String]
-    /// What this key does at this moment: "Mute" or "Unmute", "Pause" or "Hide".
-    let word: String
-    /// The copy table's line for it; the chords keep the pair Settings names, so
-    /// the two never disagree about the key.
-    let tooltip: String
-    /// Drawn dimmed: J while the reply in the player has no chat to go to
-    /// (board v4.0 §02, "No place to go to").
-    var isDimmed = false
-
-    /// The cap of this entry alone — the letter for a chord, since the strip
-    /// prints `fn` once at its head, and `esc` for the key that is not one.
-    /// The last of the chord either way, never a second field to keep in step
-    /// with the first.
-    var cap: String { fullCaps.last ?? "" }
-
-    var id: String { fullCaps.joined() }
-}
-
-/// The strip at the player's foot, as the board prints it: `fn +` at the head
-/// of one shape holding the four chords it governs, then Esc outside it.
+/// The strip at the player's foot (board §05): one shape holding the reply
+/// key's cap and its three gestures — click, twice, hold — each with the word
+/// it does now; Esc stands outside it.
 ///
 /// Every word is read from state and none is stored — the strip says what the
 /// key will do if it is pressed now, which is the same rule the tooltips and
 /// Esc itself follow (`no-false-positives.md`).
 struct AgentReplyStrip: Equatable, Sendable {
-    /// The head: the modifier the four letters after it are pressed with.
-    static let head = "fn"
+    /// The group's tooltip, the one line that teaches the key.
+    static let keyTooltip = "Click to play or pause, twice for the next reply, hold to show or hide the list"
     /// The copy table's line for Esc, the one key that does two things (#263).
-    static let escapeTooltip = "Pauses. Press again to hide the player."
+    static let escapeTooltip = "Pauses. Press again to hide the list."
+    /// One act, one name: the hold, the second Esc and the × all hide the list.
+    static let hideList = "Hide list"
 
-    /// The four chords the head governs, in reading order.
-    let chords: [AgentReplyStripKey]
-    /// Esc, which is not one of them and stands outside their shape.
-    let escape: AgentReplyStripKey
-
-    /// - Parameters:
-    ///   - goToWord: the word on the card's own button — "Go to" for a chat
-    ///     that is open, "Open" for one that is not. One action, one name. Nil
-    ///     when the card's reply has no chat to go to: J keeps its word and is
-    ///     drawn dimmed.
-    ///   - isSpeaking: what the next Esc does: pause a reply that speaks,
-    ///     otherwise put the player away.
-    init(isMuted: Bool, isSpeaking: Bool, goToWord: String?) {
-        chords = HotkeyManager.AgentReplyChord.stripOrder.map { chord in
-            let word: String = switch chord {
-            case .goToChat: goToWord ?? "Go to"
-            case .mute: isMuted ? "Unmute" : "Mute"
-            // The two whose word is the whole of what the key does: the copy
-            // table names them once, in `name`, and the strip reads it. R is
-            // not in `stripOrder`.
-            case .previous, .next, .playOrPause: chord.name
-            }
-            return AgentReplyStripKey(
-                fullCaps: chord.caps, word: word, tooltip: chord.name,
-                isDimmed: chord == .goToChat && goToWord == nil
-            )
-        }
-        escape = AgentReplyStripKey(
-            fullCaps: ["esc"], word: isSpeaking ? "Pause" : "Hide", tooltip: Self.escapeTooltip
-        )
+    /// One gesture in the group: the faint word for how it is pressed, and
+    /// what it does now.
+    struct Gesture: Equatable, Sendable, Identifiable {
+        let how: String
+        let word: String
+        /// Drawn dimmed: Next on the last reply, which has none after it.
+        var isDimmed = false
+        var id: String { how }
     }
 
-    /// The live strip: the words come from the same reading the keys act on.
+    /// The reply key's cap at the group's head.
+    let keyCap: String
+    let gestures: [Gesture]
+    /// What Esc does now: pause a reply that speaks, otherwise hide the list.
+    let escapeWord: String
+
+    init(keyCap: String, isSpeaking: Bool, canPlayNext: Bool) {
+        self.keyCap = keyCap
+        gestures = [
+            Gesture(how: "click", word: isSpeaking ? "Pause" : "Play"),
+            Gesture(how: "twice", word: "Next", isDimmed: !canPlayNext),
+            Gesture(how: "hold", word: Self.hideList),
+        ]
+        escapeWord = isSpeaking ? "Pause" : Self.hideList
+    }
+
+    /// The live strip: the words come from the same reading the key acts on.
     @MainActor
-    init(replies: AgentReplyController, chats: AgentChatNavigator) {
-        self.init(
-            isMuted: replies.isMuted, isSpeaking: replies.isSpeaking,
-            goToWord: replies.openReply.flatMap { chats.destination(for: $0)?.title }
-        )
+    init(replies: AgentReplyController) {
+        self.init(keyCap: replies.keyCap, isSpeaking: replies.isSpeaking, canPlayNext: replies.canPlayNext)
     }
 }
 
@@ -371,7 +313,7 @@ struct AgentReplyPlayerView: View {
         VStack(spacing: 0) {
             AgentReplyTitleBar(replies: replies, mark: mark, tip: $tip)
             list
-            AgentReplyKeyStrip(strip: AgentReplyStrip(replies: replies, chats: chats), tip: $tip)
+            AgentReplyKeyStrip(strip: AgentReplyStrip(replies: replies), tip: $tip)
         }
         .background(
             .ultraThinMaterial, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.panel)
@@ -426,7 +368,7 @@ struct AgentReplyPlayerView: View {
 ///
 /// Neither the mark nor the title is a control: pressed and dragged, they move
 /// the plate like any bare part of it. The × withdraws the player exactly as a
-/// tap of fn does (#278), and never the speech, which is what its line says.
+/// hold of the reply key does (#354), and never the speech.
 ///
 /// Its own view so the render tests can put it over the list drawn flat.
 struct AgentReplyTitleBar: View {
@@ -454,9 +396,9 @@ struct AgentReplyTitleBar: View {
     private static let closeSide: CGFloat = 20
     private static let trailing: CGFloat = 10
 
-    /// The ×'s own line, in the board's copy table: what it does, in the words
-    /// the strip's esc uses when nothing speaks — one action, one name.
-    static let hideName = "Hide the player"
+    /// The ×'s own line, in the board's copy table: what it does, and the
+    /// gesture that does the same — one act, one name.
+    static let hideName = "Hide the list"
 
     var body: some View {
         HStack(spacing: 0) {
@@ -553,12 +495,12 @@ struct AgentReplyTitleBar: View {
             .contentShape(Rectangle())
             .onTapGesture { replies.hidePlayer(by: .closeMark) }
             .loreTipReport(
-                AgentReplyTipOwner.close, Self.hideName,
-                keys: [AgentReplyStrip.head],
+                AgentReplyTipOwner.close, "\(Self.hideName), hold",
+                keys: [replies.keyCap],
                 in: agentReplyTipSpace, tip: $tip
             )
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("\(Self.hideName), fn")
+            .accessibilityLabel(Self.hideName)
             .accessibilityAddTraits(.isButton)
     }
 }
@@ -823,8 +765,8 @@ struct AgentReplyCardView: View {
         // reply's length.
         let total = Int(reply.estimatedSeconds)
         let gone = min(Int(reply.estimatedSeconds * share), total)
-        // The copy table's names for the button: one action, one name with
-        // Settings' Play / Pause.
+        // The copy table's names for the button: the same word the strip
+        // prints after click.
         let word = isSpeaking ? "Pause" : "Play"
         return HStack(spacing: 8) {
             Image(systemName: isSpeaking ? "pause.fill" : "play.fill")
@@ -834,12 +776,11 @@ struct AgentReplyCardView: View {
                 .contentShape(Rectangle())
                 .onTapGesture { replies.playOrPause(replyID: reply.id) }
                 .loreTipReport(
-                    AgentReplyTipOwner.play(reply.id), word,
-                    keys: HotkeyManager.AgentReplyChord.playOrPause.caps,
+                    AgentReplyTipOwner.play(reply.id), word, keys: [replies.keyCap],
                     in: agentReplyTipSpace, tip: $tip
                 )
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(word), fn R")
+                .accessibilityLabel(word)
                 .accessibilityAddTraits(.isButton)
             Text(ReadAloudController.timeLabel(Double(gone)))
             PlayerProgressBar(progress: share, fill: LoreTheme.Accent.blue, track: LoreTheme.Surface.line2)
@@ -878,11 +819,10 @@ private struct AgentReplyGoButton: View {
                 .onTapGesture { Task { await chats.open(reply) } }
                 .loreTipReport(
                     AgentReplyTipOwner.go(reply.id), destination.tooltip,
-                    keys: HotkeyManager.AgentReplyChord.goToChat.caps,
                     in: agentReplyTipSpace, tip: $tip
                 )
                 .accessibilityElement(children: .ignore)
-                .accessibilityLabel("\(destination.title), \(destination.tooltip), fn J")
+                .accessibilityLabel("\(destination.title), \(destination.tooltip)")
                 .accessibilityAddTraits(.isButton)
         }
     }
@@ -908,10 +848,10 @@ extension AgentReply {
 
 // MARK: - The key strip
 
-/// Every key the player answers to, in one line at its foot (board v4.0): one
-/// shape — `--card3` at the chip radius — holding `fn +` and the four chords
-/// pressed with it, and Esc outside it, ending on the rail. A legend, not a
-/// control: the keys are the controls.
+/// The reply key in one line at the player's foot (board §05): one shape —
+/// `--card3` at the chip radius — holding the key's cap and its three gestures,
+/// and Esc outside it, ending on the rail. A legend, not a control: the key is
+/// the control.
 ///
 /// Not private: the render tests measure it beside the board.
 struct AgentReplyKeyStrip: View {
@@ -925,74 +865,73 @@ struct AgentReplyKeyStrip: View {
         top: 0, leading: AgentReplyPlayerView.listInset.leading, bottom: 0,
         trailing: AgentReplyPlayerView.listInset.trailing + AgentReplyRowView.trailing
     )
-    /// The group: 22 tall, 3 before `fn` and 8 after the last word, 10
+    /// The group: 22 tall, 3 before the cap and 8 after the last word, 10
     /// between its entries.
     private static let groupHeight: CGFloat = 22
     private static let groupInsets = EdgeInsets(top: 0, leading: 3, bottom: 0, trailing: 8)
     private static let entryGap: CGFloat = 10
-    /// The gap when the board's does not fit: muted while a reply speaks,
-    /// Unmute and Pause together want 5 pt more than the plate has at 10.
-    private static let tightGap: CGFloat = 8
-    /// Between a keycap and its word.
+    /// Between a keycap or a gesture's word and the word after it.
     private static let capGap: CGFloat = 4
 
     var body: some View {
-        ViewThatFits(in: .horizontal) {
-            line(gap: Self.entryGap)
-            line(gap: Self.tightGap)
-        }
-        .frame(height: Self.height)
-        .overlay(alignment: .top) {
-            LoreTheme.Surface.line.frame(height: 0.5)
-        }
-    }
-
-    private func line(gap: CGFloat) -> some View {
         HStack(spacing: 0) {
-            HStack(spacing: gap) {
-                head
-                ForEach(strip.chords) { entry($0, outside: false) }
+            HStack(spacing: Self.entryGap) {
+                Self.keycap(strip.keyCap, outside: false)
+                ForEach(strip.gestures) { gesture($0) }
             }
             .padding(Self.groupInsets)
             .frame(height: Self.groupHeight)
             .background(
                 LoreTheme.Surface.card3, in: RoundedRectangle(cornerRadius: LoreTheme.Radius.chip)
             )
+            .contentShape(Rectangle())
+            .loreTipReport(
+                AgentReplyTipOwner.key("reply"), AgentReplyStrip.keyTooltip,
+                in: agentReplyTipSpace, tip: $tip
+            )
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(
+                ([strip.keyCap] + strip.gestures.map { "\($0.how) \($0.word)" }).joined(separator: ", ")
+            )
+            .accessibilityHint(AgentReplyStrip.keyTooltip)
             Spacer(minLength: 0)
-            entry(strip.escape, outside: true)
+            escape
         }
         .padding(Self.insets)
-    }
-
-    /// The modifier the four letters after it are pressed with.
-    private var head: some View {
-        HStack(spacing: Self.capGap) {
-            Self.keycap(AgentReplyStrip.head, outside: false)
-            Text("+")
-                .font(.system(size: 12))
-                .foregroundStyle(LoreTheme.TextColor.muted)
-                .fixedSize()
+        .frame(height: Self.height)
+        .overlay(alignment: .top) {
+            LoreTheme.Surface.line.frame(height: 0.5)
         }
-        .accessibilityHidden(true)
     }
 
-    private func entry(_ key: AgentReplyStripKey, outside: Bool) -> some View {
+    private func gesture(_ gesture: AgentReplyStrip.Gesture) -> some View {
         HStack(spacing: Self.capGap) {
-            Self.keycap(key.cap, outside: outside)
-            Text(key.word)
+            Text(gesture.how)
+                .foregroundStyle(gesture.isDimmed ? LoreTheme.TextColor.muted : LoreTheme.TextColor.faint)
+            Text(gesture.word)
+                .foregroundStyle(LoreTheme.TextColor.muted)
+        }
+        .font(LoreTheme.Typography.meta)
+        // Its own width, never a column's: a word cut short has stopped saying
+        // what the key does.
+        .fixedSize()
+        .opacity(gesture.isDimmed ? 0.45 : 1)
+    }
+
+    private var escape: some View {
+        HStack(spacing: Self.capGap) {
+            Self.keycap("esc", outside: true)
+            Text(strip.escapeWord)
                 .font(LoreTheme.Typography.meta)
                 .foregroundStyle(LoreTheme.TextColor.muted)
-                // Its own width, never a column's: a word shortened to "Unmu…"
-                // has stopped saying what the key does.
                 .fixedSize()
         }
-        .opacity(key.isDimmed ? 0.45 : 1)
         .loreTipReport(
-            AgentReplyTipOwner.key(key.id), key.tooltip, keys: key.fullCaps,
+            AgentReplyTipOwner.key("esc"), AgentReplyStrip.escapeTooltip,
             in: agentReplyTipSpace, tip: $tip
         )
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel("\(key.word), \(key.fullCaps.joined(separator: " "))")
+        .accessibilityLabel("\(strip.escapeWord), esc")
     }
 
     /// The bubble's own keycap at the strip's size (#235), on `--line2` inside
@@ -1006,56 +945,71 @@ struct AgentReplyKeyStrip: View {
 
 // MARK: - The capsule
 
-/// The quiet capsule in the player's place (board f, g), under the dictation
-/// bubble because the panel hangs lower than it does. Live: the panel's poll
-/// puts it up and takes it down off the same reading the words come from.
+/// The capsule in the list's place (board d, e, f), under the dictation bubble
+/// because the panel hangs lower than it does. Live: the panel's poll puts it
+/// up and takes it down off the same reading the words come from. The pointer
+/// on it reads the outside for the tooltip's tense, and the tooltip names why
+/// the replies were silent and the two gestures that act on them.
 struct AgentReplyWaitingView: View {
     let capsule: AgentReplyWaitingCapsule
+    let replies: AgentReplyController
     /// The capsule moves the window exactly as the player does (#267): it is
     /// the same window, and the place it is left at is the same place.
     var onDrag: ((BubbleDrag) -> Void)?
 
-    @State private var tip: AgentReplyTip?
+    @State private var isPointerOn = false
+    @State private var pointerX: CGFloat = 0
 
     var body: some View {
         VStack(spacing: 0) {
             words
-            AgentReplyTipRow(tip: tip, width: AgentReplyPlayerView.plateWidth)
+            Color.clear
+                .frame(width: AgentReplyPlayerView.plateWidth, height: BubbleTipCard.room)
+                .overlay(alignment: .topLeading) {
+                    if isPointerOn {
+                        BubbleTipCard(
+                            text: "", pointerX: pointerX, canvasWidth: AgentReplyPlayerView.plateWidth,
+                            widthCap: AgentReplyPlayerView.plateWidth, showsArrow: false,
+                            sentence: capsule.tooltip
+                        )
+                        .padding(.top, BubbleTipCard.gap)
+                    }
+                }
         }
         .frame(width: AgentReplyPlayerView.plateWidth)
         .coordinateSpace(.named(agentReplyTipSpace))
+        .onDisappear { replies.endTooltipReading() }
     }
 
     private var words: some View {
         HStack(spacing: 7) {
-            if capsule.isMuted {
-                Image(systemName: "speaker.slash.fill")
-                    .font(.system(size: 9))
-                    .foregroundStyle(LoreTheme.TextColor.muted)
-            }
             Text(capsule.words)
                 .font(.system(size: 12))
                 .foregroundStyle(LoreTheme.TextColor.primary)
                 .lineLimit(1)
-            if !capsule.keys.isEmpty {
-                LoreKeycapRun(caps: capsule.keys)
-            }
+            LoreKeycapRun(caps: [capsule.keyCap])
+                .padding(.leading, 4)
         }
-        .padding(.leading, 13)
-        .padding(.trailing, capsule.keys.isEmpty ? 13 : 6)
+        .padding(.leading, 10)
+        .padding(.trailing, 6)
         .frame(height: 28)
         .background(.ultraThinMaterial, in: Capsule())
         .overlay(Capsule().strokeBorder(LoreTheme.Shadow.windowRim, lineWidth: 0.5))
-        .loreTipReport(
-            AgentReplyTipOwner.capsule, capsule.tooltip, keys: capsule.keys,
-            in: agentReplyTipSpace, tip: $tip
-        )
+        .onContinuousHover(coordinateSpace: .named(agentReplyTipSpace)) { phase in
+            switch phase {
+            case .active(let location):
+                guard !isPointerOn else { return }
+                isPointerOn = true
+                pointerX = location.x
+                replies.readSurroundingsForTooltip()
+            case .ended:
+                isPointerOn = false
+                replies.endTooltipReading()
+            }
+        }
         .accessibilityElement(children: .ignore)
-        .accessibilityLabel(
-            capsule.isMuted
-                ? "\(capsule.words), \(capsule.tooltip), fn M"
-                : "\(capsule.words), \(capsule.tooltip)"
-        )
+        .accessibilityLabel("\(capsule.words), \(capsule.keyCap)")
+        .accessibilityHint(capsule.tooltip.plain)
         .gesture(BubbleDrag.gesture { onDrag?($0) })
     }
 }
@@ -1075,7 +1029,6 @@ enum AgentReplyTipOwner: Hashable, Sendable {
     case key(String)
     /// The header's × (#263).
     case close
-    case capsule
 }
 
 /// One line of the player's copy table (`LoreTipLine`, shared with the bubble's

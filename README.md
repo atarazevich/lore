@@ -13,7 +13,7 @@
 </p>
 
 <p align="center">
-  <a href="https://lore.dev.cognition.design">Website</a>
+  <a href="https://lore.dev.devkit.md">Website</a>
   ·
   <a href="#download"><strong>Download</strong></a>
   ·
@@ -27,7 +27,7 @@
 </p>
 
 <p align="center">
-  <a href="https://lore.dev.cognition.design/#film"><img src="images/film.jpg" alt="The lore film: hold fn, talk to Claude Code, release. 45 seconds."></a>
+  <a href="https://lore.dev.devkit.md/#film"><img src="images/film.jpg" alt="The lore film: hold fn, talk to Claude Code, release. 45 seconds."></a>
 </p>
 
 <p align="center">
@@ -108,12 +108,12 @@ If macOS already uses `fn` for something else, onboarding offers Right Option or
 ## Download
 
 <p align="center">
-  <a href="https://updates.dev.cognition.design/download/Lore.dmg">
+  <a href="https://updates.dev.devkit.md/download/Lore.dmg">
     <img src="https://img.shields.io/badge/Download-Lore.dmg-black?style=for-the-badge&amp;logo=apple&amp;logoColor=white" alt="Download Lore.dmg" width="230">
   </a>
 </p>
 
-Download [Lore.dmg](https://updates.dev.cognition.design/download/Lore.dmg), drag lore to Applications, open it. Or with Homebrew: `brew install --cask atarazevich/tap/lore`. Every version is also on the [Releases](https://github.com/atarazevich/lore/releases) page.
+Download [Lore.dmg](https://updates.dev.devkit.md/download/Lore.dmg), drag lore to Applications, open it. Or with Homebrew: `brew install --cask atarazevich/tap/lore`. Every version is also on the [Releases](https://github.com/atarazevich/lore/releases) page.
 
 First launch asks for three permissions (Microphone, Accessibility, Input Monitoring) and downloads the speech model once, about 630 MB. Then hold `fn`.
 

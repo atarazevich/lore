@@ -15,24 +15,19 @@ final class HotkeyManager {
     /// the dictation setup alongside `install`; nil simply disables the chords.
     ///
     /// Both keys are the selection's only while agent replies are off, which is
-    /// the default — see `fnChord`.
+    /// the default; on, they do nothing and fn stays free (#354) — see `fnChord`.
     weak var readAloudController: ReadAloudController? {
         didSet { observeClaimInputs(); syncHotKeys() }
     }
-    /// Agent replies (#259): with the switch on, the letters on the talk key
-    /// are the player's — R play/pause, [ previous, ] next, J the reply's chat,
-    /// M mute — a tap of the talk key alone shows or hides the player (#278),
-    /// and Esc stops a reply that is being read aloud. Set by the dictation
-    /// setup alongside `install`; nil, or the switch off, leaves every key
-    /// exactly what it was.
+    /// Agent replies: with the switch on, the reply key (#354) clicks, clicks
+    /// twice and holds for the player, and Esc stops a reply that is being read
+    /// aloud. Set by the dictation setup alongside `install`; nil, or the
+    /// switch off, leaves every key exactly what it was.
     weak var agentReplies: AgentReplyController? {
         // Assigned after `install`: the observation starts again so its
         // switch is tracked (#342), and the set re-derived (#346).
         didSet { observeClaimInputs(); syncHotKeys() }
     }
-    /// Where Fn+J goes (#258). Nil leaves that one key inert, the way a nil
-    /// `readAloudController` leaves the selection's keys inert.
-    weak var agentChats: AgentChatNavigator?
 
     private var globalFlagsMonitor: Any?
     private var globalKeyMonitor: Any?
@@ -63,11 +58,13 @@ final class HotkeyManager {
     private var isHoldMode = false
     /// True when Fn was held at the moment Space locked. First Fn release after this should be ignored.
     private var fnHeldAtLock = false
-    /// Another key went down while the talk key was held (#278): the press was
-    /// a chord — Fn+R, Fn+[, Fn+V, Fn+arrow for Home — and not a tap, even when
-    /// it is let go inside the window. A flicker's re-press keeps it; a press
-    /// after a settled release starts clean.
-    private var pressCarriedKey = false
+    /// The reply key's press under way (#354), decided by its own timestamps.
+    private var replyKeyPress = AgentReplyKeyPress()
+    /// The reply key is down, by its side bit in the last flags-changed event.
+    private var replyKeyDown = false
+    /// Wakes `replyKeyPress` at its deadline: a hold at 400 ms, a click once
+    /// its window for a second press has passed.
+    private var replyKeyTimer: Task<Void, Never>?
 
     /// The talk key's decision window (#279): held when it closes, the press is
     /// a dictation; let go inside it, a tap. A press let go before it has never
@@ -303,7 +300,7 @@ final class HotkeyManager {
             // The tap's own mirror, for when the tap is dead and lore is in
             // front: a key inside a press makes it a chord (#278). Idempotent,
             // so the tap and this both marking one key is one mark.
-            self.noteKeyDown(keyCode: event.keyCode)
+            if !event.isARepeat { self.noteKeyDown(keyCode: event.keyCode) }
 
             // Lore's controls — the Fn letters, Space, Esc — through the one
             // decision the tap and the hot keys take (`controlPress`), for when
@@ -394,6 +391,7 @@ final class HotkeyManager {
 
         cancelHoldWindow()
         cancelRelease()
+        resetReplyKey()
         lockedHoldStart = nil
         coordinator?.onRecordingEnding = nil
         coordinator = nil
@@ -406,9 +404,10 @@ final class HotkeyManager {
         HotkeyManager.hkLog.info("Hotkey manager uninstalled")
     }
 
-    /// Modifier enable toggle lookup (DSET-05): Space lock, Fn+V cleanup and
-    /// Fn+T translate each gate on one SettingsStore flag; absent settings
-    /// default to enabled. (Fn+K has no switch. Fn+S is not here — its switch
+    /// Modifier enable toggle lookup (DSET-06): Fn+V cleanup and Fn+T
+    /// translate each gate on one SettingsStore flag; absent settings default
+    /// to enabled. (Space lock and pause have no switch since #349; Fn+K has
+    /// none either. Fn+S is not here — its switch
     /// is Copying's own, read live through `RichInputSettings`.) The NSEvent
     /// monitors and the CGEvent tap callback all run on the main thread (the
     /// tap source is added to CFRunLoopGetMain — see the Space path's
@@ -430,6 +429,9 @@ final class HotkeyManager {
         let time = event.timestamp > 0 ? event.timestamp : ProcessInfo.processInfo.systemUptime
         lastFlagsChangeRead = max(lastFlagsChangeRead, time)
         fnFlagDown = event.modifierFlags.contains(.function)
+        // The reply key first: it is never the talk key, and it is read
+        // whatever the talk key is, a recorded non-modifier included.
+        readReplyKey(event, at: time)
         let hotkeyKey = settings?.hotkeyKey ?? .fn
         // A recorded talk key that is not a modifier never appears here: it
         // arrives as a key-down and a key-up through the tap (#226), and asking
@@ -478,7 +480,6 @@ final class HotkeyManager {
         if fnReleaseDebounce != nil, time - releasedAt >= Self.releaseDebounceSeconds {
             settleRelease()
         }
-        if fnReleaseDebounce == nil { pressCarriedKey = false }
         pressedAt = time
         awaitingUnreadRelease = false
         fnDown = true
@@ -567,11 +568,30 @@ final class HotkeyManager {
     /// the default registers nothing, so no test can take the owner's Space.
     init(
         systemRelease: @escaping @MainActor (HotkeyKey) -> SystemRelease = HotkeyManager.liveSystemRelease,
-        hotKeys registrar: HotKeyRegistering = InertHotKeys()
+        hotKeys registrar: HotKeyRegistering = InertHotKeys(),
+        keyDownSince: @escaping @MainActor (TimeInterval) -> Bool = HotkeyManager.liveKeyDownSince
     ) {
         self.systemRelease = systemRelease
         self.hotKeys = RecordingHotKeys(registrar: registrar)
+        self.keyDownSince = keyDownSince
     }
+
+    /// Whether the system saw a key-down after `time` (event clock) that was
+    /// not one lore posted itself: what tells a reply-key press that carried a
+    /// letter from a click where lore's own key-down paths are blind — under
+    /// secure input, or with the tap dead. Injected only by tests, which have
+    /// no keyboard.
+    private let keyDownSince: @MainActor (TimeInterval) -> Bool
+
+    private static func liveKeyDownSince(_ time: TimeInterval) -> Bool {
+        let since = CGEventSource.secondsSinceLastEventType(.hidSystemState, eventType: .keyDown)
+        let last = ProcessInfo.processInfo.systemUptime - since
+        return last > time + clockSlack && !SyntheticKeyEvent.wasPosted(near: last)
+    }
+
+    /// The system's own key-downs are read only where lore's are blind:
+    /// another app holds secure input, or the tap is dead.
+    private var keyDownPathsBlind: Bool { secureInputHeld || !isEventTapAlive }
 
     private static func liveSystemRelease(_ key: HotkeyKey) -> SystemRelease {
         let flags = NSEvent.ModifierFlags(rawValue: UInt(CGEventSource.flagsState(.combinedSessionState).rawValue))
@@ -582,7 +602,8 @@ final class HotkeyManager {
 
     /// What a press of the talk key is, decided here alone (#279): held when
     /// the window closes, a dictation — everything it brings starts here; let
-    /// go inside it, a tap (the player, nothing else) or, with a key in it, a chord.
+    /// go inside it, nothing (the tap showed the player until #354 gave that to
+    /// the reply key; fn is left free).
     private func decideTalkKeyPress(heldThroughWindow: Bool) {
         isPreBufferingFlag = false
         if heldThroughWindow {
@@ -599,10 +620,6 @@ final class HotkeyManager {
         // A sticky mic error can surface on a tap too (synchronous .denied
         // path); startPreBuffer cancels its grace hide on the next press.
         coordinator?.dismissMicErrorAfterRelease()
-        afterReleaseDebounce { manager in
-            guard !manager.pressCarriedKey else { return }
-            manager.agentReplies?.togglePlayer()
-        }
     }
 
     /// The talk key came up, at `time` by the event's own clock.
@@ -703,19 +720,90 @@ final class HotkeyManager {
         pendingRelease = nil
     }
 
-    /// A key went down (#278). While the talk key is held that makes the press
-    /// a chord, never a tap. Called by both event paths for every real
-    /// key-down; the recorded talk key's own auto-repeat is excluded by its
-    /// caller.
+    /// A key went down. While the reply key is held that makes its press
+    /// typing — ⌥E types é — and never a click or a hold (#354). Called by
+    /// every event path for every real key-down, auto-repeats left out.
     ///
-    /// Not the Globe key's own key-down (#279): macOS sends one, without the fn
-    /// flag, just before the flag clears at the release of every short press of
-    /// fn. It is the talk key being let go, and counting it made every tap a
-    /// chord — the player never came up on a real keyboard.
+    /// The first of three ways a press becomes typing, each covering what the
+    /// others cannot see: this one, the keys the tap and the monitors receive;
+    /// a modifier changing under the key (`readReplyKey`), which no key-down
+    /// carries; and the system's own key-down time (`noteSystemKeyDown`),
+    /// where the first is blind.
     func noteKeyDown(keyCode: UInt16) {
-        guard fnDown else { return }
-        if keyCode == HotkeyKey.globeKeyCode, (settings?.hotkeyKey ?? .fn) == .fn { return }
-        pressCarriedKey = true
+        guard replyKeyDown else { return }
+        replyKeyPress.otherKey()
+    }
+
+    // MARK: - The reply key (#354)
+
+    /// The reply key in effect, or nil while agent replies are off: then it is
+    /// no key at all.
+    private var replyKey: AgentReplyKey? {
+        guard agentReplies?.isEnabled == true else { return nil }
+        return settings?.agentReplyKey ?? AgentReplyKey.defaultKey(talkKey: settings?.hotkeyKey ?? .fn)
+    }
+
+    /// One flags-changed event, read for the reply key by its side bit — never
+    /// `keyState`, which read a held Right Option as up while another app
+    /// reacted to it (#343). Flags-changed arrives under Secure Keyboard Entry
+    /// (#341, #342), so the key needs no hot key. Another modifier changing
+    /// while it is down is typing (⌥⇧K).
+    private func readReplyKey(_ event: NSEvent, at time: TimeInterval) {
+        guard let key = replyKey else {
+            resetReplyKey()
+            return
+        }
+        let down = key.hotkeyKey.isDown(after: event, wasDown: replyKeyDown)
+        guard down != replyKeyDown else {
+            if down, event.keyCode != key.keyCode { replyKeyPress.otherKey() }
+            return
+        }
+        replyKeyDown = down
+        if down {
+            deliver(replyKeyPress.press(at: time))
+        } else {
+            noteSystemKeyDown()
+            deliver(replyKeyPress.release(at: time))
+        }
+        scheduleReplyKeyTick()
+    }
+
+    /// A key the system saw go down since this press began, read only where
+    /// the tap and the monitors are blind (secure input, a dead tap); key-downs
+    /// before the press and lore's own posted keys are left out.
+    private func noteSystemKeyDown() {
+        guard keyDownPathsBlind, let pressedAt = replyKeyPress.pressedAt,
+              keyDownSince(pressedAt)
+        else { return }
+        replyKeyPress.otherKey()
+    }
+
+    /// Wakes the press at its deadline, by the event clock.
+    private func scheduleReplyKeyTick() {
+        replyKeyTimer?.cancel()
+        replyKeyTimer = nil
+        guard let deadline = replyKeyPress.deadline else { return }
+        let wait = max(0, deadline - ProcessInfo.processInfo.systemUptime)
+        replyKeyTimer = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(wait))
+            guard !Task.isCancelled, let self else { return }
+            self.noteSystemKeyDown()
+            self.deliver(self.replyKeyPress.tick(at: max(deadline, ProcessInfo.processInfo.systemUptime)))
+            self.scheduleReplyKeyTick()
+        }
+    }
+
+    private func deliver(_ gesture: ReplyKeyGesture?) {
+        guard let gesture else { return }
+        HotkeyManager.hkLog.debug("[HOTKEY] reply key → \(gesture.rawValue, privacy: .public)")
+        agentReplies?.replyKey(gesture)
+    }
+
+    private func resetReplyKey() {
+        replyKeyTimer?.cancel()
+        replyKeyTimer = nil
+        replyKeyDown = false
+        replyKeyPress.reset()
     }
 
     /// Callers: the local key monitor and the global monitor's Ctrl+Cmd+V chord
@@ -899,7 +987,6 @@ final class HotkeyManager {
                 HotkeyManager.hkLog.debug("[HOTKEY] Esc → pending dictation cancelled")
                 cancelHoldWindow()
                 isPreBufferingFlag = false
-                pressCarriedKey = true
                 coordinator.cancelPreBuffer()
                 return
             }
@@ -931,7 +1018,8 @@ final class HotkeyManager {
     ///
     /// Internal so `DictationPauseTests` can walk the table without a keyboard.
     func spaceAction(talkKeyHeld: Bool) -> SpaceAction {
-        guard let coordinator, modifierOn({ $0.modifierLockEnabled }),
+        // No setting gates this (#349): lock and pause always work, like Esc and K.
+        guard let coordinator,
               coordinator.state == .recording || coordinator.isPreBuffering
         else { return .passThrough }
         return SpaceAction.decide(
@@ -1067,8 +1155,7 @@ final class HotkeyManager {
             coordinator.stopRecording()
             return
         }
-        guard modifierOn({ $0.modifierLockEnabled }),
-              coordinator.state == .recording || coordinator.isPreBuffering else { return }
+        guard coordinator.state == .recording || coordinator.isPreBuffering else { return }
         lockRecording(coordinator)
         HotkeyManager.hkLog.debug("[HOTKEY] lock glyph → confirm + locked")
     }
@@ -1094,135 +1181,53 @@ final class HotkeyManager {
         isRecordingFlag = false
     }
 
-    // MARK: - The letters on the talk key (#105, and the player's since #259)
+    // MARK: - The letters on the talk key (#105)
 
-    /// What a letter pressed with Fn means — one table both event paths read,
-    /// so a key cannot be swallowed by one and ignored by the other.
-    enum FnChord: Equatable, Sendable {
-        /// The agent-replies player (#259). Each of its keys carries its own
-        /// keycode, so a key and what it does stay one fact.
-        case reply(AgentReplyChord)
-        /// Read Aloud (#105): read the selection now, or add it to the queue.
-        /// R is the player's own `playOrPause` keycode — one key in two
-        /// worlds, and one number — and Q is the one letter that is the
-        /// selection's alone.
-        case readSelection(enqueue: Bool)
-        /// A chord that was taught and now does nothing: Fn+Q while the player
-        /// has the keys. Taken all the same — a swallowed key is silence, an
-        /// unswallowed one types a `q` into the app in front (#259).
-        case retired
-    }
-
-    /// The player's keys, as the board prints them
-    /// (`docs/design/prototypes/agent-replies-player.html`, its key strip). The
-    /// raw value is the keycode, so the key and what it does are one fact and
-    /// not two.
-    enum AgentReplyChord: UInt16, Equatable, Sendable, CaseIterable {
-        /// R — Play / Pause, the play key again (#278). From #263 to #278 it
-        /// showed and hid the player; that is a tap of the talk key now.
-        case playOrPause = 15
-        /// `[` — Previous.
-        case previous = 33
-        /// `]` — Next.
-        case next = 30
-        /// J — Go to / Open the reply's chat.
-        case goToChat = 38
-        /// M — Mute / Unmute.
-        case mute = 46
-    }
-
-    /// Q's keycode, stated once here because it is the only letter that is not
-    /// one of the player's keys above.
+    /// R and Q, the selection's two letters.
+    private static let readSelectionKey: UInt16 = 15
     private static let queueSelectionKey: UInt16 = 12
 
     /// Every key `fnChord` can claim, in one list: read there and by the hot
     /// keys (#342), so the two cannot name different letters.
-    static let fnChordKeys: [UInt16] = AgentReplyChord.allCases.map(\.rawValue) + [queueSelectionKey]
+    static let fnChordKeys: [UInt16] = [readSelectionKey, queueSelectionKey]
 
-    /// Whose this letter is, with Fn held, or nil when it is nobody's — nil
-    /// being the common case, and the answer for every key the chord table
-    /// does not name.
+    /// Whether this letter, with Fn held, is Read Aloud's (#105) — false to
+    /// read the selection now, true to add it to the queue — or nil when it is
+    /// nobody's: the common case, and the answer for every other key. One
+    /// reading both event paths take, so a key cannot be swallowed by one and
+    /// ignored by the other.
     ///
-    /// The switch decides which set exists, and this is the whole of "while it
-    /// is off, every key behaves exactly as today" (#259): on, the player's five
-    /// keys, and Q taken but retired so a taught chord cannot type its letter;
-    /// off, Fn+R and Fn+Q read the selection as they have since #105. A
-    /// recipient that is not wired at all makes its own keys nobody's, which is
-    /// what keeps them from even being consumed.
+    /// Fn+R and Fn+Q read the selection as they have since #105 while agent
+    /// replies are off. On, they are nobody's: the reply key does the replies
+    /// (#354) and fn is left free. A recipient that is not wired makes its
+    /// keys nobody's too, which keeps them from even being consumed.
     ///
     /// Internal so tests walk the table without a keyboard.
-    func fnChord(keyCode: UInt16) -> FnChord? {
-        guard Self.fnChordKeys.contains(keyCode) else { return nil }
-        if agentReplies?.isEnabled == true {
-            if let key = AgentReplyChord(rawValue: keyCode) { return .reply(key) }
-            return keyCode == Self.queueSelectionKey ? .retired : nil
-        }
-        guard readAloudController != nil else { return nil }
-        switch keyCode {
-        case AgentReplyChord.playOrPause.rawValue: return .readSelection(enqueue: false)
-        case Self.queueSelectionKey: return .readSelection(enqueue: true)
-        default: return nil
-        }
+    func fnChord(keyCode: UInt16) -> Bool? {
+        guard Self.fnChordKeys.contains(keyCode), agentReplies?.isEnabled != true,
+              readAloudController != nil
+        else { return nil }
+        return keyCode == Self.queueSelectionKey
     }
 
     /// A letter chord taken. Internal for the same reason `handleEscape` is.
     ///
     /// Whether the key does anything at all is decided *before* the dictation
     /// gesture it arrived under is ended: the Fn that carried the letter has a
-    /// microphone open under it, and a key with nothing to act on — an empty
-    /// queue, no chat to go to, a retired chord — must not cost the recording
-    /// it was pressed inside. It used to, leaving the words nowhere: no paste,
-    /// no history entry, no surface (#259).
-    func handleFnChord(_ chord: FnChord) {
-        let key = String(describing: chord)
-        guard let act = action(for: chord) else {
-            HotkeyManager.hkLog.debug("[HOTKEY] Fn chord \(key, privacy: .public) → nothing to do")
+    /// microphone open under it, and a key with nothing to act on must not
+    /// cost the recording it was pressed inside (#259).
+    func handleFnChord(enqueue: Bool) {
+        guard let readAloudController else {
+            HotkeyManager.hkLog.debug("[HOTKEY] Fn chord → nothing to do")
             return
         }
-        HotkeyManager.hkLog.debug("[HOTKEY] Fn chord \(key, privacy: .public)")
+        HotkeyManager.hkLog.debug("[HOTKEY] Fn chord, enqueue \(enqueue, privacy: .public)")
         endGestureForChord()
-        act()
-    }
-
-    /// What this chord would do right now, or nil when it would do nothing.
-    /// Every answer is the recipient's own — the queue says whether it has a
-    /// reply for the key, the navigator whether it has a chat to go to — so the
-    /// question asked here and the action that follows cannot disagree.
-    ///
-    /// The closure is not `Sendable` on purpose: it holds the recipient and is
-    /// called by the line after the one that asked for it, on this actor.
-    private func action(for chord: FnChord) -> (() -> Void)? {
-        switch chord {
-        case .retired:
-            return nil
-        case .readSelection(let enqueue):
-            // No controller wired → fully inert: no gesture teardown, no discard.
-            guard let readAloudController else { return nil }
-            return {
-                Task { @MainActor in
-                    if enqueue {
-                        await readAloudController.enqueueSelection()
-                    } else {
-                        await readAloudController.readSelectionNow()
-                    }
-                }
-            }
-        case .reply(let key):
-            guard let replies = agentReplies else { return nil }
-            switch key {
-            // Play or pause (#278). With no reply at the position there is
-            // nothing to play, and the key is a dead one, which is what keeps
-            // it off a live dictation.
-            case .playOrPause:
-                return replies.canPlayOrPause ? { replies.playOrPause() } : nil
-            case .previous: return replies.canPlayPrevious ? { replies.previous() } : nil
-            case .next: return replies.canPlayNext ? { replies.next() } : nil
-            // Mute is not a reply's action but the state arriving replies are
-            // held by, so it is the one key an empty queue still answers.
-            case .mute: return { replies.toggleMute() }
-            case .goToChat:
-                guard let chats = agentChats, chats.canOpenCurrent else { return nil }
-                return { Task { @MainActor in await chats.openCurrent() } }
+        Task { @MainActor in
+            if enqueue {
+                await readAloudController.enqueueSelection()
+            } else {
+                await readAloudController.readSelectionNow()
             }
         }
     }
@@ -1235,8 +1240,7 @@ final class HotkeyManager {
     /// gesture in flight (pre-buffer, hold, locked) aborts before it acts.
     /// Unlike Fn+V/T nothing "pending" is set; the subsequent Fn release then
     /// falls through the tap path as a no-op (timer cancelled, flags cleared
-    /// here) — and is not a tap for the player, because the letter marked the
-    /// press as a chord (`noteKeyDown`, #278).
+    /// here).
     private func endGestureForChord() {
         cancelHoldWindow()
         cancelRelease()
@@ -1250,9 +1254,6 @@ final class HotkeyManager {
         // of an earlier dictation, which discardRecording would also kill.
         if let coordinator, coordinator.isPreBuffering || coordinator.state == .recording {
             coordinator.discardRecording()
-            // What the discarded dictation did to a reply is undone, so the
-            // chord acts on the reply as the press found it (#279).
-            agentReplies?.dictationDiscardedByChord()
         }
     }
 
@@ -1323,7 +1324,8 @@ final class HotkeyManager {
     /// passed on (or, arriving as a hot key, swallowed: see `handleHotKey`).
     enum ControlPress: Equatable {
         case recordingChord(RecordingChord)
-        case fnChord(FnChord)
+        /// Fn+R / Fn+Q, Read Aloud's: `enqueue` is Q.
+        case readSelection(enqueue: Bool)
         case space(SpaceAction)
         case escape(EscapeAction)
         /// Control-Command-V: paste the last transcript again. Reaches
@@ -1338,7 +1340,7 @@ final class HotkeyManager {
         if fnHeld, isRecordingFlag, let chord = recordingChord(keyCode: Int64(keyCode)) {
             return .recordingChord(chord)
         }
-        if fnHeld, let chord = fnChord(keyCode: keyCode) { return .fnChord(chord) }
+        if fnHeld, let enqueue = fnChord(keyCode: keyCode) { return .readSelection(enqueue: enqueue) }
         if keyCode == HotkeyKey.spaceKeyCode {
             let action = spaceAction(talkKeyHeld: talkKeyHeld)
             return action == .passThrough ? nil : .space(action)
@@ -1354,7 +1356,7 @@ final class HotkeyManager {
     func perform(_ press: ControlPress, isRepeat: Bool) {
         switch press {
         case .recordingChord(let chord): handleRecordingChord(chord)
-        case .fnChord(let chord): handleFnChord(chord)
+        case .readSelection(let enqueue): handleFnChord(enqueue: enqueue)
         case .space(let action): handleSpace(action, isRepeat: isRepeat)
         case .escape(let action): handleEscape(action, isRepeat: isRepeat)
         case .repaste: coordinator?.pasteLastTranscript()
@@ -1428,7 +1430,8 @@ final class HotkeyManager {
     /// While secure input is held (#346), what the tap and the monitors act on
     /// outside a recording joins the set, under the conditions they act on
     /// it: Control-Command-V; the letters on fn that `fnChord` claims now
-    /// (Read aloud's R and Q, or the player's keys with agent replies on);
+    /// (Read aloud's R and Q, while agent replies are off — the reply key is a
+    /// modifier, read from flags-changed, and needs no hot key);
     /// and bare Esc while `escapeAction` makes it lore's with no dictation —
     /// a reply speaking, the player or its pinned help on screen — unless a
     /// crosshair lore knows of owns it. Never a bare letter: typing stays
@@ -1562,8 +1565,7 @@ final class HotkeyManager {
     }
     private var lastDeadShortcuts = DeadShortcuts()
     /// The fn letters in the order Settings lists them, then the recording's.
-    private static let letterOrder: [UInt16] = AgentReplyChord.allCases.map(\.rawValue) + [queueSelectionKey]
-        + RecordingChord.allCases.map(\.rawValue)
+    private static let letterOrder: [UInt16] = fnChordKeys + RecordingChord.allCases.map(\.rawValue)
 
     /// One secure-input reading (#341, #346): its edges are traced, an open
     /// health panel re-reads, and the hot keys follow. Called by the 5 s
@@ -1600,7 +1602,6 @@ final class HotkeyManager {
             _ = coordinator.state
             _ = coordinator.isPreBuffering
             _ = settings?.hotkeyKey
-            _ = settings?.modifierLockEnabled
             _ = settings?.modifierCleanupEnabled
             _ = settings?.modifierTranslateEnabled
             _ = settings?.richInputSwitches
@@ -1762,7 +1763,8 @@ final class HotkeyManager {
                 // chord, not a tap (#278) — read before a single branch below
                 // can return, so a key lore swallows counts as much as one it
                 // passes on.
-                if let code = UInt16(exactly: keyCode) {
+                if let code = UInt16(exactly: keyCode),
+                   event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
                     MainActor.assumeIsolated { manager.noteKeyDown(keyCode: code) }
                 }
 

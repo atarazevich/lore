@@ -253,21 +253,10 @@ final class SettingsStore {
         }
     }
 
-    // Modifier enable toggles (Settings MODIFIERS section, DSET-05/06). Each
-    // gates one hardcoded key path in HotkeyManager; all default on. Esc is
-    // not a modifier and has no toggle.
-
-    @ObservationIgnored nonisolated(unsafe) private var _modifierLockEnabled: Bool
-    /// Space = lock while recording.
-    var modifierLockEnabled: Bool {
-        get { access(keyPath: \.modifierLockEnabled); return _modifierLockEnabled }
-        set {
-            withMutation(keyPath: \.modifierLockEnabled) {
-                _modifierLockEnabled = newValue
-                defaults.set(newValue, forKey: "modifierLockEnabled")
-            }
-        }
-    }
+    // V and T enable toggles (Settings → Modifiers). Each gates its Fn chord
+    // in HotkeyManager and its bubble letter; both default on. Space, Esc and
+    // K have no toggle (#349); an older build's stored `modifierLockEnabled`
+    // is never read.
 
     @ObservationIgnored nonisolated(unsafe) private var _modifierCleanupEnabled: Bool
     /// Fn+V = pending cleanup while recording.
@@ -297,6 +286,14 @@ final class SettingsStore {
     var hotkeyKey: HotkeyKey {
         get { access(keyPath: \.hotkeyKey); return _hotkeyKey }
         set {
+            // The talk key wins (#354): taking the reply key's key moves the
+            // reply key to its default for the new talk key.
+            if _agentReplyKeyChoice?.hotkeyKey == newValue {
+                withMutation(keyPath: \.agentReplyKey) {
+                    _agentReplyKeyChoice = nil
+                    defaults.removeObject(forKey: Self.agentReplyKeyKey)
+                }
+            }
             withMutation(keyPath: \.hotkeyKey) {
                 _hotkeyKey = newValue
                 defaults.set(newValue.storageValue, forKey: "hotkeyKey")
@@ -601,6 +598,27 @@ final class SettingsStore {
 
     private static let agentReplyPlayerPlaceKey = "agentReplyPlayerPlace"
 
+    @ObservationIgnored nonisolated(unsafe) private var _agentReplyKeyChoice: AgentReplyKey?
+    /// The reply key (#354): his choice, or the default when he made none or
+    /// the talk key has taken it — never the talk key (`AgentReplyKey.resolve`).
+    /// Setting the talk key's own key is refused; choosing a talk key that is
+    /// the reply key moves the reply key instead (`hotkeyKey`'s setter).
+    var agentReplyKey: AgentReplyKey {
+        get {
+            access(keyPath: \.agentReplyKey)
+            return AgentReplyKey.resolve(chosen: _agentReplyKeyChoice, talkKey: hotkeyKey)
+        }
+        set {
+            guard newValue.hotkeyKey != hotkeyKey else { return }
+            withMutation(keyPath: \.agentReplyKey) {
+                _agentReplyKeyChoice = newValue
+                defaults.set(newValue.rawValue, forKey: Self.agentReplyKeyKey)
+            }
+        }
+    }
+
+    private static let agentReplyKeyKey = "agentReplyKey"
+
     // MARK: - UI Settings
 
     @ObservationIgnored nonisolated(unsafe) private var _recPillEnabled: Bool
@@ -735,7 +753,6 @@ final class SettingsStore {
         self._soundOnDictationStart = defaults.bool(forKey: "soundOnDictationStart")
         self._dictationAudioRetentionCount = defaults.object(forKey: "dictationAudioRetention") as? Int ?? 500
         // Modifier toggles default on (key absent == enabled)
-        self._modifierLockEnabled = defaults.object(forKey: "modifierLockEnabled") as? Bool ?? true
         self._modifierCleanupEnabled = defaults.object(forKey: "modifierCleanupEnabled") as? Bool ?? true
         self._modifierTranslateEnabled = defaults.object(forKey: "modifierTranslateEnabled") as? Bool ?? true
         // A stored key this build cannot honour (#226) falls back to Fn rather
@@ -794,6 +811,8 @@ final class SettingsStore {
             ?? SettingsStore.defaultAgentChatResumeCommand
         // Held as JSON, the way every compound value here is: an unreadable one
         // is a player that opens where it always did.
+        self._agentReplyKeyChoice = defaults.string(forKey: Self.agentReplyKeyKey)
+            .flatMap(AgentReplyKey.init(rawValue:))
         self._agentReplyPlayerPlace = defaults.data(forKey: Self.agentReplyPlayerPlaceKey)
             .flatMap { try? JSONDecoder().decode(CGPoint.self, from: $0) }
 

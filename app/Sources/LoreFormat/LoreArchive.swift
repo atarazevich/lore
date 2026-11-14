@@ -129,7 +129,7 @@ public struct LoreArchive: Sendable {
         if query.kind != .meeting {
             let entries = query.marked ? marks() : dictations()
             for entry in entries where query.covers(entry.timestamp) {
-                let texts = [entry.rawText, entry.cleanedText].compactMap { $0 }
+                let texts = [entry.rawText, entry.cleanedText].compactMap { $0.map(UnknownToken.removed) }
                 guard query.matches(texts) else { continue }
                 // The shown text, unless only the other version has the words.
                 let shown = entry.text ?? ""
@@ -143,7 +143,7 @@ public struct LoreArchive: Sendable {
                 let records = records(of: meeting)
                 let lines = records.map(\.displayText)
                 let about = [meeting.info.displayTitle, meeting.info.summary].compactMap { $0 } + (meeting.info.tags ?? [])
-                let texts = about + lines + records.compactMap { $0.refinedText == nil ? nil : $0.text }
+                let texts = about + lines + records.compactMap { $0.refinedText == nil ? nil : $0.originalText }
                     + [notes(of: meeting)].compactMap { $0 }
                 guard query.matches(texts) else { continue }
                 let first = query.words.first ?? ""
@@ -283,7 +283,7 @@ public struct LoreArchive: Sendable {
     public func render(_ item: Item, notes withNotes: Bool = false, raw: Bool = false) -> String {
         switch item {
         case .dictation(let entry):
-            return ((raw ? entry.rawText ?? entry.text : entry.text) ?? "") + "\n"
+            return ((raw ? entry.shownRawText ?? entry.text : entry.text) ?? "") + "\n"
         case .meeting(let meeting):
             let info = meeting.info
             var out = "# \(info.displayTitle)\n"

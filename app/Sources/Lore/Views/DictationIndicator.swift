@@ -121,6 +121,20 @@ enum BubbleRail {
         guard open else { return standing }
         return standing + readingOrder.filter { !armed.contains($0) }
     }
+
+    /// The letters Settings has turned off (#349). K has no switch.
+    @MainActor
+    static func offLetters(_ settings: AppSettings?) -> Set<BubbleRailLetter> {
+        guard let settings else { return [] }
+        var off: Set<BubbleRailLetter> = []
+        if !settings.modifierCleanupEnabled { off.insert(.cleanup) }
+        if !settings.modifierTranslateEnabled { off.insert(.translate) }
+        return off
+    }
+
+    /// The dim of an off letter: the same .42 a left-out row in the bubble's
+    /// list dims to, so "off" reads one way on the whole shape.
+    static let offOpacity: Double = 0.42
 }
 
 // MARK: - The bubble's own tooltip (#207)
@@ -237,6 +251,10 @@ struct BubbleTipCard: View {
     var widthCap: CGFloat = Self.maxWidth
     /// The arrow standing on the card, pointing at what the line is about.
     var showsArrow = true
+    /// A hover tooltip whose lines carry keycaps inside them — the replies'
+    /// capsule (#354). Drawn like a hint's sentence, with no × and nothing the
+    /// pointer can touch; `text` is unused while it is set.
+    var sentence: [[DictationHintPiece]]?
 
     /// The hint this card is, if it is one (#235). Nil is the hover tooltip the
     /// card has always been: one line, no keycaps, no ×, and nothing the pointer
@@ -324,6 +342,8 @@ struct BubbleTipCard: View {
         CardWidthCap(maxWidth: widthCap - 2 * Self.padX) {
             if let hint {
                 hintBody(hint)
+            } else if let sentence {
+                sentenceLines(sentence)
             } else {
                 plainBody
             }
@@ -370,12 +390,31 @@ struct BubbleTipCard: View {
     /// (#260 — the player's strip and its capsule each print their own key).
     private var plainBody: some View {
         HStack(spacing: 6) {
-            Text(text)
+            tipLines
                 .font(.system(size: Self.fontSize))
+            if !keys.isEmpty { LoreKeycapRun(caps: keys) }
+        }
+    }
+
+    /// One line the 222 pt cap may wrap onto a second row; or — text with a
+    /// newline (#349, the off letter's "Turned off in Settings") — two rows of
+    /// one line each, the second muted, so the second can never be cut off by
+    /// the first wrapping. Either way two rows, the room the canvas keeps.
+    @ViewBuilder
+    private var tipLines: some View {
+        let lines = text.split(separator: "\n", maxSplits: 1).map(String.init)
+        if lines.count == 2 {
+            VStack(alignment: .leading, spacing: 0) {
+                Text(lines[0]).foregroundStyle(LoreTheme.TextColor.primary)
+                Text(lines[1]).foregroundStyle(LoreTheme.TextColor.muted)
+            }
+            .lineLimit(1)
+            .fixedSize()
+        } else {
+            Text(text)
                 .foregroundStyle(LoreTheme.TextColor.primary)
                 .lineLimit(2)
                 .fixedSize(horizontal: false, vertical: true)
-            if !keys.isEmpty { LoreKeycapRun(caps: keys) }
         }
     }
 
@@ -388,20 +427,25 @@ struct BubbleTipCard: View {
     /// key's name turns out to be.
     private func hintBody(_ hint: Hint) -> some View {
         HStack(alignment: .center, spacing: 8) {
-            VStack(alignment: .leading, spacing: Self.hintLineSpacing) {
-                ForEach(Array(hint.sentence.enumerated()), id: \.offset) { _, line in
-                    HStack(spacing: 0) {
-                        ForEach(Array(line.enumerated()), id: \.offset) { _, piece in
-                            piecePart(piece)
-                        }
-                    }
-                }
-            }
-            .accessibilityElement(children: .ignore)
-            .accessibilityLabel(hint.sentence.plain)
+            sentenceLines(hint.sentence)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel(hint.sentence.plain)
             if let onClose = hint.onClose { closeMark(onClose) }
         }
         .onHover { hint.onHold($0) }
+    }
+
+    /// The board's own lines, each a run of words and keycaps.
+    private func sentenceLines(_ sentence: [[DictationHintPiece]]) -> some View {
+        VStack(alignment: .leading, spacing: Self.hintLineSpacing) {
+            ForEach(Array(sentence.enumerated()), id: \.offset) { _, line in
+                HStack(spacing: 0) {
+                    ForEach(Array(line.enumerated()), id: \.offset) { _, piece in
+                        piecePart(piece)
+                    }
+                }
+            }
+        }
     }
 
     @ViewBuilder
@@ -581,9 +625,10 @@ struct DictationIndicatorView: View {
     /// while the dictation carries the mark.
     var marked = false
     var recordingSeconds: Int = 0
-    /// DSET-05: with Space-lock turned off there is no lock to offer, so the
-    /// glyph is not drawn at all rather than standing there inert (#201).
-    var lockEnabled = true
+    /// The letters turned off in Settings (#349): they stay on the open rail,
+    /// dimmed, with no action, and say why. The lock has no such switch any
+    /// more — Space locks and pauses on every Mac, like Esc and K.
+    var offLetters: Set<BubbleRailLetter> = []
     /// The chosen talk key's keycap, for the lock tooltip that names the way
     /// out of a locked recording (#226). Polled like the switches above,
     /// because the setting can change between recordings.
@@ -1393,7 +1438,7 @@ struct DictationIndicatorView: View {
                             .accessibilityElement(children: .ignore)
                             .accessibilityLabel(key.help)
                             .accessibilityAddTraits(key.action == nil ? .isStaticText : .isToggle)
-                            .opacity(key.armed || railVisible ? 1 : 0)
+                            .opacity(key.armed || railVisible ? (key.off ? BubbleRail.offOpacity : 1) : 0)
                             .allowsHitTesting(key.armed || railVisible)
                     }
                 }
@@ -1420,13 +1465,15 @@ struct DictationIndicatorView: View {
     /// what a letter reports about this dictation — cleanup or translate on
     /// paste, the mark for later — and it is also why the letter stands in the
     /// resting bubble.
-    private struct RailKey: Identifiable {
+    struct RailKey: Identifiable {
         /// What the key reads: its own letter on the keyboard.
         let label: String
         let bright: Bool
         let help: String
         let action: (() -> Void)?
         let armed: Bool
+        /// Turned off in Settings (#349): dimmed to `BubbleRail.offOpacity`.
+        var off = false
         /// Which element the pointer is on, and the key's identity in the row.
         let tip: BubbleTipOwner
         /// Which hint speaks from this key, if one does (#235).
@@ -1435,22 +1482,44 @@ struct DictationIndicatorView: View {
     }
 
     private var cleanupKey: RailKey {
-        let armed = pendingMode == .cleanup
-        return RailKey(
-            label: BubbleRailLetter.cleanup.rawValue, bright: armed,
-            help: armed ? "Cleaning up on paste" : "Clean up on paste (Fn+V)",
-            action: onArmCleanup, armed: armed, tip: .letter(.cleanup),
-            anchor: .letter(.cleanup)
-        )
+        Self.switchableKey(.cleanup, pendingMode: pendingMode, offLetters: offLetters, arm: onArmCleanup)
     }
 
     private var translateKey: RailKey {
-        let armed = pendingMode == .translate
+        Self.switchableKey(.translate, pendingMode: pendingMode, offLetters: offLetters, arm: onArmTranslate)
+    }
+
+    /// V or T as the rail draws it. Off is switched off in Settings and not
+    /// armed (#349): an off letter can never be armed from the bubble or the
+    /// chord, and one armed before the switch went off is still going to
+    /// happen, so it stands lit. Off takes the action away; `help` is the
+    /// letter's tooltip and its VoiceOver name alike.
+    static func switchableKey(
+        _ feature: UpgradeAction, pendingMode: UpgradeAction?,
+        offLetters: Set<BubbleRailLetter>, arm: (() -> Void)?
+    ) -> RailKey {
+        let letter: BubbleRailLetter = feature == .cleanup ? .cleanup : .translate
+        let armed = pendingMode == feature
+        let off = offLetters.contains(letter) && !armed
         return RailKey(
-            label: BubbleRailLetter.translate.rawValue, bright: armed,
-            help: armed ? "Translating on paste" : "Translate on paste (Fn+T)",
-            action: onArmTranslate, armed: armed, tip: .letter(.translate)
+            label: letter.rawValue, bright: armed,
+            help: letterHelp(feature, armed: armed, off: off),
+            action: off ? nil : arm, armed: armed, off: off,
+            tip: .letter(letter), anchor: feature == .cleanup ? .letter(.cleanup) : nil
         )
+    }
+
+    /// The second line of an off letter's tooltip (board `core-controls.html`).
+    static let offLine = "Turned off in Settings"
+
+    /// What V and T say. An off letter keeps the feature's own line and adds
+    /// where it was turned off under it, as the card's second line (#349).
+    static func letterHelp(_ feature: UpgradeAction, armed: Bool, off: Bool) -> String {
+        let line = switch feature {
+        case .cleanup: armed ? "Cleaning up on paste" : "Clean up on paste (Fn+V)"
+        case .translate: armed ? "Translating on paste" : "Translate on paste (Fn+T)"
+        }
+        return off ? line + "\n" + offLine : line
     }
 
     /// The copy is the board's (`dictation-mark.html` B1, B3): the outcome and
@@ -1876,7 +1945,7 @@ struct DictationIndicatorView: View {
         .frame(height: 38)
         // Off is drawn, not only spoken: the whole row dims, words struck
         // through, so the state is legible without colour.
-        .opacity(item.included ? 1 : 0.42)
+        .opacity(item.included ? 1 : BubbleRail.offOpacity)
         .contentShape(Rectangle())
         .loreHoverFill()
         .onTapGesture {
@@ -1953,10 +2022,8 @@ struct DictationIndicatorView: View {
                     .foregroundStyle(LoreTheme.TextColor.primary)
                     .transition(Self.faceDissolve)
             } else {
-                if lockEnabled {
-                    lockGlyph(measuring: measuring).onTextBaseline()
-                        .transition(Self.faceDissolve)
-                }
+                lockGlyph(measuring: measuring).onTextBaseline()
+                    .transition(Self.faceDissolve)
                 waveform(measuring: measuring, paused: paused)
                     .onTextBaseline()
                     .bubbleTip(.waveform, "Your voice level", hovered: $hoveredTip, pointer: pointer)
@@ -2486,7 +2553,8 @@ final class DictationIndicatorModel {
     /// Fn+K armed or entry marked (#324).
     var marked = false
     var recordingSeconds: Int = 0
-    var lockEnabled = true
+    /// V and T switched off in Settings (#349).
+    var offLetters: Set<BubbleRailLetter> = []
     /// The chosen talk key's keycap, for the lock tooltip (#226).
     var talkKeyName = HotkeyKey.fn.shortName
     var lastError: DictationFace?
@@ -2545,7 +2613,7 @@ struct DictationIndicatorHost: View {
             modelPreparing: model.modelPreparing,
             marked: model.marked,
             recordingSeconds: model.recordingSeconds,
-            lockEnabled: model.lockEnabled,
+            offLetters: model.offLetters,
             talkKeyName: model.talkKeyName,
             lastError: model.lastError,
             bluetoothRedirected: model.bluetoothRedirected,
@@ -2751,7 +2819,7 @@ final class DictationIndicatorManager {
                 if newSeconds != self.model.recordingSeconds {
                     self.model.recordingSeconds = newSeconds
                 }
-                self.model.lockEnabled = coordinator.settings?.modifierLockEnabled ?? true
+                self.model.offLetters = BubbleRail.offLetters(coordinator.settings)
                 // The lock tooltip names the key the user holds (#226); the
                 // setting can change between recordings, so it is polled.
                 self.model.talkKeyName = (coordinator.settings?.hotkeyKey ?? .fn).shortName

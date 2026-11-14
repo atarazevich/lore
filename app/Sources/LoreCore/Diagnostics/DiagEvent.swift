@@ -487,7 +487,8 @@ public enum DiagEvent: Codable, Sendable, Equatable {
     /// reading that started by itself was stopped" can tell a fresh reply from
     /// the queue running on. `click` is the pointer on a reply, which is what
     /// plays and resumes since #263; `next`/`previous` a move. `key` is an
-    /// explicit play on the keyboard: Fn+R (#259, and again since #278).
+    /// explicit play on the keyboard: a click of the reply key since #354
+    /// (Fn+R before).
     public enum ReplyStartTrigger: String, Codable, Sendable, CaseIterable {
         case arrival
         case continued
@@ -499,8 +500,9 @@ public enum DiagEvent: Codable, Sendable, Equatable {
 
     /// Why a speaking agent reply stopped short of its end (#256). `mute` holds
     /// reading the same way the microphone does, so it pauses a reply too.
-    /// `click` is the pointer on the reply being read (#263); `key` is Fn+R
-    /// (#259, and again since #278).
+    /// `click` is the pointer on the reply being read (#263); `key` is a click
+    /// of the reply key since #354 (Fn+R before). `mute` is retired with fn M
+    /// (#354) and kept for decoding.
     public enum ReplyPauseReason: String, Codable, Sendable, CaseIterable {
         case click
         case key
@@ -511,8 +513,8 @@ public enum DiagEvent: Codable, Sendable, Equatable {
 
     /// Who put the player on screen or took it away (#263) — the key, the
     /// header's ×, or the Esc that follows a pause. Visibility only: a reply
-    /// being read carries on either way. `key` is a tap of the talk key since
-    /// #278; before it, Fn+R. `reading` is a reply beginning to be read over a
+    /// being read carries on either way. `key` is a hold of the reply key since
+    /// #354 (a tap of the talk key #278–#354, Fn+R before). `reading` is a reply beginning to be read over a
     /// player the owner had put away (#285): it shows while the reply speaks.
     public enum ReplyVisibility: String, Codable, Sendable, CaseIterable {
         case key
@@ -526,6 +528,56 @@ public enum DiagEvent: Codable, Sendable, Equatable {
         case next
     }
 
+    /// What a press of the reply key was (#354): a click, a second press inside
+    /// the click's window, or a press still down at the hold's mark.
+    public enum ReplyKeyGesture: String, Codable, Sendable, CaseIterable {
+        case click
+        case twice
+        case hold
+        /// A gesture a newer build knows and this one does not.
+        case unknown
+
+        /// A gesture this version does not know reads as `.unknown`.
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = ReplyKeyGesture(rawValue: raw) ?? .unknown
+        }
+    }
+
+    /// What kind of lore's own recording kept a click of the reply key from
+    /// starting sound (#354).
+    public enum ReplyRefusal: String, Codable, Sendable, CaseIterable {
+        case dictation
+        case meeting
+        /// A recording a newer build knows and this one does not.
+        case unknown
+
+        /// A value this version does not know reads as `.unknown`.
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = ReplyRefusal(rawValue: raw) ?? .unknown
+        }
+    }
+
+    /// Why replies are kept silent (#354), in the order the capsule names
+    /// them: another app's microphone, a game in front, another app's sound,
+    /// lore's own dictation, lore's own meeting recording.
+    public enum ReplyQuietReason: String, Codable, Sendable, CaseIterable {
+        case microphone
+        case game
+        case sound
+        case dictation
+        case meeting
+        /// A reason a newer build knows and this one does not.
+        case unknown
+
+        /// A reason this version does not know reads as `.unknown`.
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = ReplyQuietReason(rawValue: raw) ?? .unknown
+        }
+    }
+
     /// Why a reply was not taken, and its words left to `say` (#257). The
     /// switch being off is the designed answer; `unreadableRequest` is a line
     /// on the command socket that decoded as no request at all — an oversize
@@ -533,6 +585,18 @@ public enum DiagEvent: Codable, Sendable, Equatable {
     public enum ReplyDeclined: String, Codable, Sendable, CaseIterable {
         case switchOff
         case unreadableRequest
+    }
+
+    /// Why a reply was read by the system voice instead of the local one
+    /// (#351): the service is not installed on this Mac, it did not come up,
+    /// a request to it failed (it crashed or answered nothing), or the reply's
+    /// language is neither Russian nor English. Also what the speech service
+    /// throws, so the reason traced is the one it gave.
+    public enum LocalVoiceFallback: String, Codable, Sendable, CaseIterable, Error {
+        case notInstalled
+        case startFailed
+        case requestFailed
+        case languageUnsupported
     }
 
     /// Where bringing in a note from the iPhone stopped (#309): one of its
@@ -566,6 +630,24 @@ public enum DiagEvent: Codable, Sendable, Equatable {
     public enum PhoneResumer: String, Codable, Sendable, CaseIterable {
         case user
         case system
+    }
+
+    /// What made the iPhone's recorder resume a stop by iOS by itself (#356):
+    /// the interruption ended, lore came back to the front, iOS reset its
+    /// media services, or the audio engine's configuration changed.
+    public enum PhoneResumeTrigger: String, Codable, Sendable, CaseIterable {
+        case interruptionEnded
+        case returnedToLore
+        case mediaReset
+        case engineChanged
+        /// A trigger a newer phone knows and this build does not.
+        case unknown
+
+        /// A trigger this version does not know reads as `.unknown`.
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = PhoneResumeTrigger(rawValue: raw) ?? .unknown
+        }
     }
 
     /// Why the iPhone's Resume is blocked, as its reason line names it (#306):
@@ -1191,9 +1273,10 @@ public enum DiagEvent: Codable, Sendable, Equatable {
     case agentReplyMicrophoneFreed(waiting: Int)
     case agentReplyMoved(direction: ReplyMove)
     case agentReplyChatOpened(state: ReplyChatState, outcome: Outcome)
+    /// Retired (#354) with fn M: kept so a persisted events.json still decodes.
     case agentReplyMute(on: Bool)
-    /// The capsule that says how many replies wait went up (#260) — `muted`
-    /// tells the two reasons apart: mute is on, or a microphone is in use.
+    /// The capsule that says how many replies wait went up (#260). `muted` is
+    /// always false since #354 retired mute; the field stays for decoding.
     case agentReplyWaitingShown(muted: Bool, waiting: Int)
     /// …and came down, because its condition stopped being true.
     case agentReplyWaitingWithdrawn
@@ -1207,6 +1290,23 @@ public enum DiagEvent: Codable, Sendable, Equatable {
     /// deliberately not here: a coordinate on his screen is as much about him as
     /// a folder name, and nothing about this event needs it.
     case agentReplyPlayerMoved
+    /// The reply key's press was read as this gesture (#354). Every decision,
+    /// whether or not it had anything to act on.
+    case agentReplyKeyPressed(gesture: ReplyKeyGesture)
+    /// The mode lore derived for an arriving reply changed (#354): Quiet for
+    /// the first reason that holds, nil for Loud.
+    case agentReplyModeChanged(quietBecause: ReplyQuietReason?)
+    /// A click or a double click of the reply key found lore recording (#354)
+    /// — a dictation or a meeting — and started no sound, which would go into
+    /// that recording.
+    case agentReplyPlayRefused(because: ReplyRefusal)
+    /// A reply, or the rest of it, went to the system voice (#351). Once per
+    /// reply, and `notInstalled` once per launch: the reason, never the text or
+    /// the language's name.
+    case agentReplyLocalVoiceFellBack(reason: LocalVoiceFallback)
+    /// The app started the local speech service and its socket answered after
+    /// `ms` (#351).
+    case agentReplySpeechServiceStarted(ms: Int)
 
     // MARK: - iPhone recorder (#306)
     //
@@ -1219,6 +1319,10 @@ public enum DiagEvent: Codable, Sendable, Equatable {
     case phoneCaptureResumed(by: PhoneResumer)
     /// A resume was attempted and the system would not restart capture.
     case phoneResumeRefused
+    /// lore set out to resume a stop by iOS by itself, and why (#356).
+    case phoneAutoResume(trigger: PhoneResumeTrigger)
+    /// iOS reset its media services under a recording (#356).
+    case phoneMediaReset
     /// The reason line about Resume went up, naming why it is blocked.
     case phoneResumeBlocked(cause: PhoneResumeBlock)
     /// The reason line came down after `afterMs`, and how.
@@ -1335,11 +1439,13 @@ extension DiagEvent {
              .agentReplyReadingPaused, .agentReplyEscapeRepeated, .agentReplyHeldByMicrophone,
              .agentReplyMicrophoneFreed, .agentReplyMoved, .agentReplyChatOpened,
              .agentReplyMute, .agentReplyWaitingShown, .agentReplyWaitingWithdrawn,
-             .agentReplyPlayerShown, .agentReplyPlayerHidden, .agentReplyPlayerMoved:
+             .agentReplyPlayerShown, .agentReplyPlayerHidden, .agentReplyPlayerMoved,
+             .agentReplyKeyPressed, .agentReplyModeChanged, .agentReplyPlayRefused,
+             .agentReplyLocalVoiceFellBack, .agentReplySpeechServiceStarted:
             return .agentReplies
 
         case .phoneCaptureStopped, .phoneCaptureResumed, .phoneResumeRefused,
-             .phoneResumeBlocked, .phoneResumeBlockCleared, .phoneResumeGaveUp,
+             .phoneAutoResume, .phoneMediaReset, .phoneResumeBlocked, .phoneResumeBlockCleared, .phoneResumeGaveUp,
              .phoneWriterDied, .phoneSegmentOpened, .phoneSegmentsMerged,
              .phoneStopAlertShown, .phoneStopAlertCleared, .phoneReminderFired,
              .phoneTranscriptionOutOfTime, .phoneTitleFailed, .phoneSpeakersNotFound,
@@ -1512,9 +1618,16 @@ extension DiagEvent {
         case .agentReplyPlayerShown: return "agentReplyPlayerShown"
         case .agentReplyPlayerHidden: return "agentReplyPlayerHidden"
         case .agentReplyPlayerMoved: return "agentReplyPlayerMoved"
+        case .agentReplyKeyPressed: return "agentReplyKeyPressed"
+        case .agentReplyModeChanged: return "agentReplyModeChanged"
+        case .agentReplyPlayRefused: return "agentReplyPlayRefused"
+        case .agentReplyLocalVoiceFellBack: return "agentReplyLocalVoiceFellBack"
+        case .agentReplySpeechServiceStarted: return "agentReplySpeechServiceStarted"
         case .phoneCaptureStopped: return "phoneCaptureStopped"
         case .phoneCaptureResumed: return "phoneCaptureResumed"
         case .phoneResumeRefused: return "phoneResumeRefused"
+        case .phoneAutoResume: return "phoneAutoResume"
+        case .phoneMediaReset: return "phoneMediaReset"
         case .phoneResumeBlocked: return "phoneResumeBlocked"
         case .phoneResumeBlockCleared: return "phoneResumeBlockCleared"
         case .phoneResumeGaveUp: return "phoneResumeGaveUp"

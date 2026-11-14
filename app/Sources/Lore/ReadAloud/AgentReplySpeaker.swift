@@ -8,6 +8,10 @@ struct AgentReplyVoicedText: Equatable, Sendable {
     let voiceID: String
     /// The text's detected language, for the automatic voice.
     let languageCode: String?
+    /// The local voice that reads it when the speech service is installed
+    /// (#351); nil when the sender asked for a system voice by name, or the
+    /// language is one no local voice speaks.
+    var localVoice: SileroVoice? = nil
 }
 
 /// What the speaker is asked to say for one reply (#267): the chat announced

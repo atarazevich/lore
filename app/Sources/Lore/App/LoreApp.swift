@@ -722,6 +722,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
         // the settings store itself.
         model.readHotkeyKey = { settings.hotkeyKey }
         model.writeHotkeyKey = { settings.hotkeyKey = $0 }
+        model.readOffLetters = { BubbleRail.offLetters(settings) }
         model.onHotkeyRecorderListening = { coordinator.hotkeyManager.isSuspended = $0 }
         model.onClosableChanged = { [weak window] in window?.setClosable($0) }
         model.onWantsFront = { [weak window] in window?.front() }
@@ -978,18 +979,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate {
             guard let coordinator else { return false }
             return coordinator.dictationCoordinator.state == .recording || coordinator.isRecording
         }
+        // …and which of the two it is, so a reply kept silent under a meeting
+        // is not said to be silent for a dictation (#354).
+        coordinator.agentReplies.isMeetingRecording = { [weak coordinator] in
+            coordinator?.isRecording ?? false
+        }
         // Agent replies (#256): the controller follows its switch live and runs
         // nothing — no queue, no microphone observer — while it is off.
         coordinator.agentReplies.start(settings: settings)
-        // The player's keys (#259): while the switch is on, the letters on the
-        // talk key are the player's — Fn+R play/pause, Fn+[ previous, Fn+] next,
-        // Fn+J the reply's chat, Fn+M mute — and Esc stops a reply that is being
-        // read aloud. Off, the manager finds the switch off and every key is what
-        // it was, Fn+R and Fn+Q included. Wired here and not in
+        // The reply key (#354): while the switch is on, its click, double click
+        // and hold are the player's, and Esc stops a reply that is being read
+        // aloud. Off, the manager finds the switch off and every key is what it
+        // was, Fn+R and Fn+Q included. Wired here and not in
         // `startDictationPipeline`, for the same reason the Read Aloud chords
         // are: the onboarding Try-it step is hold-to-talk and nothing else.
         coordinator.hotkeyManager.agentReplies = coordinator.agentReplies
-        coordinator.hotkeyManager.agentChats = coordinator.agentChats
     }
 
     /// Build the health monitor (#83, reworked #140/#151): an on-open fact sheet

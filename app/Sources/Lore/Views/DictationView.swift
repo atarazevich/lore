@@ -44,8 +44,8 @@ private final class HistoryProjectionCache {
     ) -> [DictationHistoryEntry] {
         guard !searchText.isEmpty else { return entries }
         return entries.filter { entry in
-            let raw = entry.rawText ?? ""
-            let cleaned = entry.cleanedText ?? ""
+            let raw = UnknownToken.removed(from: entry.rawText ?? "")
+            let cleaned = UnknownToken.removed(from: entry.cleanedText ?? "")
             return raw.localizedCaseInsensitiveContains(searchText)
                 || cleaned.localizedCaseInsensitiveContains(searchText)
         }
@@ -177,9 +177,7 @@ struct DictationView: View {
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(LoreTheme.Accent.red)
                 } else {
-                    // Only advertise Space-lock while that modifier is enabled.
-                    Text(settings.modifierLockEnabled
-                            ? "Recording... Space to lock" : "Recording...")
+                    Text("Recording... Space to lock")
                         .font(.system(size: 13, weight: .semibold))
                         .foregroundStyle(LoreTheme.Accent.red)
                 }
@@ -893,14 +891,13 @@ struct DictationView: View {
     private var hotkeyCheatSheet: some View {
         HStack(spacing: 16) {
             kbdHint(settings.hotkeyKey.shortName, "hold to talk")
-            if settings.modifierLockEnabled {
-                kbdHint("Space", "lock")
-                kbdHint("\(settings.hotkeyKey.shortName)+Space", "pause")
-            }
-            if settings.modifierCleanupEnabled {
+            kbdHint("Space", "lock")
+            kbdHint("\(settings.hotkeyKey.shortName)+Space", "pause")
+            let off = BubbleRail.offLetters(settings)
+            if !off.contains(.cleanup) {
                 kbdHint("Fn+V", "cleanup")
             }
-            if settings.modifierTranslateEnabled {
+            if !off.contains(.translate) {
                 kbdHint("Fn+T", "translate")
             }
             kbdHint("Esc", "cancel")

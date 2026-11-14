@@ -97,6 +97,10 @@ final class OnboardingModel {
     @ObservationIgnored var readHotkeyKey: () -> HotkeyKey = { .fn }
     @ObservationIgnored var writeHotkeyKey: (HotkeyKey) -> Void = { _ in }
 
+    /// The letters Settings has turned off (#349), read live the same way, so
+    /// the Ready sheet never teaches a key that does nothing.
+    @ObservationIgnored var readOffLetters: () -> Set<BubbleRailLetter> = { [] }
+
     /// Quiets hold-to-talk while the step's key recorder listens: the press
     /// there is the user choosing a key, not holding one. The step normally
     /// runs before the hotkey manager exists, but a walk back from Try it
@@ -303,6 +307,20 @@ final class OnboardingModel {
 
     /// The talk key the flow is teaching.
     var hotkeyKey: HotkeyKey { readHotkeyKey() }
+
+    /// The Ready sheet's rows, only for keys that work (#349). "Fn" is literal
+    /// in Fn+V and Fn+T: those chords read the event's own Fn flag.
+    var readyCheatRows: [(key: String, meaning: String)] {
+        let off = readOffLetters()
+        var rows = [
+            (key: hotkeyKey.shortName, meaning: "hold to talk"),
+            (key: "Space", meaning: "lock it on, hands free"),
+        ]
+        if !off.contains(.cleanup) { rows.append((key: "Fn+V", meaning: "clean up what you're saying")) }
+        if !off.contains(.translate) { rows.append((key: "Fn+T", meaning: "translate what you're saying")) }
+        rows.append((key: "\u{2303}\u{2318}V", meaning: "paste that take again"))
+        return rows
+    }
 
     /// Whether the Fn step has anything to say (#226). It is not a gate any
     /// more: it stands only while Fn is the key the user holds *and* macOS has
