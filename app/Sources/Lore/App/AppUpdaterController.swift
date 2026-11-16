@@ -91,14 +91,20 @@ final class AppUpdaterController {
 
 @MainActor
 final class LoreUserDriver: SPUStandardUserDriver {
-    private static let sparkleErrorDomain = "SUSparkleErrorDomain"
-    private static let installationErrorCode = 4005
-    private static let installationWriteNoPermissionErrorCode = 4012
+    private nonisolated static let sparkleErrorDomain = DiagEvent.ErrorDomain.sparkleDomainName
+    private nonisolated static let installationErrorCode = 4005
+    private nonisolated static let installationWriteNoPermissionErrorCode = 4012
 
+    /// lore's own guidance replaces Sparkle's alert only when macOS confirmably
+    /// refused the write (#359). Every other failure, an installer that exited
+    /// early included, gets Sparkle's own message: the cause is unknown, and
+    /// sending the user to App Management on a guess is a false alarm.
     override func showUpdaterError(_ error: any Error, acknowledgement: @escaping () -> Void) {
-        let nsError = error as NSError
+        let writeRefused = Self.isWritePermissionFailure(error as NSError)
+        let guidance = writeRefused ? Self.installedBundleGuidance() : .none
+        DiagStore.record(.updateFailed(error: error, guidance: guidance))
 
-        guard let guidance = appManagementGuidance(for: nsError) else {
+        guard let content = alertContent(for: guidance) else {
             super.showUpdaterError(error, acknowledgement: acknowledgement)
             return
         }
@@ -106,81 +112,79 @@ final class LoreUserDriver: SPUStandardUserDriver {
         let alert = NSAlert()
         alert.alertStyle = .warning
         alert.icon = NSApp.applicationIconImage
-        alert.messageText = guidance.title
-        alert.informativeText = guidance.message
+        alert.messageText = content.title
+        alert.informativeText = content.message
         alert.addButton(withTitle: "OK")
         alert.runModal()
 
         acknowledgement()
     }
 
-    private func appManagementGuidance(for error: NSError) -> (title: String, message: String)? {
-        if containsPermissionWriteFailure(error) {
-            return permissionAlertContent()
-        }
-
-        guard error.domain == Self.sparkleErrorDomain else {
-            return nil
-        }
-
-        let installedInApplications = Bundle.main.bundleURL.path.hasPrefix("/Applications/")
-        guard installedInApplications else {
-            return nil
-        }
-
-        if error.code == Self.installationErrorCode {
-            let description = error.localizedDescription
-            let likelyInstallerHandshakeFailure =
-                description == "An error occurred while running the updater. Please try again later." ||
-                description == "An error occurred while launching the installer. Please try again later." ||
-                description == "An error occurred while connecting to the installer. Please try again later."
-
-            if likelyInstallerHandshakeFailure {
-                return permissionAlertContent()
-            }
-        }
-
-        return nil
+    /// Reads the installed bundle's owner and writability, only after a
+    /// confirmed write refusal. Unreadable attributes count as not proven.
+    private static func installedBundleGuidance() -> DiagEvent.UpdateGuidance {
+        let bundle = Bundle.main.bundleURL
+        let files = FileManager.default
+        let owner = (try? files.attributesOfItem(atPath: bundle.path))?[.ownerAccountID] as? NSNumber
+        return writeRefusedGuidance(
+            ownerID: owner?.uint32Value,
+            userID: getuid(),
+            bundleWritable: files.isWritableFile(atPath: bundle.path)
+        )
     }
 
-    private func containsPermissionWriteFailure(_ error: NSError) -> Bool {
-        if error.domain == Self.sparkleErrorDomain && error.code == Self.installationWriteNoPermissionErrorCode {
-            return true
-        }
-
-        if error.domain == NSCocoaErrorDomain && error.code == NSFileWriteNoPermissionError {
-            return true
-        }
-
-        if let underlying = error.userInfo[NSUnderlyingErrorKey] as? NSError, containsPermissionWriteFailure(underlying) {
-            return true
-        }
-
-        if let underlyingErrors = error.userInfo[NSMultipleUnderlyingErrorsKey] as? [NSError] {
-            return underlyingErrors.contains(where: containsPermissionWriteFailure(_:))
-        }
-
-        return false
+    /// After macOS refused the write: a bundle another account owns, or one
+    /// this user cannot write, is fixed by reinstalling; otherwise App
+    /// Management is what stands in the way. The folder it sits in is not
+    /// read: a non-admin user never can write /Applications, and reinstalling
+    /// would not change that. A missing owner (attributes unreadable) is not
+    /// evidence of another account.
+    nonisolated static func writeRefusedGuidance(
+        ownerID: UInt32?, userID: UInt32, bundleWritable: Bool
+    ) -> DiagEvent.UpdateGuidance {
+        let ownedByAnother = ownerID.map { $0 != userID } ?? false
+        return ownedByAnother || !bundleWritable ? .notOwned : .appManagement
     }
 
-    private func permissionAlertContent() -> (title: String, message: String) {
+    /// A write refusal as Sparkle shapes it (SPUInstallerDriver.m): its own
+    /// no-permission code anywhere in the chain, or Cocoa's write-no-permission
+    /// directly beneath its installation error. A 513 anywhere else (the delta
+    /// patcher's temporary files) is not a refusal to replace the app.
+    nonisolated static func isWritePermissionFailure(_ error: NSError) -> Bool {
+        let chain = error.underlyingChain
+        if chain.contains(where: { $0.domain == sparkleErrorDomain && $0.code == installationWriteNoPermissionErrorCode }) {
+            return true
+        }
+        return zip(chain, chain.dropFirst()).contains { parent, child in
+            parent.domain == sparkleErrorDomain && parent.code == installationErrorCode
+                && child.domain == NSCocoaErrorDomain && child.code == NSFileWriteNoPermissionError
+        }
+    }
+
+    private func alertContent(for guidance: DiagEvent.UpdateGuidance) -> (title: String, message: String)? {
         let appName = Bundle.main.object(forInfoDictionaryKey: "CFBundleDisplayName") as? String
             ?? Bundle.main.object(forInfoDictionaryKey: "CFBundleName") as? String
             ?? "This app"
 
-        let message = """
-        macOS blocked \(appName) from replacing the installed app.
+        switch guidance {
+        case .none, .unknown:
+            return nil
+        case .notOwned:
+            return ("\(appName) can't update itself", """
+            \(appName) was installed by another account or with administrator rights, so it can't replace itself. \
+            Drag \(appName) from Applications to the Trash, then install it again from the download. Updates will work from then on.
+            """)
+        case .appManagement:
+            return ("Allow \(appName) to Install Updates", """
+            macOS didn't let \(appName) replace the installed app.
 
-        To allow updates:
-        1. Open System Settings > Privacy & Security > App Management
-        2. Enable \(appName)
-        3. Approve the password prompt
-        4. Try the update again
-
-        If you already allowed it, quit \(appName) and retry the update.
-        """
-
-        return ("Allow \(appName) to Install Updates", message)
+            To allow updates:
+            1. Open System Settings > Privacy & Security > App Management
+            2. Enable \(appName)
+            3. Approve the password prompt
+            4. Quit \(appName), open it and try the update again
+            """)
+        }
     }
 }
 

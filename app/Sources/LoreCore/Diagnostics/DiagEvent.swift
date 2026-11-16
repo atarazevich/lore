@@ -295,6 +295,57 @@ public enum DiagEvent: Codable, Sendable, Equatable {
         }
     }
 
+    /// The domain of an error an update failed with (#359). A fixed set of
+    /// identifiers, never the domain string itself: a domain this version does
+    /// not name, or one a newer build wrote, reads as `.other`.
+    public enum ErrorDomain: String, Codable, Sendable, CaseIterable {
+        /// Sparkle's own (`SUSparkleErrorDomain`).
+        case sparkle
+        case cocoa
+        case posix
+        case osStatus
+        case url
+        case other
+
+        /// Sparkle's error domain, `SUSparkleErrorDomain`.
+        public static let sparkleDomainName = "SUSparkleErrorDomain"
+
+        public init(domain: String) {
+            switch domain {
+            case Self.sparkleDomainName: self = .sparkle
+            case NSCocoaErrorDomain: self = .cocoa
+            case NSPOSIXErrorDomain: self = .posix
+            case NSOSStatusErrorDomain: self = .osStatus
+            case NSURLErrorDomain: self = .url
+            default: self = .other
+            }
+        }
+
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = ErrorDomain(rawValue: raw) ?? .other
+        }
+    }
+
+    /// Which of lore's own alerts an update failure put up in place of
+    /// Sparkle's (#359).
+    public enum UpdateGuidance: String, Codable, Sendable, CaseIterable {
+        /// None: Sparkle's own alert.
+        case none
+        /// macOS refused the write and the bundle is this user's: App Management.
+        case appManagement
+        /// macOS refused the write and the bundle belongs to another account or
+        /// is not writable by this user: reinstall it.
+        case notOwned
+        case unknown
+
+        /// A value this version does not know reads as `.unknown`.
+        public init(from decoder: Decoder) throws {
+            let raw = try decoder.singleValueContainer().decode(String.self)
+            self = UpdateGuidance(rawValue: raw) ?? .unknown
+        }
+    }
+
     /// Which on-disk artifact was found corrupt and moved aside. A closed set —
     /// never the file's path, which can carry a session id.
     public enum Artifact: String, Codable, Sendable, CaseIterable {
@@ -807,6 +858,13 @@ public enum DiagEvent: Codable, Sendable, Equatable {
     /// The restart came back when the next event is `appLaunched`;
     /// `waiterStarted` false means that shell could not be started.
     case appRelaunch(waiterStarted: Bool)
+
+    /// An update failed and Sparkle reported it (#359): the error's domain and
+    /// code, and those of the innermost error beneath it, which names the
+    /// cause (an installer that exited early reads as Sparkle 4005 on top).
+    /// Also feed and download failures. `guidance` is which of lore's own
+    /// alerts replaced Sparkle's, `.none` when Sparkle's was shown.
+    case updateFailed(domain: ErrorDomain, code: Int, rootDomain: ErrorDomain, rootCode: Int, guidance: UpdateGuidance)
 
     /// A health condition crossed / left the persistence window (#151) — one
     /// pair per condition, at that condition's own crossing, so two failures
@@ -1375,7 +1433,7 @@ public enum DiagEvent: Codable, Sendable, Equatable {
 extension DiagEvent {
     var subsystem: DiagSubsystem {
         switch self {
-        case .appLaunched, .appLaunchRefused, .appRelaunch, .healthConditionSustained, .healthConditionCleared,
+        case .appLaunched, .appLaunchRefused, .appRelaunch, .updateFailed, .healthConditionSustained, .healthConditionCleared,
              .healthSummonFired, .healthSummonWithdrawn, .healthSummonCleared,
              .onboardingStarted, .onboardingStepShown, .onboardingDictationLanded,
              .onboardingCompleted, .grantCardShown, .grantCardSteppedAside,
@@ -1467,6 +1525,7 @@ extension DiagEvent {
         case .appLaunched: return "appLaunched"
         case .appLaunchRefused: return "appLaunchRefused"
         case .appRelaunch: return "appRelaunch"
+        case .updateFailed: return "updateFailed"
         case .healthConditionSustained: return "healthConditionSustained"
         case .healthConditionCleared: return "healthConditionCleared"
         case .healthSummonFired: return "healthSummonFired"
@@ -1693,5 +1752,19 @@ public struct DiagRecord: Codable, Sendable, Equatable {
     mutating func merge(_ other: DiagRecord) {
         count = occurrences + other.occurrences
         until = Swift.max(lastAt, other.lastAt)
+    }
+}
+
+extension DiagEvent {
+    /// `updateFailed` read off an error (#359): its own domain and code, and
+    /// the innermost error's beneath it — the same error when there is none.
+    public static func updateFailed(error: any Error, guidance: UpdateGuidance) -> DiagEvent {
+        let chain = error.underlyingChain
+        let top = chain[0], root = chain[chain.count - 1]
+        return .updateFailed(
+            domain: ErrorDomain(domain: top.domain), code: top.code,
+            rootDomain: ErrorDomain(domain: root.domain), rootCode: root.code,
+            guidance: guidance
+        )
     }
 }

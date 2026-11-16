@@ -115,6 +115,15 @@ If macOS already uses `fn` for something else, onboarding offers Right Option or
 
 Download [Lore.dmg](https://updates.dev.devkit.md/download/Lore.dmg), drag lore to Applications, open it. Or with Homebrew: `brew install --cask atarazevich/tap/lore`. Every version is also on the [Releases](https://github.com/atarazevich/lore/releases) page.
 
+From a terminal or an AI agent, install without `sudo`, so lore can update itself:
+
+```bash
+curl -fsSL -o /tmp/Lore.dmg https://updates.dev.devkit.md/download/Lore.dmg
+hdiutil attach -nobrowse -quiet -mountpoint /tmp/lore-dmg /tmp/Lore.dmg
+ditto /tmp/lore-dmg/Lore.app /Applications/Lore.app
+hdiutil detach -quiet /tmp/lore-dmg
+```
+
 First launch asks for three permissions (Microphone, Accessibility, Input Monitoring) and downloads the speech model once, about 630 MB. Then hold `fn`.
 
 New versions appear on the Releases page; the app also offers them from the menu bar, Check for Updates.

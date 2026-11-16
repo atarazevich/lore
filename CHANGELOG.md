@@ -1,5 +1,10 @@
 # Changelog
 
+## v3.13.0 — 2026-11-16
+
+**3.12.1 (#359) A failed update says what actually went wrong**
+- When an update fails, lore now shows the real reason, and asks you to allow it under App Management only when macOS really refused to replace the app.
+
 ## v3.12.0 — 2026-11-14
 
 **3.11.6 (#357) Updates and reports move to devkit.md**
